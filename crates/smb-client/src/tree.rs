@@ -85,9 +85,10 @@ fn reject_path_separator(component: &'static str, value: &str) -> Result<(), Smb
 mod tests {
     use super::*;
     use crate::packet::header::{Smb2Command, Smb2Header, SMB2_HEADER_BYTES};
-    use crate::packet::tree_connect::{Smb2TreeConnectRequest, Smb2TreeConnectResponse};
+    use crate::packet::tree_connect::Smb2TreeConnectRequest;
+    use crate::test_support::*;
     use crate::transport::DirectTcpTransport;
-    use crate::wire::{put_u16, put_u32};
+
     use tokio::io::duplex;
 
     #[test]
@@ -130,7 +131,7 @@ mod tests {
             transport
                 .send_packet(&response_packet(
                     response_header,
-                    &tree_connect_response_body(),
+                    &tree_connect_response_body(Smb2ShareFlags::ENCRYPT_DATA),
                 ))
                 .await
                 .expect("response");
@@ -143,26 +144,5 @@ mod tests {
         assert_eq!(tree.tree_id, 88);
         assert_eq!(actor.state().await.expect("state").tree_id, 88);
         server_task.await.expect("server task");
-    }
-
-    fn response_packet(header: Smb2Header, body: &[u8]) -> Vec<u8> {
-        let mut packet = header.encode().to_vec();
-        packet.extend_from_slice(body);
-        packet
-    }
-
-    fn tree_connect_response_body() -> Vec<u8> {
-        let mut body = vec![0; 16];
-        put_u16(&mut body, 0, 16);
-        body[2] = Smb2ShareType::Disk.to_wire();
-        put_u32(&mut body, 4, Smb2ShareFlags::ENCRYPT_DATA.0);
-        put_u32(&mut body, 8, Smb2ShareCapabilities::DFS.0);
-        put_u32(&mut body, 12, 0x001f_01ff);
-        let _ = Smb2TreeConnectResponse::decode_packet(&response_packet(
-            Smb2Header::new(Smb2Command::TreeConnect, 0),
-            &body,
-        ))
-        .expect("self-check response body");
-        body
     }
 }

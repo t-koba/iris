@@ -223,15 +223,16 @@ fn checked_add_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::close::Smb2CloseFlags;
+    use crate::test_support::*;
+
     use crate::packet::close::Smb2CloseRequest;
     use crate::packet::create::Smb2FileId;
-    use crate::packet::create::Smb2OplockLevel;
-    use crate::packet::create::{Smb2CreateAction, Smb2CreateRequest};
+
+    use crate::packet::create::Smb2CreateRequest;
     use crate::packet::header::{Smb2Command, Smb2Header, SMB2_HEADER_BYTES};
     use crate::packet::query_directory::Smb2QueryDirectoryRequest;
     use crate::transport::DirectTcpTransport;
-    use crate::wire::{align8, encode_utf16le, put_u16, put_u32, put_u64};
+    use crate::wire::{align8, encode_utf16le, put_u32, put_u64};
     use tokio::io::duplex;
 
     #[test]
@@ -308,7 +309,7 @@ mod tests {
                         assert!(create
                             .create_options
                             .contains(Smb2CreateOptions::DIRECTORY_FILE));
-                        create_response_body(file_id)
+                        create_response_body(file_id, Smb2FileAttributes::DIRECTORY, 0)
                     }
                     Smb2Command::QueryDirectory => {
                         let query = Smb2QueryDirectoryRequest::decode(body).expect("query");
@@ -341,7 +342,7 @@ mod tests {
                     Smb2Command::Close => {
                         let close = Smb2CloseRequest::decode(body).expect("close");
                         assert_eq!(close.file_id, file_id);
-                        close_response_body()
+                        close_response_body(Smb2FileAttributes::DIRECTORY, 0)
                     }
                     _ => unreachable!("covered command list"),
                 };
@@ -407,43 +408,5 @@ mod tests {
     fn with_next_offset(mut entry: Vec<u8>, next_offset: u32) -> Vec<u8> {
         put_u32(&mut entry, 0, next_offset);
         entry
-    }
-
-    fn response_packet(header: Smb2Header, body: &[u8]) -> Vec<u8> {
-        let mut packet = header.encode().to_vec();
-        packet.extend_from_slice(body);
-        packet
-    }
-
-    fn create_response_body(file_id: Smb2FileId) -> Vec<u8> {
-        let mut body = vec![0; 88];
-        put_u16(&mut body, 0, 89);
-        body[2] = Smb2OplockLevel::None.to_wire();
-        put_u32(&mut body, 4, Smb2CreateAction::Opened.to_wire());
-        put_u64(&mut body, 40, 4096);
-        put_u64(&mut body, 48, 0);
-        put_u32(&mut body, 56, Smb2FileAttributes::DIRECTORY.0);
-        put_u64(&mut body, 64, file_id.persistent);
-        put_u64(&mut body, 72, file_id.volatile);
-        body
-    }
-
-    fn query_directory_response_body(buffer: &[u8]) -> Vec<u8> {
-        let mut body = vec![0; 8 + buffer.len()];
-        put_u16(&mut body, 0, 9);
-        put_u16(&mut body, 2, (SMB2_HEADER_BYTES + 8) as u16);
-        put_u32(&mut body, 4, buffer.len() as u32);
-        body[8..].copy_from_slice(buffer);
-        body
-    }
-
-    fn close_response_body() -> Vec<u8> {
-        let mut body = vec![0; 60];
-        put_u16(&mut body, 0, 60);
-        put_u16(&mut body, 2, Smb2CloseFlags::POSTQUERY_ATTRIB.0);
-        put_u64(&mut body, 40, 4096);
-        put_u64(&mut body, 48, 0);
-        put_u32(&mut body, 56, Smb2FileAttributes::DIRECTORY.0);
-        body
     }
 }

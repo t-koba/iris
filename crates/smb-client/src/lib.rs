@@ -13,6 +13,8 @@ pub mod file;
 pub mod netbios;
 pub mod packet;
 pub mod session;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod transform;
 pub mod transport;
 pub mod tree;

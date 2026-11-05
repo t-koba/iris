@@ -560,6 +560,7 @@ fn encode_with_cipher(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::*;
 
     fn keys() -> Smb3EncryptionKeys {
         Smb3EncryptionKeys::new([0x11; 16], [0x22; 16])
@@ -710,9 +711,5 @@ mod tests {
 
         assert_eq!(hex(&block), "0388dace60b6a392f328c2b971b2fe78");
         assert_eq!(hex(&tag), "ab6e47d42cec13bdf53a67b21257bddf");
-    }
-
-    fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }

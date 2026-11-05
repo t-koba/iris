@@ -1046,13 +1046,13 @@ fn smb_network_error(operation: &'static str, error: SmbConnectionError) -> Back
 mod tests {
     use super::*;
     use iris_smb_client::packet::header::SMB2_HEADER_BYTES;
+    use iris_smb_client::test_support::*;
     use iris_smb_client::{
-        DirectTcpTransport, Smb2CloseFlags, Smb2CloseRequest, Smb2Command, Smb2CreateAction,
-        Smb2CreateDisposition, Smb2CreateOptions, Smb2CreateRequest, Smb2DesiredAccess,
-        Smb2Dialect, Smb2FileId, Smb2FileInformationClass, Smb2Header, Smb2IoctlFlags,
-        Smb2IoctlRequest, Smb2NegotiateRequest, Smb2QueryDirectoryFlags, Smb2QueryDirectoryRequest,
-        Smb2ReadRequest, Smb2SecurityMode, Smb2SetInfoRequest, Smb2ShareCapabilities,
-        Smb2ShareFlags, Smb2ShareType, Smb2TreeConnectRequest, Smb2WriteRequest, SmbNtStatus,
+        DirectTcpTransport, Smb2CloseRequest, Smb2Command, Smb2CreateDisposition,
+        Smb2CreateOptions, Smb2CreateRequest, Smb2DesiredAccess, Smb2Dialect, Smb2FileId,
+        Smb2FileInformationClass, Smb2Header, Smb2IoctlFlags, Smb2IoctlRequest,
+        Smb2NegotiateRequest, Smb2QueryDirectoryFlags, Smb2QueryDirectoryRequest, Smb2ReadRequest,
+        Smb2SetInfoRequest, Smb2ShareFlags, Smb2TreeConnectRequest, Smb2WriteRequest, SmbNtStatus,
         DEFAULT_COPYCHUNK_CHUNK_BYTES, FSCTL_SRV_COPYCHUNK, FSCTL_SRV_REQUEST_RESUME_KEY,
         SMB2_RESUME_KEY_BYTES,
     };
@@ -1443,7 +1443,7 @@ mod tests {
         transport
             .send_packet(&response_packet(
                 response_header,
-                &tree_connect_response_body(),
+                &tree_connect_response_body(Smb2ShareFlags::DFS),
             ))
             .await
             .expect("tree response");
@@ -1954,22 +1954,22 @@ mod tests {
         assert_eq!(copychunk_body.file_id, target_file_id);
         assert!(copychunk_body.flags.contains(Smb2IoctlFlags::IS_FSCTL));
         assert_eq!(&copychunk_body.input[..SMB2_RESUME_KEY_BYTES], &resume_key);
-        assert_eq!(u32_from_le(&copychunk_body.input, 24), 2);
-        assert_eq!(u64_from_le(&copychunk_body.input, 32), 0);
-        assert_eq!(u64_from_le(&copychunk_body.input, 40), 0);
+        assert_eq!(le_u32(&copychunk_body.input, 24), 2);
+        assert_eq!(le_u64(&copychunk_body.input, 32), 0);
+        assert_eq!(le_u64(&copychunk_body.input, 40), 0);
         assert_eq!(
-            u32_from_le(&copychunk_body.input, 48),
+            le_u32(&copychunk_body.input, 48),
             DEFAULT_COPYCHUNK_CHUNK_BYTES
         );
         assert_eq!(
-            u64_from_le(&copychunk_body.input, 56),
+            le_u64(&copychunk_body.input, 56),
             u64::from(DEFAULT_COPYCHUNK_CHUNK_BYTES)
         );
         assert_eq!(
-            u64_from_le(&copychunk_body.input, 64),
+            le_u64(&copychunk_body.input, 64),
             u64::from(DEFAULT_COPYCHUNK_CHUNK_BYTES)
         );
-        assert_eq!(u32_from_le(&copychunk_body.input, 72), 7);
+        assert_eq!(le_u32(&copychunk_body.input, 72), 7);
         let mut copychunk_output = vec![0; 12];
         put_u32(&mut copychunk_output, 0, 2);
         put_u32(&mut copychunk_output, 4, 7);
@@ -2029,7 +2029,7 @@ mod tests {
         );
         assert_eq!(set_info_body.file_id.persistent, u64::MAX);
         assert_eq!(set_info_body.file_id.volatile, u64::MAX);
-        assert_eq!(u64_from_le(&set_info_body.buffer, 16), source_mtime);
+        assert_eq!(le_u64(&set_info_body.buffer, 16), source_mtime);
         assert_eq!(close_header.command, Smb2Command::Close);
         let close_body = Smb2CloseRequest::decode(&time_create[close_offset + SMB2_HEADER_BYTES..])
             .expect("close");
@@ -2174,106 +2174,6 @@ mod tests {
         }
     }
 
-    fn response_packet(header: Smb2Header, body: &[u8]) -> Vec<u8> {
-        let mut packet = header.encode().to_vec();
-        packet.extend_from_slice(body);
-        packet
-    }
-
-    fn compound_response_packet(parts: Vec<(Smb2Header, Vec<u8>)>) -> Vec<u8> {
-        let mut packet = Vec::new();
-        let part_count = parts.len();
-        for (index, (mut header, body)) in parts.into_iter().enumerate() {
-            let is_last = index + 1 == part_count;
-            let unpadded_len = SMB2_HEADER_BYTES + body.len();
-            let segment_len = if is_last {
-                unpadded_len
-            } else {
-                unpadded_len.div_ceil(8) * 8
-            };
-            header.next_command = if is_last { 0 } else { segment_len as u32 };
-            packet.extend_from_slice(&header.encode());
-            packet.extend_from_slice(&body);
-            packet.resize(packet.len() + segment_len - unpadded_len, 0);
-        }
-        packet
-    }
-
-    fn negotiate_response_body() -> Vec<u8> {
-        let mut body = vec![0; 65];
-        put_u16(&mut body, 0, 65);
-        put_u16(
-            &mut body,
-            2,
-            Smb2SecurityMode::SIGNING_ENABLED.0 | Smb2SecurityMode::SIGNING_REQUIRED.0,
-        );
-        put_u16(&mut body, 4, Smb2Dialect::Smb311.to_wire());
-        body[8..24].copy_from_slice(&[0x55; 16]);
-        put_u32(&mut body, 28, 1_048_576);
-        put_u32(&mut body, 32, 1_048_576);
-        put_u32(&mut body, 36, 1_048_576);
-        let security_offset = (SMB2_HEADER_BYTES + body.len()) as u16;
-        put_u16(&mut body, 56, security_offset);
-        body
-    }
-
-    fn tree_connect_response_body() -> Vec<u8> {
-        let mut body = vec![0; 16];
-        put_u16(&mut body, 0, 16);
-        body[2] = Smb2ShareType::Disk.to_wire();
-        put_u32(&mut body, 4, Smb2ShareFlags::DFS.0);
-        put_u32(&mut body, 8, Smb2ShareCapabilities::DFS.0);
-        put_u32(&mut body, 12, 0x001f_01ff);
-        body
-    }
-
-    fn create_response_body(
-        file_id: Smb2FileId,
-        attributes: Smb2FileAttributes,
-        end_of_file: u64,
-    ) -> Vec<u8> {
-        let mut body = vec![0; 88];
-        put_u16(&mut body, 0, 89);
-        put_u32(&mut body, 4, Smb2CreateAction::Opened.to_wire());
-        put_u64(&mut body, 40, 4096);
-        put_u64(&mut body, 48, end_of_file);
-        put_u32(&mut body, 56, attributes.0);
-        put_u64(&mut body, 64, file_id.persistent);
-        put_u64(&mut body, 72, file_id.volatile);
-        body
-    }
-
-    fn query_directory_response_body(buffer: &[u8]) -> Vec<u8> {
-        let mut body = vec![0; 8 + buffer.len()];
-        put_u16(&mut body, 0, 9);
-        put_u16(&mut body, 2, (SMB2_HEADER_BYTES + 8) as u16);
-        put_u32(&mut body, 4, buffer.len() as u32);
-        body[8..].copy_from_slice(buffer);
-        body
-    }
-
-    fn read_response_body(data: &[u8]) -> Vec<u8> {
-        let mut body = vec![0; 16 + data.len()];
-        put_u16(&mut body, 0, 17);
-        body[2] = (SMB2_HEADER_BYTES + 16) as u8;
-        put_u32(&mut body, 4, data.len() as u32);
-        body[16..].copy_from_slice(data);
-        body
-    }
-
-    fn write_response_body(count: u32) -> Vec<u8> {
-        let mut body = vec![0; 16];
-        put_u16(&mut body, 0, 17);
-        put_u32(&mut body, 4, count);
-        body
-    }
-
-    fn set_info_response_body() -> Vec<u8> {
-        let mut body = vec![0; 2];
-        put_u16(&mut body, 0, 2);
-        body
-    }
-
     fn ioctl_response_body(ctl_code: u32, file_id: Smb2FileId, output: &[u8]) -> Vec<u8> {
         iris_smb_client::smb2_ioctl_response_body(
             ctl_code,
@@ -2282,16 +2182,6 @@ mod tests {
             Smb2IoctlFlags::IS_FSCTL,
         )
         .expect("ioctl response body")
-    }
-
-    fn close_response_body(attributes: Smb2FileAttributes, end_of_file: u64) -> Vec<u8> {
-        let mut body = vec![0; 60];
-        put_u16(&mut body, 0, 60);
-        put_u16(&mut body, 2, Smb2CloseFlags::POSTQUERY_ATTRIB.0);
-        put_u64(&mut body, 40, 4096);
-        put_u64(&mut body, 48, end_of_file);
-        put_u32(&mut body, 56, attributes.0);
-        body
     }
 
     fn directory_entry_record(
@@ -2313,47 +2203,5 @@ mod tests {
         put_u64(&mut body, 96, file_id);
         body[104..].copy_from_slice(&file_name_bytes);
         body
-    }
-
-    fn u32_from_le(bytes: &[u8], offset: usize) -> u32 {
-        u32::from_le_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-        ])
-    }
-
-    fn u64_from_le(bytes: &[u8], offset: usize) -> u64 {
-        u64::from_le_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-            bytes[offset + 4],
-            bytes[offset + 5],
-            bytes[offset + 6],
-            bytes[offset + 7],
-        ])
-    }
-
-    fn encode_utf16le(value: &str) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(value.len() * 2);
-        for unit in value.encode_utf16() {
-            bytes.extend_from_slice(&unit.to_le_bytes());
-        }
-        bytes
-    }
-
-    fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
-        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
-    }
-
-    fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
-        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-    }
-
-    fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
-        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
     }
 }

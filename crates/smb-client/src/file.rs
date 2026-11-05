@@ -434,11 +434,12 @@ fn checked_write_len(length: usize) -> Result<u32, SmbConnectionError> {
 mod tests {
     use super::*;
     use crate::actor::SmbConnectionActor;
-    use crate::packet::create::Smb2OplockLevel;
-    use crate::packet::create::{Smb2CreateAction, Smb2FileAttributes};
+    use crate::test_support::*;
+
+    use crate::packet::create::Smb2FileAttributes;
     use crate::packet::header::{Smb2Command, Smb2Header, SMB2_HEADER_BYTES};
     use crate::transport::DirectTcpTransport;
-    use crate::wire::{put_u16, put_u32, put_u64};
+
     use tokio::io::duplex;
 
     #[tokio::test]
@@ -462,12 +463,12 @@ mod tests {
                     Smb2Command::Create => {
                         let create = Smb2CreateRequest::decode(body).expect("create");
                         assert_eq!(create.name, "folder/file.bin");
-                        create_response_body(file_id)
+                        create_response_body(file_id, Smb2FileAttributes::ARCHIVE, 7)
                     }
                     Smb2Command::Close => {
                         let close = Smb2CloseRequest::decode(body).expect("close");
                         assert_eq!(close.file_id, file_id);
-                        close_response_body()
+                        close_response_body(Smb2FileAttributes::ARCHIVE, 7)
                     }
                     _ => unreachable!("covered command list"),
                 };
@@ -552,7 +553,7 @@ mod tests {
                 .send_packet(&compound_response_packet(vec![
                     (
                         Smb2Header::new(Smb2Command::Create, create_header.message_id),
-                        create_response_body(file_id),
+                        create_response_body(file_id, Smb2FileAttributes::ARCHIVE, 7),
                     ),
                     (
                         Smb2Header::new(Smb2Command::SetInfo, set_header.message_id),
@@ -560,7 +561,7 @@ mod tests {
                     ),
                     (
                         Smb2Header::new(Smb2Command::Close, close_header.message_id),
-                        close_response_body(),
+                        close_response_body(Smb2FileAttributes::ARCHIVE, 7),
                     ),
                 ]))
                 .await
@@ -690,68 +691,5 @@ mod tests {
             16
         );
         server_task.await.expect("server task");
-    }
-
-    fn response_packet(header: Smb2Header, body: &[u8]) -> Vec<u8> {
-        let mut packet = header.encode().to_vec();
-        packet.extend_from_slice(body);
-        packet
-    }
-
-    fn compound_response_packet(parts: Vec<(Smb2Header, Vec<u8>)>) -> Vec<u8> {
-        let mut packet = Vec::new();
-        let part_count = parts.len();
-        for (index, (mut header, body)) in parts.into_iter().enumerate() {
-            let is_last = index + 1 == part_count;
-            let unpadded_len = SMB2_HEADER_BYTES + body.len();
-            let segment_len = if is_last {
-                unpadded_len
-            } else {
-                unpadded_len.div_ceil(8) * 8
-            };
-            header.next_command = if is_last { 0 } else { segment_len as u32 };
-            packet.extend_from_slice(&header.encode());
-            packet.extend_from_slice(&body);
-            packet.resize(packet.len() + segment_len - unpadded_len, 0);
-        }
-        packet
-    }
-
-    fn create_response_body(file_id: Smb2FileId) -> Vec<u8> {
-        let mut body = vec![0; 88];
-        put_u16(&mut body, 0, 89);
-        body[2] = Smb2OplockLevel::None.to_wire();
-        put_u32(&mut body, 4, Smb2CreateAction::Opened.to_wire());
-        put_u64(&mut body, 40, 4096);
-        put_u64(&mut body, 48, 7);
-        put_u32(&mut body, 56, Smb2FileAttributes::ARCHIVE.0);
-        put_u64(&mut body, 64, file_id.persistent);
-        put_u64(&mut body, 72, file_id.volatile);
-        body
-    }
-
-    fn read_response_body(data: &[u8]) -> Vec<u8> {
-        let mut body = vec![0; 16 + data.len()];
-        put_u16(&mut body, 0, 17);
-        body[2] = (SMB2_HEADER_BYTES + 16) as u8;
-        put_u32(&mut body, 4, data.len() as u32);
-        body[16..].copy_from_slice(data);
-        body
-    }
-
-    fn close_response_body() -> Vec<u8> {
-        let mut body = vec![0; 60];
-        put_u16(&mut body, 0, 60);
-        put_u16(&mut body, 2, Smb2CloseFlags::POSTQUERY_ATTRIB.0);
-        put_u64(&mut body, 40, 4096);
-        put_u64(&mut body, 48, 7);
-        put_u32(&mut body, 56, Smb2FileAttributes::ARCHIVE.0);
-        body
-    }
-
-    fn set_info_response_body() -> Vec<u8> {
-        let mut body = vec![0; 2];
-        put_u16(&mut body, 0, 2);
-        body
     }
 }

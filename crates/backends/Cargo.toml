@@ -25,6 +25,7 @@ futures-util = { workspace = true }
 bytes = { workspace = true }
 
 [dev-dependencies]
+iris-smb-client = { workspace = true, features = ["test-support"] }
 criterion = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }

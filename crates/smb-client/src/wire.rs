@@ -9,15 +9,15 @@ fn le_bytes<const N: usize>(bytes: &[u8], offset: usize) -> [u8; N] {
         .expect("slice length equals N")
 }
 
-pub(crate) fn le_u16(bytes: &[u8], offset: usize) -> u16 {
+pub fn le_u16(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(le_bytes(bytes, offset))
 }
 
-pub(crate) fn le_u32(bytes: &[u8], offset: usize) -> u32 {
+pub fn le_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(le_bytes(bytes, offset))
 }
 
-pub(crate) fn le_u64(bytes: &[u8], offset: usize) -> u64 {
+pub fn le_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(le_bytes(bytes, offset))
 }
 
@@ -95,17 +95,17 @@ pub(crate) fn push_u64(bytes: &mut Vec<u8>, value: u64) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
 
-#[cfg(test)]
-pub(crate) fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
     bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }
 
-pub(crate) fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+pub fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
-#[cfg(test)]
-pub(crate) fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
@@ -114,7 +114,7 @@ pub(crate) fn align8(value: usize) -> usize {
     value.saturating_add(7) & !7
 }
 
-pub(crate) fn encode_utf16le(value: &str) -> Vec<u8> {
+pub fn encode_utf16le(value: &str) -> Vec<u8> {
     value.encode_utf16().flat_map(u16::to_le_bytes).collect()
 }
 

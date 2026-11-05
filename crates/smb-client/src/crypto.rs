@@ -340,6 +340,7 @@ fn constant_time_eq(left: &[u8; SMB2_SIGNATURE_BYTES], right: &[u8; SMB2_SIGNATU
 mod tests {
     use super::*;
     use crate::packet::header::{Smb2Command, Smb2Header};
+    use crate::test_support::*;
 
     #[test]
     fn smb311_preauth_hash_starts_with_zero_hash() {
@@ -568,31 +569,10 @@ mod tests {
         packet
     }
 
-    fn hex(bytes: &[u8]) -> String {
-        const DIGITS: &[u8; 16] = b"0123456789abcdef";
-        let mut output = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            output.push(DIGITS[(byte >> 4) as usize] as char);
-            output.push(DIGITS[(byte & 0x0f) as usize] as char);
-        }
-        output
-    }
-
     fn hex_array_16(input: &str) -> [u8; 16] {
         let bytes = hex_bytes(input);
         let mut array = [0; 16];
         array.copy_from_slice(&bytes);
         array
-    }
-
-    fn hex_bytes(input: &str) -> Vec<u8> {
-        input
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                let hex = std::str::from_utf8(pair).expect("hex utf8");
-                u8::from_str_radix(hex, 16).expect("hex byte")
-            })
-            .collect()
     }
 }

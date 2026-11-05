@@ -226,6 +226,7 @@ mod tests {
     };
     use crate::packet::header::Smb2Command;
     use crate::packet::header::{Smb2Header, SMB2_FLAGS_SIGNED, SMB2_HEADER_BYTES};
+    use crate::test_support::*;
     use crate::transform::{
         derive_smb311_encryption_keys, is_smb3_transform, Smb3EncryptionContext,
     };
@@ -265,8 +266,11 @@ mod tests {
             challenge_header.session_id = session_id;
             let challenge_response = response_packet(
                 challenge_header,
-                &session_setup_response_body(&challenge_spnego),
-                &challenge_spnego,
+                &[
+                    session_setup_response_body(&challenge_spnego).as_slice(),
+                    &challenge_spnego,
+                ]
+                .concat(),
             );
             transport
                 .send_packet(&challenge_response)
@@ -307,8 +311,10 @@ mod tests {
             final_header.status_or_channel_sequence = SmbNtStatus::SUCCESS.0;
             final_header.session_id = session_id;
             final_header.flags |= SMB2_FLAGS_SIGNED;
-            let mut final_response =
-                response_packet(final_header, &session_setup_response_body(&[]), &[]);
+            let mut final_response = response_packet(
+                final_header,
+                &[session_setup_response_body(&[]).as_slice(), &[]].concat(),
+            );
             sign_smb2_packet_hmac_sha256(&expected_session_base_key(), &mut final_response)
                 .expect("sign final response");
             transport
@@ -326,7 +332,8 @@ mod tests {
                 Smb2Header::new(Smb2Command::Echo, signed_header.message_id);
             echo_response_header.flags |= SMB2_FLAGS_SIGNED;
             echo_response_header.session_id = session_id;
-            let mut echo_response = response_packet(echo_response_header, b"ok", &[]);
+            let mut echo_response =
+                response_packet(echo_response_header, &[b"ok".as_slice(), &[]].concat());
             sign_smb2_packet_hmac_sha256(&signing_key, &mut echo_response)
                 .expect("sign echo response");
             transport
@@ -396,8 +403,11 @@ mod tests {
             challenge_header.session_id = session_id;
             let challenge_response = response_packet(
                 challenge_header,
-                &session_setup_response_body(&challenge_spnego),
-                &challenge_spnego,
+                &[
+                    session_setup_response_body(&challenge_spnego).as_slice(),
+                    &challenge_spnego,
+                ]
+                .concat(),
             );
             transport
                 .send_packet(&challenge_response)
@@ -441,8 +451,10 @@ mod tests {
                 second.as_slice(),
             ]);
             final_header.flags |= SMB2_FLAGS_SIGNED;
-            let mut final_response =
-                response_packet(final_header, &session_setup_response_body(&[]), &[]);
+            let mut final_response = response_packet(
+                final_header,
+                &[session_setup_response_body(&[]).as_slice(), &[]].concat(),
+            );
             derive_smb2_signing_key(
                 &expected_session_base_key(),
                 Smb2Dialect::Smb311,
@@ -476,7 +488,8 @@ mod tests {
             let mut echo_response_header =
                 Smb2Header::new(Smb2Command::Echo, request_header.message_id);
             echo_response_header.session_id = session_id;
-            let echo_response = response_packet(echo_response_header, b"ok", &[]);
+            let echo_response =
+                response_packet(echo_response_header, &[b"ok".as_slice(), &[]].concat());
             let encrypted_response = encryption
                 .encrypt(session_id, &echo_response)
                 .expect("encrypt response");
@@ -539,8 +552,11 @@ mod tests {
             transport
                 .send_packet(&response_packet(
                     challenge_header,
-                    &session_setup_response_body(&empty_spnego),
-                    &empty_spnego,
+                    &[
+                        session_setup_response_body(&empty_spnego).as_slice(),
+                        &empty_spnego,
+                    ]
+                    .concat(),
                 ))
                 .await
                 .expect("challenge response");
@@ -623,13 +639,6 @@ mod tests {
         body
     }
 
-    fn response_packet(header: Smb2Header, body: &[u8], tail: &[u8]) -> Vec<u8> {
-        let mut packet = header.encode().to_vec();
-        packet.extend_from_slice(body);
-        packet.extend_from_slice(tail);
-        packet
-    }
-
     fn push_security_buffer(bytes: &mut Vec<u8>, length: usize, offset: usize) {
         bytes.extend_from_slice(&(length as u16).to_le_bytes());
         bytes.extend_from_slice(&(length as u16).to_le_bytes());
@@ -640,31 +649,5 @@ mod tests {
         haystack
             .windows(needle.len())
             .any(|candidate| candidate == needle)
-    }
-
-    fn hex_array_8(hex: &str) -> [u8; 8] {
-        let bytes = hex_bytes(hex);
-        bytes.try_into().expect("hex should decode to eight bytes")
-    }
-
-    fn hex_bytes(hex: &str) -> Vec<u8> {
-        assert!(hex.len().is_multiple_of(2));
-        let mut bytes = Vec::with_capacity(hex.len() / 2);
-        let raw = hex.as_bytes();
-        for index in (0..raw.len()).step_by(2) {
-            let high = hex_value(raw[index]);
-            let low = hex_value(raw[index + 1]);
-            bytes.push((high << 4) | low);
-        }
-        bytes
-    }
-
-    fn hex_value(byte: u8) -> u8 {
-        match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            b'A'..=b'F' => byte - b'A' + 10,
-            _ => panic!("invalid hex digit"),
-        }
     }
 }

@@ -6,6 +6,9 @@ edition = "2021"
 [package.metadata.cargo-machete]
 ignored = ["md-5"]
 
+[features]
+test-support = []
+
 [dependencies]
 aes = { workspace = true }
 aes-gcm = { workspace = true }

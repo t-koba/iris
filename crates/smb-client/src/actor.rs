@@ -1155,6 +1155,7 @@ mod tests {
     use crate::crypto::{
         sign_smb2_packet_hmac_sha256, smb311_preauth_hash_sequence, verify_smb2_packet_hmac_sha256,
     };
+    use crate::test_support::*;
     use crate::transform::{Smb3EncryptionContext, Smb3EncryptionKeys};
     use crate::transport::DirectTcpTransport;
     use tokio::io::duplex;
@@ -1250,10 +1251,19 @@ mod tests {
             assert!(third.flags & SMB2_FLAGS_RELATED_OPERATIONS != 0);
 
             transport
-                .send_packet(&compound_response_packet(&[
-                    (Smb2Command::Create, first.message_id, b"created"),
-                    (Smb2Command::Read, second.message_id, b"payload"),
-                    (Smb2Command::Close, third.message_id, b"closed"),
+                .send_packet(&compound_response_packet(vec![
+                    (
+                        Smb2Header::new(Smb2Command::Create, first.message_id),
+                        b"created".to_vec(),
+                    ),
+                    (
+                        Smb2Header::new(Smb2Command::Read, second.message_id),
+                        b"payload".to_vec(),
+                    ),
+                    (
+                        Smb2Header::new(Smb2Command::Close, third.message_id),
+                        b"closed".to_vec(),
+                    ),
                 ]))
                 .await
                 .expect("compound response");
@@ -1614,30 +1624,5 @@ mod tests {
             }
         ));
         server_task.await.expect("server task");
-    }
-
-    fn response_packet(header: Smb2Header, body: &[u8]) -> Vec<u8> {
-        let mut packet = header.encode().to_vec();
-        packet.extend_from_slice(body);
-        packet
-    }
-
-    fn compound_response_packet(parts: &[(Smb2Command, u64, &[u8])]) -> Vec<u8> {
-        let mut packet = Vec::new();
-        for (index, (command, message_id, body)) in parts.iter().enumerate() {
-            let is_last = index + 1 == parts.len();
-            let unpadded_len = SMB2_HEADER_BYTES + body.len();
-            let segment_len = if is_last {
-                unpadded_len
-            } else {
-                unpadded_len.div_ceil(8) * 8
-            };
-            let mut header = Smb2Header::new(*command, *message_id);
-            header.next_command = if is_last { 0 } else { segment_len as u32 };
-            packet.extend_from_slice(&header.encode());
-            packet.extend_from_slice(body);
-            packet.resize(packet.len() + segment_len - unpadded_len, 0);
-        }
-        packet
     }
 }

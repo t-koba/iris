@@ -233,6 +233,7 @@ fn md4_h(x: u32, y: u32, z: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::*;
 
     #[test]
     fn md4_matches_rfc_1320_vectors() {
@@ -322,41 +323,5 @@ mod tests {
             hex(&response.lm_challenge_response),
             "683b04f879b28ebe848df8e4f9f2dc4cffffff0011223344"
         );
-    }
-
-    fn hex(bytes: &[u8]) -> String {
-        const DIGITS: &[u8; 16] = b"0123456789abcdef";
-        let mut output = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            output.push(DIGITS[(byte >> 4) as usize] as char);
-            output.push(DIGITS[(byte & 0x0f) as usize] as char);
-        }
-        output
-    }
-
-    fn hex_array_8(hex: &str) -> [u8; 8] {
-        let bytes = hex_bytes(hex);
-        bytes.try_into().expect("hex should decode to eight bytes")
-    }
-
-    fn hex_bytes(hex: &str) -> Vec<u8> {
-        assert!(hex.len().is_multiple_of(2));
-        let mut bytes = Vec::with_capacity(hex.len() / 2);
-        let raw = hex.as_bytes();
-        for index in (0..raw.len()).step_by(2) {
-            let high = hex_value(raw[index]);
-            let low = hex_value(raw[index + 1]);
-            bytes.push((high << 4) | low);
-        }
-        bytes
-    }
-
-    fn hex_value(byte: u8) -> u8 {
-        match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            b'A'..=b'F' => byte - b'A' + 10,
-            _ => panic!("invalid hex digit"),
-        }
     }
 }
