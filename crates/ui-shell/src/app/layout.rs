@@ -168,6 +168,8 @@ fn view_with_dialog<'a>(
         }
     };
 
+    // A transfer waits on the conflict question, so a stray click beside it must not answer it.
+    let closes_on_backdrop = !matches!(dialog, DialogState::Conflict { .. });
     let backdrop = mouse_area(
         container(
             iced::widget::Space::new()
@@ -177,8 +179,12 @@ fn view_with_dialog<'a>(
         .style(crate::views::theme::dialog_backdrop_style)
         .width(Length::Fill)
         .height(Length::Fill),
-    )
-    .on_press(DialogMessage::Close.into());
+    );
+    let backdrop = if closes_on_backdrop {
+        backdrop.on_press(DialogMessage::Close.into())
+    } else {
+        backdrop
+    };
 
     iced::widget::stack![
         main,
