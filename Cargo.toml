@@ -81,7 +81,7 @@ image = { version = "0.25", default-features = false, features = [
     "webp",
     "ico",
 ] }
-avif-rust = "0.0.6"
+avif-rust = "0.1.2"
 jpeg2k = { version = "0.10.1", default-features = false, features = ["image", "openjpeg-sys"] }
 jpegxr = "0.3.1"
 jxl-oxide = { version = "0.12.6", default-features = false, features = ["image"] }
