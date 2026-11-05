@@ -391,6 +391,21 @@ impl AppState {
         true
     }
 
+    /// Changes whenever a tab is opened, closed, moved, switched or navigated.
+    pub fn tab_layout_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for tabs in &self.panes {
+            tabs.active.hash(&mut hasher);
+            tabs.tabs.len().hash(&mut hasher);
+            for tab in &tabs.tabs {
+                tab.current_path.hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
     pub fn pane_tab_configs(&self) -> Vec<PaneTabConfig> {
         self.panes
             .iter()
@@ -539,6 +554,28 @@ mod tests {
         );
         assert_eq!(theme_from_mode(iced::theme::Mode::Dark), iced::Theme::Dark);
         assert_eq!(theme_from_mode(iced::theme::Mode::None), iced::Theme::Dark);
+    }
+
+    #[test]
+    fn tab_layout_fingerprint_tracks_saved_tab_state_only() {
+        let mut state = AppState::default();
+        state.pane_mut(0).current_path = "/a".to_string();
+        let initial = state.tab_layout_fingerprint();
+
+        state.pane_mut(0).scroll_y = 120.0;
+        state.show_hidden_files = true;
+        assert_eq!(state.tab_layout_fingerprint(), initial);
+
+        state.pane_mut(0).current_path = "/b".to_string();
+        let navigated = state.tab_layout_fingerprint();
+        assert_ne!(navigated, initial);
+
+        state.open_tab(0);
+        let opened = state.tab_layout_fingerprint();
+        assert_ne!(opened, navigated);
+
+        assert!(state.switch_tab(0, 0));
+        assert_ne!(state.tab_layout_fingerprint(), opened);
     }
 
     #[test]

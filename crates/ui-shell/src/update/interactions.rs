@@ -133,6 +133,19 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                 state.window_height = size.height;
                 return Task::done(Message::SaveLayoutConfig);
             }
+            window::Event::CloseRequested => {
+                // The debounced save may still be pending; write the layout, then quit.
+                state.config_save_generation = state.config_save_generation.wrapping_add(1);
+                return Task::perform(
+                    crate::config::save_config(super::workspace::layout_config_snapshot(state)),
+                    |result| {
+                        if let Err(error) = result {
+                            tracing::warn!("failed to save the layout before quitting: {error}");
+                        }
+                    },
+                )
+                .then(|()| iced::exit());
+            }
             window::Event::FileHovered(path) => {
                 let target = external_dnd_target(state);
                 match &mut state.dnd_state {

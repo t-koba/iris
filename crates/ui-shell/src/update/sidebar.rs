@@ -3,7 +3,7 @@ use crate::messages::SidebarMessage;
 use crate::state::{SidebarDropTarget, SidebarGroup, SidebarGroupKind, SidebarItem};
 
 fn save_layout_config() -> Task<Message> {
-    Task::perform(async {}, |_| Message::SaveLayoutConfig)
+    Task::done(Message::SaveLayoutConfig)
 }
 
 pub fn handle(state: &mut AppState, message: SidebarMessage) -> Task<Message> {

@@ -25,7 +25,14 @@ fn restore_window_task(config: &LayoutConfig) -> Task<Message> {
 
 fn save_layout_config_now(state: &mut AppState) -> Task<Message> {
     state.last_config_save = Some(std::time::Instant::now());
-    let config = LayoutConfig {
+    Task::perform(
+        crate::config::save_config(layout_config_snapshot(state)),
+        Message::LayoutConfigSaved,
+    )
+}
+
+pub(super) fn layout_config_snapshot(state: &AppState) -> LayoutConfig {
+    LayoutConfig {
         sidebar_width: state.sidebar_width,
         right_panel_width: state.right_panel_width,
         preview_panel_height: state.preview_panel_height,
@@ -81,11 +88,7 @@ fn save_layout_config_now(state: &mut AppState) -> Task<Message> {
             .collect(),
         remote_transport_mappings: state.remote_transport_mappings.clone(),
         remote_transport_secret_warnings: Vec::new(),
-    };
-    Task::perform(
-        crate::config::save_config(config),
-        Message::LayoutConfigSaved,
-    )
+    }
 }
 
 fn close_quick_look(state: &mut AppState) -> Task<Message> {
@@ -279,7 +282,7 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
             {
                 *current = position;
             }
-            return Task::perform(async {}, |_| Message::SaveLayoutConfig);
+            return Task::done(Message::SaveLayoutConfig);
         }
         Message::SetPropertiesPosition(position) => {
             state.properties_position = position;
@@ -290,7 +293,7 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
             {
                 *properties_position = position;
             }
-            return Task::perform(async {}, |_| Message::SaveLayoutConfig);
+            return Task::done(Message::SaveLayoutConfig);
         }
         Message::FolderStatsLoaded(path, stats) => {
             if state.focused_folder_stats_path.as_deref() == Some(&path) {
@@ -304,12 +307,15 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                 state.pane_mut(1).current_path = path.clone();
                 state.pane_mut(1).push_to_history(path.clone());
                 refresh_breadcrumbs_for_pane(state, 1);
-                return load_secondary_directory_task(path);
+                return Task::batch([
+                    load_secondary_directory_task(path),
+                    Task::done(Message::SaveLayoutConfig),
+                ]);
             }
             if !state.dual_pane_enabled {
                 state.active_pane = 0;
             }
-            return Task::perform(async {}, |_| Message::SaveLayoutConfig);
+            return Task::done(Message::SaveLayoutConfig);
         }
         Message::SetActivePane(pane) => {
             state.active_pane = pane;

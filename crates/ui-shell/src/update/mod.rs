@@ -64,6 +64,18 @@ fn open_help_document() -> Result<(), String> {
 }
 
 pub fn update(state: &mut AppState, message: Message) -> Task<Message> {
+    // Open tabs and their folders are part of the saved layout; persist them whenever they
+    // change instead of relying on some later setting change to write them.
+    let saves_tabs = !matches!(message, Message::LayoutConfigLoaded(..));
+    let tabs_before = state.tab_layout_fingerprint();
+    let task = dispatch(state, message);
+    if saves_tabs && state.tab_layout_fingerprint() != tabs_before {
+        return Task::batch([task, Task::done(Message::SaveLayoutConfig)]);
+    }
+    task
+}
+
+fn dispatch(state: &mut AppState, message: Message) -> Task<Message> {
     let mutation_is_busy = state.pending_operation.is_some()
         && matches!(
             &message,

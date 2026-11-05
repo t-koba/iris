@@ -53,6 +53,8 @@ fn application_settings() -> Settings {
 fn window_settings() -> window::Settings {
     let mut settings = window::Settings {
         icon: load_window_icon(),
+        // Closing goes through `CloseRequested` so pending settings are written before exit.
+        exit_on_close_request: false,
         min_size: Some(Size::new(
             iris_ui_shell::app::resolved_layout::MIN_WINDOW_WIDTH,
             iris_ui_shell::app::resolved_layout::MIN_WINDOW_HEIGHT,

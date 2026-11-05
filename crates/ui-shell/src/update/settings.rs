@@ -140,7 +140,7 @@ pub fn set_map_tile_fetch_enabled(state: &mut AppState, enabled: bool) -> Task<M
     {
         *map_tile_fetch_enabled = enabled;
     }
-    Task::perform(async {}, |_| Message::SaveLayoutConfig)
+    Task::done(Message::SaveLayoutConfig)
 }
 
 pub fn set_shortcut_overrides_json_input(state: &mut AppState, value: String) -> Task<Message> {
@@ -160,7 +160,7 @@ pub fn set_shortcut_overrides_json_input(state: &mut AppState, value: String) ->
                 }
                 *shortcut_overrides_error = None;
                 state.shortcut_overrides = overrides;
-                Task::perform(async {}, |_| Message::SaveLayoutConfig)
+                Task::done(Message::SaveLayoutConfig)
             }
             Err(error) => {
                 *shortcut_overrides_error = Some(error.to_string());
@@ -214,7 +214,7 @@ fn apply_shortcut_overrides(
         *shortcut_overrides_json_input = value;
         *shortcut_overrides_error = None;
     }
-    Task::perform(async {}, |_| Message::SaveLayoutConfig)
+    Task::done(Message::SaveLayoutConfig)
 }
 
 pub fn set_remote_copy_undo_enabled(state: &mut AppState, enabled: bool) -> Task<Message> {
@@ -226,7 +226,7 @@ pub fn set_remote_copy_undo_enabled(state: &mut AppState, enabled: bool) -> Task
     {
         *remote_copy_undo_enabled = enabled;
     }
-    Task::perform(async {}, |_| Message::SaveLayoutConfig)
+    Task::done(Message::SaveLayoutConfig)
 }
 
 pub fn set_locale_choice(state: &mut AppState, choice: LocaleChoice) -> Task<Message> {
@@ -235,7 +235,7 @@ pub fn set_locale_choice(state: &mut AppState, choice: LocaleChoice) -> Task<Mes
     if let Some(DialogState::Settings { locale_choice, .. }) = &mut state.active_dialog {
         *locale_choice = choice;
     }
-    Task::perform(async {}, |_| Message::SaveLayoutConfig)
+    Task::done(Message::SaveLayoutConfig)
 }
 
 pub fn set_notification_timeout_input(state: &mut AppState, value: String) -> Task<Message> {
@@ -257,7 +257,7 @@ pub fn set_notification_timeout_input(state: &mut AppState, value: String) -> Ta
 
     state.notification_timeout_secs = timeout_secs;
     state.refresh_notification_expirations();
-    Task::perform(async {}, |_| Message::SaveLayoutConfig)
+    Task::done(Message::SaveLayoutConfig)
 }
 
 pub fn set_cache_encryption_policy(
@@ -273,7 +273,7 @@ pub fn set_cache_encryption_policy(
     {
         *cache_encryption_policy = policy;
     }
-    Task::perform(async {}, |_| Message::SaveLayoutConfig)
+    Task::done(Message::SaveLayoutConfig)
 }
 
 pub fn set_thumbnail_cache_limit_input(state: &mut AppState, value: String) -> Task<Message> {
@@ -295,7 +295,7 @@ pub fn set_thumbnail_cache_limit_input(state: &mut AppState, value: String) -> T
 
     state.thumbnail_cache_limit_bytes = limit_bytes;
     trim_thumbnail_cache_to_limits(state);
-    Task::perform(async {}, |_| Message::SaveLayoutConfig)
+    Task::done(Message::SaveLayoutConfig)
 }
 
 pub fn set_memory_budget_limit_input(state: &mut AppState, value: String) -> Task<Message> {
@@ -317,7 +317,7 @@ pub fn set_memory_budget_limit_input(state: &mut AppState, value: String) -> Tas
     state.memory_budget_limit_bytes = limit_bytes;
     iris_core_domain::memory_budget::MemoryBudget::global().set_cap_bytes(limit_bytes);
     trim_thumbnail_cache_to_memory_budget(state);
-    Task::perform(async {}, |_| Message::SaveLayoutConfig)
+    Task::done(Message::SaveLayoutConfig)
 }
 
 pub fn storage_usage_calculated(state: &mut AppState, usage: crate::state::StorageUsage) {
