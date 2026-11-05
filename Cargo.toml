@@ -11,6 +11,9 @@ opt-level = 3
 # Keep target/ small for tests and clippy while preserving line numbers in backtraces.
 debug = "line-tables-only"
 
+[workspace.package]
+version = "0.4.0"
+
 [workspace]
 members = [
     "crates/core-domain",

@@ -16,7 +16,7 @@ sign_identity="${IRIS_MACOS_SIGN_IDENTITY:--}"
 notary_profile="${IRIS_MACOS_NOTARY_PROFILE:-}"
 deployment_target="${IRIS_MACOS_DEPLOYMENT_TARGET:-14.0}"
 export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
-version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo_root/crates/ui-shell/Cargo.toml" | head -n 1)
+version=$(sed -n '/^\[workspace.package\]$/,/^\[/{s/^version = "\([^" ]*\)".*/\1/p;}' "$repo_root/Cargo.toml" | head -n 1)
 
 typeset -A bundled_dylibs
 

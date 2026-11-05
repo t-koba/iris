@@ -29,9 +29,9 @@ jobs:
             echo "release workflow must run from a v* tag" >&2
             exit 1
           fi
-          manifest_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/ui-shell/Cargo.toml | head -n 1)"
-          if [[ "$manifest_version" != "$version" ]]; then
-            echo "tag $GITHUB_REF_NAME does not match iris-ui-shell version $manifest_version" >&2
+          workspace_version="$(sed -n '/^\[workspace.package\]$/,/^\[/{s/^version = "\([^" ]*\)".*/\1/p;}' Cargo.toml | head -n 1)"
+          if [[ "$workspace_version" != "$version" ]]; then
+            echo "tag $GITHUB_REF_NAME does not match workspace version $workspace_version" >&2
             exit 1
           fi
 
