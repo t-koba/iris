@@ -196,6 +196,31 @@ pub struct Smb2CreateRequest {
 }
 
 impl Smb2CreateRequest {
+    /// A request without oplocks or create contexts that shares read, write and delete access.
+    pub fn new(
+        name: impl Into<String>,
+        desired_access: u32,
+        file_attributes: Smb2FileAttributes,
+        create_disposition: Smb2CreateDisposition,
+        create_options: Smb2CreateOptions,
+    ) -> Self {
+        Self {
+            security_flags: 0,
+            requested_oplock_level: Smb2OplockLevel::None,
+            impersonation_level: Smb2ImpersonationLevel::Impersonation,
+            smb_create_flags: 0,
+            desired_access: Smb2DesiredAccess(desired_access),
+            file_attributes,
+            share_access: Smb2ShareAccess(
+                Smb2ShareAccess::READ.0 | Smb2ShareAccess::WRITE.0 | Smb2ShareAccess::DELETE.0,
+            ),
+            create_disposition,
+            create_options,
+            name: name.into(),
+            create_contexts: Vec::new(),
+        }
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, SmbClientError> {
         let name_bytes = encode_utf16le(&self.name);
         let name_length = checked_u16_len("create.name", name_bytes.len())?;

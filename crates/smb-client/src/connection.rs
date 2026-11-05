@@ -69,4 +69,16 @@ impl SmbResponse {
     pub fn status(&self) -> SmbNtStatus {
         self.header.status()
     }
+
+    pub fn ensure_success(&self, command: Smb2Command) -> Result<(), SmbConnectionError> {
+        let status = self.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(SmbConnectionError::UnexpectedStatus {
+                command,
+                status: status.0,
+            })
+        }
+    }
 }

@@ -1,5 +1,5 @@
 use crate::connection::{SmbConnectionError, SmbResponse};
-use crate::file::{close_file, open_file_for_read, open_file_for_write, SmbOpenFile};
+use crate::file::{close, open_file_for_read, open_file_for_write, SmbHandle};
 use crate::packet::create::Smb2CreateDisposition;
 use crate::packet::header::Smb2Command;
 use crate::packet::ioctl::{Smb2IoctlFlags, Smb2IoctlRequest, Smb2IoctlResponse};
@@ -42,13 +42,13 @@ pub async fn copy_file_chunks(
     let target = match open_file_for_write(connection, target_path, create_disposition).await {
         Ok(target) => target,
         Err(error) => {
-            let _ = close_file(connection, source).await;
+            let _ = close(connection, source).await;
             return Err(error);
         }
     };
     let copy_result = copy_open_file_chunks(connection, &source, &target).await;
-    let close_source_result = close_file(connection, source).await.map(|_| ());
-    let close_target_result = close_file(connection, target).await.map(|_| ());
+    let close_source_result = close(connection, source).await.map(|_| ());
+    let close_target_result = close(connection, target).await.map(|_| ());
     match (copy_result, close_source_result.and(close_target_result)) {
         (Ok(bytes), Ok(())) => Ok(bytes),
         (Err(error), _) | (_, Err(error)) => Err(error),
@@ -57,7 +57,7 @@ pub async fn copy_file_chunks(
 
 pub async fn request_resume_key(
     connection: &SmbConnectionActor,
-    file: &SmbOpenFile,
+    file: &SmbHandle,
 ) -> Result<[u8; SMB2_RESUME_KEY_BYTES], SmbConnectionError> {
     let response = connection
         .request(
@@ -81,7 +81,7 @@ pub async fn request_resume_key(
 
 pub async fn copy_chunks(
     connection: &SmbConnectionActor,
-    target: &SmbOpenFile,
+    target: &SmbHandle,
     resume_key: &[u8; SMB2_RESUME_KEY_BYTES],
     chunks: &[SmbCopyChunk],
 ) -> Result<SmbCopyChunkResponse, SmbConnectionError> {
@@ -162,8 +162,8 @@ pub fn decode_copychunk_response(
 
 async fn copy_open_file_chunks(
     connection: &SmbConnectionActor,
-    source: &SmbOpenFile,
-    target: &SmbOpenFile,
+    source: &SmbHandle,
+    target: &SmbHandle,
 ) -> Result<u64, SmbConnectionError> {
     if source.end_of_file == 0 {
         return Ok(0);

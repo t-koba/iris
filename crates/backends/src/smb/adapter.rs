@@ -15,13 +15,11 @@ use iris_core_domain::types::read_handle::ReadHandle;
 use iris_core_domain::types::session::BackendSession;
 use iris_core_domain::types::thumbnail::{ThumbnailHint, ThumbnailResult};
 use iris_smb_client::{
-    close_directory, close_file, copy_file_chunks, create_directory, delete_directory, delete_file,
-    list_directory_once, open_file_and_read, open_file_for_read, open_file_for_write,
-    read_file_ranges_pipelined, rename_directory, rename_file, set_file_basic_info, write_file_at,
-    write_file_chunks_pipelined, Smb2CreateDisposition, Smb2FileAttributes,
-    Smb2FileBasicInformation, SmbConnectionActor, SmbConnectionError, SmbDirectoryEntry,
-    SmbOpenDirectory, SmbOpenFile, SmbReadRange, DEFAULT_READ_CHUNK_LENGTH,
-    DEFAULT_WRITE_CHUNK_LENGTH,
+    close, copy_file_chunks, create_directory, delete, list_directory_once, open_file_and_read,
+    open_file_for_read, open_file_for_write, read_file_ranges_pipelined, rename, set_basic_info,
+    write_file_at, write_file_chunks_pipelined, Smb2CreateDisposition, Smb2FileAttributes,
+    Smb2FileBasicInformation, SmbConnectionActor, SmbConnectionError, SmbDirectoryEntry, SmbHandle,
+    SmbReadRange, DEFAULT_READ_CHUNK_LENGTH, DEFAULT_WRITE_CHUNK_LENGTH,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -335,7 +333,7 @@ impl SmbAdapter {
                 .map(|_| ())
                 .map_err(|error| smb_network_error("write file", error))
         };
-        let close_result = close_file(&native.actor, file)
+        let close_result = close(&native.actor, file)
             .await
             .map(|_| ())
             .map_err(|error| smb_network_error("close written file", error));
@@ -382,7 +380,7 @@ impl SmbAdapter {
             }
         }
 
-        let close_result = close_file(&native.actor, file)
+        let close_result = close(&native.actor, file)
             .await
             .map(|_| ())
             .map_err(|error| smb_network_error("close streamed file", error));
@@ -403,15 +401,15 @@ impl SmbAdapter {
         let source_path = smb_relative_path(&src.display_path)?;
         let target_path = smb_relative_path(&final_display_path)?;
         let replace_if_exists = matches!(options.on_conflict, ConflictResolution::Overwrite);
-        if src_metadata.is_dir {
-            rename_directory(&native.actor, source_path, target_path, replace_if_exists)
-                .await
-                .map_err(|error| smb_network_error("rename directory", error))
-        } else {
-            rename_file(&native.actor, source_path, target_path, replace_if_exists)
-                .await
-                .map_err(|error| smb_network_error("rename file", error))
-        }
+        rename(
+            &native.actor,
+            source_path,
+            target_path,
+            src_metadata.is_dir,
+            replace_if_exists,
+        )
+        .await
+        .map_err(|error| smb_network_error("rename", error))
     }
 
     async fn copy_native(
@@ -443,7 +441,7 @@ impl SmbAdapter {
         .map_err(|error| smb_network_error("server-side copy", error))?;
 
         if let Some(mtime) = src_metadata.mtime {
-            set_file_basic_info(
+            set_basic_info(
                 &native.actor,
                 target_path,
                 Smb2FileBasicInformation {
@@ -479,7 +477,7 @@ impl SmbAdapter {
             let smb_path = smb_relative_path(&display_path)?;
             if metadata.is_dir {
                 if visited {
-                    delete_directory(&native.actor, smb_path)
+                    delete(&native.actor, smb_path, true)
                         .await
                         .map_err(|error| smb_network_error("delete directory", error))?;
                     continue;
@@ -496,7 +494,7 @@ impl SmbAdapter {
                     stack.push((child_display_path(&display_path, &entry.file_name), false));
                 }
             } else {
-                delete_file(&native.actor, smb_path)
+                delete(&native.actor, smb_path, false)
                     .await
                     .map_err(|error| smb_network_error("delete file", error))?;
             }
@@ -513,7 +511,7 @@ struct NativeSmbReadStream {
     actor: SmbConnectionActor,
     pool: Arc<SmbPool>,
     generation: u64,
-    file: Option<SmbOpenFile>,
+    file: Option<SmbHandle>,
     next_offset: u64,
     remaining: u64,
     buffer: Vec<u8>,
@@ -526,7 +524,7 @@ struct NativeSmbReadStream {
 impl NativeSmbReadStream {
     fn new(
         actor: SmbConnectionActor,
-        file: SmbOpenFile,
+        file: SmbHandle,
         offset: u64,
         length: u64,
         initial_data: Vec<u8>,
@@ -596,9 +594,9 @@ impl NativeSmbReadStream {
             return;
         };
         let actor = self.actor.clone();
-        self.close_future = Some(Box::pin(async move {
-            close_file(&actor, file).await.map(|_| ())
-        }));
+        self.close_future = Some(Box::pin(
+            async move { close(&actor, file).await.map(|_| ()) },
+        ));
     }
 
     fn invalidate_connection(&self) {
@@ -679,7 +677,7 @@ impl Drop for NativeSmbReadStream {
         if let Some(file) = self.file.take() {
             let actor = self.actor.clone();
             tokio::spawn(async move {
-                let _ = close_file(&actor, file).await;
+                let _ = close(&actor, file).await;
             });
         }
     }
@@ -780,7 +778,7 @@ impl BackendAdapter for SmbAdapter {
     ) -> Result<(), BackendError> {
         let native = self.native_session().await?;
         let path = smb_relative_path(&object.display_path)?;
-        let result = set_file_basic_info(
+        let result = set_basic_info(
             &native.actor,
             path,
             Smb2FileBasicInformation {
@@ -905,9 +903,9 @@ fn native_write_disposition(resolution: &ConflictResolution) -> Smb2CreateDispos
 
 async fn close_directory_after_create(
     actor: &SmbConnectionActor,
-    directory: SmbOpenDirectory,
+    directory: SmbHandle,
 ) -> Result<(), BackendError> {
-    close_directory(actor, directory)
+    close(actor, directory)
         .await
         .map(|_| ())
         .map_err(|error| smb_network_error("close created directory", error))

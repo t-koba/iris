@@ -3,8 +3,7 @@ use crate::connection::SmbConnectionError;
 use crate::packet::close::{Smb2CloseFlags, Smb2CloseRequest, Smb2CloseResponse};
 use crate::packet::create::{
     Smb2CreateDisposition, Smb2CreateOptions, Smb2CreateRequest, Smb2CreateResponse,
-    Smb2DesiredAccess, Smb2FileAttributes, Smb2FileId, Smb2ImpersonationLevel, Smb2OplockLevel,
-    Smb2ShareAccess,
+    Smb2DesiredAccess, Smb2FileAttributes, Smb2FileId,
 };
 use crate::packet::header::{smb2_credit_charge_for_payload, Smb2Command};
 use crate::packet::read::{Smb2ReadChannel, Smb2ReadFlags, Smb2ReadRequest, Smb2ReadResponse};
@@ -20,13 +19,31 @@ pub const DEFAULT_READ_PIPELINE_DEPTH: usize = 8;
 pub const DEFAULT_READ_CHUNK_LENGTH: u32 = 1024 * 1024;
 pub const DEFAULT_WRITE_CHUNK_LENGTH: usize = 1024 * 1024;
 
+/// An open file or directory.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SmbOpenFile {
+pub struct SmbHandle {
     pub file_id: Smb2FileId,
     pub end_of_file: u64,
     pub allocation_size: u64,
     pub file_attributes: Smb2FileAttributes,
 }
+
+impl From<Smb2CreateResponse> for SmbHandle {
+    fn from(response: Smb2CreateResponse) -> Self {
+        Self {
+            file_id: response.file_id,
+            end_of_file: response.end_of_file,
+            allocation_size: response.allocation_size,
+            file_attributes: response.file_attributes,
+        }
+    }
+}
+
+/// The file id that makes a related compound request use the handle opened before it.
+const RELATED_FILE_ID: Smb2FileId = Smb2FileId {
+    persistent: u64::MAX,
+    volatile: u64::MAX,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SmbReadRange {
@@ -34,40 +51,35 @@ pub struct SmbReadRange {
     pub length: u32,
 }
 
+pub(crate) async fn open(
+    connection: &SmbConnectionActor,
+    request: Smb2CreateRequest,
+) -> Result<SmbHandle, SmbConnectionError> {
+    let response = connection
+        .request(Smb2Command::Create, request.encode()?)
+        .await?;
+    response.ensure_success(Smb2Command::Create)?;
+    Ok(Smb2CreateResponse::decode_packet(&response.to_packet())?.into())
+}
+
 pub async fn open_file_for_read(
     connection: &SmbConnectionActor,
     path: impl Into<String>,
-) -> Result<SmbOpenFile, SmbConnectionError> {
-    let response = connection
-        .request(
-            Smb2Command::Create,
-            open_file_for_read_request(path).encode()?,
-        )
-        .await?;
-    let response = Smb2CreateResponse::decode_packet(&response.to_packet())?;
-    Ok(SmbOpenFile {
-        file_id: response.file_id,
-        end_of_file: response.end_of_file,
-        allocation_size: response.allocation_size,
-        file_attributes: response.file_attributes,
-    })
+) -> Result<SmbHandle, SmbConnectionError> {
+    open(connection, read_request(path)).await
 }
 
 pub async fn open_file_and_read(
     connection: &SmbConnectionActor,
     path: impl Into<String>,
     range: SmbReadRange,
-) -> Result<(SmbOpenFile, Vec<u8>), SmbConnectionError> {
-    let inherited_file_id = Smb2FileId {
-        persistent: u64::MAX,
-        volatile: u64::MAX,
-    };
-    let (read_body, credit_charge) = read_request_for_range(inherited_file_id, range)?;
+) -> Result<(SmbHandle, Vec<u8>), SmbConnectionError> {
+    let (read_body, credit_charge) = read_request_for_range(RELATED_FILE_ID, range)?;
     let responses = connection
         .request_compound(vec![
             SmbCompoundRequest {
                 command: Smb2Command::Create,
-                body: open_file_for_read_request(path).encode()?,
+                body: read_request(path).encode()?,
                 credit_charge: 0,
                 related: false,
             },
@@ -80,182 +92,132 @@ pub async fn open_file_and_read(
         ])
         .await?;
 
-    ensure_success(&responses[0], Smb2Command::Create)?;
+    responses[0].ensure_success(Smb2Command::Create)?;
     let create = Smb2CreateResponse::decode_packet(&responses[0].to_packet())?;
     let data = if responses[1].status() == crate::SmbNtStatus::END_OF_FILE {
         Vec::new()
     } else {
-        ensure_success(&responses[1], Smb2Command::Read)?;
+        responses[1].ensure_success(Smb2Command::Read)?;
         Smb2ReadResponse::decode_packet(&responses[1].to_packet())?.data
     };
-    Ok((
-        SmbOpenFile {
-            file_id: create.file_id,
-            end_of_file: create.end_of_file,
-            allocation_size: create.allocation_size,
-            file_attributes: create.file_attributes,
-        },
-        data,
-    ))
+    Ok((create.into(), data))
 }
 
 pub async fn open_file_for_write(
     connection: &SmbConnectionActor,
     path: impl Into<String>,
     create_disposition: Smb2CreateDisposition,
-) -> Result<SmbOpenFile, SmbConnectionError> {
-    let response = connection
-        .request(
-            Smb2Command::Create,
-            open_file_for_write_request(path, create_disposition).encode()?,
-        )
-        .await?;
-    ensure_success(&response, Smb2Command::Create)?;
-    let response = Smb2CreateResponse::decode_packet(&response.to_packet())?;
-    Ok(SmbOpenFile {
-        file_id: response.file_id,
-        end_of_file: response.end_of_file,
-        allocation_size: response.allocation_size,
-        file_attributes: response.file_attributes,
-    })
+) -> Result<SmbHandle, SmbConnectionError> {
+    let request = Smb2CreateRequest::new(
+        path,
+        Smb2DesiredAccess::GENERIC_WRITE.0
+            | Smb2DesiredAccess::FILE_WRITE_DATA.0
+            | Smb2DesiredAccess::FILE_WRITE_ATTRIBUTES.0
+            | Smb2DesiredAccess::SYNCHRONIZE.0,
+        Smb2FileAttributes::NORMAL,
+        create_disposition,
+        Smb2CreateOptions(
+            Smb2CreateOptions::NON_DIRECTORY_FILE.0 | Smb2CreateOptions::SEQUENTIAL_ONLY.0,
+        ),
+    );
+    open(connection, request).await
 }
 
-pub async fn delete_file(
+/// Attributes and create options that make an open fail unless `path` has the expected kind.
+fn kind_options(is_directory: bool) -> (Smb2FileAttributes, Smb2CreateOptions) {
+    if is_directory {
+        (
+            Smb2FileAttributes::DIRECTORY,
+            Smb2CreateOptions::DIRECTORY_FILE,
+        )
+    } else {
+        (
+            Smb2FileAttributes::NORMAL,
+            Smb2CreateOptions::NON_DIRECTORY_FILE,
+        )
+    }
+}
+
+fn delete_access_request(path: impl Into<String>, is_directory: bool) -> Smb2CreateRequest {
+    let (attributes, options) = kind_options(is_directory);
+    Smb2CreateRequest::new(
+        path,
+        Smb2DesiredAccess::DELETE.0 | Smb2DesiredAccess::SYNCHRONIZE.0,
+        attributes,
+        Smb2CreateDisposition::Open,
+        options,
+    )
+}
+
+/// Deletes a file, or an empty directory.
+pub async fn delete(
     connection: &SmbConnectionActor,
     path: impl Into<String>,
+    is_directory: bool,
 ) -> Result<(), SmbConnectionError> {
-    set_file_info_by_path(
+    set_info_by_path(
         connection,
-        open_file_for_delete_request(path),
+        delete_access_request(path, is_directory),
         Smb2FileInfoClass::FILE_DISPOSITION_INFORMATION,
         smb2_file_disposition_information(true),
     )
     .await
 }
 
-pub async fn rename_file(
+pub async fn rename(
     connection: &SmbConnectionActor,
     source_path: impl Into<String>,
     target_path: impl AsRef<str>,
+    is_directory: bool,
     replace_if_exists: bool,
 ) -> Result<(), SmbConnectionError> {
-    set_file_info_by_path(
+    set_info_by_path(
         connection,
-        open_file_for_delete_request(source_path),
+        delete_access_request(source_path, is_directory),
         Smb2FileInfoClass::FILE_RENAME_INFORMATION,
         smb2_file_rename_information(replace_if_exists, target_path.as_ref())?,
     )
     .await
 }
 
-pub async fn set_file_basic_info(
+/// Sets times and attributes of a file or directory.
+pub async fn set_basic_info(
     connection: &SmbConnectionActor,
     path: impl Into<String>,
     info: Smb2FileBasicInformation,
 ) -> Result<(), SmbConnectionError> {
-    set_file_info_by_path(
+    let request = Smb2CreateRequest::new(
+        path,
+        Smb2DesiredAccess::FILE_WRITE_ATTRIBUTES.0 | Smb2DesiredAccess::SYNCHRONIZE.0,
+        Smb2FileAttributes::NORMAL,
+        Smb2CreateDisposition::Open,
+        // Neither DIRECTORY_FILE nor NON_DIRECTORY_FILE: works for files and directories.
+        Smb2CreateOptions(0),
+    );
+    set_info_by_path(
         connection,
-        open_for_write_attributes_request(path),
+        request,
         Smb2FileInfoClass::FILE_BASIC_INFORMATION,
         smb2_file_basic_information(info),
     )
     .await
 }
 
-fn open_file_for_read_request(path: impl Into<String>) -> Smb2CreateRequest {
-    Smb2CreateRequest {
-        security_flags: 0,
-        requested_oplock_level: Smb2OplockLevel::None,
-        impersonation_level: Smb2ImpersonationLevel::Impersonation,
-        smb_create_flags: 0,
-        desired_access: Smb2DesiredAccess(
-            Smb2DesiredAccess::GENERIC_READ.0 | Smb2DesiredAccess::SYNCHRONIZE.0,
-        ),
-        file_attributes: Smb2FileAttributes::NORMAL,
-        share_access: Smb2ShareAccess(
-            Smb2ShareAccess::READ.0 | Smb2ShareAccess::WRITE.0 | Smb2ShareAccess::DELETE.0,
-        ),
-        create_disposition: Smb2CreateDisposition::Open,
-        create_options: Smb2CreateOptions(
+fn read_request(path: impl Into<String>) -> Smb2CreateRequest {
+    Smb2CreateRequest::new(
+        path,
+        Smb2DesiredAccess::GENERIC_READ.0 | Smb2DesiredAccess::SYNCHRONIZE.0,
+        Smb2FileAttributes::NORMAL,
+        Smb2CreateDisposition::Open,
+        Smb2CreateOptions(
             Smb2CreateOptions::NON_DIRECTORY_FILE.0 | Smb2CreateOptions::SEQUENTIAL_ONLY.0,
         ),
-        name: path.into(),
-        create_contexts: Vec::new(),
-    }
-}
-
-fn open_for_write_attributes_request(path: impl Into<String>) -> Smb2CreateRequest {
-    Smb2CreateRequest {
-        security_flags: 0,
-        requested_oplock_level: Smb2OplockLevel::None,
-        impersonation_level: Smb2ImpersonationLevel::Impersonation,
-        smb_create_flags: 0,
-        desired_access: Smb2DesiredAccess(
-            Smb2DesiredAccess::FILE_WRITE_ATTRIBUTES.0 | Smb2DesiredAccess::SYNCHRONIZE.0,
-        ),
-        file_attributes: Smb2FileAttributes::NORMAL,
-        share_access: Smb2ShareAccess(
-            Smb2ShareAccess::READ.0 | Smb2ShareAccess::WRITE.0 | Smb2ShareAccess::DELETE.0,
-        ),
-        create_disposition: Smb2CreateDisposition::Open,
-        // Neither DIRECTORY_FILE nor NON_DIRECTORY_FILE: times are set on files and directories.
-        create_options: Smb2CreateOptions(0),
-        name: path.into(),
-        create_contexts: Vec::new(),
-    }
-}
-
-fn open_file_for_delete_request(path: impl Into<String>) -> Smb2CreateRequest {
-    Smb2CreateRequest {
-        security_flags: 0,
-        requested_oplock_level: Smb2OplockLevel::None,
-        impersonation_level: Smb2ImpersonationLevel::Impersonation,
-        smb_create_flags: 0,
-        desired_access: Smb2DesiredAccess(
-            Smb2DesiredAccess::DELETE.0 | Smb2DesiredAccess::SYNCHRONIZE.0,
-        ),
-        file_attributes: Smb2FileAttributes::NORMAL,
-        share_access: Smb2ShareAccess(
-            Smb2ShareAccess::READ.0 | Smb2ShareAccess::WRITE.0 | Smb2ShareAccess::DELETE.0,
-        ),
-        create_disposition: Smb2CreateDisposition::Open,
-        create_options: Smb2CreateOptions::NON_DIRECTORY_FILE,
-        name: path.into(),
-        create_contexts: Vec::new(),
-    }
-}
-
-fn open_file_for_write_request(
-    path: impl Into<String>,
-    create_disposition: Smb2CreateDisposition,
-) -> Smb2CreateRequest {
-    Smb2CreateRequest {
-        security_flags: 0,
-        requested_oplock_level: Smb2OplockLevel::None,
-        impersonation_level: Smb2ImpersonationLevel::Impersonation,
-        smb_create_flags: 0,
-        desired_access: Smb2DesiredAccess(
-            Smb2DesiredAccess::GENERIC_WRITE.0
-                | Smb2DesiredAccess::FILE_WRITE_DATA.0
-                | Smb2DesiredAccess::FILE_WRITE_ATTRIBUTES.0
-                | Smb2DesiredAccess::SYNCHRONIZE.0,
-        ),
-        file_attributes: Smb2FileAttributes::NORMAL,
-        share_access: Smb2ShareAccess(
-            Smb2ShareAccess::READ.0 | Smb2ShareAccess::WRITE.0 | Smb2ShareAccess::DELETE.0,
-        ),
-        create_disposition,
-        create_options: Smb2CreateOptions(
-            Smb2CreateOptions::NON_DIRECTORY_FILE.0 | Smb2CreateOptions::SEQUENTIAL_ONLY.0,
-        ),
-        name: path.into(),
-        create_contexts: Vec::new(),
-    }
+    )
 }
 
 pub async fn write_file_at(
     connection: &SmbConnectionActor,
-    file: &SmbOpenFile,
+    file: &SmbHandle,
     offset: u64,
     data: Vec<u8>,
 ) -> Result<Smb2WriteResponse, SmbConnectionError> {
@@ -277,7 +239,7 @@ pub async fn write_file_at(
             credit_charge,
         )
         .await?;
-    ensure_success(&response, Smb2Command::Write)?;
+    response.ensure_success(Smb2Command::Write)?;
     let write = Smb2WriteResponse::decode_packet(&response.to_packet())?;
     if write.count != data_len {
         return Err(SmbConnectionError::ShortWrite {
@@ -290,7 +252,7 @@ pub async fn write_file_at(
 
 pub async fn write_file_chunks_pipelined(
     connection: &SmbConnectionActor,
-    file: &SmbOpenFile,
+    file: &SmbHandle,
     chunks: impl IntoIterator<Item = (u64, Vec<u8>)>,
     max_in_flight: usize,
 ) -> Result<(), SmbConnectionError> {
@@ -336,7 +298,7 @@ fn read_request_for_range(
 
 pub async fn read_file_ranges_pipelined(
     connection: &SmbConnectionActor,
-    file: &SmbOpenFile,
+    file: &SmbHandle,
     ranges: impl IntoIterator<Item = SmbReadRange>,
     max_in_flight: usize,
 ) -> Result<Vec<Vec<u8>>, SmbConnectionError> {
@@ -359,16 +321,16 @@ pub async fn read_file_ranges_pipelined(
     Ok(chunks)
 }
 
-pub async fn close_file(
+pub async fn close(
     connection: &SmbConnectionActor,
-    file: SmbOpenFile,
+    handle: SmbHandle,
 ) -> Result<Smb2CloseResponse, SmbConnectionError> {
     let response = connection
         .request(
             Smb2Command::Close,
             Smb2CloseRequest {
                 flags: Smb2CloseFlags::POSTQUERY_ATTRIB,
-                file_id: file.file_id,
+                file_id: handle.file_id,
             }
             .encode(),
         )
@@ -390,16 +352,12 @@ fn spawn_read_range(
     })
 }
 
-async fn set_file_info_by_path(
+async fn set_info_by_path(
     connection: &SmbConnectionActor,
     create_request: Smb2CreateRequest,
     file_info_class: Smb2FileInfoClass,
     buffer: Vec<u8>,
 ) -> Result<(), SmbConnectionError> {
-    let inherited_file_id = Smb2FileId {
-        persistent: u64::MAX,
-        volatile: u64::MAX,
-    };
     let responses = connection
         .request_compound(vec![
             SmbCompoundRequest {
@@ -414,7 +372,7 @@ async fn set_file_info_by_path(
                     info_type: Smb2InfoType::File,
                     file_info_class,
                     additional_information: 0,
-                    file_id: inherited_file_id,
+                    file_id: RELATED_FILE_ID,
                     buffer,
                 }
                 .encode()?,
@@ -425,7 +383,7 @@ async fn set_file_info_by_path(
                 command: Smb2Command::Close,
                 body: Smb2CloseRequest {
                     flags: Smb2CloseFlags::POSTQUERY_ATTRIB,
-                    file_id: inherited_file_id,
+                    file_id: RELATED_FILE_ID,
                 }
                 .encode(),
                 credit_charge: 0,
@@ -434,47 +392,32 @@ async fn set_file_info_by_path(
         ])
         .await?;
 
-    ensure_success(&responses[0], Smb2Command::Create)?;
-    let create = Smb2CreateResponse::decode_packet(&responses[0].to_packet())?;
-    let file = SmbOpenFile {
-        file_id: create.file_id,
-        end_of_file: create.end_of_file,
-        allocation_size: create.allocation_size,
-        file_attributes: create.file_attributes,
-    };
-    let operation_result = ensure_success(&responses[1], Smb2Command::SetInfo).and_then(|()| {
-        Smb2SetInfoResponse::decode_packet(&responses[1].to_packet())
-            .map(|_| ())
-            .map_err(Into::into)
-    });
-    let compound_close_result = ensure_success(&responses[2], Smb2Command::Close).and_then(|()| {
-        Smb2CloseResponse::decode_packet(&responses[2].to_packet())
-            .map(|_| ())
-            .map_err(Into::into)
-    });
+    responses[0].ensure_success(Smb2Command::Create)?;
+    let handle = SmbHandle::from(Smb2CreateResponse::decode_packet(
+        &responses[0].to_packet(),
+    )?);
+    let operation_result = responses[1]
+        .ensure_success(Smb2Command::SetInfo)
+        .and_then(|()| {
+            Smb2SetInfoResponse::decode_packet(&responses[1].to_packet())
+                .map(|_| ())
+                .map_err(Into::into)
+        });
+    let compound_close_result = responses[2]
+        .ensure_success(Smb2Command::Close)
+        .and_then(|()| {
+            Smb2CloseResponse::decode_packet(&responses[2].to_packet())
+                .map(|_| ())
+                .map_err(Into::into)
+        });
 
     let close_result = if compound_close_result.is_err() {
-        close_file(connection, file).await.map(|_| ())
+        close(connection, handle).await.map(|_| ())
     } else {
         compound_close_result
     };
     operation_result?;
     close_result
-}
-
-fn ensure_success(
-    response: &crate::SmbResponse,
-    command: Smb2Command,
-) -> Result<(), SmbConnectionError> {
-    let status = response.status();
-    if status.is_success() {
-        Ok(())
-    } else {
-        Err(SmbConnectionError::UnexpectedStatus {
-            command,
-            status: status.0,
-        })
-    }
 }
 
 fn checked_write_len(length: usize) -> Result<u32, SmbConnectionError> {
@@ -491,6 +434,7 @@ fn checked_write_len(length: usize) -> Result<u32, SmbConnectionError> {
 mod tests {
     use super::*;
     use crate::actor::SmbConnectionActor;
+    use crate::packet::create::Smb2OplockLevel;
     use crate::packet::create::{Smb2CreateAction, Smb2FileAttributes};
     use crate::packet::header::{Smb2Command, Smb2Header, SMB2_HEADER_BYTES};
     use crate::transport::DirectTcpTransport;
@@ -541,7 +485,7 @@ mod tests {
             .await
             .expect("open");
         assert_eq!(file.file_id, file_id);
-        let close = close_file(&actor, file).await.expect("close");
+        let close = close(&actor, file).await.expect("close");
         assert_eq!(close.end_of_file, 7);
         server_task.await.expect("server task");
     }
@@ -623,7 +567,7 @@ mod tests {
                 .expect("compound response");
         });
 
-        set_file_basic_info(&actor, "folder/file.bin", info)
+        set_basic_info(&actor, "folder/file.bin", info)
             .await
             .expect("set basic info");
         server_task.await.expect("server task");
@@ -633,7 +577,7 @@ mod tests {
     async fn pipelined_read_ranges_preserve_requested_order_for_out_of_order_responses() {
         let (client, server) = duplex(4096);
         let actor = SmbConnectionActor::spawn_with_initial_credits(client, 2);
-        let file = SmbOpenFile {
+        let file = SmbHandle {
             file_id: Smb2FileId {
                 persistent: 0x0102_0304_0506_0708,
                 volatile: 0x1112_1314_1516_1718,
@@ -702,7 +646,7 @@ mod tests {
     async fn pipelined_read_ranges_charge_large_reads_by_64k_units() {
         let (client, server) = duplex(4096);
         let actor = SmbConnectionActor::spawn_with_initial_credits(client, 16);
-        let file = SmbOpenFile {
+        let file = SmbHandle {
             file_id: Smb2FileId {
                 persistent: 0x0102_0304_0506_0708,
                 volatile: 0x1112_1314_1516_1718,

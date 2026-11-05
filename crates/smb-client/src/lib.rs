@@ -49,16 +49,14 @@ pub use crypto::{
     SMB311_PREAUTH_HASH_BYTES,
 };
 pub use dir::{
-    close_directory, create_directory, decode_file_id_both_directory_entries, delete_directory,
-    list_directory_once, open_directory_for_list, query_directory_entries, rename_directory,
-    set_directory_basic_info, SmbDirectoryEntry, SmbOpenDirectory,
-    DEFAULT_DIRECTORY_OUTPUT_BUFFER_LENGTH,
+    create_directory, decode_file_id_both_directory_entries, list_directory_once,
+    SmbDirectoryEntry, DEFAULT_DIRECTORY_OUTPUT_BUFFER_LENGTH,
 };
 pub use file::{
-    close_file, delete_file, open_file_and_read, open_file_for_read, open_file_for_write,
-    read_file_ranges_pipelined, rename_file, set_file_basic_info, write_file_at,
-    write_file_chunks_pipelined, SmbOpenFile, SmbReadRange, DEFAULT_READ_CHUNK_LENGTH,
-    DEFAULT_READ_PIPELINE_DEPTH, DEFAULT_WRITE_CHUNK_LENGTH,
+    close, delete, open_file_and_read, open_file_for_read, open_file_for_write,
+    read_file_ranges_pipelined, rename, set_basic_info, write_file_at, write_file_chunks_pipelined,
+    SmbHandle, SmbReadRange, DEFAULT_READ_CHUNK_LENGTH, DEFAULT_READ_PIPELINE_DEPTH,
+    DEFAULT_WRITE_CHUNK_LENGTH,
 };
 pub use netbios::{decode_direct_tcp_header, encode_direct_tcp_header};
 pub use packet::close::{Smb2CloseFlags, Smb2CloseRequest, Smb2CloseResponse};
