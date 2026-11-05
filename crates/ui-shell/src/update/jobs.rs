@@ -11,6 +11,15 @@ pub fn handle(state: &mut AppState, message: JobMessage) -> Task<Message> {
                     return process_pending_operation(state);
                 }
             }
+            // Canceled before it was stored: storing it recorded it as queued, so record the
+            // cancellation again or it would be offered for resuming after a restart.
+            if state
+                .jobs
+                .iter()
+                .any(|job| job.id == job_id && job.state == JobState::Canceled)
+            {
+                app_runtime().cancel_job(&job_id);
+            }
         }
         JobMessage::Pause(job_id) => {
             app_runtime().pause_job(&job_id);
@@ -29,7 +38,11 @@ pub fn handle(state: &mut AppState, message: JobMessage) -> Task<Message> {
             }
         }
         JobMessage::Cancel(job_id) => {
+            dismiss_job_decisions(state, &job_id);
             app_runtime().cancel_job(&job_id);
+            if let Some(job) = state.jobs.iter_mut().find(|job| job.id == job_id) {
+                job.state = JobState::Canceled;
+            }
             if let Some(pending) = &state.pending_operation {
                 if pending.job_id == job_id {
                     state.pending_operation = None;
@@ -63,6 +76,14 @@ pub fn handle(state: &mut AppState, message: JobMessage) -> Task<Message> {
             }
         }
         JobMessage::RuntimeState(job_id, job_state) => {
+            // Files still finishing report Running, but the job waits for the user's decision.
+            let awaits_decision = state
+                .pending_operation
+                .as_ref()
+                .is_some_and(|pending| pending.job_id == job_id && !pending.failed.is_empty());
+            if awaits_decision && job_state == JobState::Running {
+                return Task::none();
+            }
             if let Some(job) = state.jobs.iter_mut().find(|j| j.id == job_id) {
                 job.state = job_state.clone();
                 if !matches!(job_state, JobState::Running) {
