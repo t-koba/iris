@@ -113,9 +113,11 @@ impl client::Handler for KnownHostsHandler {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh::keys::ssh_key::PublicKey,
+        server_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        keys::check_known_hosts(&self.host, self.port, server_public_key).map_err(|error| {
+        // Host certificates are matched by their underlying key; CA trust is not supported.
+        let server_public_key = server_key.public_key();
+        keys::check_known_hosts(&self.host, self.port, &server_public_key).map_err(|error| {
             SftpHandlerError(format!(
                 "known_hosts validation failed for {}:{}: {error}",
                 self.host, self.port
