@@ -63,7 +63,7 @@ pub enum SmbSessionError {
 }
 
 pub async fn authenticate_guest(connection: &SmbConnectionActor) -> Result<u64, SmbSessionError> {
-    let exchange = send_session_setup(connection, Vec::new(), 0, false).await?;
+    let exchange = send_session_setup(connection, Vec::new(), 0, false, None).await?;
     if !exchange.response.status().is_success() {
         return Err(SmbSessionError::UnexpectedStatus {
             step: "guest",
@@ -88,7 +88,7 @@ pub async fn authenticate_ntlm_v2(
     }
     .encode()?;
     let security_buffer = spnego_initial_context_token_ntlm(&negotiate)?;
-    let first = send_session_setup(connection, security_buffer, 0, true).await?;
+    let first = send_session_setup(connection, security_buffer, 0, true, None).await?;
     if first.response.status() != SmbNtStatus::MORE_PROCESSING_REQUIRED {
         return Err(SmbSessionError::UnexpectedStatus {
             step: "challenge",
@@ -114,24 +114,16 @@ pub async fn authenticate_ntlm_v2(
         target_name: &setup.target_name,
     })?;
     let authenticate_security = spnego_neg_token_resp_ntlm(&authenticate.message)?;
-    let second = if let Some(security) = setup.security {
-        send_final_session_setup(
-            connection,
-            authenticate_security,
-            first.response.header.session_id,
-            authenticate.exported_session_key.to_vec(),
-            security.dialect,
-        )
-        .await?
-    } else {
-        send_session_setup(
-            connection,
-            authenticate_security,
-            first.response.header.session_id,
-            true,
-        )
-        .await?
-    };
+    let second = send_session_setup(
+        connection,
+        authenticate_security,
+        first.response.header.session_id,
+        true,
+        setup
+            .security
+            .map(|security| (authenticate.exported_session_key.to_vec(), security.dialect)),
+    )
+    .await?;
     if !second.response.status().is_success() {
         return Err(SmbSessionError::UnexpectedStatus {
             step: "authenticate",
@@ -171,15 +163,18 @@ struct SessionSetupExchange {
     body: Smb2SessionSetupResponse,
 }
 
+/// `signing` installs a signing key right after the request is sent; it implies
+/// SIGNING_REQUIRED.
 async fn send_session_setup(
     connection: &SmbConnectionActor,
     security_buffer: Vec<u8>,
     previous_session_id: u64,
     signing_required: bool,
+    signing: Option<(Vec<u8>, Smb2Dialect)>,
 ) -> Result<SessionSetupExchange, SmbSessionError> {
     let request = Smb2SessionSetupRequest {
         flags: 0,
-        security_mode: if signing_required {
+        security_mode: if signing_required || signing.is_some() {
             Smb2SessionSetupSecurityMode::SIGNING_REQUIRED
         } else {
             Smb2SessionSetupSecurityMode::SIGNING_ENABLED
@@ -189,28 +184,8 @@ async fn send_session_setup(
         previous_session_id,
         security_buffer,
     };
-    let response = connection.request_session_setup(request.encode()).await?;
-    let body = Smb2SessionSetupResponse::decode_packet(&response.to_packet())?;
-    Ok(SessionSetupExchange { response, body })
-}
-
-async fn send_final_session_setup(
-    connection: &SmbConnectionActor,
-    security_buffer: Vec<u8>,
-    previous_session_id: u64,
-    session_key: Vec<u8>,
-    dialect: Smb2Dialect,
-) -> Result<SessionSetupExchange, SmbSessionError> {
-    let request = Smb2SessionSetupRequest {
-        flags: 0,
-        security_mode: Smb2SessionSetupSecurityMode::SIGNING_REQUIRED,
-        capabilities: 0,
-        channel: 0,
-        previous_session_id,
-        security_buffer,
-    };
     let response = connection
-        .request_final_session_setup(request.encode(), session_key, dialect)
+        .request_session_setup(request.encode(), signing)
         .await?;
     let body = Smb2SessionSetupResponse::decode_packet(&response.to_packet())?;
     Ok(SessionSetupExchange { response, body })

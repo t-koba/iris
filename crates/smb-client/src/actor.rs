@@ -222,20 +222,29 @@ impl SmbConnectionActor {
         body: impl Into<Vec<u8>>,
         credit_charge: u16,
     ) -> Result<SmbResponse, SmbConnectionError> {
-        let (response_tx, response_rx) = oneshot::channel();
+        self.call(|response_tx| ActorCommand::Request {
+            command,
+            body: body.into(),
+            credit_charge,
+            header_tree_id: None,
+            response_state_update: ResponseStateUpdate::None,
+            response_tx,
+            signing_after_send: None,
+        })
+        .await
+    }
+
+    /// Sends one command to the actor task and waits for its reply.
+    async fn call<T>(
+        &self,
+        command: impl FnOnce(oneshot::Sender<Result<T, SmbConnectionError>>) -> ActorCommand,
+    ) -> Result<T, SmbConnectionError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
         self.sender
-            .send(ActorCommand::Request {
-                command,
-                body: body.into(),
-                credit_charge,
-                header_tree_id: None,
-                response_state_update: ResponseStateUpdate::None,
-                response_tx,
-                signing_after_send: None,
-            })
+            .send(command(reply_tx))
             .await
             .map_err(|_| SmbConnectionError::RequestQueueClosed)?;
-        response_rx
+        reply_rx
             .await
             .map_err(|_| SmbConnectionError::ResponseCanceled)?
     }
@@ -244,88 +253,49 @@ impl SmbConnectionActor {
         &self,
         requests: Vec<SmbCompoundRequest>,
     ) -> Result<Vec<SmbResponse>, SmbConnectionError> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(ActorCommand::Compound {
-                requests,
-                response_tx,
-            })
-            .await
-            .map_err(|_| SmbConnectionError::RequestQueueClosed)?;
-        response_rx
-            .await
-            .map_err(|_| SmbConnectionError::ResponseCanceled)?
+        self.call(|response_tx| ActorCommand::Compound {
+            requests,
+            response_tx,
+        })
+        .await
     }
 
     pub(crate) async fn request_tree_connect(
         &self,
         body: impl Into<Vec<u8>>,
     ) -> Result<SmbResponse, SmbConnectionError> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(ActorCommand::Request {
-                command: Smb2Command::TreeConnect,
-                body: body.into(),
-                credit_charge: 0,
-                header_tree_id: Some(0),
-                response_state_update: ResponseStateUpdate::SetTreeIdFromResponse,
-                response_tx,
-                signing_after_send: None,
-            })
-            .await
-            .map_err(|_| SmbConnectionError::RequestQueueClosed)?;
-        response_rx
-            .await
-            .map_err(|_| SmbConnectionError::ResponseCanceled)?
+        self.call(|response_tx| ActorCommand::Request {
+            command: Smb2Command::TreeConnect,
+            body: body.into(),
+            credit_charge: 0,
+            header_tree_id: Some(0),
+            response_state_update: ResponseStateUpdate::SetTreeIdFromResponse,
+            response_tx,
+            signing_after_send: None,
+        })
+        .await
     }
 
+    /// Sends a SESSION_SETUP request. With `signing`, the signing key derived from that
+    /// session key and dialect takes effect right after this request is sent.
     pub(crate) async fn request_session_setup(
         &self,
         body: impl Into<Vec<u8>>,
+        signing: Option<(Vec<u8>, crate::packet::negotiate::Smb2Dialect)>,
     ) -> Result<SmbResponse, SmbConnectionError> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(ActorCommand::Request {
-                command: Smb2Command::SessionSetup,
-                body: body.into(),
-                credit_charge: 0,
-                header_tree_id: None,
-                response_state_update: ResponseStateUpdate::SetSessionIdFromResponse,
-                response_tx,
-                signing_after_send: None,
-            })
-            .await
-            .map_err(|_| SmbConnectionError::RequestQueueClosed)?;
-        response_rx
-            .await
-            .map_err(|_| SmbConnectionError::ResponseCanceled)?
-    }
-
-    pub(crate) async fn request_final_session_setup(
-        &self,
-        body: impl Into<Vec<u8>>,
-        session_key: Vec<u8>,
-        dialect: crate::packet::negotiate::Smb2Dialect,
-    ) -> Result<SmbResponse, SmbConnectionError> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(ActorCommand::Request {
-                command: Smb2Command::SessionSetup,
-                body: body.into(),
-                credit_charge: 0,
-                header_tree_id: None,
-                response_state_update: ResponseStateUpdate::SetSessionIdFromResponse,
-                response_tx,
-                signing_after_send: Some(PendingSigningKey {
-                    session_key,
-                    dialect,
-                }),
-            })
-            .await
-            .map_err(|_| SmbConnectionError::RequestQueueClosed)?;
-        response_rx
-            .await
-            .map_err(|_| SmbConnectionError::ResponseCanceled)?
+        self.call(|response_tx| ActorCommand::Request {
+            command: Smb2Command::SessionSetup,
+            body: body.into(),
+            credit_charge: 0,
+            header_tree_id: None,
+            response_state_update: ResponseStateUpdate::SetSessionIdFromResponse,
+            response_tx,
+            signing_after_send: signing.map(|(session_key, dialect)| PendingSigningKey {
+                session_key,
+                dialect,
+            }),
+        })
+        .await
     }
 
     /// Sets the session and tree ids that real connections learn from responses.
@@ -335,35 +305,23 @@ impl SmbConnectionActor {
         session_id: u64,
         tree_id: u32,
     ) -> Result<(), SmbConnectionError> {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.sender
-            .send(ActorCommand::SetIds {
-                session_id,
-                tree_id,
-                ack_tx,
-            })
-            .await
-            .map_err(|_| SmbConnectionError::RequestQueueClosed)?;
-        ack_rx
-            .await
-            .map_err(|_| SmbConnectionError::ResponseCanceled)?
+        self.call(|ack_tx| ActorCommand::SetIds {
+            session_id,
+            tree_id,
+            ack_tx,
+        })
+        .await
     }
 
     pub async fn set_signing_key(
         &self,
         signing_key: SmbSigningKey,
     ) -> Result<(), SmbConnectionError> {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.sender
-            .send(ActorCommand::SetSigningKey {
-                signing_key,
-                ack_tx,
-            })
-            .await
-            .map_err(|_| SmbConnectionError::RequestQueueClosed)?;
-        ack_rx
-            .await
-            .map_err(|_| SmbConnectionError::ResponseCanceled)?
+        self.call(|ack_tx| ActorCommand::SetSigningKey {
+            signing_key,
+            ack_tx,
+        })
+        .await
     }
 
     pub async fn enable_encryption(
@@ -371,17 +329,11 @@ impl SmbConnectionActor {
         keys: Smb3EncryptionKeys,
     ) -> Result<(), SmbConnectionError> {
         let encryption = Smb3EncryptionContext::new(keys)?;
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.sender
-            .send(ActorCommand::EnableEncryption {
-                encryption: Box::new(encryption),
-                ack_tx,
-            })
-            .await
-            .map_err(|_| SmbConnectionError::RequestQueueClosed)?;
-        ack_rx
-            .await
-            .map_err(|_| SmbConnectionError::ResponseCanceled)?
+        self.call(|ack_tx| ActorCommand::EnableEncryption {
+            encryption: Box::new(encryption),
+            ack_tx,
+        })
+        .await
     }
 
     pub async fn state(&self) -> Result<SmbConnectionActorState, SmbConnectionError> {
@@ -1502,7 +1454,7 @@ mod tests {
             .await
             .expect("negotiate");
         actor
-            .request_session_setup(b"session".to_vec())
+            .request_session_setup(b"session".to_vec(), None)
             .await
             .expect("session setup");
         let before_echo = actor
