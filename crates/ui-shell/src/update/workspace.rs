@@ -393,6 +393,7 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
             state.sidebar_visible = config.sidebar_visible;
             state.preview_panel_visible = config.preview_panel_visible;
             state.properties_panel_visible = config.properties_panel_visible;
+            let hidden_files_changed = state.show_hidden_files != config.show_hidden_files;
             state.show_hidden_files = config.show_hidden_files;
             state.cache_encryption_policy = config.cache_encryption_policy;
             state.thumbnail_cache_limit_bytes = config.thumbnail_cache_limit_bytes;
@@ -463,6 +464,15 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                     load_secondary_directory_task(secondary_path)
                 };
                 return Task::batch([preview_task, window_task, primary_task, secondary_task]);
+            }
+            // The start-up listing was read before the saved hidden-files setting was known.
+            if hidden_files_changed && !state.pane(0).current_path.is_empty() {
+                let primary_path = state.pane(0).current_path.clone();
+                return Task::batch([
+                    preview_task,
+                    window_task,
+                    load_directory_progressively(primary_path, state.show_hidden_files),
+                ]);
             }
             return Task::batch([preview_task, window_task]);
         }
