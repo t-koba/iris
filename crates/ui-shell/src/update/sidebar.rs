@@ -1,7 +1,6 @@
 use super::*;
-use crate::i18n::tr;
 use crate::messages::SidebarMessage;
-use crate::state::{SidebarDropTarget, SidebarGroup, SidebarItem};
+use crate::state::{SidebarDropTarget, SidebarGroup, SidebarGroupKind, SidebarItem};
 
 fn save_layout_config() -> Task<Message> {
     Task::perform(async {}, |_| Message::SaveLayoutConfig)
@@ -44,19 +43,16 @@ pub fn handle(state: &mut AppState, message: SidebarMessage) -> Task<Message> {
         SidebarMessage::AddCurrentPathToFavorites => {
             let path = state.active_pane().current_path.clone();
             if !path.is_empty() {
-                let favorite_group_index = state
+                let index = match state
                     .sidebar_groups
                     .iter()
-                    .position(|group| group.name == tr("sidebar-group-favorites"));
-                let index = match favorite_group_index {
+                    .position(|group| group.kind == SidebarGroupKind::Favorites)
+                {
                     Some(index) => index,
                     None => {
-                        state.sidebar_groups.push(SidebarGroup {
-                            name: tr("sidebar-group-favorites"),
-                            collapsed: false,
-                            items: Vec::new(),
-                            system: false,
-                        });
+                        state
+                            .sidebar_groups
+                            .push(SidebarGroup::new(SidebarGroupKind::Favorites));
                         state.sidebar_groups.len() - 1
                     }
                 };
@@ -89,16 +85,17 @@ pub fn handle(state: &mut AppState, message: SidebarMessage) -> Task<Message> {
             }
         }
         SidebarMessage::AddGroup => {
-            state.sidebar_groups.push(SidebarGroup {
-                name: tr("sidebar-new-group"),
-                collapsed: false,
-                items: Vec::new(),
-                system: false,
-            });
+            state
+                .sidebar_groups
+                .push(SidebarGroup::new(SidebarGroupKind::Custom));
             return save_layout_config();
         }
         SidebarMessage::BeginRenameGroup(group_idx) => {
-            if let Some(group) = state.sidebar_groups.get(group_idx) {
+            if let Some(group) = state
+                .sidebar_groups
+                .get(group_idx)
+                .filter(|group| !group.is_system())
+            {
                 state.sidebar_rename_input = group.name.clone();
                 state.sidebar_renaming_group = Some(group_idx);
             }
@@ -128,7 +125,7 @@ pub fn handle(state: &mut AppState, message: SidebarMessage) -> Task<Message> {
             if state
                 .sidebar_groups
                 .get(group)
-                .map(|sidebar_group| !sidebar_group.system)
+                .map(|sidebar_group| !sidebar_group.is_system())
                 .unwrap_or(false)
             {
                 state.sidebar_dragging_item = Some((group, item));
@@ -140,7 +137,7 @@ pub fn handle(state: &mut AppState, message: SidebarMessage) -> Task<Message> {
             if state
                 .sidebar_groups
                 .get(group_idx)
-                .map(|sidebar_group| !sidebar_group.system)
+                .map(|sidebar_group| !sidebar_group.is_system())
                 .unwrap_or(false)
             {
                 state.sidebar_dragging_group = Some(group_idx);
@@ -162,7 +159,7 @@ pub fn handle(state: &mut AppState, message: SidebarMessage) -> Task<Message> {
                             let target_ok = state
                                 .sidebar_groups
                                 .get(to_group)
-                                .map(|group| !group.system)
+                                .map(|group| !group.is_system())
                                 .unwrap_or(false);
                             if target_ok {
                                 if from_group == to_group {

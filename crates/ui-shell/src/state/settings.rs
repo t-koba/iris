@@ -43,12 +43,71 @@ impl std::fmt::Display for CacheEncryptionPolicy {
     }
 }
 
+/// What a sidebar group holds; groups are found by kind, never by their (translated) name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarGroupKind {
+    /// Home, Desktop, ... (filled at start-up).
+    Places,
+    /// Mounted volumes (kept in sync with the OS).
+    Volumes,
+    /// Connected cloud storage.
+    Cloud,
+    /// Created by "Add to favorites".
+    Favorites,
+    /// Created by the user.
+    Custom,
+}
+
+impl SidebarGroupKind {
+    /// System groups are filled by the app: their items are not saved, they cannot be renamed
+    /// or reordered, and their names follow the UI language.
+    pub fn is_system(self) -> bool {
+        matches!(self, Self::Places | Self::Volumes)
+    }
+
+    pub fn default_name_key(self) -> &'static str {
+        match self {
+            Self::Places => "sidebar-group-places",
+            Self::Volumes => "sidebar-group-volumes",
+            Self::Cloud => "sidebar-group-cloud",
+            Self::Favorites => "sidebar-group-favorites",
+            Self::Custom => "sidebar-new-group",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SidebarGroup {
     pub name: String,
     pub collapsed: bool,
     pub items: Vec<SidebarItem>,
-    pub system: bool,
+    pub kind: SidebarGroupKind,
+}
+
+impl SidebarGroup {
+    /// An empty group named in the current UI language.
+    pub fn new(kind: SidebarGroupKind) -> Self {
+        Self {
+            name: crate::i18n::tr(kind.default_name_key()),
+            collapsed: false,
+            items: Vec::new(),
+            kind,
+        }
+    }
+
+    pub fn is_system(&self) -> bool {
+        self.kind.is_system()
+    }
+
+    /// System groups are always shown in the current language; others keep the stored name.
+    pub fn display_name(&self) -> String {
+        if self.is_system() {
+            crate::i18n::tr(self.kind.default_name_key())
+        } else {
+            self.name.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

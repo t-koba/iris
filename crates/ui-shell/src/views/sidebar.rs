@@ -46,7 +46,7 @@ pub fn view_sidebar(state: &AppState) -> Element<'_, Message> {
     }
 
     for (group_idx, group) in state.sidebar_groups.iter().enumerate() {
-        if !group.system {
+        if !group.is_system() {
             continue;
         }
         let collapse_icon = if group.collapsed {
@@ -67,7 +67,7 @@ pub fn view_sidebar(state: &AppState) -> Element<'_, Message> {
             )
             .push(
                 button(
-                    text(truncate_with_ellipsis(&group.name, 24))
+                    text(truncate_with_ellipsis(&group.display_name(), 24))
                         .size(11)
                         .color(muted),
                 )
@@ -97,7 +97,7 @@ pub fn view_sidebar(state: &AppState) -> Element<'_, Message> {
         .sidebar_groups
         .iter()
         .enumerate()
-        .filter(|(_, g)| !g.system)
+        .filter(|(_, g)| !g.is_system())
         .collect();
 
     let is_dragging_item = state.sidebar_dragging_item.is_some();
@@ -167,7 +167,7 @@ pub fn view_sidebar(state: &AppState) -> Element<'_, Message> {
                 )
                 .push(
                     button(
-                        text(truncate_with_ellipsis(&group.name, 18))
+                        text(truncate_with_ellipsis(&group.display_name(), 18))
                             .size(11)
                             .color(muted),
                     )

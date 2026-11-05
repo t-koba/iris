@@ -60,7 +60,7 @@ fn view_pane_breadcrumb_bar(state: &AppState, pane_idx: usize) -> Element<'_, Me
             .iter()
             .enumerate()
             .find_map(|(group_index, group)| {
-                if group.name == tr("sidebar-group-favorites") {
+                if group.kind == crate::state::SidebarGroupKind::Favorites {
                     group
                         .items
                         .iter()

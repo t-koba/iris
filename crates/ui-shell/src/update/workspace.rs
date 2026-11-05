@@ -60,7 +60,7 @@ fn save_layout_config_now(state: &mut AppState) -> Task<Message> {
             .map(|group| crate::config::SidebarGroupConfig {
                 name: group.name.clone(),
                 collapsed: group.collapsed,
-                items: if group.system {
+                items: if group.is_system() {
                     Vec::new()
                 } else {
                     group
@@ -75,7 +75,8 @@ fn save_layout_config_now(state: &mut AppState) -> Task<Message> {
                         })
                         .collect()
                 },
-                system: group.system,
+                system: group.is_system(),
+                kind: Some(group.kind),
             })
             .collect(),
         remote_transport_mappings: state.remote_transport_mappings.clone(),
@@ -414,35 +415,7 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
             state.properties_split_ratio = config.properties_split_ratio;
             state.properties_position = config.properties_position;
             if !config.sidebar_groups.is_empty() {
-                state.sidebar_groups.retain(|group| group.system);
-                for group in &config.sidebar_groups {
-                    if group.system {
-                        if let Some(existing) = state
-                            .sidebar_groups
-                            .iter_mut()
-                            .find(|current| current.name == group.name)
-                        {
-                            existing.collapsed = group.collapsed;
-                        }
-                        continue;
-                    }
-                    state.sidebar_groups.push(SidebarGroup {
-                        name: group.name.clone(),
-                        collapsed: group.collapsed,
-                        items: group
-                            .items
-                            .iter()
-                            .map(|item| SidebarItem {
-                                name: item.name.clone(),
-                                path: item.path.clone(),
-                                badge: item.badge.clone(),
-                                badge_color: item.badge_color,
-                                ejectable: item.ejectable,
-                            })
-                            .collect(),
-                        system: false,
-                    });
-                }
+                restore_sidebar_groups(state, &config.sidebar_groups);
             }
             state.remote_transport_mappings = config.remote_transport_mappings;
             app_runtime().set_remote_transport_mappings(state.remote_transport_mappings.clone());
@@ -494,4 +467,121 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
     }
 
     Task::none()
+}
+
+/// System groups keep their live items and only take the saved collapsed state; the other groups
+/// are replaced by the saved ones.
+fn restore_sidebar_groups(state: &mut AppState, saved: &[crate::config::SidebarGroupConfig]) {
+    state.sidebar_groups.retain(SidebarGroup::is_system);
+    for group in saved {
+        let Some(kind) = group.kind.or_else(|| legacy_sidebar_group_kind(group)) else {
+            continue;
+        };
+        if kind.is_system() {
+            if let Some(existing) = state
+                .sidebar_groups
+                .iter_mut()
+                .find(|current| current.kind == kind)
+            {
+                existing.collapsed = group.collapsed;
+            }
+            continue;
+        }
+        state.sidebar_groups.push(SidebarGroup {
+            name: group.name.clone(),
+            collapsed: group.collapsed,
+            items: group
+                .items
+                .iter()
+                .map(|item| SidebarItem {
+                    name: item.name.clone(),
+                    path: item.path.clone(),
+                    badge: item.badge.clone(),
+                    badge_color: item.badge_color,
+                    ejectable: item.ejectable,
+                })
+                .collect(),
+            kind,
+        });
+    }
+}
+
+/// Files written before group kinds were saved only had translated names; match them against
+/// every bundled language. Unknown system groups are dropped (they are rebuilt at start-up).
+fn legacy_sidebar_group_kind(
+    group: &crate::config::SidebarGroupConfig,
+) -> Option<crate::state::SidebarGroupKind> {
+    use crate::state::SidebarGroupKind;
+
+    let named = |kind: SidebarGroupKind| {
+        crate::i18n::translations_of(kind.default_name_key()).contains(&group.name)
+    };
+    if group.system {
+        [SidebarGroupKind::Places, SidebarGroupKind::Volumes]
+            .into_iter()
+            .find(|kind| named(*kind))
+    } else if named(SidebarGroupKind::Favorites) {
+        Some(SidebarGroupKind::Favorites)
+    } else if named(SidebarGroupKind::Cloud) {
+        Some(SidebarGroupKind::Cloud)
+    } else {
+        Some(SidebarGroupKind::Custom)
+    }
+}
+
+#[cfg(test)]
+mod sidebar_restore_tests {
+    use super::*;
+    use crate::config::SidebarGroupConfig;
+    use crate::state::SidebarGroupKind;
+
+    fn saved(name: &str, system: bool, kind: Option<SidebarGroupKind>) -> SidebarGroupConfig {
+        SidebarGroupConfig {
+            name: name.to_string(),
+            collapsed: true,
+            items: Vec::new(),
+            system,
+            kind,
+        }
+    }
+
+    #[test]
+    fn restore_matches_system_groups_by_kind_whatever_the_saved_language() {
+        crate::i18n::initialize(Some("ja"));
+        let places_ja = tr("sidebar-group-places");
+        let favorites_ja = tr("sidebar-group-favorites");
+        crate::i18n::initialize(Some("en"));
+        let mut state = AppState::default();
+        state.sidebar_groups = vec![
+            SidebarGroup::new(SidebarGroupKind::Places),
+            SidebarGroup::new(SidebarGroupKind::Volumes),
+        ];
+
+        restore_sidebar_groups(
+            &mut state,
+            &[
+                // Written by an older version in Japanese: kinds are inferred from the names.
+                saved(&places_ja, true, None),
+                saved(&favorites_ja, false, None),
+                saved("Work", false, None),
+                saved("Volumes", true, Some(SidebarGroupKind::Volumes)),
+            ],
+        );
+
+        let kinds = state
+            .sidebar_groups
+            .iter()
+            .map(|group| (group.kind, group.collapsed))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            [
+                (SidebarGroupKind::Places, true),
+                (SidebarGroupKind::Volumes, true),
+                (SidebarGroupKind::Favorites, true),
+                (SidebarGroupKind::Custom, true),
+            ]
+        );
+        crate::i18n::initialize(None);
+    }
 }

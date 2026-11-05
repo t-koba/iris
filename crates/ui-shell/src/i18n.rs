@@ -56,6 +56,17 @@ pub fn tr_with(key: &str, args: &[(&'static str, FluentValue<'_>)]) -> String {
     tr_args(key, Some(&fluent_args))
 }
 
+/// `key` in every bundled language, for recognising text that was saved in another language.
+pub fn translations_of(key: &str) -> Vec<String> {
+    I18N.with(|i18n| {
+        let i18n = i18n.borrow();
+        [&i18n.en, &i18n.ja]
+            .into_iter()
+            .filter_map(|bundle| i18n.format_from(bundle, key, None))
+            .collect()
+    })
+}
+
 pub fn is_japanese_locale() -> bool {
     I18N.with(|i18n| i18n.borrow().locale == Locale::Ja)
 }

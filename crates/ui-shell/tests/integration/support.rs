@@ -7,7 +7,8 @@ use iris_remote_transport::{RemoteTransportKind, SshAuthKind};
 use iris_ui_shell::state::{
     AppState, CacheEncryptionPolicy, CloudConnectFormState, DialogState, JobDisplayInfo,
     NetworkConnectFormState, Notification, NotificationAction, NotificationSeverity, PaneState,
-    PreviewData, PreviewPosition, PropertiesPosition, SettingsSection, SidebarGroup, SidebarItem,
+    PreviewData, PreviewPosition, PropertiesPosition, SettingsSection, SidebarGroup,
+    SidebarGroupKind, SidebarItem,
 };
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -192,7 +193,7 @@ pub fn snapshot_state(state: &AppState) -> StateSnapshot {
             .map(|group| SidebarGroupSnapshot {
                 name: group.name.clone(),
                 collapsed: group.collapsed,
-                system: group.system,
+                system: group.is_system(),
                 item_names: group.items.iter().map(|item| item.name.clone()).collect(),
             })
             .collect(),
@@ -257,7 +258,7 @@ pub fn sample_state() -> AppState {
         SidebarGroup {
             name: "場所".into(),
             collapsed: false,
-            system: true,
+            kind: SidebarGroupKind::Places,
             items: vec![
                 SidebarItem {
                     name: "ホーム".into(),
@@ -278,7 +279,7 @@ pub fn sample_state() -> AppState {
         SidebarGroup {
             name: "お気に入り".into(),
             collapsed: false,
-            system: false,
+            kind: SidebarGroupKind::Favorites,
             items: vec![
                 SidebarItem {
                     name: "Projects".into(),
@@ -299,7 +300,7 @@ pub fn sample_state() -> AppState {
         SidebarGroup {
             name: "リモート".into(),
             collapsed: false,
-            system: false,
+            kind: SidebarGroupKind::Custom,
             items: vec![SidebarItem {
                 name: "NAS".into(),
                 path: "/Volumes/NAS".into(),

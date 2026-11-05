@@ -1377,7 +1377,7 @@ mod tests {
         state.sidebar_groups = vec![SidebarGroup {
             name: "Favorites".to_string(),
             collapsed: false,
-            system: false,
+            kind: crate::state::SidebarGroupKind::Favorites,
             items: vec![SidebarItem {
                 name: "Projects".to_string(),
                 path: "/work/projects".to_string(),
@@ -1412,7 +1412,7 @@ mod tests {
         state.sidebar_groups = vec![SidebarGroup {
             name: "Places".to_string(),
             collapsed: false,
-            system: true,
+            kind: crate::state::SidebarGroupKind::Places,
             items: vec![SidebarItem {
                 name: "Archive".to_string(),
                 path: "/remote/archive".to_string(),

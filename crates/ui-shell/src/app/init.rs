@@ -1,7 +1,7 @@
 use crate::i18n::tr;
 use crate::messages::{DirectoryMessage, Message};
 use crate::runtime::{app_runtime, CloudSidebarLocation};
-use crate::state::{AppState, PaneLoadState, SidebarGroup, SidebarItem};
+use crate::state::{AppState, PaneLoadState, SidebarGroup, SidebarGroupKind, SidebarItem};
 use crate::update::helpers::{load_directory_progressively, refresh_breadcrumbs};
 use iced::Task;
 use std::path::PathBuf;
@@ -111,35 +111,12 @@ fn init_sidebar_groups() -> Vec<SidebarGroup> {
     }
 
     groups.push(SidebarGroup {
-        name: tr("sidebar-group-places"),
-        collapsed: false,
         items: places,
-        system: true,
+        ..SidebarGroup::new(SidebarGroupKind::Places)
     });
-
-    let mut volumes = Vec::new();
-    match iris_platform_integration::mount::list_mounted_volumes() {
-        Ok(mounted_volumes) => {
-            for volume in mounted_volumes {
-                volumes.push(SidebarItem {
-                    name: volume.name,
-                    path: volume.mount_path.to_string_lossy().to_string(),
-                    badge: "V".to_string(),
-                    badge_color: [0.5, 0.5, 0.5, 1.0],
-                    ejectable: volume.ejectable,
-                });
-            }
-        }
-        Err(error) => {
-            tracing::warn!("failed to list mounted volumes: {}", error);
-        }
-    }
-    groups.push(SidebarGroup {
-        name: tr("sidebar-group-volumes"),
-        collapsed: false,
-        items: volumes,
-        system: true,
-    });
+    // The mounted-volumes subscription fills this right after start-up; listing volumes here
+    // would block the first frame (a stale network mount can hang `stat`).
+    groups.push(SidebarGroup::new(SidebarGroupKind::Volumes));
 
     groups
 }

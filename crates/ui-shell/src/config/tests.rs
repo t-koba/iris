@@ -71,6 +71,7 @@ fn serde_layout_roundtrip_preserves_sidebar_groups() {
                 collapsed: true,
                 items: Vec::new(),
                 system: true,
+                kind: Some(crate::state::SidebarGroupKind::Places),
             },
             SidebarGroupConfig {
                 name: "Favorites".to_string(),
@@ -83,6 +84,7 @@ fn serde_layout_roundtrip_preserves_sidebar_groups() {
                     ejectable: false,
                 }],
                 system: false,
+                kind: None,
             },
         ],
         tabs: vec![

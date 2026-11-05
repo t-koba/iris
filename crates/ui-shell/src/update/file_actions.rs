@@ -899,7 +899,7 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                         kind: ContextMenuKind::SidebarItem {
                             group,
                             item,
-                            removable: !sidebar_group.system,
+                            removable: !sidebar_group.is_system(),
                         },
                         target_name: sidebar_item.name.clone(),
                         position,

@@ -32,7 +32,7 @@ pub use settings::{
     normalize_notification_timeout_secs, notification_timeout_input_from_secs,
     parse_notification_timeout_input_secs, parse_smb_port_input, CacheEncryptionPolicy,
     CloudConnectFormState, CloudProvider, NetworkConnectFormState, NetworkProtocol,
-    SettingsSection, SidebarDropTarget, SidebarGroup, SidebarItem,
+    SettingsSection, SidebarDropTarget, SidebarGroup, SidebarGroupKind, SidebarItem,
     DEFAULT_NOTIFICATION_TIMEOUT_SECS, MAX_NOTIFICATION_TIMEOUT_SECS,
 };
 pub use tasks::{

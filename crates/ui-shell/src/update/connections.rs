@@ -6,7 +6,7 @@ use crate::runtime::{app_runtime, CloudSidebarLocation, SmbNativeConnectRequest}
 use crate::state::{
     parse_smb_port_input, AppState, CloudConnectFormState, CloudProvider, DialogState,
     NetworkConnectFormState, NetworkProtocol, NotificationAction, NotificationSeverity,
-    SidebarGroup, SidebarItem,
+    SidebarGroup, SidebarGroupKind, SidebarItem,
 };
 use iced::Task;
 use iris_platform_integration::mount::MountedVolume;
@@ -519,7 +519,7 @@ pub fn connect_network_completed(
 ) -> Task<Message> {
     match result {
         Ok(item) => {
-            add_item_to_group(state, &tr("sidebar-group-volumes"), item.clone());
+            add_item_to_group(state, SidebarGroupKind::Volumes, item.clone());
             state.active_dialog = None;
             navigate_to_path(state, item.path)
         }
@@ -538,7 +538,7 @@ pub fn connect_cloud_completed(
 ) -> Task<Message> {
     match result {
         Ok(item) => {
-            add_item_to_group(state, &tr("sidebar-group-cloud"), item.clone());
+            add_item_to_group(state, SidebarGroupKind::Cloud, item.clone());
             state.active_dialog = None;
             navigate_to_path(state, item.path)
         }
@@ -551,8 +551,14 @@ pub fn connect_cloud_completed(
     }
 }
 
+/// Replaces the OS-mounted volumes; native SMB connections in the same group are not OS mounts
+/// and stay until they are disconnected.
 pub fn sync_mounted_volume_group(state: &mut AppState, volumes: Vec<MountedVolume>) {
-    let items = volumes
+    let group = group_of_kind(state, SidebarGroupKind::Volumes);
+    let native_connections = std::mem::take(&mut group.items)
+        .into_iter()
+        .filter(|item| app_runtime().is_virtual_display_path(&item.path));
+    group.items = volumes
         .into_iter()
         .map(|volume| SidebarItem {
             name: volume.name,
@@ -561,85 +567,51 @@ pub fn sync_mounted_volume_group(state: &mut AppState, volumes: Vec<MountedVolum
             badge_color: [0.5, 0.5, 0.5, 1.0],
             ejectable: volume.ejectable,
         })
+        .chain(native_connections)
         .collect();
-
-    if let Some(group) = state
-        .sidebar_groups
-        .iter_mut()
-        .find(|group| group.system && group.name == tr("sidebar-group-volumes"))
-    {
-        group.items = items;
-        return;
-    }
-
-    let insert_at = state
-        .sidebar_groups
-        .iter()
-        .position(|group| !group.system)
-        .unwrap_or(state.sidebar_groups.len());
-    state.sidebar_groups.insert(
-        insert_at,
-        SidebarGroup {
-            name: tr("sidebar-group-volumes"),
-            collapsed: false,
-            items,
-            system: true,
-        },
-    );
 }
 
 pub fn cloud_backends_loaded(state: &mut AppState, items: Vec<SidebarItem>) {
-    let index = state
-        .sidebar_groups
-        .iter()
-        .position(|group| group.name == tr("sidebar-group-cloud"));
-    let index = match index {
-        Some(index) => index,
-        None => {
-            state.sidebar_groups.push(SidebarGroup {
-                name: tr("sidebar-group-cloud"),
-                collapsed: false,
-                items: Vec::new(),
-                system: false,
-            });
-            state.sidebar_groups.len() - 1
-        }
-    };
-
-    state.sidebar_groups[index].items = items;
+    group_of_kind(state, SidebarGroupKind::Cloud).items = items;
 }
 
-pub fn add_item_to_group(state: &mut AppState, group_name: &str, item: SidebarItem) {
-    add_item_to_group_batch(state, group_name, vec![item]);
-}
-
-fn add_item_to_group_batch(state: &mut AppState, group_name: &str, items: Vec<SidebarItem>) {
-    let index = state
-        .sidebar_groups
+pub fn add_item_to_group(state: &mut AppState, kind: SidebarGroupKind, item: SidebarItem) {
+    let group = group_of_kind(state, kind);
+    if !group
+        .items
         .iter()
-        .position(|group| group.name == group_name);
-    let index = match index {
-        Some(index) => index,
-        None => {
-            state.sidebar_groups.push(SidebarGroup {
-                name: group_name.to_string(),
-                collapsed: false,
-                items: Vec::new(),
-                system: false,
-            });
-            state.sidebar_groups.len() - 1
-        }
-    };
-
-    for item in items {
-        let already_exists = state.sidebar_groups[index]
-            .items
-            .iter()
-            .any(|existing| existing.path == item.path);
-        if !already_exists {
-            state.sidebar_groups[index].items.push(item);
-        }
+        .any(|existing| existing.path == item.path)
+    {
+        group.items.push(item);
     }
+}
+
+/// The group of `kind`, created if missing: system groups go before the user's groups, the
+/// others after them.
+pub(crate) fn group_of_kind(state: &mut AppState, kind: SidebarGroupKind) -> &mut SidebarGroup {
+    let index = match state
+        .sidebar_groups
+        .iter()
+        .position(|group| group.kind == kind)
+    {
+        Some(index) => index,
+        None => {
+            let insert_at = if kind.is_system() {
+                state
+                    .sidebar_groups
+                    .iter()
+                    .position(|group| !group.is_system())
+                    .unwrap_or(state.sidebar_groups.len())
+            } else {
+                state.sidebar_groups.len()
+            };
+            state
+                .sidebar_groups
+                .insert(insert_at, SidebarGroup::new(kind));
+            insert_at
+        }
+    };
+    &mut state.sidebar_groups[index]
 }
 
 fn active_network_form(dialog: &Option<DialogState>) -> Option<&NetworkConnectFormState> {
@@ -746,6 +718,63 @@ mod tests {
             "active tab of pane 1 leaves too"
         );
         assert_eq!(pane1[1].current_path, "/Volumes/Card2");
+    }
+
+    fn volume(name: &str) -> MountedVolume {
+        MountedVolume {
+            name: name.to_string(),
+            mount_path: std::path::PathBuf::from(format!("/media/{name}")),
+            ejectable: true,
+            kind: iris_platform_integration::mount::VolumeKind::Local,
+        }
+    }
+
+    #[test]
+    fn mount_refresh_keeps_native_smb_connections_in_the_volumes_group() {
+        let mut state = AppState::default();
+        add_item_to_group(
+            &mut state,
+            SidebarGroupKind::Volumes,
+            SidebarItem {
+                name: "NAS".to_string(),
+                path: "/__iris_remote__/smb:abc".to_string(),
+                badge: "N".to_string(),
+                badge_color: [0.5, 0.5, 0.5, 1.0],
+                ejectable: false,
+            },
+        );
+
+        sync_mounted_volume_group(&mut state, vec![volume("USB")]);
+
+        let groups = &state.sidebar_groups;
+        assert_eq!(groups.len(), 1);
+        let names = groups[0]
+            .items
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["USB", "NAS"]);
+    }
+
+    #[test]
+    fn changing_language_does_not_duplicate_system_groups() {
+        crate::i18n::initialize(Some("en"));
+        let mut state = AppState::default();
+        state.sidebar_groups = vec![
+            SidebarGroup::new(SidebarGroupKind::Places),
+            SidebarGroup::new(SidebarGroupKind::Volumes),
+        ];
+
+        crate::i18n::initialize(Some("ja"));
+        sync_mounted_volume_group(&mut state, vec![volume("USB")]);
+
+        assert_eq!(state.sidebar_groups.len(), 2);
+        assert_eq!(state.sidebar_groups[1].items.len(), 1);
+        assert_eq!(
+            state.sidebar_groups[1].display_name(),
+            crate::i18n::tr("sidebar-group-volumes")
+        );
+        crate::i18n::initialize(None);
     }
 
     #[test]
