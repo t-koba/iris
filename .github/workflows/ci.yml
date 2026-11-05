@@ -42,7 +42,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config clang ffmpeg netcat-openbsd openssh-client \
+          sudo apt-get install -y pkg-config clang ffmpeg netcat-openbsd openssh-client ripgrep \
             libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev
 
@@ -105,6 +105,7 @@ jobs:
       - name: Source safety policy
         if: matrix.os == 'ubuntu-latest'
         run: |
+          command -v rg >/dev/null 2>&1 || { echo "required command is missing: rg" >&2; exit 1; }
           test -z "$(rg -n '#\[allow' crates --glob '*.rs' || true)"
           unsafe_files=$(rg -l '\bunsafe\b' crates --glob '*.rs' | rg -v '^(crates/backends/src/common.rs|crates/backends/src/localfs/reflink.rs|crates/platform-integration/src/trash.rs|crates/thumb-preview/src/image_generic.rs|crates/thumb-preview/src/pdf.rs|crates/ui-shell/src/macos_menu.rs)$' || true)
           test -z "$unsafe_files"
@@ -126,6 +127,7 @@ jobs:
       - name: Minimal binary size guard
         if: matrix.os == 'ubuntu-latest'
         run: |
+          command -v rg >/dev/null 2>&1 || { echo "required command is missing: rg" >&2; exit 1; }
           cargo bloat --release -p iris-ui-shell --no-default-features --features minimal -n 20 --crates > /tmp/iris-bloat.txt
           ! rg -i 'ffmpeg|pdfium' /tmp/iris-bloat.txt
 
