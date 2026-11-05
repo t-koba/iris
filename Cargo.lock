@@ -466,11 +466,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "avif-rust"
-version = "0.0.6"
+name = "avif-image-buffer"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e6267b2527cbe43d9e369f91a4af3028274f7033bb0759e906bbc9717fceba7"
+checksum = "7f064a888d7b2d2d78426fe473647c14281494f8994d1e4240d83cff37e5eafc"
+
+[[package]]
+name = "avif-rust"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe0b5ee8b4698179b3bbb8b0fd86930846c9eb932451035f02ec2e723b1a4086"
 dependencies = [
+ "avif-image-buffer",
  "bin-rs",
 ]
 
