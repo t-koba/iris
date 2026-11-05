@@ -2,8 +2,6 @@
 name = "iris-search"
 version.workspace = true
 edition = "2021"
-description = "Filtering and recursive search over file listings."
-publish = false
 
 [dependencies]
 iris-core-domain = { workspace = true }

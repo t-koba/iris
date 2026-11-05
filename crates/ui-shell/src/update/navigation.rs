@@ -43,7 +43,11 @@ pub fn handle(state: &mut AppState, message: NavigationMessage) -> Task<Message>
         NavigationMessage::EditPath { pane: target_pane } => {
             state.active_pane = target_pane;
             for pane_idx in 0..2 {
-                state.pane_mut(pane_idx).close_path_editor();
+                let pane = state.pane_mut(pane_idx);
+                pane.path_editing = false;
+                pane.path_input.clear();
+                pane.path_suggestions.clear();
+                pane.path_suggestion_selected = None;
             }
             let input_value =
                 app_runtime().format_display_path(&state.pane(target_pane).current_path);

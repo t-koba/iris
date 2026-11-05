@@ -2,8 +2,6 @@
 name = "iris-transfer"
 version.workspace = true
 edition = "2021"
-description = "Copy and move execution with verification, retries and resumable jobs."
-publish = false
 
 [dependencies]
 iris-core-domain = { workspace = true }

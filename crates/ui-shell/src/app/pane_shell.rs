@@ -594,20 +594,6 @@ struct GpsBoundsCanvasState {
     pan_last: Option<Point>,
 }
 
-impl GpsBoundsCanvas {
-    /// Asks for the map tiles that `viewport` shows in `bounds`.
-    fn visible_tiles_message(&self, viewport: MapViewport, bounds: Rectangle) -> Message {
-        Message::Pane(
-            self.pane_idx,
-            PaneMessage::GpsMapVisibleTiles(visible_tiles(
-                viewport,
-                bounds.width.max(1.0),
-                bounds.height.max(1.0),
-            )),
-        )
-    }
-}
-
 impl canvas::Program<Message> for GpsBoundsCanvas {
     type State = GpsBoundsCanvasState;
 
@@ -619,9 +605,16 @@ impl canvas::Program<Message> for GpsBoundsCanvas {
         cursor: mouse::Cursor,
     ) -> Option<iced::widget::Action<Message>> {
         ensure_gps_viewport(state, self.viewport_bounds, bounds.size());
-        let visible_tiles_message = state
-            .viewport
-            .map(|viewport| self.visible_tiles_message(viewport, bounds));
+        let visible_tiles_message = state.viewport.map(|viewport| {
+            Message::Pane(
+                self.pane_idx,
+                PaneMessage::GpsMapVisibleTiles(visible_tiles(
+                    viewport,
+                    bounds.width.max(1.0),
+                    bounds.height.max(1.0),
+                )),
+            )
+        });
         let position = cursor.position_in(bounds)?;
 
         match event {
@@ -645,7 +638,14 @@ impl canvas::Program<Message> for GpsBoundsCanvas {
                     let delta: Vector = position - last;
                     viewport.pan_by_pixels(delta.x, delta.y);
                     state.pan_last = Some(position);
-                    let message = Some(self.visible_tiles_message(*viewport, bounds));
+                    let message = Some(Message::Pane(
+                        self.pane_idx,
+                        PaneMessage::GpsMapVisibleTiles(visible_tiles(
+                            *viewport,
+                            bounds.width.max(1.0),
+                            bounds.height.max(1.0),
+                        )),
+                    ));
                     return Some(canvas_capture(message));
                 }
                 None
@@ -697,7 +697,14 @@ impl canvas::Program<Message> for GpsBoundsCanvas {
                     };
                     if steps != 0 {
                         viewport.zoom_by_steps(steps);
-                        let message = Some(self.visible_tiles_message(*viewport, bounds));
+                        let message = Some(Message::Pane(
+                            self.pane_idx,
+                            PaneMessage::GpsMapVisibleTiles(visible_tiles(
+                                *viewport,
+                                bounds.width.max(1.0),
+                                bounds.height.max(1.0),
+                            )),
+                        ));
                         return Some(canvas_capture(message));
                     }
                 }

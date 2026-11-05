@@ -57,11 +57,105 @@ pub(super) fn is_reduced_resolution_ifd(
     new_subfile_type.is_some_and(|value| value & 0x1 != 0) || subfile_type == Some(2)
 }
 
+pub(super) fn extract_filtered_exif_metadata(
+    file_path: &Path,
+) -> (Option<u32>, Option<u32>, Vec<(String, String)>) {
+    let Ok(file) = std::fs::File::open(file_path) else {
+        return (None, None, Vec::new());
+    };
+    let mut reader = std::io::BufReader::new(file);
+    extract_filtered_exif_metadata_from_reader(&mut reader)
+}
+
+pub(super) fn extract_filtered_exif_metadata_from_reader<R: std::io::BufRead + Seek>(
+    reader: &mut R,
+) -> (Option<u32>, Option<u32>, Vec<(String, String)>) {
+    let Ok(exif_data) = exif::Reader::new().read_from_container(reader) else {
+        return (None, None, Vec::new());
+    };
+
+    let mut width = None;
+    let mut height = None;
+    for field in exif_data.fields() {
+        if field.tag == exif::Tag::PixelXDimension {
+            width = field.value.get_uint(0);
+        } else if field.tag == exif::Tag::PixelYDimension {
+            height = field.value.get_uint(0);
+        } else if field.tag == exif::Tag::ImageWidth && width.is_none() {
+            width = field.value.get_uint(0);
+        } else if field.tag == exif::Tag::ImageLength && height.is_none() {
+            height = field.value.get_uint(0);
+        }
+    }
+
+    let mut entries = Vec::new();
+    let mut seen_tags = HashSet::new();
+    for field in exif_data.fields() {
+        let tag_name = format!("{}", field.tag);
+        let value = field.display_value().with_unit(&exif_data).to_string();
+        if value.len() < 500
+            && !is_effectively_blank_exif_value(&value)
+            && !tag_name.contains("Unknown")
+            && !tag_name.starts_with("Tag(")
+            && !should_skip_raw_exif_tag(&tag_name, field.tag)
+            && seen_tags.insert(tag_name.clone())
+        {
+            entries.push((tag_name, value));
+        }
+    }
+
+    (width, height, entries)
+}
+
 pub(super) fn panasonic_image_dimension(start: Option<u32>, end: Option<u32>) -> Option<u32> {
     match (start, end) {
         (Some(start), Some(end)) if end > start => Some(end - start),
         _ => None,
     }
+}
+
+pub(super) fn is_effectively_blank_exif_value(value: &str) -> bool {
+    value
+        .chars()
+        .all(|ch| ch.is_whitespace() || matches!(ch, '"' | ',' | '\0'))
+}
+
+pub(super) fn should_skip_raw_exif_tag(tag_name: &str, tag: exif::Tag) -> bool {
+    matches!(
+        tag,
+        exif::Tag::PixelXDimension
+            | exif::Tag::PixelYDimension
+            | exif::Tag::ImageWidth
+            | exif::Tag::ImageLength
+            | exif::Tag::Compression
+            | exif::Tag::JPEGInterchangeFormat
+            | exif::Tag::JPEGInterchangeFormatLength
+            | exif::Tag::StripOffsets
+            | exif::Tag::StripByteCounts
+            | exif::Tag::XResolution
+            | exif::Tag::YResolution
+            | exif::Tag::ResolutionUnit
+            | exif::Tag::WhitePoint
+            | exif::Tag::PrimaryChromaticities
+            | exif::Tag::YCbCrCoefficients
+            | exif::Tag::YCbCrPositioning
+    ) || matches!(
+        tag_name,
+        "Bits Per Sample"
+            | "Compressed Bits Per Pixel"
+            | "Components Configuration"
+            | "Flashpix Version"
+            | "Color Space"
+            | "Thumbnail Offset"
+            | "Thumbnail Length"
+            | "Preview Image Start"
+            | "Preview Image Length"
+            | "Preview Image Size"
+            | "Encoding Process"
+            | "Color Components"
+            | "Y Cb Cr Sub Sampling"
+            | "Subfile Type"
+    )
 }
 
 pub(super) fn candidate_from_range(

@@ -2,8 +2,6 @@
 name = "iris-auth"
 version.workspace = true
 edition = "2021"
-description = "Credential storage for backend tokens in the OS credential store."
-publish = false
 
 [dependencies]
 iris-platform-integration = { workspace = true }

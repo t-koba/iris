@@ -569,6 +569,16 @@ impl BackendAdapter for PCloudAdapter {
         })
     }
 
+    async fn get_metadata(
+        &self,
+        object: &ObjectRef,
+        level: MetadataLevel,
+    ) -> Result<MetadataResult, BackendError> {
+        let mut result = self.stat(object).await?;
+        result.level = level;
+        Ok(result)
+    }
+
     async fn get_stable_id(&self, object: &ObjectRef) -> Result<StableId, BackendError> {
         Ok(object.key.stable_id.clone())
     }

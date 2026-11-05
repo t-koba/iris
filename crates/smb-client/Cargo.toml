@@ -2,8 +2,6 @@
 name = "iris-smb-client"
 version.workspace = true
 edition = "2021"
-description = "Native SMB2/3 client with signing, encryption and server-side copy."
-publish = false
 
 [package.metadata.cargo-machete]
 ignored = ["md-5"]

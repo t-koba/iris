@@ -2,8 +2,6 @@
 name = "iris-backends"
 version.workspace = true
 edition = "2021"
-description = "Storage backends for Iris: local file system, SMB, S3 and pCloud."
-publish = false
 
 [dependencies]
 iris-core-domain = { workspace = true }

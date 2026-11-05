@@ -52,8 +52,21 @@ pub(super) fn extract_x3f_structured_metadata(
     })
 }
 
+pub(super) fn merge_metadata_entries(
+    entries: &mut Vec<(String, String)>,
+    additional: Vec<(String, String)>,
+) {
+    let mut seen: HashSet<String> = entries.iter().map(|(tag, _)| tag.clone()).collect();
+    for (tag, value) in additional {
+        if value.len() >= 500 || !seen.insert(tag.clone()) {
+            continue;
+        }
+        entries.push((tag, value));
+    }
+}
+
 pub(super) fn push_metadata_entry(entries: &mut Vec<(String, String)>, tag: &str, value: String) {
-    if value.is_empty() || crate::metadata::is_effectively_blank_exif_value(&value) {
+    if value.is_empty() || is_effectively_blank_exif_value(&value) {
         return;
     }
     if entries.iter().any(|(existing, _)| existing == tag) {

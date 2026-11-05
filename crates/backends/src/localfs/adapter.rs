@@ -283,7 +283,14 @@ impl LocalFsAdapter {
             Ok(file_type) => file_type,
             Err(_) => {
                 return Some(ListedEntry::NameOnly(EntryNameOnly {
-                    object_ref: self.listed_object_ref(display_path, parent_stable_id),
+                    object_ref: ObjectRef {
+                        key: ObjectKey {
+                            backend_id: self.backend_id.clone(),
+                            stable_id: StableId(display_path.clone()),
+                        },
+                        parent_stable_id: Some(parent_stable_id.clone()),
+                        display_path,
+                    },
                     name,
                     is_dir: false,
                     is_symlink: false,
@@ -296,23 +303,19 @@ impl LocalFsAdapter {
         let is_dir = file_type.is_dir();
 
         Some(ListedEntry::NameOnly(EntryNameOnly {
-            object_ref: self.listed_object_ref(display_path, parent_stable_id),
+            object_ref: ObjectRef {
+                key: ObjectKey {
+                    backend_id: self.backend_id.clone(),
+                    stable_id: StableId(display_path.clone()),
+                },
+                parent_stable_id: Some(parent_stable_id.clone()),
+                display_path,
+            },
             name,
             is_dir,
             is_symlink,
             is_inaccessible: false,
         }))
-    }
-
-    fn listed_object_ref(&self, display_path: String, parent_stable_id: &StableId) -> ObjectRef {
-        ObjectRef {
-            key: ObjectKey {
-                backend_id: self.backend_id.clone(),
-                stable_id: StableId(display_path.clone()),
-            },
-            parent_stable_id: Some(parent_stable_id.clone()),
-            display_path,
-        }
     }
 }
 

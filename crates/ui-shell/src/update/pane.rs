@@ -406,12 +406,22 @@ pub fn handle_pane_message(
             let Some(path) = app_runtime().resolve_navigation_input(&input, &current_path) else {
                 return Task::none();
             };
-            state.pane_mut(pane_idx).close_path_editor();
+            {
+                let pane = state.pane_mut(pane_idx);
+                pane.path_editing = false;
+                pane.path_input.clear();
+                pane.path_suggestions.clear();
+                pane.path_suggestion_selected = None;
+            }
             return navigate_pane_to_path(state, pane_idx, path);
         }
 
         PaneMessage::CancelPathEdit => {
-            state.pane_mut(pane_idx).close_path_editor();
+            let pane = state.pane_mut(pane_idx);
+            pane.path_editing = false;
+            pane.path_input.clear();
+            pane.path_suggestions.clear();
+            pane.path_suggestion_selected = None;
         }
 
         PaneMessage::PathSuggestionNext => {
@@ -437,7 +447,13 @@ pub fn handle_pane_message(
             let Some(path) = app_runtime().resolve_navigation_input(&input, &current_path) else {
                 return Task::none();
             };
-            state.pane_mut(pane_idx).close_path_editor();
+            {
+                let pane = state.pane_mut(pane_idx);
+                pane.path_editing = false;
+                pane.path_input.clear();
+                pane.path_suggestions.clear();
+                pane.path_suggestion_selected = None;
+            }
             return navigate_pane_to_path(state, pane_idx, path);
         }
 

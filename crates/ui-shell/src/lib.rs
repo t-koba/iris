@@ -1,6 +1,3 @@
-//! The Iris application: state, messages, update logic, views and the `AppRuntime` that ties
-//! the other crates together.
-
 pub mod app;
 pub mod commands;
 pub mod config;

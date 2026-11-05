@@ -2,8 +2,6 @@
 name = "iris-path-service"
 version.workspace = true
 edition = "2021"
-description = "Path normalization, display paths and URL parsing."
-publish = false
 
 [dependencies]
 dirs-next = "2"

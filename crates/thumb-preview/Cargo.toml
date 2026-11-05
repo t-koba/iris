@@ -2,8 +2,6 @@
 name = "iris-thumb-preview"
 version.workspace = true
 edition = "2021"
-description = "Thumbnails, previews and metadata for images, RAW, video and PDF."
-publish = false
 
 [package.metadata.cargo-machete]
 ignored = ["kamadak-exif"]
