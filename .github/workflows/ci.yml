@@ -137,6 +137,9 @@ jobs:
       - name: Thumb preview RAW smoke
         run: cargo test -p iris-thumb-preview --test golden --locked
 
+      - name: SFTP readiness deadline regression
+        run: bash ./scripts/test-perf-transfer-readiness.sh
+
       - name: Native SFTP and SMB container integration
         if: matrix.os == 'ubuntu-latest'
         env:

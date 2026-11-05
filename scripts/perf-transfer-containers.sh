@@ -115,16 +115,25 @@ prepare_known_hosts() {
   local scan_output="$work_root/ssh-keyscan.out"
   local scan_error="$work_root/ssh-keyscan.err"
   local deadline=$((SECONDS + ready_timeout))
+  local remaining
+  local scan_timeout
   mkdir -p "$home_dir/.ssh"
   chmod 700 "$home_dir/.ssh"
   while (( SECONDS < deadline )); do
-    if ssh-keyscan -T "$ssh_keyscan_timeout" -p "$sftp_port" 127.0.0.1 >"$scan_output" 2>"$scan_error" && [[ -s "$scan_output" ]]; then
+    remaining=$((deadline - SECONDS))
+    scan_timeout="$ssh_keyscan_timeout"
+    if (( scan_timeout > remaining )); then
+      scan_timeout="$remaining"
+    fi
+    if ssh-keyscan -T "$scan_timeout" -p "$sftp_port" 127.0.0.1 >"$scan_output" 2>"$scan_error" && [[ -s "$scan_output" ]]; then
       mv "$scan_output" "$known_hosts"
       chmod 600 "$known_hosts"
       export HOME="$home_dir"
       return 0
     fi
-    sleep 1
+    if (( SECONDS < deadline )); then
+      sleep 1
+    fi
   done
   echo "SFTP server did not provide an SSH host key within ${ready_timeout}s" >&2
   if [[ -s "$scan_error" ]]; then
