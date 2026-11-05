@@ -396,10 +396,12 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
             state.sidebar_width = config.sidebar_width;
             state.right_panel_width = config.right_panel_width;
             state.preview_panel_height = config.preview_panel_height;
-            state.window_width = config.window_width;
-            state.window_height = config.window_height;
-            state.window_x = config.window_x;
-            state.window_y = config.window_y;
+            if first_load {
+                state.window_width = config.window_width;
+                state.window_height = config.window_height;
+                state.window_x = config.window_x;
+                state.window_y = config.window_y;
+            }
             state.preview_position = config.preview_position;
             state.dual_pane_enabled = config.dual_pane_enabled;
             state.pane_split_ratio = config.pane_split_ratio;
