@@ -59,7 +59,10 @@ proptest = "1"
 
 # HTTP client (for cloud backends, OAuth2)
 # No default features: rustls with the ring provider and only json + query + stream.
-reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls"] }
+# reqwest's "rustls" feature would link aws-lc as a second crypto library; "rustls-no-provider"
+# uses the ring provider that iris-backends installs (`ensure_tls_crypto_provider`).
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 # OS integration
 keyring = "4"

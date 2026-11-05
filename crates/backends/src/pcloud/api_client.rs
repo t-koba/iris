@@ -39,6 +39,7 @@ pub struct PCloudApiClient {
 }
 
 fn build_http_client() -> Client {
+    crate::ensure_tls_crypto_provider();
     Client::builder()
         .tcp_nodelay(true)
         .connect_timeout(Duration::from_secs(10))

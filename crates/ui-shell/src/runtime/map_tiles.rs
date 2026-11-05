@@ -16,6 +16,7 @@ fn map_tile_http_client() -> Result<&'static reqwest::Client, String> {
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
+            iris_backends::ensure_tls_crypto_provider();
             reqwest::Client::builder()
                 .tcp_nodelay(true)
                 .connect_timeout(StdDuration::from_secs(5))

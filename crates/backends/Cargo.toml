@@ -12,6 +12,7 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 reqwest = { workspace = true, features = ["multipart"] }
+rustls = { workspace = true }
 aws-sdk-s3 = { workspace = true }
 aws-config = { workspace = true }
 aws-smithy-http-client = { workspace = true }
