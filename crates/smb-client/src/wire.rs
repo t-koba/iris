@@ -65,3 +65,91 @@ pub(crate) fn decode_utf16le(bytes: &[u8]) -> Result<String, SmbClientError> {
         .collect::<Vec<_>>();
     String::from_utf16(&units).map_err(|_| SmbClientError::InvalidUtf16Path)
 }
+
+pub(crate) fn push_u16(bytes: &mut Vec<u8>, value: u16) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn push_u32(bytes: &mut Vec<u8>, value: u32) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn push_u64(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+#[cfg(test)]
+pub(crate) fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+pub(crate) fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+#[cfg(test)]
+pub(crate) fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+/// Rounds `value` up to the next multiple of 8, the alignment of SMB2 variable fields.
+pub(crate) fn align8(value: usize) -> usize {
+    value.saturating_add(7) & !7
+}
+
+pub(crate) fn encode_utf16le(value: &str) -> Vec<u8> {
+    value.encode_utf16().flat_map(u16::to_le_bytes).collect()
+}
+
+pub(crate) fn checked_u16_len(field: &'static str, length: usize) -> Result<u16, SmbClientError> {
+    u16::try_from(length).map_err(|_| SmbClientError::FieldTooLarge {
+        field,
+        length,
+        max: u16::MAX as usize,
+    })
+}
+
+pub(crate) fn checked_u32_len(field: &'static str, length: usize) -> Result<u32, SmbClientError> {
+    u32::try_from(length).map_err(|_| SmbClientError::FieldTooLarge {
+        field,
+        length,
+        max: u32::MAX as usize,
+    })
+}
+
+/// Checks the fixed length and StructureSize of an SMB2 message body.
+pub(crate) fn check_fixed_body(
+    body: &[u8],
+    fixed_bytes: usize,
+    structure_size: u16,
+) -> Result<(), SmbClientError> {
+    if body.len() < fixed_bytes {
+        return Err(SmbClientError::ShortFrame {
+            expected: fixed_bytes,
+            actual: body.len(),
+        });
+    }
+    let size = le_u16(body, 0);
+    if size != structure_size {
+        return Err(SmbClientError::InvalidStructureSize { size });
+    }
+    Ok(())
+}
+
+/// The body of an SMB2 response after checking its fixed length and StructureSize.
+pub(crate) fn response_body(
+    packet: &[u8],
+    fixed_bytes: usize,
+    structure_size: u16,
+) -> Result<&[u8], SmbClientError> {
+    let required_len = SMB2_HEADER_BYTES + fixed_bytes;
+    if packet.len() < required_len {
+        return Err(SmbClientError::ShortFrame {
+            expected: required_len,
+            actual: packet.len(),
+        });
+    }
+    let body = &packet[SMB2_HEADER_BYTES..];
+    check_fixed_body(body, fixed_bytes, structure_size)?;
+    Ok(body)
+}

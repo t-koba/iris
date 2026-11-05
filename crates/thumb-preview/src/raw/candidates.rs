@@ -186,37 +186,33 @@ pub(super) fn candidate_from_range(
     })
 }
 
+/// A JPEG stored as strips or tiles: read in place when contiguous, otherwise assembled.
 pub(super) fn candidate_from_segments(
-    source: &impl BlockingBinaryReader,
-    offsets: &[u32],
-    counts: &[u32],
-) -> Option<StructuredJpegCandidate> {
-    if let Some((start, len)) = contiguous_segment(offsets, counts) {
-        return candidate_from_range(source, start, len);
-    }
-
-    let total_len = validate_segment_layout(offsets, counts, source.len())?;
-    let mut bytes = Vec::with_capacity(total_len);
-    for (&offset, &count) in offsets.iter().zip(counts.iter()) {
-        bytes.extend_from_slice(&source.read_range(offset as u64, count as usize)?);
-    }
-    candidate_from_bytes(bytes)
-}
-
-pub(super) fn candidate_from_segments_u64(
     source: &impl BlockingBinaryReader,
     offsets: &[u64],
     counts: &[u64],
 ) -> Option<StructuredJpegCandidate> {
-    if let Some((start, len)) = contiguous_segment_u64(offsets, counts) {
-        return candidate_from_range(source, start, len);
+    if offsets.is_empty() || offsets.len() != counts.len() {
+        return None;
     }
-
-    let total_len = validate_segment_layout_u64(offsets, counts, source.len())?;
-    let mut bytes = Vec::with_capacity(total_len);
-    for (&offset, &count) in offsets.iter().zip(counts.iter()) {
-        let count = usize::try_from(count).ok()?;
-        bytes.extend_from_slice(&source.read_range(offset, count)?);
+    let mut segments = Vec::with_capacity(offsets.len());
+    let mut total = 0usize;
+    let mut contiguous = true;
+    for (&offset, &count) in offsets.iter().zip(counts) {
+        let len = usize::try_from(count).ok().filter(|len| *len > 0)?;
+        if offset.checked_add(count)? > source.len() {
+            return None;
+        }
+        contiguous &= offset == offsets[0] + total as u64;
+        total = total.checked_add(len)?;
+        segments.push((offset, len));
+    }
+    if contiguous {
+        return candidate_from_range(source, offsets[0], total);
+    }
+    let mut bytes = Vec::with_capacity(total);
+    for (offset, len) in segments {
+        bytes.extend_from_slice(&source.read_range(offset, len)?);
     }
     candidate_from_bytes(bytes)
 }
@@ -232,48 +228,4 @@ pub(super) fn candidate_from_bytes(bytes: Vec<u8>) -> Option<StructuredJpegCandi
         width,
         height,
     })
-}
-
-pub(super) fn tiff_tag_candidate(
-    source: &impl BlockingBinaryReader,
-    endian: Endian,
-    field_type: u16,
-    count: u32,
-    value_or_offset: u32,
-) -> Option<StructuredJpegCandidate> {
-    let unit_size = tiff_type_size(field_type)?;
-    let byte_len = count as usize;
-    let total_len = byte_len.checked_mul(unit_size)?;
-    if total_len < MIN_JPEG_BYTES {
-        return None;
-    }
-
-    if total_len <= 4 {
-        let bytes = inline_tiff_value_bytes(endian, value_or_offset, total_len);
-        return candidate_from_bytes(bytes);
-    }
-
-    candidate_from_range(source, value_or_offset as u64, total_len)
-}
-
-pub(super) fn tiff_tag_candidate_bigtiff(
-    source: &impl BlockingBinaryReader,
-    endian: Endian,
-    field_type: u16,
-    count: u64,
-    value_or_offset: u64,
-) -> Option<StructuredJpegCandidate> {
-    let unit_size = tiff_type_size(field_type)?;
-    let byte_len = usize::try_from(count).ok()?;
-    let total_len = byte_len.checked_mul(unit_size)?;
-    if total_len < MIN_JPEG_BYTES {
-        return None;
-    }
-
-    if total_len <= BIGTIFF_INLINE_BYTES {
-        let bytes = inline_tiff_value_bytes_u64(endian, value_or_offset, total_len);
-        return candidate_from_bytes(bytes);
-    }
-
-    candidate_from_range(source, value_or_offset, total_len)
 }

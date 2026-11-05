@@ -1,3 +1,4 @@
+use crate::wire::encode_utf16le;
 use crate::SmbClientError;
 use hmac::{Hmac, KeyInit, Mac};
 use md5::Md5;
@@ -12,13 +13,13 @@ pub struct NtlmV2Response {
 }
 
 pub fn nt_hash(password: &str) -> [u8; 16] {
-    md4(&utf16le(password))
+    md4(&encode_utf16le(password))
 }
 
 pub fn ntlm_v2_hash(user: &str, target: &str, password: &str) -> Result<[u8; 16], SmbClientError> {
     let nt_hash = nt_hash(password);
-    let mut identity = utf16le(&user.to_uppercase());
-    identity.extend_from_slice(&utf16le(target));
+    let mut identity = encode_utf16le(&user.to_uppercase());
+    identity.extend_from_slice(&encode_utf16le(target));
     hmac_md5(&nt_hash, &identity)
 }
 
@@ -97,14 +98,6 @@ fn hmac_md5(key: &[u8], data: &[u8]) -> Result<[u8; 16], SmbClientError> {
     let mut mac = HmacMd5::new_from_slice(key).map_err(|_| SmbClientError::InvalidHmacKey)?;
     mac.update(data);
     Ok(mac.finalize().into_bytes().into())
-}
-
-fn utf16le(value: &str) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(value.len() * 2);
-    for unit in value.encode_utf16() {
-        bytes.extend_from_slice(&unit.to_le_bytes());
-    }
-    bytes
 }
 
 fn md4(input: &[u8]) -> [u8; 16] {

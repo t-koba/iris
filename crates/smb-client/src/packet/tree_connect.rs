@@ -1,12 +1,14 @@
 use crate::packet::header::SMB2_HEADER_BYTES;
-use crate::wire::{checked_slice, decode_utf16le, le_u16, le_u32};
+use crate::wire::{
+    check_fixed_body, checked_slice, checked_u16_len, decode_utf16le, encode_utf16le, le_u16,
+    le_u32, push_u16, response_body,
+};
 use crate::SmbClientError;
 
 const TREE_CONNECT_REQUEST_STRUCTURE_SIZE: u16 = 9;
 const TREE_CONNECT_RESPONSE_STRUCTURE_SIZE: u16 = 16;
 const TREE_CONNECT_REQUEST_FIXED_BYTES: usize = 8;
 const TREE_CONNECT_RESPONSE_FIXED_BYTES: usize = 16;
-const U16_MAX_USIZE: usize = u16::MAX as usize;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Smb2TreeConnectFlags(pub u16);
@@ -88,18 +90,11 @@ impl Smb2TreeConnectRequest {
     }
 
     pub fn decode(body: &[u8]) -> Result<Self, SmbClientError> {
-        if body.len() < TREE_CONNECT_REQUEST_FIXED_BYTES {
-            return Err(SmbClientError::ShortFrame {
-                expected: TREE_CONNECT_REQUEST_FIXED_BYTES,
-                actual: body.len(),
-            });
-        }
-        let structure_size = le_u16(body, 0);
-        if structure_size != TREE_CONNECT_REQUEST_STRUCTURE_SIZE {
-            return Err(SmbClientError::InvalidStructureSize {
-                size: structure_size,
-            });
-        }
+        check_fixed_body(
+            body,
+            TREE_CONNECT_REQUEST_FIXED_BYTES,
+            TREE_CONNECT_REQUEST_STRUCTURE_SIZE,
+        )?;
 
         let path_offset = le_u16(body, 4) as usize;
         let path_length = le_u16(body, 6) as usize;
@@ -130,21 +125,11 @@ pub struct Smb2TreeConnectResponse {
 
 impl Smb2TreeConnectResponse {
     pub fn decode_packet(packet: &[u8]) -> Result<Self, SmbClientError> {
-        let body_offset = SMB2_HEADER_BYTES;
-        let required_len = body_offset + TREE_CONNECT_RESPONSE_FIXED_BYTES;
-        if packet.len() < required_len {
-            return Err(SmbClientError::ShortFrame {
-                expected: required_len,
-                actual: packet.len(),
-            });
-        }
-        let body = &packet[body_offset..];
-        let structure_size = le_u16(body, 0);
-        if structure_size != TREE_CONNECT_RESPONSE_STRUCTURE_SIZE {
-            return Err(SmbClientError::InvalidStructureSize {
-                size: structure_size,
-            });
-        }
+        let body = response_body(
+            packet,
+            TREE_CONNECT_RESPONSE_FIXED_BYTES,
+            TREE_CONNECT_RESPONSE_STRUCTURE_SIZE,
+        )?;
 
         Ok(Self {
             share_type: Smb2ShareType::from_wire(body[2])?,
@@ -155,30 +140,11 @@ impl Smb2TreeConnectResponse {
     }
 }
 
-fn checked_u16_len(field: &'static str, length: usize) -> Result<u16, SmbClientError> {
-    u16::try_from(length).map_err(|_| SmbClientError::FieldTooLarge {
-        field,
-        length,
-        max: U16_MAX_USIZE,
-    })
-}
-
-fn encode_utf16le(value: &str) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(value.len() * 2);
-    for unit in value.encode_utf16() {
-        push_u16(&mut bytes, unit);
-    }
-    bytes
-}
-
-fn push_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::packet::header::{Smb2Command, Smb2Header};
+    use crate::wire::push_u32;
     use proptest::prelude::*;
 
     proptest! {
@@ -340,9 +306,5 @@ mod tests {
         push_u32(&mut body, capabilities);
         push_u32(&mut body, maximal_access);
         body
-    }
-
-    fn push_u32(bytes: &mut Vec<u8>, value: u32) {
-        bytes.extend_from_slice(&value.to_le_bytes());
     }
 }

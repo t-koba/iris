@@ -1,9 +1,8 @@
 use iris_core_domain::types::error::{AuthErrorDetail, BackendError, NetworkErrorDetail};
 use iris_smb_client::{
-    authenticate_guest_actor, authenticate_ntlm_v2_actor, tree_connect_share_actor,
-    NtlmV2SecurityConfig, NtlmV2SessionSetup, Smb2Command, Smb2Dialect, Smb2EncryptionCipher,
-    Smb2NegotiateContext, Smb2NegotiateRequest, Smb2NegotiateResponse, Smb2SecurityMode,
-    SmbConnectionActor, SmbTree,
+    authenticate_guest, authenticate_ntlm_v2, tree_connect_share, NtlmV2SecurityConfig,
+    NtlmV2SessionSetup, Smb2Command, Smb2Dialect, Smb2EncryptionCipher, Smb2NegotiateContext,
+    Smb2NegotiateRequest, Smb2NegotiateResponse, Smb2SecurityMode, SmbConnectionActor, SmbTree,
 };
 use ring::rand::{SecureRandom, SystemRandom};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -177,12 +176,12 @@ async fn connect_native_smb(
             "SMB guest access is disabled; provide credentials or explicitly allow guest access",
         ));
     } else {
-        authenticate_guest_actor(&actor)
+        authenticate_guest(&actor)
             .await
             .map_err(|error| auth_error(format!("SMB guest session setup failed: {error}")))?;
     }
 
-    let tree = tree_connect_share_actor(&actor, server, share)
+    let tree = tree_connect_share(&actor, server, share)
         .await
         .map_err(|error| network_error(format!("SMB native tree connect failed: {error}")))?;
 
@@ -245,7 +244,7 @@ async fn authenticate_native_smb(
         .password
         .as_deref()
         .ok_or_else(|| auth_error("SMB native password is not configured"))?;
-    authenticate_ntlm_v2_actor(
+    authenticate_ntlm_v2(
         actor,
         &NtlmV2SessionSetup {
             user: config.username.clone().unwrap_or_default(),

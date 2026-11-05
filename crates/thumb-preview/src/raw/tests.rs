@@ -296,7 +296,7 @@ fn extracts_noncontiguous_jpeg_strips_from_structured_offsets() {
     let jpeg = encoded_test_jpeg(88, 58);
     let tiff = split_jpeg_strips_tiff(96, 512, &jpeg);
 
-    let path = unique_temp_raw_path("orf");
+    let path = unique_temp_raw_path("dng");
     std::fs::write(&path, &tiff).expect("write fragmented strip tiff");
 
     let result = extract_raw_thumbnail(&path, 256).expect("fragmented strip preview");
@@ -333,6 +333,7 @@ fn extracts_cr3_preview_from_stz2_sample_sizes() {
     let _ = std::fs::remove_file(path);
 }
 
+#[cfg(feature = "raw-full")]
 #[test]
 fn extracts_rw2_jpg_from_raw_tag_with_nonstandard_magic() {
     let jpeg = encoded_test_jpeg(192, 128);
@@ -393,7 +394,7 @@ fn prefers_smallest_sufficient_structured_candidate() {
     rw2.extend_from_slice(&small_jpeg);
     rw2.extend_from_slice(&large_jpeg);
 
-    let path = unique_temp_raw_path("rw2");
+    let path = unique_temp_raw_path("dng");
     std::fs::write(&path, &rw2).expect("write rw2-like file");
 
     let result = extract_raw_thumbnail(&path, 200).expect("best candidate");

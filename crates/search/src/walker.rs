@@ -117,7 +117,7 @@ fn record_from_metadata(path: &Path, metadata: &fs::Metadata) -> SegmentRecord {
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| path_string.clone());
-    let kind = classify_kind(path, metadata);
+    let kind = IndexedKind::for_path(path, metadata.is_dir());
     SegmentRecord {
         path: path_string,
         name,
@@ -140,31 +140,7 @@ fn record_from_metadata(path: &Path, metadata: &fs::Metadata) -> SegmentRecord {
     }
 }
 
-fn classify_kind(path: &Path, metadata: &fs::Metadata) -> IndexedKind {
-    if metadata.is_dir() {
-        return IndexedKind::Directory;
-    }
-    let Some(extension) = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.to_ascii_lowercase())
-    else {
-        return IndexedKind::File;
-    };
-    match extension.as_str() {
-        "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "heif" | "hif" | "tif" | "tiff"
-        | "bmp" | "avif" | "jp2" | "j2k" | "j2c" | "jpc" | "jpf" | "jpx" | "jpm" | "jxr"
-        | "hdp" | "wdp" | "jxl" | "arw" | "cr2" | "cr3" | "nef" | "nrw" | "orf" | "rw2" | "raf"
-        | "dng" | "x3f" => IndexedKind::Image,
-        "mp4" | "mov" | "m4v" | "mkv" | "avi" | "webm" | "mpg" | "mpeg" | "mj2" => {
-            IndexedKind::Video
-        }
-        "pdf" => IndexedKind::Pdf,
-        _ => IndexedKind::File,
-    }
-}
-
-fn system_time_to_secs(value: SystemTime) -> i64 {
+pub fn system_time_to_secs(value: SystemTime) -> i64 {
     match value.duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_secs().min(i64::MAX as u64) as i64,
         Err(error) => -(error.duration().as_secs().min(i64::MAX as u64) as i64),

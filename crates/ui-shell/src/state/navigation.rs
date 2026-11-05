@@ -8,7 +8,7 @@ use iris_search::token::{parse_filter_tokens, ParseWarning};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 const ENTRY_NOT_VISIBLE: usize = usize::MAX;
@@ -1037,7 +1037,7 @@ fn entry_matches_model(entry: &ListEntry, model: &FilterModel) -> bool {
         }
     }
     if let Some(range) = &model.date {
-        let Some(mtime) = entry.mtime.map(system_time_to_secs) else {
+        let Some(mtime) = entry.mtime.map(iris_search::walker::system_time_to_secs) else {
             return false;
         };
         if !range.contains(mtime) {
@@ -1052,32 +1052,5 @@ fn entry_matches_model(entry: &ListEntry, model: &FilterModel) -> bool {
 }
 
 pub(crate) fn list_entry_kind(entry: &ListEntry) -> IndexedKind {
-    if entry.is_dir {
-        return IndexedKind::Directory;
-    }
-    let Some(extension) = std::path::Path::new(&entry.name)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.to_ascii_lowercase())
-    else {
-        return IndexedKind::File;
-    };
-    match extension.as_str() {
-        "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "heif" | "hif" | "tif" | "tiff"
-        | "bmp" | "avif" | "jp2" | "j2k" | "j2c" | "jpc" | "jpf" | "jpx" | "jpm" | "jxr"
-        | "hdp" | "wdp" | "jxl" | "arw" | "cr2" | "cr3" | "nef" | "nrw" | "orf" | "rw2" | "raf"
-        | "dng" | "x3f" => IndexedKind::Image,
-        "mp4" | "mov" | "m4v" | "mkv" | "avi" | "webm" | "mpg" | "mpeg" | "mj2" => {
-            IndexedKind::Video
-        }
-        "pdf" => IndexedKind::Pdf,
-        _ => IndexedKind::File,
-    }
-}
-
-fn system_time_to_secs(value: SystemTime) -> i64 {
-    match value.duration_since(UNIX_EPOCH) {
-        Ok(duration) => duration.as_secs().min(i64::MAX as u64) as i64,
-        Err(error) => -(error.duration().as_secs().min(i64::MAX as u64) as i64),
-    }
+    IndexedKind::for_path(&entry.name, entry.is_dir)
 }

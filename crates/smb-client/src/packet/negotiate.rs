@@ -1,5 +1,8 @@
 use crate::packet::header::SMB2_HEADER_BYTES;
-use crate::wire::{checked_slice, le_u16, le_u32, le_u64};
+use crate::wire::{
+    align8, check_fixed_body, checked_slice, le_u16, le_u32, le_u64, push_u16, push_u32,
+    response_body,
+};
 use crate::SmbClientError;
 
 const NEGOTIATE_REQUEST_STRUCTURE_SIZE: u16 = 36;
@@ -117,19 +120,11 @@ impl Smb2NegotiateRequest {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, SmbClientError> {
-        if bytes.len() < NEGOTIATE_REQUEST_FIXED_BYTES {
-            return Err(SmbClientError::ShortFrame {
-                expected: NEGOTIATE_REQUEST_FIXED_BYTES,
-                actual: bytes.len(),
-            });
-        }
-
-        let structure_size = le_u16(bytes, 0);
-        if structure_size != NEGOTIATE_REQUEST_STRUCTURE_SIZE {
-            return Err(SmbClientError::InvalidStructureSize {
-                size: structure_size,
-            });
-        }
+        check_fixed_body(
+            bytes,
+            NEGOTIATE_REQUEST_FIXED_BYTES,
+            NEGOTIATE_REQUEST_STRUCTURE_SIZE,
+        )?;
 
         let dialect_count = le_u16(bytes, 2) as usize;
         let dialect_bytes = dialect_count.saturating_mul(2);
@@ -198,21 +193,11 @@ pub struct Smb2NegotiateResponse {
 
 impl Smb2NegotiateResponse {
     pub fn decode_packet(packet: &[u8]) -> Result<Self, SmbClientError> {
-        let body_offset = SMB2_HEADER_BYTES;
-        let required_len = body_offset + NEGOTIATE_RESPONSE_FIXED_BYTES;
-        if packet.len() < required_len {
-            return Err(SmbClientError::ShortFrame {
-                expected: required_len,
-                actual: packet.len(),
-            });
-        }
-        let body = &packet[body_offset..];
-        let structure_size = le_u16(body, 0);
-        if structure_size != NEGOTIATE_RESPONSE_STRUCTURE_SIZE {
-            return Err(SmbClientError::InvalidStructureSize {
-                size: structure_size,
-            });
-        }
+        let body = response_body(
+            packet,
+            NEGOTIATE_RESPONSE_FIXED_BYTES,
+            NEGOTIATE_RESPONSE_STRUCTURE_SIZE,
+        )?;
 
         let security_buffer_offset = le_u16(body, 56) as usize;
         let security_buffer_length = le_u16(body, 58) as usize;
@@ -368,33 +353,22 @@ fn decode_contexts(
         }
         offset = data_offset + data_length;
         if index + 1 < count {
-            offset = align_eight(offset);
+            offset = align8(offset);
         }
     }
     Ok(contexts)
 }
 
 fn pad_to_eight(bytes: &mut Vec<u8>, base_offset: usize) {
-    let padding = align_eight(base_offset + bytes.len()) - (base_offset + bytes.len());
+    let padding = align8(base_offset + bytes.len()) - (base_offset + bytes.len());
     bytes.resize(bytes.len() + padding, 0);
-}
-
-fn align_eight(value: usize) -> usize {
-    value.saturating_add(7) & !7
-}
-
-fn push_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_u32(bytes: &mut Vec<u8>, value: u32) {
-    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::packet::header::{Smb2Command, Smb2Header};
+    use crate::wire::{put_u16, put_u32, put_u64};
 
     #[test]
     fn negotiate_request_round_trips_dialects() {
@@ -503,7 +477,7 @@ mod tests {
         let mut packet = Smb2Header::new(Smb2Command::Negotiate, 7).encode().to_vec();
         let mut body = response_body(b"", Smb2Dialect::Smb311);
         put_u16(&mut body, 6, 2);
-        let context_offset = align_eight(SMB2_HEADER_BYTES + body.len());
+        let context_offset = align8(SMB2_HEADER_BYTES + body.len());
         put_u32(&mut body, 60, context_offset as u32);
         packet.extend_from_slice(&body);
         packet.resize(context_offset, 0);
@@ -549,17 +523,5 @@ mod tests {
         put_u16(&mut bytes, 58, security.len() as u16);
         put_u32(&mut bytes, 60, 0);
         bytes
-    }
-
-    fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
-        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
-    }
-
-    fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
-        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-    }
-
-    fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
-        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
     }
 }

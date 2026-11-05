@@ -1,5 +1,6 @@
 use super::*;
 use iced::widget::image as iced_image;
+use iris_core_domain::media::MediaFormat;
 use tokio_util::sync::CancellationToken;
 
 pub(super) enum ThumbnailTaskOutcome {
@@ -100,60 +101,17 @@ pub(super) async fn generate_one_thumbnail(
 }
 
 pub(super) fn thumbnail_priority_rank(path: &str) -> u8 {
-    let lower = path.to_lowercase();
-    if is_lightweight_image_path(&lower) {
-        0
-    } else if is_raw_path(&lower) {
-        1
-    } else {
-        2
+    match MediaFormat::from_path(path) {
+        Some(MediaFormat::Jpeg | MediaFormat::Image) => 0,
+        Some(MediaFormat::Raw) => 1,
+        _ => 2,
     }
 }
 
+/// Slow formats that are fetched only after everything visible.
 pub(super) fn is_background_media_path(path: &str) -> bool {
-    let lower = path.to_lowercase();
-    is_raw_path(&lower)
-        || is_modern_image_path(&lower)
-        || lower.ends_with(".pdf")
-        || is_video_path(&lower)
-}
-
-fn is_modern_image_path(lower_path: &str) -> bool {
-    [
-        ".avif", ".heic", ".heif", ".hif", ".jp2", ".j2k", ".j2c", ".jpc", ".jpf", ".jpx", ".jpm",
-        ".jxr", ".hdp", ".wdp", ".jxl",
-    ]
-    .iter()
-    .any(|extension| lower_path.ends_with(extension))
-}
-
-pub(super) fn is_lightweight_image_path(lower_path: &str) -> bool {
-    lower_path.ends_with(".jpg")
-        || lower_path.ends_with(".jpeg")
-        || lower_path.ends_with(".png")
-        || lower_path.ends_with(".webp")
-        || lower_path.ends_with(".gif")
-        || lower_path.ends_with(".bmp")
-        || lower_path.ends_with(".tif")
-        || lower_path.ends_with(".tiff")
-}
-
-pub(super) fn is_raw_path(lower_path: &str) -> bool {
-    lower_path.ends_with(".arw")
-        || lower_path.ends_with(".cr2")
-        || lower_path.ends_with(".cr3")
-        || lower_path.ends_with(".dng")
-        || lower_path.ends_with(".nef")
-        || lower_path.ends_with(".orf")
-        || lower_path.ends_with(".raf")
-        || lower_path.ends_with(".rw2")
-        || lower_path.ends_with(".x3f")
-}
-
-pub(super) fn is_video_path(lower_path: &str) -> bool {
-    lower_path.ends_with(".mp4")
-        || lower_path.ends_with(".mov")
-        || lower_path.ends_with(".mkv")
-        || lower_path.ends_with(".avi")
-        || lower_path.ends_with(".mj2")
+    matches!(
+        MediaFormat::from_path(path),
+        Some(MediaFormat::Raw | MediaFormat::ModernImage | MediaFormat::Pdf | MediaFormat::Video)
+    )
 }

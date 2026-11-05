@@ -1,7 +1,8 @@
 use crate::io::binary_reader::{join_to_backend_error, RemoteRangeReader, RemoteWindowSource};
-use crate::raw::{extract_raw_metadata, is_known_raw_extension, supports_raw_extension};
+use crate::raw::{extract_raw_metadata, supports_raw_extension};
 use chrono::NaiveDateTime;
 use iris_core_domain::backend_adapter::BackendAdapter;
+use iris_core_domain::media::MediaFormat;
 use iris_core_domain::types::error::BackendError;
 use iris_core_domain::types::metadata::MediaMetadata;
 use iris_core_domain::types::object::ObjectRef;
@@ -367,10 +368,7 @@ fn merge_metadata_entries(entries: &mut Vec<(String, String)>, additional: Vec<(
 }
 
 fn is_raw_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(is_known_raw_extension)
-        .unwrap_or(false)
+    MediaFormat::from_path(path) == Some(MediaFormat::Raw)
 }
 
 fn is_x3f_path(path: &Path) -> bool {

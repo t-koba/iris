@@ -45,6 +45,7 @@ fn tiff_with_primary_and_preview_ifds() -> Vec<u8> {
     tiff
 }
 
+#[cfg(feature = "raw-full")]
 fn rw2_with_sensor_borders() -> Vec<u8> {
     let mut rw2 = Vec::new();
     rw2.extend_from_slice(b"II");
@@ -71,6 +72,7 @@ fn rw2_with_sensor_borders() -> Vec<u8> {
     rw2
 }
 
+#[cfg(feature = "raw-full")]
 fn rw2_with_structured_metadata_entries() -> Vec<u8> {
     let mut rw2 = Vec::new();
     rw2.extend_from_slice(b"II");
@@ -118,8 +120,8 @@ fn x3f_with_header4_metadata(width: u32, height: u32, version: u32, rotation: u3
 fn extracts_primary_dimensions_from_main_raw_ifd() {
     let raw = tiff_with_primary_and_preview_ifds();
 
-    let path = unique_temp_raw_path("rw2");
-    std::fs::write(&path, &raw).expect("write rw2-like metadata file");
+    let path = unique_temp_raw_path("dng");
+    std::fs::write(&path, &raw).expect("write metadata file");
 
     let metadata = extract_raw_metadata(&path).expect("raw metadata");
     assert_eq!(metadata.width, Some(8368));
@@ -128,6 +130,7 @@ fn extracts_primary_dimensions_from_main_raw_ifd() {
     let _ = std::fs::remove_file(path);
 }
 
+#[cfg(feature = "raw-full")]
 #[test]
 fn extracts_panasonic_rw2_dimensions_from_sensor_borders() {
     let raw = rw2_with_sensor_borders();
@@ -142,6 +145,7 @@ fn extracts_panasonic_rw2_dimensions_from_sensor_borders() {
     let _ = std::fs::remove_file(path);
 }
 
+#[cfg(feature = "raw-full")]
 #[test]
 fn extracts_panasonic_rw2_container_entries_without_preview_fallback() {
     let raw = rw2_with_structured_metadata_entries();

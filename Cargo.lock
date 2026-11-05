@@ -3505,6 +3505,7 @@ version = "0.4.0"
 dependencies = [
  "chrono",
  "criterion",
+ "iris-core-domain",
  "proptest",
  "tempfile",
  "unicode-normalization",

@@ -1,41 +1,22 @@
-use super::support::{
-    is_background_media_path, is_lightweight_image_path, is_video_path, thumbnail_priority_rank,
-};
+use super::support::{is_background_media_path, thumbnail_priority_rank};
 use super::viewport::{distance_to_visible, visible_index_range};
 use super::*;
+use iris_core_domain::media::MediaFormat;
 
 const FAST_SCROLL_VELOCITY_PX_PER_SEC: f32 = 2_400.0;
 const FAST_SCROLL_GATE_WINDOW: std::time::Duration = std::time::Duration::from_millis(200);
 
 pub fn is_thumbnail_candidate(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    let ext = Path::new(&lower)
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default();
-
-    is_lightweight_image_path(&lower)
-        || matches!(
-            ext,
-            "heic"
-                | "heif"
-                | "hif"
-                | "avif"
-                | "jp2"
-                | "j2k"
-                | "j2c"
-                | "jpc"
-                | "jpf"
-                | "jpx"
-                | "jpm"
-                | "jxr"
-                | "hdp"
-                | "wdp"
-                | "jxl"
-        )
-        || (ext == "pdf" && iris_thumb_preview::pdf::supports_pdf_thumbnails())
-        || iris_thumb_preview::raw::supports_raw_extension(ext)
-        || (is_video_path(&lower) && iris_thumb_preview::video::supports_video_thumbnails())
+    match MediaFormat::from_path(name) {
+        Some(MediaFormat::Jpeg | MediaFormat::Image | MediaFormat::ModernImage) => true,
+        Some(MediaFormat::Raw) => Path::new(name)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(iris_thumb_preview::raw::supports_raw_extension),
+        Some(MediaFormat::Pdf) => iris_thumb_preview::pdf::supports_pdf_thumbnails(),
+        Some(MediaFormat::Video) => iris_thumb_preview::video::supports_video_thumbnails(),
+        None => false,
+    }
 }
 
 pub(super) fn request_priority_for(distance: usize, path: &str) -> RequestPriority {
@@ -216,8 +197,7 @@ pub(super) fn should_queue_thumbnail_for_path(
         return false;
     }
 
-    let lower = path.to_lowercase();
-    if is_video_path(&lower) {
+    if MediaFormat::from_path(path) == Some(MediaFormat::Video) {
         return distance == 0 && iris_thumb_preview::video::supports_video_thumbnails();
     }
 

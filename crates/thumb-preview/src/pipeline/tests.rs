@@ -21,13 +21,13 @@ use tokio::io::AsyncRead;
 #[test]
 fn classify_raw_by_extension_when_mime_missing() {
     let file_type = classify_for_local_path(Path::new("/tmp/sample.x3f"), None);
-    assert!(matches!(file_type, FileType::Raw));
+    assert!(matches!(file_type, Some(MediaFormat::Raw)));
 }
 
 #[test]
 fn classify_raw_by_extension_case_insensitive() {
     let file_type = classify_for_local_path(Path::new("/tmp/sample.X3F"), None);
-    assert!(matches!(file_type, FileType::Raw));
+    assert!(matches!(file_type, Some(MediaFormat::Raw)));
 }
 
 #[test]
@@ -38,7 +38,11 @@ fn classify_all_fr032_raw_extensions() {
     for ext in extensions {
         let file = format!("/tmp/sample.{}", ext);
         let file_type = classify_for_local_path(Path::new(&file), None);
-        assert!(matches!(file_type, FileType::Raw), "not raw: {}", ext);
+        assert!(
+            matches!(file_type, Some(MediaFormat::Raw)),
+            "not raw: {}",
+            ext
+        );
     }
 }
 
@@ -51,7 +55,13 @@ fn classify_all_modern_image_extensions() {
     for ext in extensions {
         let file = format!("/tmp/sample.{ext}");
         let file_type = classify_for_local_path(Path::new(&file), None);
-        assert!(matches!(file_type, FileType::Image), "not image: {ext}");
+        assert!(
+            matches!(
+                file_type,
+                Some(MediaFormat::Image | MediaFormat::ModernImage)
+            ),
+            "not image: {ext}"
+        );
     }
 }
 
@@ -59,7 +69,7 @@ fn classify_all_modern_image_extensions() {
 fn classify_motion_jpeg2000_as_video() {
     assert!(matches!(
         classify_for_local_path(Path::new("/tmp/sample.mj2"), None),
-        FileType::Video
+        Some(MediaFormat::Video)
     ));
 }
 
@@ -67,7 +77,7 @@ fn classify_motion_jpeg2000_as_video() {
 fn classify_jpeg_xr_vendor_mime_as_image() {
     assert!(matches!(
         classify_content_type(Some("image/vnd.ms-photo")),
-        FileType::Image
+        Some(MediaFormat::Image | MediaFormat::ModernImage)
     ));
 }
 

@@ -59,16 +59,10 @@ enum ActorCommand {
         requests: Vec<SmbCompoundRequest>,
         response_tx: oneshot::Sender<CompoundResponseResult>,
     },
-    SetSessionId {
+    #[cfg(test)]
+    SetIds {
         session_id: u64,
-        ack_tx: oneshot::Sender<Result<(), SmbConnectionError>>,
-    },
-    SetTreeId {
         tree_id: u32,
-        ack_tx: oneshot::Sender<Result<(), SmbConnectionError>>,
-    },
-    SetCreditRequest {
-        credit_request: u16,
         ack_tx: oneshot::Sender<Result<(), SmbConnectionError>>,
     },
     SetSigningKey {
@@ -334,33 +328,18 @@ impl SmbConnectionActor {
             .map_err(|_| SmbConnectionError::ResponseCanceled)?
     }
 
-    pub async fn set_session_id(&self, session_id: u64) -> Result<(), SmbConnectionError> {
+    /// Sets the session and tree ids that real connections learn from responses.
+    #[cfg(test)]
+    pub(crate) async fn set_ids(
+        &self,
+        session_id: u64,
+        tree_id: u32,
+    ) -> Result<(), SmbConnectionError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.sender
-            .send(ActorCommand::SetSessionId { session_id, ack_tx })
-            .await
-            .map_err(|_| SmbConnectionError::RequestQueueClosed)?;
-        ack_rx
-            .await
-            .map_err(|_| SmbConnectionError::ResponseCanceled)?
-    }
-
-    pub async fn set_tree_id(&self, tree_id: u32) -> Result<(), SmbConnectionError> {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.sender
-            .send(ActorCommand::SetTreeId { tree_id, ack_tx })
-            .await
-            .map_err(|_| SmbConnectionError::RequestQueueClosed)?;
-        ack_rx
-            .await
-            .map_err(|_| SmbConnectionError::ResponseCanceled)?
-    }
-
-    pub async fn set_credit_request(&self, credit_request: u16) -> Result<(), SmbConnectionError> {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.sender
-            .send(ActorCommand::SetCreditRequest {
-                credit_request,
+            .send(ActorCommand::SetIds {
+                session_id,
+                tree_id,
                 ack_tx,
             })
             .await
@@ -368,14 +347,6 @@ impl SmbConnectionActor {
         ack_rx
             .await
             .map_err(|_| SmbConnectionError::ResponseCanceled)?
-    }
-
-    pub async fn set_hmac_sha256_signing_key(
-        &self,
-        signing_key: impl Into<Vec<u8>>,
-    ) -> Result<(), SmbConnectionError> {
-        self.set_signing_key(SmbSigningKey::hmac_sha256(signing_key))
-            .await
     }
 
     pub async fn set_signing_key(
@@ -597,21 +568,14 @@ where
             requests,
             response_tx,
         } => send_compound_request(transport, state, pending, requests, response_tx).await,
-        ActorCommand::SetSessionId { session_id, ack_tx } => {
-            state.session_id = session_id;
-            send_ack(ack_tx);
-            Ok(())
-        }
-        ActorCommand::SetTreeId { tree_id, ack_tx } => {
-            state.tree_id = tree_id;
-            send_ack(ack_tx);
-            Ok(())
-        }
-        ActorCommand::SetCreditRequest {
-            credit_request,
+        #[cfg(test)]
+        ActorCommand::SetIds {
+            session_id,
+            tree_id,
             ack_tx,
         } => {
-            state.credit_request = credit_request.max(1);
+            state.session_id = session_id;
+            state.tree_id = tree_id;
             send_ack(ack_tx);
             Ok(())
         }
@@ -1188,7 +1152,9 @@ fn tracks_preauth(command: Smb2Command) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::smb311_preauth_hash_sequence;
+    use crate::crypto::{
+        sign_smb2_packet_hmac_sha256, smb311_preauth_hash_sequence, verify_smb2_packet_hmac_sha256,
+    };
     use crate::transform::{Smb3EncryptionContext, Smb3EncryptionKeys};
     use crate::transport::DirectTcpTransport;
     use tokio::io::duplex;
@@ -1293,8 +1259,7 @@ mod tests {
                 .expect("compound response");
         });
 
-        actor.set_session_id(0x1111).await.expect("session id");
-        actor.set_tree_id(0x2222).await.expect("tree id");
+        actor.set_ids(0x1111, 0x2222).await.expect("ids");
         let responses = actor
             .request_compound(vec![
                 SmbCompoundRequest {
@@ -1400,7 +1365,6 @@ mod tests {
             let header = Smb2Header::decode(&request).expect("header");
             assert_eq!(header.session_id, 0x1010);
             assert_eq!(header.tree_id, 0x2020);
-            assert_eq!(header.credit_request_response, 16);
             let mut response_header = Smb2Header::new(Smb2Command::Echo, header.message_id);
             response_header.credit_request_response = 32;
             transport
@@ -1409,9 +1373,7 @@ mod tests {
                 .expect("response");
         });
 
-        actor.set_session_id(0x1010).await.expect("session id");
-        actor.set_tree_id(0x2020).await.expect("tree id");
-        actor.set_credit_request(16).await.expect("credit request");
+        actor.set_ids(0x1010, 0x2020).await.expect("ids");
         let response = actor
             .request(Smb2Command::Echo, b"probe".to_vec())
             .await
@@ -1454,7 +1416,7 @@ mod tests {
                 .expect("response");
         });
 
-        actor.set_session_id(session_id).await.expect("session id");
+        actor.set_ids(session_id, 0).await.expect("ids");
         actor
             .enable_encryption(client_keys)
             .await
@@ -1551,6 +1513,107 @@ mod tests {
 
         assert_eq!(before_echo, expected);
         assert_eq!(after_echo, expected);
+    }
+
+    async fn echo_with_hmac_signing(
+        respond: impl FnOnce(Smb2Header, &[u8]) -> Vec<u8> + Send + 'static,
+    ) -> Result<SmbResponse, SmbConnectionError> {
+        let key = b"session-signing-key".to_vec();
+        let server_key = key.clone();
+        let (client, server) = duplex(4096);
+        let actor = SmbConnectionActor::spawn(client);
+        let server_task = tokio::spawn(async move {
+            let mut transport = DirectTcpTransport::new(server);
+            let request = transport.recv_packet().await.expect("request");
+            let header = Smb2Header::decode(&request).expect("header");
+            assert_eq!(header.flags & SMB2_FLAGS_SIGNED, SMB2_FLAGS_SIGNED);
+            assert!(verify_smb2_packet_hmac_sha256(&server_key, &request).expect("verify"));
+            transport
+                .send_packet(&respond(header, &server_key))
+                .await
+                .expect("response");
+        });
+        actor
+            .set_signing_key(SmbSigningKey::hmac_sha256(key))
+            .await
+            .expect("signing key");
+        let result = actor.request(Smb2Command::Echo, b"ping".to_vec()).await;
+        server_task.await.expect("server task");
+        result
+    }
+
+    fn signed_echo_response(request: Smb2Header, key: &[u8]) -> Vec<u8> {
+        let mut header = Smb2Header::new(request.command, request.message_id);
+        header.flags |= SMB2_FLAGS_SIGNED;
+        let mut response = response_packet(header, b"pong");
+        sign_smb2_packet_hmac_sha256(key, &mut response).expect("sign");
+        response
+    }
+
+    #[tokio::test]
+    async fn actor_signs_requests_and_verifies_signed_responses() {
+        let response = echo_with_hmac_signing(signed_echo_response)
+            .await
+            .expect("signed response");
+        assert_eq!(response.body, b"pong");
+    }
+
+    #[tokio::test]
+    async fn actor_rejects_bad_response_signature() {
+        let error = echo_with_hmac_signing(|request, key| {
+            let mut response = signed_echo_response(request, key);
+            *response.last_mut().expect("byte") ^= 0xff;
+            response
+        })
+        .await
+        .expect_err("bad signature");
+        assert!(matches!(
+            error,
+            SmbConnectionError::SignatureVerificationFailed
+        ));
+    }
+
+    #[tokio::test]
+    async fn actor_rejects_unsigned_response_once_signing_is_enabled() {
+        let error = echo_with_hmac_signing(|request, _| {
+            response_packet(
+                Smb2Header::new(request.command, request.message_id),
+                b"pong",
+            )
+        })
+        .await
+        .expect_err("unsigned response");
+        assert!(matches!(error, SmbConnectionError::UnsignedResponse));
+    }
+
+    #[tokio::test]
+    async fn actor_rejects_response_for_another_command() {
+        let (client, server) = duplex(4096);
+        let actor = SmbConnectionActor::spawn(client);
+        let server_task = tokio::spawn(async move {
+            let mut transport = DirectTcpTransport::new(server);
+            let request = transport.recv_packet().await.expect("request");
+            let header = Smb2Header::decode(&request).expect("header");
+            transport
+                .send_packet(&response_packet(
+                    Smb2Header::new(Smb2Command::Cancel, header.message_id),
+                    b"",
+                ))
+                .await
+                .expect("response");
+        });
+        let error = actor
+            .request(Smb2Command::Echo, b"ping".to_vec())
+            .await
+            .expect_err("command mismatch");
+        assert!(matches!(
+            error,
+            SmbConnectionError::CommandMismatch {
+                expected: Smb2Command::Echo,
+                actual: Smb2Command::Cancel,
+            }
+        ));
+        server_task.await.expect("server task");
     }
 
     fn response_packet(header: Smb2Header, body: &[u8]) -> Vec<u8> {

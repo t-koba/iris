@@ -18,24 +18,16 @@ mod bmff_samples;
 mod candidates;
 mod containers;
 mod structured_metadata;
-mod tiff_dimensions;
+mod tiff;
 mod tiff_numeric;
-mod tiff_preview;
-mod tiff_segments;
 
 use bmff_boxes::*;
 use bmff_samples::*;
 use candidates::*;
 use containers::*;
 use structured_metadata::*;
-use tiff_dimensions::*;
+use tiff::*;
 use tiff_numeric::*;
-use tiff_preview::*;
-use tiff_segments::*;
-
-const KNOWN_RAW_EXTENSIONS: &[&str] = &[
-    "arw", "cr2", "cr3", "dng", "nef", "orf", "raf", "rw2", "x3f",
-];
 
 const RAW_CORE_EXTENSIONS: &[&str] = &["arw", "cr3", "dng", "nef"];
 
@@ -50,7 +42,6 @@ const TIFF_MAGIC_BIGTIFF: u16 = 43;
 const TIFF_MAGIC_RW2: u16 = 0x55;
 const BIGTIFF_OFFSET_SIZE: u16 = 8;
 const BIGTIFF_ENTRY_BYTES: usize = 20;
-const BIGTIFF_INLINE_BYTES: usize = 8;
 
 const TAG_NEW_SUBFILE_TYPE: u16 = 0x00FE;
 const TAG_SUBFILE_TYPE: u16 = 0x00FF;
@@ -330,11 +321,6 @@ fn supported_raw_extension(file_path: &Path) -> Option<String> {
         return None;
     }
     Some(ext)
-}
-
-pub fn is_known_raw_extension(ext: &str) -> bool {
-    let ext = ext.to_ascii_lowercase();
-    KNOWN_RAW_EXTENSIONS.contains(&ext.as_str())
 }
 
 pub fn supports_raw_extension(ext: &str) -> bool {

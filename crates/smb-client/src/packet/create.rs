@@ -1,13 +1,14 @@
 use crate::packet::header::SMB2_HEADER_BYTES;
-use crate::wire::{checked_slice, decode_utf16le, le_u16, le_u32, le_u64};
+use crate::wire::{
+    align8, check_fixed_body, checked_slice, checked_u16_len, checked_u32_len, decode_utf16le,
+    encode_utf16le, le_u16, le_u32, le_u64, push_u16, push_u32, push_u64, put_u32, response_body,
+};
 use crate::SmbClientError;
 
 const CREATE_REQUEST_STRUCTURE_SIZE: u16 = 57;
 const CREATE_RESPONSE_STRUCTURE_SIZE: u16 = 89;
 const CREATE_REQUEST_FIXED_BYTES: usize = 56;
 const CREATE_RESPONSE_FIXED_BYTES: usize = 88;
-const U16_MAX_USIZE: usize = u16::MAX as usize;
-const U32_MAX_USIZE: usize = u32::MAX as usize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -228,7 +229,7 @@ impl Smb2CreateRequest {
 
         if !self.create_contexts.is_empty() {
             let next_absolute_offset = SMB2_HEADER_BYTES + bytes.len();
-            let padding = padding_to_8(next_absolute_offset);
+            let padding = align8(next_absolute_offset) - next_absolute_offset;
             bytes.resize(bytes.len() + padding, 0);
             let contexts_offset =
                 checked_u32_len("create.contexts_offset", SMB2_HEADER_BYTES + bytes.len())?;
@@ -240,18 +241,11 @@ impl Smb2CreateRequest {
     }
 
     pub fn decode(body: &[u8]) -> Result<Self, SmbClientError> {
-        if body.len() < CREATE_REQUEST_FIXED_BYTES {
-            return Err(SmbClientError::ShortFrame {
-                expected: CREATE_REQUEST_FIXED_BYTES,
-                actual: body.len(),
-            });
-        }
-        let structure_size = le_u16(body, 0);
-        if structure_size != CREATE_REQUEST_STRUCTURE_SIZE {
-            return Err(SmbClientError::InvalidStructureSize {
-                size: structure_size,
-            });
-        }
+        check_fixed_body(
+            body,
+            CREATE_REQUEST_FIXED_BYTES,
+            CREATE_REQUEST_STRUCTURE_SIZE,
+        )?;
 
         let name_offset = le_u16(body, 44) as usize;
         let name_length = le_u16(body, 46) as usize;
@@ -317,28 +311,18 @@ pub struct Smb2CreateResponse {
 
 impl Smb2CreateResponse {
     pub fn decode_packet(packet: &[u8]) -> Result<Self, SmbClientError> {
-        let body_offset = SMB2_HEADER_BYTES;
-        let required_len = body_offset + CREATE_RESPONSE_FIXED_BYTES;
-        if packet.len() < required_len {
-            return Err(SmbClientError::ShortFrame {
-                expected: required_len,
-                actual: packet.len(),
-            });
-        }
-        let body = &packet[body_offset..];
-        let structure_size = le_u16(body, 0);
-        if structure_size != CREATE_RESPONSE_STRUCTURE_SIZE {
-            return Err(SmbClientError::InvalidStructureSize {
-                size: structure_size,
-            });
-        }
+        let body = response_body(
+            packet,
+            CREATE_RESPONSE_FIXED_BYTES,
+            CREATE_RESPONSE_STRUCTURE_SIZE,
+        )?;
 
         let create_contexts_offset = le_u32(body, 80) as usize;
         let create_contexts_length = le_u32(body, 84) as usize;
         let create_contexts = if create_contexts_length == 0 {
             Vec::new()
         } else {
-            checked_packet_slice(packet, create_contexts_offset, create_contexts_length)?.to_vec()
+            checked_slice(packet, create_contexts_offset, create_contexts_length)?.to_vec()
         };
 
         Ok(Self {
@@ -359,71 +343,6 @@ impl Smb2CreateResponse {
             create_contexts,
         })
     }
-}
-
-fn checked_u16_len(field: &'static str, length: usize) -> Result<u16, SmbClientError> {
-    u16::try_from(length).map_err(|_| SmbClientError::FieldTooLarge {
-        field,
-        length,
-        max: U16_MAX_USIZE,
-    })
-}
-
-fn checked_u32_len(field: &'static str, length: usize) -> Result<u32, SmbClientError> {
-    u32::try_from(length).map_err(|_| SmbClientError::FieldTooLarge {
-        field,
-        length,
-        max: U32_MAX_USIZE,
-    })
-}
-
-fn checked_packet_slice(
-    packet: &[u8],
-    offset: usize,
-    length: usize,
-) -> Result<&[u8], SmbClientError> {
-    let Some(end) = offset.checked_add(length) else {
-        return Err(SmbClientError::BufferRangeOutOfBounds {
-            offset,
-            length,
-            available: packet.len(),
-        });
-    };
-    packet
-        .get(offset..end)
-        .ok_or(SmbClientError::BufferRangeOutOfBounds {
-            offset,
-            length,
-            available: packet.len(),
-        })
-}
-
-fn encode_utf16le(value: &str) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(value.len() * 2);
-    for unit in value.encode_utf16() {
-        push_u16(&mut bytes, unit);
-    }
-    bytes
-}
-
-fn padding_to_8(offset: usize) -> usize {
-    (8 - offset % 8) % 8
-}
-
-fn push_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_u32(bytes: &mut Vec<u8>, value: u32) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_u64(bytes: &mut Vec<u8>, value: u64) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
-    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
 #[cfg(test)]

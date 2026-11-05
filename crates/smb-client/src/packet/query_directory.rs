@@ -1,13 +1,15 @@
 use crate::packet::create::Smb2FileId;
 use crate::packet::header::SMB2_HEADER_BYTES;
-use crate::wire::{checked_body_tail_slice, checked_slice, decode_utf16le, le_u16, le_u32, le_u64};
+use crate::wire::{
+    check_fixed_body, checked_body_tail_slice, checked_slice, checked_u16_len, decode_utf16le,
+    encode_utf16le, le_u16, le_u32, le_u64, push_u16, push_u32, push_u64, response_body,
+};
 use crate::SmbClientError;
 
 const QUERY_DIRECTORY_REQUEST_STRUCTURE_SIZE: u16 = 33;
 const QUERY_DIRECTORY_RESPONSE_STRUCTURE_SIZE: u16 = 9;
 const QUERY_DIRECTORY_REQUEST_FIXED_BYTES: usize = 32;
 const QUERY_DIRECTORY_RESPONSE_FIXED_BYTES: usize = 8;
-const U16_MAX_USIZE: usize = u16::MAX as usize;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Smb2FileInformationClass(pub u8);
@@ -64,18 +66,11 @@ impl Smb2QueryDirectoryRequest {
     }
 
     pub fn decode(body: &[u8]) -> Result<Self, SmbClientError> {
-        if body.len() < QUERY_DIRECTORY_REQUEST_FIXED_BYTES {
-            return Err(SmbClientError::ShortFrame {
-                expected: QUERY_DIRECTORY_REQUEST_FIXED_BYTES,
-                actual: body.len(),
-            });
-        }
-        let structure_size = le_u16(body, 0);
-        if structure_size != QUERY_DIRECTORY_REQUEST_STRUCTURE_SIZE {
-            return Err(SmbClientError::InvalidStructureSize {
-                size: structure_size,
-            });
-        }
+        check_fixed_body(
+            body,
+            QUERY_DIRECTORY_REQUEST_FIXED_BYTES,
+            QUERY_DIRECTORY_REQUEST_STRUCTURE_SIZE,
+        )?;
 
         let file_name_offset = le_u16(body, 24) as usize;
         let file_name_length = le_u16(body, 26) as usize;
@@ -111,21 +106,11 @@ pub struct Smb2QueryDirectoryResponse {
 
 impl Smb2QueryDirectoryResponse {
     pub fn decode_packet(packet: &[u8]) -> Result<Self, SmbClientError> {
-        let body_offset = SMB2_HEADER_BYTES;
-        let required_len = body_offset + QUERY_DIRECTORY_RESPONSE_FIXED_BYTES;
-        if packet.len() < required_len {
-            return Err(SmbClientError::ShortFrame {
-                expected: required_len,
-                actual: packet.len(),
-            });
-        }
-        let body = &packet[body_offset..];
-        let structure_size = le_u16(body, 0);
-        if structure_size != QUERY_DIRECTORY_RESPONSE_STRUCTURE_SIZE {
-            return Err(SmbClientError::InvalidStructureSize {
-                size: structure_size,
-            });
-        }
+        let body = response_body(
+            packet,
+            QUERY_DIRECTORY_RESPONSE_FIXED_BYTES,
+            QUERY_DIRECTORY_RESPONSE_STRUCTURE_SIZE,
+        )?;
 
         let output_buffer_offset = le_u16(body, 2) as usize;
         let output_buffer_length = le_u32(body, 4) as usize;
@@ -145,14 +130,6 @@ impl Smb2QueryDirectoryResponse {
     }
 }
 
-fn checked_u16_len(field: &'static str, length: usize) -> Result<u16, SmbClientError> {
-    u16::try_from(length).map_err(|_| SmbClientError::FieldTooLarge {
-        field,
-        length,
-        max: U16_MAX_USIZE,
-    })
-}
-
 fn checked_packet_tail_slice(
     packet: &[u8],
     offset: usize,
@@ -167,26 +144,6 @@ fn checked_packet_tail_slice(
         });
     }
     checked_slice(packet, offset, length)
-}
-
-fn encode_utf16le(value: &str) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(value.len() * 2);
-    for unit in value.encode_utf16() {
-        push_u16(&mut bytes, unit);
-    }
-    bytes
-}
-
-fn push_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_u32(bytes: &mut Vec<u8>, value: u32) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_u64(bytes: &mut Vec<u8>, value: u64) {
-    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 #[cfg(test)]
