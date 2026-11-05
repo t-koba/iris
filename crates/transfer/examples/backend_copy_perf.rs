@@ -4,7 +4,7 @@ use iris_backends::smb::connection::{SmbConnectionConfig, DEFAULT_SMB_PORT};
 use iris_core_domain::backend_adapter::BackendAdapter;
 use iris_core_domain::types::object::{BackendId, ObjectKey, ObjectRef, StableId};
 use iris_core_domain::types::progress::ProgressInfo;
-use iris_transfer::executor::client_relay_copy;
+use iris_transfer::executor::{client_relay_copy, CopyRelayOptions};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
@@ -93,12 +93,7 @@ async fn run(args: Args) -> Result<(), String> {
                 iteration,
                 args.mode,
             )?;
-            let (tx, _rx) = watch::channel(ProgressInfo {
-                bytes_completed: 0,
-                bytes_total: None,
-                files_completed: 0,
-                files_total: Some(1),
-            });
+            let (tx, _rx) = watch::channel(ProgressInfo::single_file(0, None, false));
             let src_ref = object_ref("perf-src", relative_src)?;
             let dst_ref = object_ref("perf-dst", &relative_dst)?;
             let result = client_relay_copy(
@@ -107,6 +102,7 @@ async fn run(args: Args) -> Result<(), String> {
                 dst_backend.as_ref(),
                 &dst_ref,
                 &tx,
+                CopyRelayOptions::default(),
             )
             .await
             .map_err(|error| {

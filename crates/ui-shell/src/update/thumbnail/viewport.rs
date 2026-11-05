@@ -208,32 +208,9 @@ pub(super) fn distance_to_visible(index: usize, visible_start: usize, visible_en
 mod tests {
     use super::*;
     use iris_core_domain::types::list::ListEntry;
-    use iris_core_domain::types::metadata::MetadataLevel;
-    use iris_core_domain::types::object::{BackendId, ObjectKey, ObjectRef, StableId};
 
     fn entry(name: &str, is_dir: bool) -> ListEntry {
-        ListEntry {
-            object_ref: ObjectRef {
-                key: ObjectKey {
-                    backend_id: BackendId("local".to_string()),
-                    stable_id: StableId(name.to_string()),
-                },
-                parent_stable_id: None,
-                display_path: format!("/tmp/{name}"),
-            },
-            sort_name_key: ListEntry::sort_name_key_for(name),
-            sort_extension_key: ListEntry::sort_extension_key_for(name),
-            name: name.to_string(),
-            is_dir,
-            metadata_level: MetadataLevel::L1,
-            size: None,
-            mtime: None,
-            ctime: None,
-            is_symlink: false,
-            symlink_target: None,
-            is_inaccessible: false,
-            annotation: None,
-        }
+        crate::test_support::local_entry(&format!("/tmp/{name}"), is_dir)
     }
 
     #[test]

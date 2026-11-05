@@ -13,16 +13,12 @@ use iris_core_domain::types::options::{ConflictResolution, CopyOptions, DeleteMo
 use iris_core_domain::types::progress::ByteRange;
 use iris_core_domain::types::read_handle::ReadHandle;
 use iris_core_domain::types::session::BackendSession;
-use iris_core_domain::types::thumbnail::{ThumbnailHint, ThumbnailResult};
 use iris_smb_client::{
-    close_directory_actor, close_file_actor, copy_file_chunks_actor, create_directory_actor,
-    delete_directory_actor, delete_file_actor, list_directory_once_actor, open_file_and_read_actor,
-    open_file_for_read_actor, open_file_for_write_actor, read_file_ranges_pipelined,
-    rename_directory_actor, rename_file_actor, set_file_basic_info_actor, write_file_at_actor,
-    write_file_chunks_pipelined, Smb2CreateDisposition, Smb2FileAttributes,
-    Smb2FileBasicInformation, SmbConnectionActor, SmbConnectionError, SmbDirectoryEntry,
-    SmbOpenDirectory, SmbOpenFile, SmbReadRange, DEFAULT_READ_CHUNK_LENGTH,
-    DEFAULT_WRITE_CHUNK_LENGTH,
+    close, copy_file_chunks, create_directory, delete, list_directory_once, open_file_and_read,
+    open_file_for_read, open_file_for_write, read_file_ranges_pipelined, rename, set_basic_info,
+    write_file_at, write_file_chunks_pipelined, Smb2CreateDisposition, Smb2FileAttributes,
+    Smb2FileBasicInformation, SmbConnectionActor, SmbConnectionError, SmbDirectoryEntry, SmbHandle,
+    SmbReadRange, DEFAULT_READ_CHUNK_LENGTH, DEFAULT_WRITE_CHUNK_LENGTH,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -105,7 +101,7 @@ impl SmbAdapter {
 
         let smb_path = smb_relative_path(&dir.display_path)?;
         let offset = parse_cursor_offset(cursor)?;
-        let entries = list_directory_once_actor(&native.actor, smb_path)
+        let entries = list_directory_once(&native.actor, smb_path)
             .await
             .map_err(|error| smb_network_error("list directory", error))?;
 
@@ -169,7 +165,7 @@ impl SmbAdapter {
         }
 
         let (parent, name) = parent_display_path_and_name(&object.display_path)?;
-        let entries = list_directory_once_actor(&native.actor, smb_relative_path(&parent)?)
+        let entries = list_directory_once(&native.actor, smb_relative_path(&parent)?)
             .await
             .map_err(|error| smb_network_error("stat parent directory", error))?;
         let entry = entries
@@ -214,13 +210,13 @@ impl SmbAdapter {
             .min(u64::from(DEFAULT_READ_CHUNK_LENGTH)) as u32;
         let (file, mut initial_data) = if initial_length == 0 {
             (
-                open_file_for_read_actor(&native.actor, smb_path)
+                open_file_for_read(&native.actor, smb_path)
                     .await
                     .map_err(|error| smb_network_error("open file", error))?,
                 Vec::new(),
             )
         } else {
-            open_file_and_read_actor(
+            open_file_and_read(
                 &native.actor,
                 smb_path,
                 SmbReadRange {
@@ -325,18 +321,18 @@ impl SmbAdapter {
         create_disposition: Smb2CreateDisposition,
     ) -> Result<(), BackendError> {
         let smb_path = smb_relative_path(display_path)?;
-        let file = open_file_for_write_actor(&native.actor, smb_path, create_disposition)
+        let file = open_file_for_write(&native.actor, smb_path, create_disposition)
             .await
             .map_err(|error| smb_network_error("open file for write", error))?;
         let write_result = if data.is_empty() {
             Ok(())
         } else {
-            write_file_at_actor(&native.actor, &file, 0, data)
+            write_file_at(&native.actor, &file, 0, data)
                 .await
                 .map(|_| ())
                 .map_err(|error| smb_network_error("write file", error))
         };
-        let close_result = close_file_actor(&native.actor, file)
+        let close_result = close(&native.actor, file)
             .await
             .map(|_| ())
             .map_err(|error| smb_network_error("close written file", error));
@@ -351,7 +347,7 @@ impl SmbAdapter {
         create_disposition: Smb2CreateDisposition,
     ) -> Result<(), BackendError> {
         let smb_path = smb_relative_path(display_path)?;
-        let file = open_file_for_write_actor(&native.actor, smb_path, create_disposition)
+        let file = open_file_for_write(&native.actor, smb_path, create_disposition)
             .await
             .map_err(|error| smb_network_error("open file for streaming write", error))?;
         const PIPELINE_DEPTH: usize = 8;
@@ -383,7 +379,7 @@ impl SmbAdapter {
             }
         }
 
-        let close_result = close_file_actor(&native.actor, file)
+        let close_result = close(&native.actor, file)
             .await
             .map(|_| ())
             .map_err(|error| smb_network_error("close streamed file", error));
@@ -404,15 +400,15 @@ impl SmbAdapter {
         let source_path = smb_relative_path(&src.display_path)?;
         let target_path = smb_relative_path(&final_display_path)?;
         let replace_if_exists = matches!(options.on_conflict, ConflictResolution::Overwrite);
-        if src_metadata.is_dir {
-            rename_directory_actor(&native.actor, source_path, target_path, replace_if_exists)
-                .await
-                .map_err(|error| smb_network_error("rename directory", error))
-        } else {
-            rename_file_actor(&native.actor, source_path, target_path, replace_if_exists)
-                .await
-                .map_err(|error| smb_network_error("rename file", error))
-        }
+        rename(
+            &native.actor,
+            source_path,
+            target_path,
+            src_metadata.is_dir,
+            replace_if_exists,
+        )
+        .await
+        .map_err(|error| smb_network_error("rename", error))
     }
 
     async fn copy_native(
@@ -434,7 +430,7 @@ impl SmbAdapter {
             .await?;
         let source_path = smb_relative_path(&src.display_path)?;
         let target_path = smb_relative_path(&final_display_path)?;
-        copy_file_chunks_actor(
+        copy_file_chunks(
             &native.actor,
             source_path,
             target_path.clone(),
@@ -444,7 +440,7 @@ impl SmbAdapter {
         .map_err(|error| smb_network_error("server-side copy", error))?;
 
         if let Some(mtime) = src_metadata.mtime {
-            set_file_basic_info_actor(
+            set_basic_info(
                 &native.actor,
                 target_path,
                 Smb2FileBasicInformation {
@@ -480,14 +476,14 @@ impl SmbAdapter {
             let smb_path = smb_relative_path(&display_path)?;
             if metadata.is_dir {
                 if visited {
-                    delete_directory_actor(&native.actor, smb_path)
+                    delete(&native.actor, smb_path, true)
                         .await
                         .map_err(|error| smb_network_error("delete directory", error))?;
                     continue;
                 }
 
                 stack.push((display_path.clone(), true));
-                let entries = list_directory_once_actor(&native.actor, smb_path)
+                let entries = list_directory_once(&native.actor, smb_path)
                     .await
                     .map_err(|error| smb_network_error("list directory for delete", error))?;
                 for entry in entries
@@ -497,7 +493,7 @@ impl SmbAdapter {
                     stack.push((child_display_path(&display_path, &entry.file_name), false));
                 }
             } else {
-                delete_file_actor(&native.actor, smb_path)
+                delete(&native.actor, smb_path, false)
                     .await
                     .map_err(|error| smb_network_error("delete file", error))?;
             }
@@ -514,7 +510,7 @@ struct NativeSmbReadStream {
     actor: SmbConnectionActor,
     pool: Arc<SmbPool>,
     generation: u64,
-    file: Option<SmbOpenFile>,
+    file: Option<SmbHandle>,
     next_offset: u64,
     remaining: u64,
     buffer: Vec<u8>,
@@ -527,7 +523,7 @@ struct NativeSmbReadStream {
 impl NativeSmbReadStream {
     fn new(
         actor: SmbConnectionActor,
-        file: SmbOpenFile,
+        file: SmbHandle,
         offset: u64,
         length: u64,
         initial_data: Vec<u8>,
@@ -597,9 +593,9 @@ impl NativeSmbReadStream {
             return;
         };
         let actor = self.actor.clone();
-        self.close_future = Some(Box::pin(async move {
-            close_file_actor(&actor, file).await.map(|_| ())
-        }));
+        self.close_future = Some(Box::pin(
+            async move { close(&actor, file).await.map(|_| ()) },
+        ));
     }
 
     fn invalidate_connection(&self) {
@@ -680,7 +676,7 @@ impl Drop for NativeSmbReadStream {
         if let Some(file) = self.file.take() {
             let actor = self.actor.clone();
             tokio::spawn(async move {
-                let _ = close_file_actor(&actor, file).await;
+                let _ = close(&actor, file).await;
             });
         }
     }
@@ -781,7 +777,7 @@ impl BackendAdapter for SmbAdapter {
     ) -> Result<(), BackendError> {
         let native = self.native_session().await?;
         let path = smb_relative_path(&object.display_path)?;
-        let result = set_file_basic_info_actor(
+        let result = set_basic_info(
             &native.actor,
             path,
             Smb2FileBasicInformation {
@@ -802,7 +798,7 @@ impl BackendAdapter for SmbAdapter {
         let native = self.native_session().await?;
         let display_path = child_display_path(&parent.display_path, name);
         let smb_path = smb_relative_path(&display_path)?;
-        let result = create_directory_actor(&native.actor, smb_path)
+        let result = create_directory(&native.actor, smb_path)
             .await
             .map_err(|error| smb_network_error("create directory", error));
         let directory = self.finish_mutation(&native, result).await?;
@@ -862,17 +858,6 @@ impl BackendAdapter for SmbAdapter {
         Ok(self.next_ticket(OperationKind::Delete))
     }
 
-    async fn get_thumbnail(
-        &self,
-        _object: &ObjectRef,
-        _hint: ThumbnailHint,
-    ) -> Result<ThumbnailResult, BackendError> {
-        // No thumbnail API is assumed; range reads plus embedded preview extraction are used instead.
-        Err(BackendError::Unsupported {
-            operation: "get_thumbnail",
-        })
-    }
-
     async fn get_metadata(
         &self,
         object: &ObjectRef,
@@ -906,9 +891,9 @@ fn native_write_disposition(resolution: &ConflictResolution) -> Smb2CreateDispos
 
 async fn close_directory_after_create(
     actor: &SmbConnectionActor,
-    directory: SmbOpenDirectory,
+    directory: SmbHandle,
 ) -> Result<(), BackendError> {
-    close_directory_actor(actor, directory)
+    close(actor, directory)
         .await
         .map(|_| ())
         .map_err(|error| smb_network_error("close created directory", error))
@@ -1061,13 +1046,13 @@ fn smb_network_error(operation: &'static str, error: SmbConnectionError) -> Back
 mod tests {
     use super::*;
     use iris_smb_client::packet::header::SMB2_HEADER_BYTES;
+    use iris_smb_client::test_support::*;
     use iris_smb_client::{
-        DirectTcpTransport, Smb2CloseFlags, Smb2CloseRequest, Smb2Command, Smb2CreateAction,
-        Smb2CreateDisposition, Smb2CreateOptions, Smb2CreateRequest, Smb2DesiredAccess,
-        Smb2Dialect, Smb2FileId, Smb2FileInformationClass, Smb2Header, Smb2IoctlFlags,
-        Smb2IoctlRequest, Smb2NegotiateRequest, Smb2QueryDirectoryFlags, Smb2QueryDirectoryRequest,
-        Smb2ReadRequest, Smb2SecurityMode, Smb2SetInfoRequest, Smb2ShareCapabilities,
-        Smb2ShareFlags, Smb2ShareType, Smb2TreeConnectRequest, Smb2WriteRequest, SmbNtStatus,
+        DirectTcpTransport, Smb2CloseRequest, Smb2Command, Smb2CreateDisposition,
+        Smb2CreateOptions, Smb2CreateRequest, Smb2DesiredAccess, Smb2Dialect, Smb2FileId,
+        Smb2FileInformationClass, Smb2Header, Smb2IoctlFlags, Smb2IoctlRequest,
+        Smb2NegotiateRequest, Smb2QueryDirectoryFlags, Smb2QueryDirectoryRequest, Smb2ReadRequest,
+        Smb2SetInfoRequest, Smb2ShareFlags, Smb2TreeConnectRequest, Smb2WriteRequest, SmbNtStatus,
         DEFAULT_COPYCHUNK_CHUNK_BYTES, FSCTL_SRV_COPYCHUNK, FSCTL_SRV_REQUEST_RESUME_KEY,
         SMB2_RESUME_KEY_BYTES,
     };
@@ -1458,7 +1443,7 @@ mod tests {
         transport
             .send_packet(&response_packet(
                 response_header,
-                &tree_connect_response_body(),
+                &tree_connect_response_body(Smb2ShareFlags::DFS),
             ))
             .await
             .expect("tree response");
@@ -1969,22 +1954,22 @@ mod tests {
         assert_eq!(copychunk_body.file_id, target_file_id);
         assert!(copychunk_body.flags.contains(Smb2IoctlFlags::IS_FSCTL));
         assert_eq!(&copychunk_body.input[..SMB2_RESUME_KEY_BYTES], &resume_key);
-        assert_eq!(u32_from_le(&copychunk_body.input, 24), 2);
-        assert_eq!(u64_from_le(&copychunk_body.input, 32), 0);
-        assert_eq!(u64_from_le(&copychunk_body.input, 40), 0);
+        assert_eq!(le_u32(&copychunk_body.input, 24), 2);
+        assert_eq!(le_u64(&copychunk_body.input, 32), 0);
+        assert_eq!(le_u64(&copychunk_body.input, 40), 0);
         assert_eq!(
-            u32_from_le(&copychunk_body.input, 48),
+            le_u32(&copychunk_body.input, 48),
             DEFAULT_COPYCHUNK_CHUNK_BYTES
         );
         assert_eq!(
-            u64_from_le(&copychunk_body.input, 56),
+            le_u64(&copychunk_body.input, 56),
             u64::from(DEFAULT_COPYCHUNK_CHUNK_BYTES)
         );
         assert_eq!(
-            u64_from_le(&copychunk_body.input, 64),
+            le_u64(&copychunk_body.input, 64),
             u64::from(DEFAULT_COPYCHUNK_CHUNK_BYTES)
         );
-        assert_eq!(u32_from_le(&copychunk_body.input, 72), 7);
+        assert_eq!(le_u32(&copychunk_body.input, 72), 7);
         let mut copychunk_output = vec![0; 12];
         put_u32(&mut copychunk_output, 0, 2);
         put_u32(&mut copychunk_output, 4, 7);
@@ -2044,7 +2029,7 @@ mod tests {
         );
         assert_eq!(set_info_body.file_id.persistent, u64::MAX);
         assert_eq!(set_info_body.file_id.volatile, u64::MAX);
-        assert_eq!(u64_from_le(&set_info_body.buffer, 16), source_mtime);
+        assert_eq!(le_u64(&set_info_body.buffer, 16), source_mtime);
         assert_eq!(close_header.command, Smb2Command::Close);
         let close_body = Smb2CloseRequest::decode(&time_create[close_offset + SMB2_HEADER_BYTES..])
             .expect("close");
@@ -2189,106 +2174,6 @@ mod tests {
         }
     }
 
-    fn response_packet(header: Smb2Header, body: &[u8]) -> Vec<u8> {
-        let mut packet = header.encode().to_vec();
-        packet.extend_from_slice(body);
-        packet
-    }
-
-    fn compound_response_packet(parts: Vec<(Smb2Header, Vec<u8>)>) -> Vec<u8> {
-        let mut packet = Vec::new();
-        let part_count = parts.len();
-        for (index, (mut header, body)) in parts.into_iter().enumerate() {
-            let is_last = index + 1 == part_count;
-            let unpadded_len = SMB2_HEADER_BYTES + body.len();
-            let segment_len = if is_last {
-                unpadded_len
-            } else {
-                unpadded_len.div_ceil(8) * 8
-            };
-            header.next_command = if is_last { 0 } else { segment_len as u32 };
-            packet.extend_from_slice(&header.encode());
-            packet.extend_from_slice(&body);
-            packet.resize(packet.len() + segment_len - unpadded_len, 0);
-        }
-        packet
-    }
-
-    fn negotiate_response_body() -> Vec<u8> {
-        let mut body = vec![0; 65];
-        put_u16(&mut body, 0, 65);
-        put_u16(
-            &mut body,
-            2,
-            Smb2SecurityMode::SIGNING_ENABLED.0 | Smb2SecurityMode::SIGNING_REQUIRED.0,
-        );
-        put_u16(&mut body, 4, Smb2Dialect::Smb311.to_wire());
-        body[8..24].copy_from_slice(&[0x55; 16]);
-        put_u32(&mut body, 28, 1_048_576);
-        put_u32(&mut body, 32, 1_048_576);
-        put_u32(&mut body, 36, 1_048_576);
-        let security_offset = (SMB2_HEADER_BYTES + body.len()) as u16;
-        put_u16(&mut body, 56, security_offset);
-        body
-    }
-
-    fn tree_connect_response_body() -> Vec<u8> {
-        let mut body = vec![0; 16];
-        put_u16(&mut body, 0, 16);
-        body[2] = Smb2ShareType::Disk.to_wire();
-        put_u32(&mut body, 4, Smb2ShareFlags::DFS.0);
-        put_u32(&mut body, 8, Smb2ShareCapabilities::DFS.0);
-        put_u32(&mut body, 12, 0x001f_01ff);
-        body
-    }
-
-    fn create_response_body(
-        file_id: Smb2FileId,
-        attributes: Smb2FileAttributes,
-        end_of_file: u64,
-    ) -> Vec<u8> {
-        let mut body = vec![0; 88];
-        put_u16(&mut body, 0, 89);
-        put_u32(&mut body, 4, Smb2CreateAction::Opened.to_wire());
-        put_u64(&mut body, 40, 4096);
-        put_u64(&mut body, 48, end_of_file);
-        put_u32(&mut body, 56, attributes.0);
-        put_u64(&mut body, 64, file_id.persistent);
-        put_u64(&mut body, 72, file_id.volatile);
-        body
-    }
-
-    fn query_directory_response_body(buffer: &[u8]) -> Vec<u8> {
-        let mut body = vec![0; 8 + buffer.len()];
-        put_u16(&mut body, 0, 9);
-        put_u16(&mut body, 2, (SMB2_HEADER_BYTES + 8) as u16);
-        put_u32(&mut body, 4, buffer.len() as u32);
-        body[8..].copy_from_slice(buffer);
-        body
-    }
-
-    fn read_response_body(data: &[u8]) -> Vec<u8> {
-        let mut body = vec![0; 16 + data.len()];
-        put_u16(&mut body, 0, 17);
-        body[2] = (SMB2_HEADER_BYTES + 16) as u8;
-        put_u32(&mut body, 4, data.len() as u32);
-        body[16..].copy_from_slice(data);
-        body
-    }
-
-    fn write_response_body(count: u32) -> Vec<u8> {
-        let mut body = vec![0; 16];
-        put_u16(&mut body, 0, 17);
-        put_u32(&mut body, 4, count);
-        body
-    }
-
-    fn set_info_response_body() -> Vec<u8> {
-        let mut body = vec![0; 2];
-        put_u16(&mut body, 0, 2);
-        body
-    }
-
     fn ioctl_response_body(ctl_code: u32, file_id: Smb2FileId, output: &[u8]) -> Vec<u8> {
         iris_smb_client::smb2_ioctl_response_body(
             ctl_code,
@@ -2297,16 +2182,6 @@ mod tests {
             Smb2IoctlFlags::IS_FSCTL,
         )
         .expect("ioctl response body")
-    }
-
-    fn close_response_body(attributes: Smb2FileAttributes, end_of_file: u64) -> Vec<u8> {
-        let mut body = vec![0; 60];
-        put_u16(&mut body, 0, 60);
-        put_u16(&mut body, 2, Smb2CloseFlags::POSTQUERY_ATTRIB.0);
-        put_u64(&mut body, 40, 4096);
-        put_u64(&mut body, 48, end_of_file);
-        put_u32(&mut body, 56, attributes.0);
-        body
     }
 
     fn directory_entry_record(
@@ -2328,47 +2203,5 @@ mod tests {
         put_u64(&mut body, 96, file_id);
         body[104..].copy_from_slice(&file_name_bytes);
         body
-    }
-
-    fn u32_from_le(bytes: &[u8], offset: usize) -> u32 {
-        u32::from_le_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-        ])
-    }
-
-    fn u64_from_le(bytes: &[u8], offset: usize) -> u64 {
-        u64::from_le_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-            bytes[offset + 4],
-            bytes[offset + 5],
-            bytes[offset + 6],
-            bytes[offset + 7],
-        ])
-    }
-
-    fn encode_utf16le(value: &str) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(value.len() * 2);
-        for unit in value.encode_utf16() {
-            bytes.extend_from_slice(&unit.to_le_bytes());
-        }
-        bytes
-    }
-
-    fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
-        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
-    }
-
-    fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
-        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-    }
-
-    fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
-        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
     }
 }

@@ -1,47 +1,28 @@
-use super::support::{
-    is_background_media_path, is_lightweight_image_path, is_video_path, thumbnail_priority_rank,
-};
+use super::support::{is_background_media_path, thumbnail_priority_rank};
 use super::viewport::{distance_to_visible, visible_index_range};
 use super::*;
+use iris_core_domain::media::MediaFormat;
 
 const FAST_SCROLL_VELOCITY_PX_PER_SEC: f32 = 2_400.0;
 const FAST_SCROLL_GATE_WINDOW: std::time::Duration = std::time::Duration::from_millis(200);
 
 pub fn is_thumbnail_candidate(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    let ext = Path::new(&lower)
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default();
-
-    is_lightweight_image_path(&lower)
-        || matches!(
-            ext,
-            "heic"
-                | "heif"
-                | "hif"
-                | "avif"
-                | "jp2"
-                | "j2k"
-                | "j2c"
-                | "jpc"
-                | "jpf"
-                | "jpx"
-                | "jpm"
-                | "jxr"
-                | "hdp"
-                | "wdp"
-                | "jxl"
-        )
-        || (ext == "pdf" && iris_thumb_preview::pdf::supports_pdf_thumbnails())
-        || iris_thumb_preview::raw::supports_raw_extension(ext)
-        || (is_video_path(&lower) && iris_thumb_preview::video::supports_video_thumbnails())
+    match MediaFormat::from_path(name) {
+        Some(MediaFormat::Jpeg | MediaFormat::Image | MediaFormat::ModernImage) => true,
+        Some(MediaFormat::Raw) => Path::new(name)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(iris_thumb_preview::raw::supports_raw_extension),
+        Some(MediaFormat::Pdf) => iris_thumb_preview::pdf::supports_pdf_thumbnails(),
+        Some(MediaFormat::Video) => iris_thumb_preview::video::supports_video_thumbnails(),
+        None => false,
+    }
 }
 
 pub(super) fn request_priority_for(distance: usize, path: &str) -> RequestPriority {
     if distance == 0 {
         RequestPriority::Visible
-    } else if is_background_thumbnail(path) {
+    } else if is_background_media_path(path) {
         RequestPriority::Background
     } else {
         RequestPriority::Nearby
@@ -64,6 +45,49 @@ fn request_priority_rank(priority: RequestPriority) -> u8 {
     }
 }
 
+/// Thumbnail candidates in the prefetch range of every grid pane, as
+/// `(pane_idx, index, distance from the visible rows, key)`.
+fn prefetch_candidates(state: &AppState) -> Vec<(usize, EntryIndex, usize, ThumbnailCacheKey)> {
+    let mut candidates = Vec::new();
+    for pane_idx in 0..2 {
+        let pane = state.pane(pane_idx);
+        if pane.view_mode != ViewMode::Grid {
+            continue;
+        }
+        let visible_indices = pane.visible_indices();
+        if visible_indices.is_empty() {
+            continue;
+        }
+        let (visible_start, visible_end) =
+            visible_index_range(state, pane_idx, visible_indices.len());
+        let (prefetch_start, prefetch_end) =
+            thumbnail_prefetch_range(state, pane_idx, visible_indices.len());
+        let scrolling_fast = pane_is_scrolling_fast(state, pane_idx);
+        for visible_position in prefetch_start..prefetch_end {
+            let Some(index) = visible_indices.get(visible_position).copied() else {
+                continue;
+            };
+            let Some(entry) = pane.entry(index) else {
+                continue;
+            };
+            if entry.is_dir || !is_thumbnail_candidate(&entry.name) {
+                continue;
+            }
+            let distance = distance_to_visible(visible_position, visible_start, visible_end);
+            if scrolling_fast && distance > 0 {
+                continue;
+            }
+            let key = ThumbnailCacheKey::from_entry(entry);
+            // A video thumbnail decodes a frame, so videos wait until they are visible.
+            if distance > 0 && MediaFormat::from_path(key.path()) == Some(MediaFormat::Video) {
+                continue;
+            }
+            candidates.push((pane_idx, index, distance, key));
+        }
+    }
+    candidates
+}
+
 /// Deduplicated by cache key, keeping the best priority.
 pub(super) fn collect_missing_candidates(
     state: &AppState,
@@ -72,70 +96,26 @@ pub(super) fn collect_missing_candidates(
         ThumbnailCacheKey,
         (usize, u8, RequestPriority, EntryIndex, usize),
     >::new();
-
-    for pane_idx in 0..2 {
-        if state.pane(pane_idx).view_mode != ViewMode::Grid {
+    for (pane_idx, index, distance, key) in prefetch_candidates(state) {
+        if state.thumbnail_cache.contains_key(&key)
+            || state.thumbnail_inflight.contains(&key)
+            || state.thumbnail_unsupported.contains(&key)
+        {
             continue;
         }
-        let visible_indices = state.pane(pane_idx).visible_indices();
-        if visible_indices.is_empty() {
-            continue;
-        }
-
-        let (visible_start, visible_end) =
-            visible_index_range(state, pane_idx, visible_indices.len());
-        let (prefetch_start, prefetch_end) =
-            thumbnail_prefetch_range(state, pane_idx, visible_indices.len());
-        let scrolling_fast = pane_is_scrolling_fast(state, pane_idx);
-
-        for visible_position in prefetch_start..prefetch_end {
-            let Some(index) = visible_indices.get(visible_position).copied() else {
-                continue;
-            };
-            let Some(entry) = state.pane(pane_idx).entry(index) else {
-                continue;
-            };
-            if entry.is_dir || !is_thumbnail_candidate(&entry.name) {
-                continue;
-            }
-
-            let key = ThumbnailCacheKey::from_entry(entry);
-            if state.thumbnail_cache.contains_key(&key)
-                || state.thumbnail_inflight.contains(&key)
-                || state.thumbnail_unsupported.contains(&key)
-            {
-                continue;
-            }
-            let distance = distance_to_visible(visible_position, visible_start, visible_end);
-            if scrolling_fast && distance > 0 {
-                continue;
-            }
-            let full_path = key.path();
-            if !should_queue_thumbnail_for_path(
-                full_path,
-                state.pane(pane_idx).view_mode.clone(),
-                distance,
-            ) {
-                continue;
-            }
-            let media_priority = thumbnail_priority(full_path);
-            let request_priority = request_priority_for(distance, full_path);
-
-            let candidate = (distance, media_priority, request_priority, index, pane_idx);
-            best.entry(key)
-                .and_modify(|existing| {
-                    let existing_rank = (request_priority_rank(existing.2), existing.0, existing.1);
-                    let new_rank = (
-                        request_priority_rank(request_priority),
-                        distance,
-                        media_priority,
-                    );
-                    if new_rank < existing_rank {
-                        *existing = candidate;
-                    }
-                })
-                .or_insert(candidate);
-        }
+        let media_priority = thumbnail_priority_rank(key.path());
+        let request_priority = request_priority_for(distance, key.path());
+        let candidate = (distance, media_priority, request_priority, index, pane_idx);
+        let rank = |(distance, media, priority, _, _): &(usize, u8, RequestPriority, _, _)| {
+            (request_priority_rank(*priority), *distance, *media)
+        };
+        best.entry(key)
+            .and_modify(|existing| {
+                if rank(&candidate) < rank(existing) {
+                    *existing = candidate;
+                }
+            })
+            .or_insert(candidate);
     }
 
     let mut result: Vec<_> = best.into_values().collect();
@@ -149,45 +129,10 @@ pub(super) fn collect_missing_candidates(
 pub(super) fn collect_desired_paths(
     state: &AppState,
 ) -> std::collections::HashSet<ThumbnailCacheKey> {
-    let mut desired = std::collections::HashSet::new();
-    for pane_idx in 0..2 {
-        if state.pane(pane_idx).view_mode != ViewMode::Grid {
-            continue;
-        }
-        let visible_indices = state.pane(pane_idx).visible_indices();
-        if visible_indices.is_empty() {
-            continue;
-        }
-        let (visible_start, visible_end) =
-            visible_index_range(state, pane_idx, visible_indices.len());
-        let (prefetch_start, prefetch_end) =
-            thumbnail_prefetch_range(state, pane_idx, visible_indices.len());
-        let scrolling_fast = pane_is_scrolling_fast(state, pane_idx);
-        for visible_position in prefetch_start..prefetch_end {
-            let Some(index) = visible_indices.get(visible_position).copied() else {
-                continue;
-            };
-            let Some(entry) = state.pane(pane_idx).entry(index) else {
-                continue;
-            };
-            if entry.is_dir || !is_thumbnail_candidate(&entry.name) {
-                continue;
-            }
-            let distance = distance_to_visible(visible_position, visible_start, visible_end);
-            if scrolling_fast && distance > 0 {
-                continue;
-            }
-            let key = ThumbnailCacheKey::from_entry(entry);
-            if should_queue_thumbnail_for_path(
-                key.path(),
-                state.pane(pane_idx).view_mode.clone(),
-                distance,
-            ) {
-                desired.insert(key);
-            }
-        }
-    }
-    desired
+    prefetch_candidates(state)
+        .into_iter()
+        .map(|(_, _, _, key)| key)
+        .collect()
 }
 
 fn thumbnail_prefetch_range(state: &AppState, pane_idx: usize, scan_end: usize) -> (usize, usize) {
@@ -201,31 +146,6 @@ fn thumbnail_prefetch_range(state: &AppState, pane_idx: usize, scan_end: usize) 
     let start = visible_start.saturating_sub(margin);
     let end = (visible_end + margin).min(scan_end);
     (start, end.max(start + 1))
-}
-
-pub(super) fn thumbnail_priority(path: &str) -> u8 {
-    thumbnail_priority_rank(path)
-}
-
-pub(super) fn should_queue_thumbnail_for_path(
-    path: &str,
-    view_mode: ViewMode,
-    distance: usize,
-) -> bool {
-    if view_mode != ViewMode::Grid {
-        return false;
-    }
-
-    let lower = path.to_lowercase();
-    if is_video_path(&lower) {
-        return distance == 0 && iris_thumb_preview::video::supports_video_thumbnails();
-    }
-
-    true
-}
-
-fn is_background_thumbnail(path: &str) -> bool {
-    is_background_media_path(path)
 }
 
 #[cfg(test)]
@@ -277,26 +197,20 @@ mod tests {
             .unwrap_or(path)
             .to_string();
         ListEntry {
-            object_ref: ObjectRef {
-                key: ObjectKey {
-                    backend_id: BackendId("local".to_string()),
-                    stable_id: StableId(path.to_string()),
-                },
-                parent_stable_id: None,
-                display_path: path.to_string(),
-            },
-            sort_name_key: ListEntry::sort_name_key_for(&name),
-            sort_extension_key: ListEntry::sort_extension_key_for(&name),
-            name,
-            is_dir: false,
             metadata_level: MetadataLevel::L1,
             size: Some(1),
-            mtime: None,
-            ctime: None,
-            is_symlink: false,
-            symlink_target: None,
-            is_inaccessible: false,
-            annotation: None,
+            ..ListEntry::new(
+                ObjectRef {
+                    key: ObjectKey {
+                        backend_id: BackendId("local".to_string()),
+                        stable_id: StableId(path.to_string()),
+                    },
+                    parent_stable_id: None,
+                    display_path: path.to_string(),
+                },
+                name,
+                false,
+            )
         }
     }
 

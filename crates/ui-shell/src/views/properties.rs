@@ -288,7 +288,7 @@ fn typed_media_rows(media: &MediaMetadata) -> Vec<(String, String)> {
         rows.push((tr("properties-captured-at"), value));
     }
 
-    if let Some(value) = format_camera_label(media) {
+    if let Some(value) = media.camera_label() {
         rows.push((tr("properties-camera"), value));
     }
 
@@ -317,24 +317,6 @@ fn format_utc_offset(offset_min: i16) -> String {
     let sign = if offset_min < 0 { '-' } else { '+' };
     let abs = offset_min.unsigned_abs();
     format!("UTC{}{:02}:{:02}", sign, abs / 60, abs % 60)
-}
-
-fn format_camera_label(media: &MediaMetadata) -> Option<String> {
-    match (
-        media.camera_make.as_ref().filter(|value| !value.is_empty()),
-        media
-            .camera_model
-            .as_ref()
-            .filter(|value| !value.is_empty()),
-    ) {
-        (Some(make), Some(model)) if model.to_lowercase().starts_with(&make.to_lowercase()) => {
-            Some(model.clone())
-        }
-        (Some(make), Some(model)) => Some(format!("{} {}", make, model)),
-        (Some(make), None) => Some(make.clone()),
-        (None, Some(model)) => Some(model.clone()),
-        (None, None) => None,
-    }
 }
 
 fn format_gps_coordinates(lat: Option<f64>, lon: Option<f64>) -> Option<String> {
@@ -380,7 +362,7 @@ mod tests {
             camera_model: Some("Canon EOS R5".to_string()),
             ..MediaMetadata::default()
         };
-        assert_eq!(format_camera_label(&media).as_deref(), Some("Canon EOS R5"));
+        assert_eq!(media.camera_label().as_deref(), Some("Canon EOS R5"));
     }
 
     #[test]

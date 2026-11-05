@@ -205,11 +205,16 @@ pub trait BackendAdapter: Send + Sync {
         mode: DeleteMode,
     ) -> Result<OperationTicket, BackendError>;
 
+    /// Thumbnails rendered by the storage service; most backends have none and keep this default.
     async fn get_thumbnail(
         &self,
-        object: &ObjectRef,
-        hint: ThumbnailHint,
-    ) -> Result<ThumbnailResult, BackendError>;
+        _object: &ObjectRef,
+        _hint: ThumbnailHint,
+    ) -> Result<ThumbnailResult, BackendError> {
+        Err(BackendError::Unsupported {
+            operation: "get_thumbnail",
+        })
+    }
 
     async fn get_metadata(
         &self,
@@ -322,14 +327,6 @@ mod tests {
             unsupported("delete")
         }
 
-        async fn get_thumbnail(
-            &self,
-            _object: &ObjectRef,
-            _hint: ThumbnailHint,
-        ) -> Result<ThumbnailResult, BackendError> {
-            unsupported("get_thumbnail")
-        }
-
         async fn get_metadata(
             &self,
             _object: &ObjectRef,
@@ -343,7 +340,7 @@ mod tests {
         }
 
         fn capabilities(&self) -> CapabilitySet {
-            CapabilitySet::none()
+            CapabilitySet::default()
         }
     }
 

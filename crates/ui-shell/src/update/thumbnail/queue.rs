@@ -278,26 +278,20 @@ mod tests {
             .unwrap_or(path)
             .to_string();
         ListEntry {
-            object_ref: ObjectRef {
-                key: ObjectKey {
-                    backend_id: BackendId("local".to_string()),
-                    stable_id: StableId(path.to_string()),
-                },
-                parent_stable_id: None,
-                display_path: path.to_string(),
-            },
-            sort_name_key: ListEntry::sort_name_key_for(&name),
-            sort_extension_key: ListEntry::sort_extension_key_for(&name),
-            name,
-            is_dir: false,
             metadata_level: MetadataLevel::L1,
             size: Some(1),
-            mtime: None,
-            ctime: None,
-            is_symlink: false,
-            symlink_target: None,
-            is_inaccessible: false,
-            annotation: None,
+            ..ListEntry::new(
+                ObjectRef {
+                    key: ObjectKey {
+                        backend_id: BackendId("local".to_string()),
+                        stable_id: StableId(path.to_string()),
+                    },
+                    parent_stable_id: None,
+                    display_path: path.to_string(),
+                },
+                name,
+                false,
+            )
         }
     }
 

@@ -23,6 +23,20 @@ pub enum IndexedKind {
 }
 
 impl IndexedKind {
+    /// Kind of a directory entry, from its extension.
+    pub fn for_path(path: impl AsRef<std::path::Path>, is_dir: bool) -> Self {
+        use iris_core_domain::media::MediaFormat;
+        if is_dir {
+            return Self::Directory;
+        }
+        match MediaFormat::from_path(path) {
+            Some(format) if format.is_image() => Self::Image,
+            Some(MediaFormat::Video) => Self::Video,
+            Some(MediaFormat::Pdf) => Self::Pdf,
+            _ => Self::File,
+        }
+    }
+
     fn from_byte(value: u8) -> Self {
         match value {
             0 => Self::File,

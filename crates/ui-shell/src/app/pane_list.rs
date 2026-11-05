@@ -154,7 +154,7 @@ fn build_list_rows<'a>(
             u64::MAX,
             0.0,
             container(header)
-                .style(theme::list_header_style)
+                .style(theme::sunken_panel_style)
                 .padding([2, 8])
                 .width(Length::Fill)
                 .into(),
@@ -1000,54 +1000,23 @@ fn fixed_row_window(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iris_core_domain::types::metadata::MetadataLevel;
-    use iris_core_domain::types::object::{BackendId, ObjectKey, ObjectRef, StableId};
-
-    fn entry(display_path: &str, is_dir: bool) -> ListEntry {
-        let name = std::path::Path::new(display_path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(display_path)
-            .to_string();
-        ListEntry {
-            object_ref: ObjectRef {
-                key: ObjectKey {
-                    backend_id: BackendId("local".into()),
-                    stable_id: StableId(display_path.into()),
-                },
-                display_path: display_path.into(),
-                parent_stable_id: None,
-            },
-            sort_name_key: ListEntry::sort_name_key_for(&name),
-            sort_extension_key: ListEntry::sort_extension_key_for(&name),
-            name,
-            is_dir,
-            metadata_level: MetadataLevel::L1,
-            size: None,
-            mtime: None,
-            ctime: None,
-            is_symlink: false,
-            symlink_target: None,
-            is_inaccessible: false,
-            annotation: None,
-        }
-    }
+    use crate::test_support::local_entry;
 
     #[test]
     fn relative_parent_label_uses_search_root() {
-        let nested = entry("/tmp/root/a/b/photo.jpg", false);
+        let nested = local_entry("/tmp/root/a/b/photo.jpg", false);
         assert_eq!(
             relative_parent_label("/tmp/root", &nested).as_deref(),
             Some("a/b")
         );
 
-        let direct = entry("/tmp/root/photo.jpg", false);
+        let direct = local_entry("/tmp/root/photo.jpg", false);
         assert_eq!(relative_parent_label("/tmp/root", &direct), None);
     }
 
     #[test]
     fn relative_parent_label_falls_back_for_external_result() {
-        let external = entry("/Volumes/archive/photo.jpg", false);
+        let external = local_entry("/Volumes/archive/photo.jpg", false);
         assert_eq!(
             relative_parent_label("/tmp/root", &external).as_deref(),
             Some("/Volumes/archive")

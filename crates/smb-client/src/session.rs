@@ -6,16 +6,15 @@ use crate::auth::ntlmssp::{
 use crate::auth::spnego::{
     decode_neg_token_resp, spnego_initial_context_token_ntlm, spnego_neg_token_resp_ntlm,
 };
-use crate::connection::{SmbConnection, SmbConnectionError};
+use crate::connection::SmbConnectionError;
 use crate::crypto::derive_smb2_signing_key;
-use crate::packet::header::{Smb2Command, SmbNtStatus};
+use crate::packet::header::SmbNtStatus;
 use crate::packet::negotiate::{Smb2Dialect, Smb2EncryptionCipher};
 use crate::packet::session_setup::{
     Smb2SessionSetupRequest, Smb2SessionSetupResponse, Smb2SessionSetupSecurityMode,
 };
 use crate::transform::derive_smb3_encryption_keys;
 use crate::SmbClientError;
-use tokio::io::{AsyncRead, AsyncWrite};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NtlmV2SessionSetup {
@@ -63,10 +62,8 @@ pub enum SmbSessionError {
     GuestSessionNotGranted,
 }
 
-pub async fn authenticate_guest_actor(
-    connection: &SmbConnectionActor,
-) -> Result<u64, SmbSessionError> {
-    let exchange = send_session_setup_actor(connection, Vec::new(), 0, false).await?;
+pub async fn authenticate_guest(connection: &SmbConnectionActor) -> Result<u64, SmbSessionError> {
+    let exchange = send_session_setup(connection, Vec::new(), 0, false, None).await?;
     if !exchange.response.status().is_success() {
         return Err(SmbSessionError::UnexpectedStatus {
             step: "guest",
@@ -80,98 +77,7 @@ pub async fn authenticate_guest_actor(
     Ok(connection.state().await?.session_id)
 }
 
-pub async fn authenticate_ntlm_v2<T>(
-    connection: &mut SmbConnection<T>,
-    setup: &NtlmV2SessionSetup,
-) -> Result<NtlmV2Session, SmbSessionError>
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    let negotiate = NtlmsspNegotiate {
-        flags: default_negotiate_flags(),
-        domain: setup.domain.clone(),
-        workstation: setup.workstation.clone(),
-    }
-    .encode()?;
-    let security_buffer = spnego_initial_context_token_ntlm(&negotiate)?;
-    let first = send_session_setup(connection, security_buffer, 0).await?;
-    if first.response.status() != SmbNtStatus::MORE_PROCESSING_REQUIRED {
-        return Err(SmbSessionError::UnexpectedStatus {
-            step: "challenge",
-            status: first.response.status().0,
-        });
-    }
-    if first.response.header.session_id != 0 {
-        connection.set_session_id(first.response.header.session_id);
-    }
-
-    let spnego = decode_neg_token_resp(&first.body.security_buffer)?;
-    let challenge_token = spnego
-        .response_token
-        .as_deref()
-        .ok_or(SmbSessionError::MissingChallengeToken)?;
-    let challenge = NtlmsspChallenge::decode(challenge_token)?;
-    let authenticate = ntlm_v2_authenticate_message(NtlmV2AuthenticateRequest {
-        user: &setup.user,
-        domain: &setup.domain,
-        password: &setup.password,
-        workstation: &setup.workstation,
-        challenge: &challenge,
-        timestamp: setup.timestamp,
-        client_challenge: setup.client_challenge,
-        negotiate_message: &negotiate,
-        target_name: &setup.target_name,
-    })?;
-    let authenticate_security = spnego_neg_token_resp_ntlm(&authenticate.message)?;
-    if let Some(security) = setup.security {
-        connection.install_signing_after_next_request(
-            authenticate.exported_session_key.to_vec(),
-            security.dialect,
-        );
-    }
-    let second = send_session_setup(
-        connection,
-        authenticate_security,
-        first.response.header.session_id,
-    )
-    .await?;
-    if !second.response.status().is_success() {
-        return Err(SmbSessionError::UnexpectedStatus {
-            step: "authenticate",
-            status: second.response.status().0,
-        });
-    }
-    if second.body.session_flags & 0x0003 != 0 {
-        return Err(SmbSessionError::AuthenticationDowngraded);
-    }
-    if second.response.header.session_id != 0 {
-        connection.set_session_id(second.response.header.session_id);
-    }
-    if let Some(security) = setup.security {
-        let signing_key = derive_smb2_signing_key(
-            &authenticate.exported_session_key,
-            security.dialect,
-            &connection.preauth_integrity_hash(),
-        )?;
-        connection.set_signing_key(signing_key);
-        if security.encrypt {
-            let keys = derive_smb3_encryption_keys(
-                &authenticate.exported_session_key,
-                security.dialect,
-                &connection.preauth_integrity_hash(),
-                security.cipher,
-            )?;
-            connection.enable_encryption(keys)?;
-        }
-    }
-
-    Ok(NtlmV2Session {
-        session_id: connection.session_id(),
-        session_base_key: authenticate.exported_session_key,
-    })
-}
-
-pub async fn authenticate_ntlm_v2_actor(
+pub async fn authenticate_ntlm_v2(
     connection: &SmbConnectionActor,
     setup: &NtlmV2SessionSetup,
 ) -> Result<NtlmV2Session, SmbSessionError> {
@@ -182,7 +88,7 @@ pub async fn authenticate_ntlm_v2_actor(
     }
     .encode()?;
     let security_buffer = spnego_initial_context_token_ntlm(&negotiate)?;
-    let first = send_session_setup_actor(connection, security_buffer, 0, true).await?;
+    let first = send_session_setup(connection, security_buffer, 0, true, None).await?;
     if first.response.status() != SmbNtStatus::MORE_PROCESSING_REQUIRED {
         return Err(SmbSessionError::UnexpectedStatus {
             step: "challenge",
@@ -208,24 +114,16 @@ pub async fn authenticate_ntlm_v2_actor(
         target_name: &setup.target_name,
     })?;
     let authenticate_security = spnego_neg_token_resp_ntlm(&authenticate.message)?;
-    let second = if let Some(security) = setup.security {
-        send_final_session_setup_actor(
-            connection,
-            authenticate_security,
-            first.response.header.session_id,
-            authenticate.exported_session_key.to_vec(),
-            security.dialect,
-        )
-        .await?
-    } else {
-        send_session_setup_actor(
-            connection,
-            authenticate_security,
-            first.response.header.session_id,
-            true,
-        )
-        .await?
-    };
+    let second = send_session_setup(
+        connection,
+        authenticate_security,
+        first.response.header.session_id,
+        true,
+        setup
+            .security
+            .map(|security| (authenticate.exported_session_key.to_vec(), security.dialect)),
+    )
+    .await?;
     if !second.response.status().is_success() {
         return Err(SmbSessionError::UnexpectedStatus {
             step: "authenticate",
@@ -265,38 +163,18 @@ struct SessionSetupExchange {
     body: Smb2SessionSetupResponse,
 }
 
-async fn send_session_setup<T>(
-    connection: &mut SmbConnection<T>,
-    security_buffer: Vec<u8>,
-    previous_session_id: u64,
-) -> Result<SessionSetupExchange, SmbSessionError>
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    let request = Smb2SessionSetupRequest {
-        flags: 0,
-        security_mode: Smb2SessionSetupSecurityMode::SIGNING_REQUIRED,
-        capabilities: 0,
-        channel: 0,
-        previous_session_id,
-        security_buffer,
-    };
-    let response = connection
-        .request(Smb2Command::SessionSetup, &request.encode())
-        .await?;
-    let body = Smb2SessionSetupResponse::decode_packet(&response.to_packet())?;
-    Ok(SessionSetupExchange { response, body })
-}
-
-async fn send_session_setup_actor(
+/// `signing` installs a signing key right after the request is sent; it implies
+/// SIGNING_REQUIRED.
+async fn send_session_setup(
     connection: &SmbConnectionActor,
     security_buffer: Vec<u8>,
     previous_session_id: u64,
     signing_required: bool,
+    signing: Option<(Vec<u8>, Smb2Dialect)>,
 ) -> Result<SessionSetupExchange, SmbSessionError> {
     let request = Smb2SessionSetupRequest {
         flags: 0,
-        security_mode: if signing_required {
+        security_mode: if signing_required || signing.is_some() {
             Smb2SessionSetupSecurityMode::SIGNING_REQUIRED
         } else {
             Smb2SessionSetupSecurityMode::SIGNING_ENABLED
@@ -306,28 +184,8 @@ async fn send_session_setup_actor(
         previous_session_id,
         security_buffer,
     };
-    let response = connection.request_session_setup(request.encode()).await?;
-    let body = Smb2SessionSetupResponse::decode_packet(&response.to_packet())?;
-    Ok(SessionSetupExchange { response, body })
-}
-
-async fn send_final_session_setup_actor(
-    connection: &SmbConnectionActor,
-    security_buffer: Vec<u8>,
-    previous_session_id: u64,
-    session_key: Vec<u8>,
-    dialect: Smb2Dialect,
-) -> Result<SessionSetupExchange, SmbSessionError> {
-    let request = Smb2SessionSetupRequest {
-        flags: 0,
-        security_mode: Smb2SessionSetupSecurityMode::SIGNING_REQUIRED,
-        capabilities: 0,
-        channel: 0,
-        previous_session_id,
-        security_buffer,
-    };
     let response = connection
-        .request_final_session_setup(request.encode(), session_key, dialect)
+        .request_session_setup(request.encode(), signing)
         .await?;
     let body = Smb2SessionSetupResponse::decode_packet(&response.to_packet())?;
     Ok(SessionSetupExchange { response, body })
@@ -341,11 +199,14 @@ mod tests {
     use crate::crypto::{
         sign_smb2_packet_hmac_sha256, smb311_preauth_hash_sequence, verify_smb2_packet_hmac_sha256,
     };
+    use crate::packet::header::Smb2Command;
     use crate::packet::header::{Smb2Header, SMB2_FLAGS_SIGNED, SMB2_HEADER_BYTES};
+    use crate::test_support::*;
     use crate::transform::{
         derive_smb311_encryption_keys, is_smb3_transform, Smb3EncryptionContext,
     };
     use crate::transport::DirectTcpTransport;
+    use crate::wire::encode_utf16le;
     use tokio::io::duplex;
 
     #[tokio::test]
@@ -380,8 +241,11 @@ mod tests {
             challenge_header.session_id = session_id;
             let challenge_response = response_packet(
                 challenge_header,
-                &session_setup_response_body(&challenge_spnego),
-                &challenge_spnego,
+                &[
+                    session_setup_response_body(&challenge_spnego).as_slice(),
+                    &challenge_spnego,
+                ]
+                .concat(),
             );
             transport
                 .send_packet(&challenge_response)
@@ -422,8 +286,10 @@ mod tests {
             final_header.status_or_channel_sequence = SmbNtStatus::SUCCESS.0;
             final_header.session_id = session_id;
             final_header.flags |= SMB2_FLAGS_SIGNED;
-            let mut final_response =
-                response_packet(final_header, &session_setup_response_body(&[]), &[]);
+            let mut final_response = response_packet(
+                final_header,
+                &[session_setup_response_body(&[]).as_slice(), &[]].concat(),
+            );
             sign_smb2_packet_hmac_sha256(&expected_session_base_key(), &mut final_response)
                 .expect("sign final response");
             transport
@@ -441,7 +307,8 @@ mod tests {
                 Smb2Header::new(Smb2Command::Echo, signed_header.message_id);
             echo_response_header.flags |= SMB2_FLAGS_SIGNED;
             echo_response_header.session_id = session_id;
-            let mut echo_response = response_packet(echo_response_header, b"ok", &[]);
+            let mut echo_response =
+                response_packet(echo_response_header, &[b"ok".as_slice(), &[]].concat());
             sign_smb2_packet_hmac_sha256(&signing_key, &mut echo_response)
                 .expect("sign echo response");
             transport
@@ -450,7 +317,7 @@ mod tests {
                 .expect("echo response");
         });
 
-        let mut connection = SmbConnection::new(client);
+        let connection = SmbConnectionActor::spawn(client);
         let setup = NtlmV2SessionSetup {
             user: "User".into(),
             domain: "Domain".into(),
@@ -465,14 +332,14 @@ mod tests {
                 cipher: Smb2EncryptionCipher::Aes128Gcm,
             }),
         };
-        let session = authenticate_ntlm_v2(&mut connection, &setup)
+        let session = authenticate_ntlm_v2(&connection, &setup)
             .await
             .expect("authenticate");
 
         assert_eq!(session.session_id, 0x0102_0304_0506_0708);
         assert_eq!(session.session_base_key, expected_session_base_key());
         connection
-            .request(Smb2Command::Echo, b"probe")
+            .request(Smb2Command::Echo, b"probe".to_vec())
             .await
             .expect("signed followup");
         server_task.await.expect("server task");
@@ -511,8 +378,11 @@ mod tests {
             challenge_header.session_id = session_id;
             let challenge_response = response_packet(
                 challenge_header,
-                &session_setup_response_body(&challenge_spnego),
-                &challenge_spnego,
+                &[
+                    session_setup_response_body(&challenge_spnego).as_slice(),
+                    &challenge_spnego,
+                ]
+                .concat(),
             );
             transport
                 .send_packet(&challenge_response)
@@ -556,8 +426,10 @@ mod tests {
                 second.as_slice(),
             ]);
             final_header.flags |= SMB2_FLAGS_SIGNED;
-            let mut final_response =
-                response_packet(final_header, &session_setup_response_body(&[]), &[]);
+            let mut final_response = response_packet(
+                final_header,
+                &[session_setup_response_body(&[]).as_slice(), &[]].concat(),
+            );
             derive_smb2_signing_key(
                 &expected_session_base_key(),
                 Smb2Dialect::Smb311,
@@ -591,7 +463,8 @@ mod tests {
             let mut echo_response_header =
                 Smb2Header::new(Smb2Command::Echo, request_header.message_id);
             echo_response_header.session_id = session_id;
-            let echo_response = response_packet(echo_response_header, b"ok", &[]);
+            let echo_response =
+                response_packet(echo_response_header, &[b"ok".as_slice(), &[]].concat());
             let encrypted_response = encryption
                 .encrypt(session_id, &echo_response)
                 .expect("encrypt response");
@@ -615,7 +488,7 @@ mod tests {
                 cipher: Smb2EncryptionCipher::Aes128Gcm,
             }),
         };
-        let session = authenticate_ntlm_v2_actor(&actor, &setup)
+        let session = authenticate_ntlm_v2(&actor, &setup)
             .await
             .expect("authenticate");
 
@@ -654,14 +527,17 @@ mod tests {
             transport
                 .send_packet(&response_packet(
                     challenge_header,
-                    &session_setup_response_body(&empty_spnego),
-                    &empty_spnego,
+                    &[
+                        session_setup_response_body(&empty_spnego).as_slice(),
+                        &empty_spnego,
+                    ]
+                    .concat(),
                 ))
                 .await
                 .expect("challenge response");
         });
 
-        let mut connection = SmbConnection::new(client);
+        let connection = SmbConnectionActor::spawn(client);
         let setup = NtlmV2SessionSetup {
             user: "User".into(),
             domain: "Domain".into(),
@@ -672,7 +548,7 @@ mod tests {
             target_name: "cifs/server".into(),
             security: None,
         };
-        let error = authenticate_ntlm_v2(&mut connection, &setup)
+        let error = authenticate_ntlm_v2(&connection, &setup)
             .await
             .expect_err("missing challenge");
 
@@ -681,7 +557,7 @@ mod tests {
     }
 
     fn ntlm_challenge_message() -> Vec<u8> {
-        let target_name = utf16le("Domain");
+        let target_name = encode_utf16le("Domain");
         let target_info = [0u8; 4];
         let target_name_offset = 48;
         let target_info_offset = target_name_offset + target_name.len();
@@ -738,56 +614,15 @@ mod tests {
         body
     }
 
-    fn response_packet(header: Smb2Header, body: &[u8], tail: &[u8]) -> Vec<u8> {
-        let mut packet = header.encode().to_vec();
-        packet.extend_from_slice(body);
-        packet.extend_from_slice(tail);
-        packet
-    }
-
     fn push_security_buffer(bytes: &mut Vec<u8>, length: usize, offset: usize) {
         bytes.extend_from_slice(&(length as u16).to_le_bytes());
         bytes.extend_from_slice(&(length as u16).to_le_bytes());
         bytes.extend_from_slice(&(offset as u32).to_le_bytes());
     }
 
-    fn utf16le(value: &str) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(value.len() * 2);
-        for unit in value.encode_utf16() {
-            bytes.extend_from_slice(&unit.to_le_bytes());
-        }
-        bytes
-    }
-
     fn find_bytes(haystack: &[u8], needle: &[u8]) -> bool {
         haystack
             .windows(needle.len())
             .any(|candidate| candidate == needle)
-    }
-
-    fn hex_array_8(hex: &str) -> [u8; 8] {
-        let bytes = hex_bytes(hex);
-        bytes.try_into().expect("hex should decode to eight bytes")
-    }
-
-    fn hex_bytes(hex: &str) -> Vec<u8> {
-        assert!(hex.len().is_multiple_of(2));
-        let mut bytes = Vec::with_capacity(hex.len() / 2);
-        let raw = hex.as_bytes();
-        for index in (0..raw.len()).step_by(2) {
-            let high = hex_value(raw[index]);
-            let low = hex_value(raw[index + 1]);
-            bytes.push((high << 4) | low);
-        }
-        bytes
-    }
-
-    fn hex_value(byte: u8) -> u8 {
-        match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            b'A'..=b'F' => byte - b'A' + 10,
-            _ => panic!("invalid hex digit"),
-        }
     }
 }

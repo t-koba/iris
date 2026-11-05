@@ -357,52 +357,20 @@ mod tests {
     use super::*;
     use std::fs;
 
-    #[test]
-    fn parse_pcloud_callback_fragment_extracts_token_uid_and_host() {
-        let parsed = parse_pcloud_callback(
-            "http://127.0.0.1/iris-pcloud#access_token=token123&uid=42&hostname=eapi.pcloud.com",
-        )
-        .expect("callback should parse");
-        assert_eq!(parsed.access_token, "token123");
-        assert_eq!(parsed.account_id, "42");
-        assert_eq!(parsed.api_base, "https://eapi.pcloud.com");
-    }
-
-    #[test]
-    fn join_display_path_preserves_virtual_root_shape() {
-        assert_eq!(
-            join_display_path("/__iris_remote__/pcloud:42", "photos"),
-            "/__iris_remote__/pcloud:42/photos"
-        );
-        assert_eq!(join_display_path("/", "tmp"), "/tmp");
-    }
-
-    #[test]
-    fn parent_relative_display_path_handles_nested_paths() {
-        assert_eq!(
-            parent_relative_display_path("photos/2024/raw"),
-            Some("photos/2024".to_string())
-        );
-        assert_eq!(parent_relative_display_path("photos"), Some(String::new()));
-        assert_eq!(parent_relative_display_path(""), None);
-    }
-
-    #[test]
-    fn dnd_operation_defaults_to_move_on_same_filesystem() {
+    /// A file to drag and a destination folder on the same file system.
+    fn drag_fixture() -> (tempfile::TempDir, ObjectRef, std::path::PathBuf) {
         let temp = tempfile::tempdir().expect("tempdir");
         let src_path = temp.path().join("src.txt");
         let dst_dir = temp.path().join("dst");
         fs::write(&src_path, b"drag-source").expect("write source");
         fs::create_dir(&dst_dir).expect("create dest");
+        let source = crate::test_support::local_object_ref(&src_path.to_string_lossy());
+        (temp, source, dst_dir)
+    }
 
-        let source = ObjectRef {
-            key: ObjectKey {
-                backend_id: BackendId("local".to_string()),
-                stable_id: StableId("src".to_string()),
-            },
-            parent_stable_id: Some(StableId("root".to_string())),
-            display_path: src_path.to_string_lossy().to_string(),
-        };
+    #[test]
+    fn dnd_operation_defaults_to_move_on_same_filesystem() {
+        let (_temp, source, dst_dir) = drag_fixture();
 
         let operation = app_runtime().dnd_operation_for_drop(
             &[source],
@@ -415,20 +383,7 @@ mod tests {
 
     #[test]
     fn dnd_operation_honors_copy_override_modifier() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let src_path = temp.path().join("src.txt");
-        let dst_dir = temp.path().join("dst");
-        fs::write(&src_path, b"drag-source").expect("write source");
-        fs::create_dir(&dst_dir).expect("create dest");
-
-        let source = ObjectRef {
-            key: ObjectKey {
-                backend_id: BackendId("local".to_string()),
-                stable_id: StableId("src".to_string()),
-            },
-            parent_stable_id: Some(StableId("root".to_string())),
-            display_path: src_path.to_string_lossy().to_string(),
-        };
+        let (_temp, source, dst_dir) = drag_fixture();
 
         #[cfg(target_os = "macos")]
         let modifiers = iced::keyboard::Modifiers::ALT;

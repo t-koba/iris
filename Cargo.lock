@@ -3447,6 +3447,7 @@ name = "iris-core-domain"
 version = "0.4.0"
 dependencies = [
  "async-trait",
+ "rusqlite",
  "serde",
  "thiserror 2.0.21",
  "tokio",
@@ -3507,6 +3508,7 @@ version = "0.4.0"
 dependencies = [
  "chrono",
  "criterion",
+ "iris-core-domain",
  "proptest",
  "tempfile",
  "unicode-normalization",
@@ -3552,6 +3554,7 @@ dependencies = [
  "heif-oxide",
  "image",
  "iris-core-domain",
+ "iris-thumb-preview",
  "jpeg-decoder",
  "jpeg2k",
  "jpegxr",

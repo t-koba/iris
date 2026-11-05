@@ -164,12 +164,11 @@ impl AsyncRead for ProgressReader {
                     if delta >= interval || elapsed >= PROGRESS_NOTIFY_MIN_ELAPSED || is_eof {
                         this.bytes_last_notified = this.bytes_read;
                         this.last_notify_at = now;
-                        let _ = this.progress_tx.send(ProgressInfo {
-                            bytes_completed: this.bytes_read,
-                            bytes_total: this.bytes_total,
-                            files_completed: 0,
-                            files_total: Some(1),
-                        });
+                        let _ = this.progress_tx.send(ProgressInfo::single_file(
+                            this.bytes_read,
+                            this.bytes_total,
+                            false,
+                        ));
                     }
                 }
                 Poll::Ready(Ok(()))
@@ -262,28 +261,9 @@ fn source_resume_identity(metadata: &MetadataResult) -> Option<String> {
     ))
 }
 
-/// Reads `src` and writes `dst`, reporting byte progress on the watch channel.
-#[tracing::instrument(skip(src_backend, dst_backend, progress_tx), fields(src = %src.display_path, dst = %dst.display_path))]
-pub async fn client_relay_copy(
-    src_backend: &dyn BackendAdapter,
-    src: &ObjectRef,
-    dst_backend: &dyn BackendAdapter,
-    dst: &ObjectRef,
-    progress_tx: &watch::Sender<ProgressInfo>,
-) -> Result<TransferResult, BackendError> {
-    client_relay_copy_with_options(
-        src_backend,
-        src,
-        dst_backend,
-        dst,
-        progress_tx,
-        CopyRelayOptions::default(),
-    )
-    .await
-}
-
 #[tracing::instrument(skip(src_backend, dst_backend, progress_tx, options), fields(src = %src.display_path, dst = %dst.display_path))]
-pub async fn client_relay_copy_with_options(
+/// Reads `src` and writes `dst`, reporting byte progress on the watch channel.
+pub async fn client_relay_copy(
     src_backend: &dyn BackendAdapter,
     src: &ObjectRef,
     dst_backend: &dyn BackendAdapter,
@@ -378,17 +358,21 @@ async fn relay_copy_data(
                 },
             })
             .await?;
-            let _ = progress_tx.send(ProgressInfo {
-                bytes_completed: total_len,
-                bytes_total: Some(total_len),
-                files_completed: 1,
-                files_total: Some(1),
-            });
-            return Ok(TransferResult {
-                bytes_transferred: total_len,
-            });
+            return Ok(finish_file(progress_tx, total_len));
         }
     }
+    let chunked_in_flight =
+        || recommended_workers_for_backend(&src.key.backend_id.0, CHUNKED_RANGE_DEFAULT_IN_FLIGHT);
+    let new_recorder = || {
+        options.resumable.map(|context| {
+            ChunkStateRecorder::new(
+                Arc::clone(&context.job_store),
+                context.job_id.clone(),
+                context.entry_index,
+                range_metadata.and_then(|metadata| metadata.etag.clone()),
+            )
+        })
+    };
     let mut chunk_recording = None;
     let (source_reader, total_bytes): (Pin<Box<dyn AsyncRead + Send>>, Option<u64>) =
         if should_use_chunked_range_write(
@@ -398,18 +382,8 @@ async fn relay_copy_data(
         ) {
             let total_bytes =
                 range_total_bytes.expect("chunked range write copy requires known size");
-            let max_in_flight = recommended_workers_for_backend(
-                &src.key.backend_id.0,
-                CHUNKED_RANGE_DEFAULT_IN_FLIGHT,
-            );
-            let recorder = options.resumable.map(|context| {
-                ChunkStateRecorder::new(
-                    Arc::clone(&context.job_store),
-                    context.job_id.clone(),
-                    context.entry_index,
-                    range_metadata.and_then(|metadata| metadata.etag.clone()),
-                )
-            });
+            let max_in_flight = chunked_in_flight();
+            let recorder = new_recorder();
             copy_chunked_with_range_writes(ChunkedRangeWriteRequest {
                 src_backend,
                 src: src.clone(),
@@ -424,29 +398,11 @@ async fn relay_copy_data(
                 retry_policy: retry_policy.clone(),
             })
             .await?;
-            let _ = progress_tx.send(ProgressInfo {
-                bytes_completed: total_bytes,
-                bytes_total: Some(total_bytes),
-                files_completed: 1,
-                files_total: Some(1),
-            });
-            return Ok(TransferResult {
-                bytes_transferred: total_bytes,
-            });
+            return Ok(finish_file(progress_tx, total_bytes));
         } else if should_use_chunked_range(range_total_bytes, src_capabilities.can_range_read) {
             let total_bytes = range_total_bytes.expect("chunked range copy requires known size");
-            let max_in_flight = recommended_workers_for_backend(
-                &src.key.backend_id.0,
-                CHUNKED_RANGE_DEFAULT_IN_FLIGHT,
-            );
-            let recorder = options.resumable.map(|context| {
-                ChunkStateRecorder::new(
-                    Arc::clone(&context.job_store),
-                    context.job_id.clone(),
-                    context.entry_index,
-                    range_metadata.and_then(|metadata| metadata.etag.clone()),
-                )
-            });
+            let max_in_flight = chunked_in_flight();
+            let recorder = new_recorder();
             chunk_recording = recorder
                 .as_ref()
                 .map(|recorder| (recorder.clone(), total_bytes));
@@ -495,12 +451,7 @@ async fn relay_copy_data(
 
     // Batched notifications may have skipped the final value, so send it on completion.
     if let Some(total) = total_bytes {
-        let _ = progress_tx.send(ProgressInfo {
-            bytes_completed: total,
-            bytes_total: Some(total),
-            files_completed: 1,
-            files_total: Some(1),
-        });
+        let _ = progress_tx.send(ProgressInfo::single_file(total, Some(total), true));
     }
 
     debug!("client relay copy completed: {} bytes", bytes_read);
@@ -508,6 +459,14 @@ async fn relay_copy_data(
     Ok(TransferResult {
         bytes_transferred: total_bytes.unwrap_or(bytes_read),
     })
+}
+
+/// Reports a single-file transfer of `bytes` as complete.
+pub fn finish_file(progress_tx: &watch::Sender<ProgressInfo>, bytes: u64) -> TransferResult {
+    let _ = progress_tx.send(ProgressInfo::single_file(bytes, Some(bytes), true));
+    TransferResult {
+        bytes_transferred: bytes,
+    }
 }
 
 /// Only called after verification succeeded.
@@ -551,7 +510,7 @@ pub async fn move_via_relay_with_verify_and_control(
     } = options;
     let copy_span = info_span!("transfer.copy_relay");
     let copy_result = async {
-        client_relay_copy_with_options(
+        client_relay_copy(
             src_backend,
             src,
             dst_backend,
@@ -607,7 +566,7 @@ mod tests {
     use iris_core_domain::types::progress::ByteRange;
     use iris_core_domain::types::read_handle::ReadHandle;
     use iris_core_domain::types::session::BackendSession;
-    use iris_core_domain::types::thumbnail::{ThumbnailHint, ThumbnailResult};
+
     use iris_core_domain::types::transfer::{JobState, TaskId, TaskKind, TaskState};
     use iris_jobstore::repository::{
         PersistedChunkState, PersistedChunkStateRow, PersistedJob, PersistedTask,
@@ -660,9 +619,16 @@ mod tests {
             files_total: None,
         });
 
-        let result = client_relay_copy(&src_backend, &src_ref, &dst_backend, &dst_ref, &tx)
-            .await
-            .expect("relay copy should succeed");
+        let result = client_relay_copy(
+            &src_backend,
+            &src_ref,
+            &dst_backend,
+            &dst_ref,
+            &tx,
+            CopyRelayOptions::default(),
+        )
+        .await
+        .expect("relay copy should succeed");
 
         assert_eq!(result.bytes_transferred, 21);
 
@@ -716,6 +682,7 @@ mod tests {
             &dst_backend,
             &make_ref("local-dst", "photo.jpg"),
             &tx,
+            CopyRelayOptions::default(),
         )
         .await
         .expect("relay copy");
@@ -1247,16 +1214,6 @@ mod tests {
             })
         }
 
-        async fn get_thumbnail(
-            &self,
-            _object: &ObjectRef,
-            _hint: ThumbnailHint,
-        ) -> Result<ThumbnailResult, BackendError> {
-            Err(BackendError::Unsupported {
-                operation: "get_thumbnail",
-            })
-        }
-
         async fn get_metadata(
             &self,
             object: &ObjectRef,
@@ -1288,14 +1245,11 @@ mod tests {
             CapabilitySet {
                 can_range_read: true,
                 can_range_write: true,
-                can_direct_thumbnail: false,
                 can_rename: true,
-                can_clone: false,
-                can_server_side_copy: false,
                 can_provide_progress: true,
                 can_verify_by_checksum: true,
-                can_trash: false,
                 can_etag: true,
+                ..CapabilitySet::default()
             }
         }
     }
@@ -1361,9 +1315,16 @@ mod tests {
             files_total: None,
         });
 
-        let result = client_relay_copy(&src_backend, &src, &dst_backend, &dst, &tx)
-            .await
-            .expect("relay copy should succeed");
+        let result = client_relay_copy(
+            &src_backend,
+            &src,
+            &dst_backend,
+            &dst,
+            &tx,
+            CopyRelayOptions::default(),
+        )
+        .await
+        .expect("relay copy should succeed");
 
         assert_eq!(result.bytes_transferred, 6);
         assert_eq!(dst_backend.stream_write_count(), 1);
@@ -1390,9 +1351,16 @@ mod tests {
             files_total: None,
         });
 
-        let result = client_relay_copy(&src_backend, &src, &dst_backend, &dst, &tx)
-            .await
-            .expect("chunked relay copy should succeed");
+        let result = client_relay_copy(
+            &src_backend,
+            &src,
+            &dst_backend,
+            &dst,
+            &tx,
+            CopyRelayOptions::default(),
+        )
+        .await
+        .expect("chunked relay copy should succeed");
 
         assert_eq!(result.bytes_transferred, total_len);
         assert_eq!(dst_backend.get("large-copy.bin"), Some(payload));
@@ -1441,7 +1409,7 @@ mod tests {
             backoff_factor: 2.0,
         };
 
-        let result = client_relay_copy_with_options(
+        let result = client_relay_copy(
             &src_backend,
             &src,
             &dst_backend,
@@ -1514,7 +1482,7 @@ mod tests {
             files_total: None,
         });
 
-        client_relay_copy_with_options(
+        client_relay_copy(
             &src_backend,
             &src,
             &dst_backend,
@@ -1588,7 +1556,7 @@ mod tests {
             entry_index: 9,
         };
         dst_backend.fail_multipart_after_successes(1);
-        let first_result = client_relay_copy_with_options(
+        let first_result = client_relay_copy(
             &src_backend,
             &src,
             &dst_backend,
@@ -1616,7 +1584,7 @@ mod tests {
             job_id: job_id.clone(),
             entry_index: 9,
         };
-        let resumed = client_relay_copy_with_options(
+        let resumed = client_relay_copy(
             &src_backend,
             &src,
             &dst_backend,
@@ -1712,7 +1680,7 @@ mod tests {
             files_total: None,
         });
 
-        client_relay_copy_with_options(
+        client_relay_copy(
             &src_backend,
             &src,
             &dst_backend,

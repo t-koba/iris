@@ -1,11 +1,9 @@
 use crate::connection::{SmbConnectionError, SmbResponse};
-use crate::file::{
-    close_file_actor, open_file_for_read_actor, open_file_for_write_actor, SmbOpenFile,
-};
+use crate::file::{close, open_file_for_read, open_file_for_write, SmbHandle};
 use crate::packet::create::Smb2CreateDisposition;
 use crate::packet::header::Smb2Command;
 use crate::packet::ioctl::{Smb2IoctlFlags, Smb2IoctlRequest, Smb2IoctlResponse};
-use crate::wire::le_u32;
+use crate::wire::{le_u32, push_u32, push_u64};
 use crate::SmbClientError;
 use crate::SmbConnectionActor;
 
@@ -34,33 +32,32 @@ pub struct SmbCopyChunkResponse {
     pub total_bytes_written: u32,
 }
 
-pub async fn copy_file_chunks_actor(
+pub async fn copy_file_chunks(
     connection: &SmbConnectionActor,
     source_path: impl Into<String>,
     target_path: impl Into<String>,
     create_disposition: Smb2CreateDisposition,
 ) -> Result<u64, SmbConnectionError> {
-    let source = open_file_for_read_actor(connection, source_path).await?;
-    let target = match open_file_for_write_actor(connection, target_path, create_disposition).await
-    {
+    let source = open_file_for_read(connection, source_path).await?;
+    let target = match open_file_for_write(connection, target_path, create_disposition).await {
         Ok(target) => target,
         Err(error) => {
-            let _ = close_file_actor(connection, source).await;
+            let _ = close(connection, source).await;
             return Err(error);
         }
     };
-    let copy_result = copy_open_file_chunks_actor(connection, &source, &target).await;
-    let close_source_result = close_file_actor(connection, source).await.map(|_| ());
-    let close_target_result = close_file_actor(connection, target).await.map(|_| ());
+    let copy_result = copy_open_file_chunks(connection, &source, &target).await;
+    let close_source_result = close(connection, source).await.map(|_| ());
+    let close_target_result = close(connection, target).await.map(|_| ());
     match (copy_result, close_source_result.and(close_target_result)) {
         (Ok(bytes), Ok(())) => Ok(bytes),
         (Err(error), _) | (_, Err(error)) => Err(error),
     }
 }
 
-pub async fn request_resume_key_actor(
+pub async fn request_resume_key(
     connection: &SmbConnectionActor,
-    file: &SmbOpenFile,
+    file: &SmbHandle,
 ) -> Result<[u8; SMB2_RESUME_KEY_BYTES], SmbConnectionError> {
     let response = connection
         .request(
@@ -82,9 +79,9 @@ pub async fn request_resume_key_actor(
     decode_resume_key_response(&response.output)
 }
 
-pub async fn copy_chunks_actor(
+pub async fn copy_chunks(
     connection: &SmbConnectionActor,
-    target: &SmbOpenFile,
+    target: &SmbHandle,
     resume_key: &[u8; SMB2_RESUME_KEY_BYTES],
     chunks: &[SmbCopyChunk],
 ) -> Result<SmbCopyChunkResponse, SmbConnectionError> {
@@ -163,16 +160,16 @@ pub fn decode_copychunk_response(
     })
 }
 
-async fn copy_open_file_chunks_actor(
+async fn copy_open_file_chunks(
     connection: &SmbConnectionActor,
-    source: &SmbOpenFile,
-    target: &SmbOpenFile,
+    source: &SmbHandle,
+    target: &SmbHandle,
 ) -> Result<u64, SmbConnectionError> {
     if source.end_of_file == 0 {
         return Ok(0);
     }
 
-    let resume_key = request_resume_key_actor(connection, source).await?;
+    let resume_key = request_resume_key(connection, source).await?;
     let mut copied = 0u64;
     while copied < source.end_of_file {
         let chunks = copychunk_batch(copied, source.end_of_file);
@@ -180,7 +177,7 @@ async fn copy_open_file_chunks_actor(
             .iter()
             .map(|chunk| u64::from(chunk.length))
             .sum::<u64>();
-        let response = copy_chunks_actor(connection, target, &resume_key, &chunks).await?;
+        let response = copy_chunks(connection, target, &resume_key, &chunks).await?;
         let written = u64::from(response.total_bytes_written);
         if written == 0 || written > expected_bytes {
             return Err(SmbConnectionError::ShortWrite {
@@ -219,14 +216,6 @@ fn ensure_success(response: &SmbResponse, command: Smb2Command) -> Result<(), Sm
             status: status.0,
         })
     }
-}
-
-fn push_u32(bytes: &mut Vec<u8>, value: u32) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_u64(bytes: &mut Vec<u8>, value: u64) {
-    bytes.extend_from_slice(&value.to_le_bytes());
 }
 
 #[cfg(test)]

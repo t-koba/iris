@@ -7,8 +7,8 @@ use iris_search::segment::IndexedKind;
 use iris_search::token::{parse_filter_tokens, ParseWarning};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 const ENTRY_NOT_VISIBLE: usize = usize::MAX;
@@ -35,6 +35,32 @@ pub struct InlineRenameState {
 pub struct BreadcrumbSegment {
     pub name: String,
     pub full_path: String,
+}
+
+/// One segment per path component; a Windows drive and its root form one segment.
+pub fn local_breadcrumbs(path: &Path) -> Vec<BreadcrumbSegment> {
+    let mut segments: Vec<BreadcrumbSegment> = Vec::new();
+    let mut accumulated = PathBuf::new();
+    for component in path.components() {
+        accumulated.push(component);
+        let full_path = accumulated.to_string_lossy().into_owned();
+        let name = match component {
+            std::path::Component::Prefix(prefix) => {
+                prefix.as_os_str().to_string_lossy().into_owned()
+            }
+            std::path::Component::RootDir => match segments.last_mut() {
+                Some(drive) => {
+                    drive.full_path = full_path;
+                    continue;
+                }
+                None => "/".to_string(),
+            },
+            std::path::Component::Normal(segment) => segment.to_string_lossy().into_owned(),
+            std::path::Component::CurDir | std::path::Component::ParentDir => continue,
+        };
+        segments.push(BreadcrumbSegment { name, full_path });
+    }
+    segments
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -257,27 +283,6 @@ impl PaneState {
         } else {
             false
         }
-    }
-
-    pub fn rebuild_breadcrumbs(&mut self) {
-        let path = PathBuf::from(&self.current_path);
-        let mut segments = Vec::new();
-        let mut accumulated = PathBuf::new();
-
-        for component in path.components() {
-            accumulated.push(component);
-            let name = match component {
-                std::path::Component::RootDir => "/".to_string(),
-                std::path::Component::Normal(segment) => segment.to_string_lossy().to_string(),
-                _ => continue,
-            };
-            segments.push(BreadcrumbSegment {
-                name,
-                full_path: accumulated.to_string_lossy().to_string(),
-            });
-        }
-
-        self.breadcrumb_segments = segments;
     }
 
     pub fn push_to_history(&mut self, path: String) {
@@ -1037,7 +1042,7 @@ fn entry_matches_model(entry: &ListEntry, model: &FilterModel) -> bool {
         }
     }
     if let Some(range) = &model.date {
-        let Some(mtime) = entry.mtime.map(system_time_to_secs) else {
+        let Some(mtime) = entry.mtime.map(iris_search::walker::system_time_to_secs) else {
             return false;
         };
         if !range.contains(mtime) {
@@ -1052,32 +1057,5 @@ fn entry_matches_model(entry: &ListEntry, model: &FilterModel) -> bool {
 }
 
 pub(crate) fn list_entry_kind(entry: &ListEntry) -> IndexedKind {
-    if entry.is_dir {
-        return IndexedKind::Directory;
-    }
-    let Some(extension) = std::path::Path::new(&entry.name)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.to_ascii_lowercase())
-    else {
-        return IndexedKind::File;
-    };
-    match extension.as_str() {
-        "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "heif" | "hif" | "tif" | "tiff"
-        | "bmp" | "avif" | "jp2" | "j2k" | "j2c" | "jpc" | "jpf" | "jpx" | "jpm" | "jxr"
-        | "hdp" | "wdp" | "jxl" | "arw" | "cr2" | "cr3" | "nef" | "nrw" | "orf" | "rw2" | "raf"
-        | "dng" | "x3f" => IndexedKind::Image,
-        "mp4" | "mov" | "m4v" | "mkv" | "avi" | "webm" | "mpg" | "mpeg" | "mj2" => {
-            IndexedKind::Video
-        }
-        "pdf" => IndexedKind::Pdf,
-        _ => IndexedKind::File,
-    }
-}
-
-fn system_time_to_secs(value: SystemTime) -> i64 {
-    match value.duration_since(UNIX_EPOCH) {
-        Ok(duration) => duration.as_secs().min(i64::MAX as u64) as i64,
-        Err(error) => -(error.duration().as_secs().min(i64::MAX as u64) as i64),
-    }
+    IndexedKind::for_path(&entry.name, entry.is_dir)
 }

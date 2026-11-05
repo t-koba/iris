@@ -1,6 +1,6 @@
 use crate::bloom::BloomQuery;
 use crate::ngram::normalize_text;
-use crate::segment::{IndexedKind, Segment, SegmentRecord};
+use crate::segment::{IndexedKind, SegmentRecord};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,21 +202,6 @@ impl CompiledFilter {
     }
 }
 
-pub fn filter_segment<'a>(segment: &'a Segment, model: FilterModel) -> Vec<FilterHit<'a>> {
-    let compiled = CompiledFilter::new(model);
-    let mut hits = segment
-        .records()
-        .iter()
-        .filter_map(|record| compiled.matches_record(record))
-        .collect::<Vec<_>>();
-    hits.sort_by(|lhs, rhs| {
-        rhs.score
-            .cmp(&lhs.score)
-            .then_with(|| lhs.record.path.cmp(&rhs.record.path))
-    });
-    hits
-}
-
 pub fn fuzzy_name_score(candidate: &str, query: &str) -> Option<u32> {
     fuzzy_score_normalized(&normalize_text(candidate), &normalize_text(query))
 }
@@ -367,6 +352,19 @@ fn first_n_chars_end(text: &str, max_chars: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::segment::Segment;
+
+    /// Every hit, best first.
+    fn filter_segment(segment: &Segment, model: FilterModel) -> Vec<FilterHit<'_>> {
+        let batch = segment.records().len().max(1);
+        crate::stream::filter_segment_incremental(segment, model, batch, || false)
+            .into_iter()
+            .flat_map(|event| match event {
+                crate::stream::FilterEvent::Hits(hits) => hits,
+                _ => Vec::new(),
+            })
+            .collect()
+    }
     use crate::bloom::BloomSignature;
 
     fn record(path: &str) -> SegmentRecord {

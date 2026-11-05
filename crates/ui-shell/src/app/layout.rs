@@ -832,7 +832,7 @@ fn view_main_layout(state: &AppState) -> Element<'_, Message> {
     if resolved.sidebar_inline {
         layout = layout.push(
             container(sidebar::view_sidebar(state))
-                .style(theme::sidebar_style)
+                .style(theme::sunken_panel_style)
                 .width(Length::Fixed(resolved.sidebar_width))
                 .height(Length::Fill),
         );
@@ -996,7 +996,7 @@ fn view_main_layout(state: &AppState) -> Element<'_, Message> {
                 .spacing(4)
                 .height(Length::Fill),
         )
-        .style(theme::sidebar_style)
+        .style(theme::sunken_panel_style)
         .padding([4, 8])
         .width(Length::Fixed(resolved.sidebar_width))
         .height(Length::Fill);
@@ -1164,9 +1164,7 @@ fn build_right_panel_content(state: &AppState) -> Element<'_, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iris_core_domain::types::list::ListEntry;
-    use iris_core_domain::types::metadata::MetadataLevel;
-    use iris_core_domain::types::object::{BackendId, ObjectKey, ObjectRef, StableId};
+    use crate::test_support::local_entry;
 
     #[test]
     fn system_theme_uses_cached_appearance_with_iris_palette() {
@@ -1193,8 +1191,8 @@ mod tests {
     fn drag_ghost_data_uses_first_dragged_item_and_count() {
         let mut state = AppState::default();
         state.pane_mut(0).entries = vec![
-            test_list_entry("/tmp/alpha.txt", "alpha.txt"),
-            test_list_entry("/tmp/beta.txt", "beta.txt"),
+            local_entry("/tmp/alpha.txt", false),
+            local_entry("/tmp/beta.txt", false),
         ];
         state.dnd_state = DndState::Dragging {
             source_pane: 0,
@@ -1206,30 +1204,5 @@ mod tests {
 
         assert_eq!(data.title, "alpha.txt");
         assert!(data.count_label.contains('2'));
-    }
-
-    fn test_list_entry(path: &str, name: &str) -> ListEntry {
-        ListEntry {
-            object_ref: ObjectRef {
-                key: ObjectKey {
-                    backend_id: BackendId("local".to_string()),
-                    stable_id: StableId(path.to_string()),
-                },
-                parent_stable_id: None,
-                display_path: path.to_string(),
-            },
-            sort_name_key: ListEntry::sort_name_key_for(name),
-            sort_extension_key: ListEntry::sort_extension_key_for(name),
-            name: name.to_string(),
-            is_dir: false,
-            metadata_level: MetadataLevel::L1,
-            size: None,
-            mtime: None,
-            ctime: None,
-            is_symlink: false,
-            symlink_target: None,
-            is_inaccessible: false,
-            annotation: None,
-        }
     }
 }

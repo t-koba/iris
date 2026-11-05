@@ -1,5 +1,8 @@
 use crate::auth::ntlm::{ntlm_v2_hash, ntlm_v2_response, NtlmV2Response};
-use crate::wire::{checked_slice, le_u16, le_u32};
+use crate::wire::{
+    checked_slice, checked_u16_len, checked_u32_len, encode_utf16le, le_u16, le_u32, push_u16,
+    push_u32,
+};
 use crate::SmbClientError;
 use hmac::{Hmac, KeyInit, Mac};
 use md5::Md5;
@@ -20,8 +23,6 @@ const MSV_AV_TARGET_NAME: u16 = 9;
 const MSV_AV_CHANNEL_BINDINGS: u16 = 10;
 const MSV_AV_FLAG_MIC_PRESENT: u32 = 0x0000_0002;
 const NTLM_VERSION: [u8; 8] = [10, 0, 0, 0, 0, 0, 0, 15];
-const U16_MAX_USIZE: usize = u16::MAX as usize;
-const U32_MAX_USIZE: usize = u32::MAX as usize;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct NtlmsspNegotiateFlags(pub u32);
@@ -62,8 +63,8 @@ pub struct NtlmsspNegotiate {
 
 impl NtlmsspNegotiate {
     pub fn encode(&self) -> Result<Vec<u8>, SmbClientError> {
-        let domain = utf16le(&self.domain);
-        let workstation = utf16le(&self.workstation);
+        let domain = encode_utf16le(&self.domain);
+        let workstation = encode_utf16le(&self.workstation);
         let mut payload_offset = NEGOTIATE_FIXED_BYTES;
         let domain_offset = payload_offset;
         payload_offset = checked_add(payload_offset, domain.len())?;
@@ -148,9 +149,9 @@ pub struct NtlmV2AuthenticateRequest<'a> {
 
 impl NtlmsspAuthenticate {
     pub fn encode(&self) -> Result<Vec<u8>, SmbClientError> {
-        let domain = utf16le(&self.domain);
-        let user = utf16le(&self.user);
-        let workstation = utf16le(&self.workstation);
+        let domain = encode_utf16le(&self.domain);
+        let user = encode_utf16le(&self.user);
+        let workstation = encode_utf16le(&self.workstation);
         let lm = &self.ntlm_v2.lm_challenge_response;
         let nt = &self.ntlm_v2.nt_challenge_response;
         let session_key = &self.encrypted_random_session_key;
@@ -302,7 +303,11 @@ fn protected_target_info(target_info: &[u8], target_name: &str) -> Result<Vec<u8
         MSV_AV_FLAGS,
         &(flags | MSV_AV_FLAG_MIC_PRESENT).to_le_bytes(),
     )?;
-    push_av_pair(&mut output, MSV_AV_TARGET_NAME, &utf16le(target_name))?;
+    push_av_pair(
+        &mut output,
+        MSV_AV_TARGET_NAME,
+        &encode_utf16le(target_name),
+    )?;
     push_av_pair(&mut output, MSV_AV_CHANNEL_BINDINGS, &[0; 16])?;
     push_u16(&mut output, MSV_AV_EOL);
     push_u16(&mut output, 0);
@@ -408,41 +413,10 @@ fn checked_add(left: usize, right: usize) -> Result<usize, SmbClientError> {
         })
 }
 
-fn checked_u16_len(field: &'static str, length: usize) -> Result<u16, SmbClientError> {
-    u16::try_from(length).map_err(|_| SmbClientError::FieldTooLarge {
-        field,
-        length,
-        max: U16_MAX_USIZE,
-    })
-}
-
-fn checked_u32_len(field: &'static str, length: usize) -> Result<u32, SmbClientError> {
-    u32::try_from(length).map_err(|_| SmbClientError::FieldTooLarge {
-        field,
-        length,
-        max: U32_MAX_USIZE,
-    })
-}
-
-fn utf16le(value: &str) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(value.len() * 2);
-    for unit in value.encode_utf16() {
-        push_u16(&mut bytes, unit);
-    }
-    bytes
-}
-
-fn push_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_u32(bytes: &mut Vec<u8>, value: u32) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::*;
 
     #[test]
     fn negotiate_message_encodes_flags_and_security_buffers() {
@@ -459,17 +433,17 @@ mod tests {
         assert_eq!(le_u32(&encoded, 12), default_negotiate_flags().0);
         assert_eq!(
             security_buffer_slice(&encoded, 16).expect("domain"),
-            utf16le("DOMAIN")
+            encode_utf16le("DOMAIN")
         );
         assert_eq!(
             security_buffer_slice(&encoded, 24).expect("workstation"),
-            utf16le("WORKSTATION")
+            encode_utf16le("WORKSTATION")
         );
     }
 
     #[test]
     fn challenge_decodes_target_and_target_info() {
-        let target_name = utf16le("DOMAIN");
+        let target_name = encode_utf16le("DOMAIN");
         let target_info = b"av-pairs";
         let encoded = challenge_message(&target_name, target_info);
 
@@ -553,15 +527,15 @@ mod tests {
         );
         assert_eq!(
             security_buffer_slice(&encoded, 28).expect("domain"),
-            utf16le("DOMAIN")
+            encode_utf16le("DOMAIN")
         );
         assert_eq!(
             security_buffer_slice(&encoded, 36).expect("user"),
-            utf16le("User")
+            encode_utf16le("User")
         );
         assert_eq!(
             security_buffer_slice(&encoded, 44).expect("workstation"),
-            utf16le("WORKSTATION")
+            encode_utf16le("WORKSTATION")
         );
         assert_eq!(
             security_buffer_slice(&encoded, 52).expect("session key"),
@@ -573,11 +547,11 @@ mod tests {
     #[test]
     fn ntlm_v2_authenticate_message_uses_challenge_and_identity() {
         let challenge = NtlmsspChallenge {
-            target_name: utf16le("Domain"),
+            target_name: encode_utf16le("Domain"),
             flags: default_negotiate_flags(),
             server_challenge: hex_array_8("0123456789abcdef"),
             target_info: vec![0; 4],
-            raw_message: challenge_message(&utf16le("Domain"), &[0; 4]),
+            raw_message: challenge_message(&encode_utf16le("Domain"), &[0; 4]),
         };
         let client_challenge = hex_array_8("ffffff0011223344");
         let timestamp = 0x0123_4567_89ab_cdef;
@@ -618,15 +592,15 @@ mod tests {
         );
         assert_eq!(
             security_buffer_slice(&result.message, 28).expect("domain"),
-            utf16le("Domain")
+            encode_utf16le("Domain")
         );
         assert_eq!(
             security_buffer_slice(&result.message, 36).expect("user"),
-            utf16le("User")
+            encode_utf16le("User")
         );
         assert_eq!(
             security_buffer_slice(&result.message, 44).expect("workstation"),
-            utf16le("WORKSTATION")
+            encode_utf16le("WORKSTATION")
         );
         assert_eq!(le_u32(&result.message, 60), default_negotiate_flags().0);
     }
@@ -645,31 +619,5 @@ mod tests {
         bytes.extend_from_slice(target_name);
         bytes.extend_from_slice(target_info);
         bytes
-    }
-
-    fn hex_array_8(hex: &str) -> [u8; 8] {
-        let bytes = hex_bytes(hex);
-        bytes.try_into().expect("hex should decode to eight bytes")
-    }
-
-    fn hex_bytes(hex: &str) -> Vec<u8> {
-        assert!(hex.len().is_multiple_of(2));
-        let mut bytes = Vec::with_capacity(hex.len() / 2);
-        let raw = hex.as_bytes();
-        for index in (0..raw.len()).step_by(2) {
-            let high = hex_value(raw[index]);
-            let low = hex_value(raw[index + 1]);
-            bytes.push((high << 4) | low);
-        }
-        bytes
-    }
-
-    fn hex_value(byte: u8) -> u8 {
-        match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            b'A'..=b'F' => byte - b'A' + 10,
-            _ => panic!("invalid hex digit"),
-        }
     }
 }

@@ -665,35 +665,7 @@ impl std::fmt::Display for KeyCombo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iris_core_domain::types::list::ListEntry;
-    use iris_core_domain::types::metadata::MetadataLevel;
-    use iris_core_domain::types::object::{BackendId, ObjectKey, ObjectRef, StableId};
-
-    fn list_entry(name: &str) -> ListEntry {
-        let display_path = format!("/tmp/{name}");
-        ListEntry {
-            object_ref: ObjectRef {
-                key: ObjectKey {
-                    backend_id: BackendId("local".to_string()),
-                    stable_id: StableId(display_path.clone()),
-                },
-                parent_stable_id: None,
-                display_path,
-            },
-            sort_name_key: ListEntry::sort_name_key_for(name),
-            sort_extension_key: ListEntry::sort_extension_key_for(name),
-            name: name.to_string(),
-            is_dir: false,
-            metadata_level: MetadataLevel::L1,
-            size: None,
-            mtime: None,
-            ctime: None,
-            is_symlink: false,
-            symlink_target: None,
-            is_inaccessible: false,
-            annotation: None,
-        }
-    }
+    use crate::test_support::tmp_entry;
 
     #[test]
     fn override_changes_existing_shortcut() {
@@ -896,7 +868,7 @@ mod tests {
     #[test]
     fn home_and_end_follow_visible_projection_order() {
         let mut state = AppState::default();
-        state.pane_mut(0).entries = vec![list_entry("zeta.txt"), list_entry("alpha.txt")];
+        state.pane_mut(0).entries = vec![tmp_entry("zeta.txt"), tmp_entry("alpha.txt")];
         state.pane_mut(0).sort_entries();
 
         let home = handle_key_event(

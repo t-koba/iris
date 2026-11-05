@@ -3,6 +3,7 @@ use crate::pipeline_memory::{
 };
 use crate::{encoded::passthrough_encoded_image, image_generic, jpeg, pdf, raw, video};
 use iris_core_domain::backend_adapter::BackendAdapter;
+use iris_core_domain::media::MediaFormat;
 use iris_core_domain::types::error::BackendError;
 use iris_core_domain::types::object::ObjectRef;
 use iris_core_domain::types::progress::ByteRange;
@@ -42,22 +43,12 @@ fn ensure_not_cancelled(cancel_token: &CancellationToken) -> Result<(), BackendE
 }
 
 impl ThumbnailPipeline {
-    /// Tries each pipeline stage in order through the backend adapter.
-    pub async fn generate(
-        backend: &dyn BackendAdapter,
-        object: &ObjectRef,
-        hint: &ThumbnailHint,
-        content_type: Option<&str>,
-    ) -> Result<ThumbnailResult, BackendError> {
-        let cancel_token = CancellationToken::new();
-        Self::generate_with_cancellation(backend, object, hint, content_type, &cancel_token).await
-    }
-
     #[tracing::instrument(
         skip(backend, hint, cancel_token),
         fields(path = %object.display_path, max_dimension = hint.max_dimension)
     )]
-    pub async fn generate_with_cancellation(
+    /// Tries each pipeline stage in order through the backend adapter.
+    pub async fn generate(
         backend: &dyn BackendAdapter,
         object: &ObjectRef,
         hint: &ThumbnailHint,
@@ -86,7 +77,7 @@ impl ThumbnailPipeline {
         };
 
         match file_type {
-            FileType::Jpeg => {
+            Some(MediaFormat::Jpeg) => {
                 // Read only the head for EXIF thumbnail extraction.
                 let header_data =
                     read_partial(backend, object, 0, JPEG_HEADER_PROBE_BYTES, cancel_token).await?;
@@ -126,7 +117,7 @@ impl ThumbnailPipeline {
                 let hint = hint.clone();
                 decode_in_memory(full_data, hint, cancel_token).await
             }
-            FileType::Image => {
+            Some(MediaFormat::Image | MediaFormat::ModernImage) => {
                 let header_data = read_partial(
                     backend,
                     object,
@@ -170,8 +161,8 @@ impl ThumbnailPipeline {
                 let hint = hint.clone();
                 decode_in_memory(full_data, hint, cancel_token).await
             }
-            FileType::Raw => {
-                if let Some(result) = raw::extract_raw_thumbnail_from_backend_with_cancellation(
+            Some(MediaFormat::Raw) => {
+                if let Some(result) = raw::extract_raw_thumbnail_from_backend(
                     backend,
                     object,
                     hint.max_dimension,
@@ -185,7 +176,7 @@ impl ThumbnailPipeline {
                     operation: "raw embedded preview missing",
                 })
             }
-            FileType::Pdf => {
+            Some(MediaFormat::Pdf) => {
                 generate_from_downloaded_temp_path(
                     backend,
                     object,
@@ -195,7 +186,7 @@ impl ThumbnailPipeline {
                 )
                 .await
             }
-            FileType::Video => {
+            Some(MediaFormat::Video) => {
                 if !video::supports_video_thumbnails() {
                     return Err(BackendError::Unsupported {
                         operation: "video thumbnail generation without video feature",
@@ -210,29 +201,13 @@ impl ThumbnailPipeline {
                 )
                 .await
             }
-            FileType::Other => Err(BackendError::Unsupported {
+            None => Err(BackendError::Unsupported {
                 operation: "thumbnail for unknown file type",
             }),
         }
     }
 
-    /// Generates a thumbnail straight from a local path, bypassing the backend adapter.
     pub fn generate_from_path(
-        file_path: &Path,
-        hint: &ThumbnailHint,
-        content_type: Option<&str>,
-    ) -> Option<ThumbnailResult> {
-        let cancel_token = CancellationToken::new();
-        Self::generate_from_path_result_with_cancellation(
-            file_path,
-            hint,
-            content_type,
-            &cancel_token,
-        )
-        .ok()
-    }
-
-    pub fn generate_from_path_result_with_cancellation(
         file_path: &Path,
         hint: &ThumbnailHint,
         content_type: Option<&str>,
@@ -246,17 +221,17 @@ impl ThumbnailPipeline {
             .map(str::to_ascii_lowercase);
 
         match file_type {
-            FileType::Jpeg => local_thumbnail_result(
+            Some(MediaFormat::Jpeg) => local_thumbnail_result(
                 jpeg::extract_jpeg_thumbnail_from_path(file_path, hint.max_dimension),
                 "jpeg thumbnail generation failed",
                 cancel_token,
             ),
-            FileType::Image => local_thumbnail_result(
+            Some(MediaFormat::Image | MediaFormat::ModernImage) => local_thumbnail_result(
                 image_generic::extract_image_thumbnail(file_path, hint),
                 "image thumbnail generation failed",
                 cancel_token,
             ),
-            FileType::Raw => {
+            Some(MediaFormat::Raw) => {
                 if !raw::supports_any_raw_thumbnails()
                     || ext
                         .as_deref()
@@ -267,11 +242,8 @@ impl ThumbnailPipeline {
                     });
                 }
 
-                let result = raw::extract_raw_thumbnail_with_cancellation(
-                    file_path,
-                    hint.max_dimension,
-                    cancel_token,
-                );
+                let result =
+                    raw::extract_raw_thumbnail(file_path, hint.max_dimension, cancel_token);
                 if let Some(thumbnail) = result {
                     return Ok(thumbnail);
                 }
@@ -280,7 +252,7 @@ impl ThumbnailPipeline {
                     operation: "raw embedded preview missing",
                 })
             }
-            FileType::Video => {
+            Some(MediaFormat::Video) => {
                 if !video::supports_video_thumbnails() {
                     return Err(BackendError::Unsupported {
                         operation: "video thumbnail generation without video feature",
@@ -292,7 +264,7 @@ impl ThumbnailPipeline {
                     cancel_token,
                 )
             }
-            FileType::Pdf => {
+            Some(MediaFormat::Pdf) => {
                 if !pdf::supports_pdf_thumbnails() {
                     return Err(BackendError::Unsupported {
                         operation: "pdf thumbnail generation without pdf feature",
@@ -304,7 +276,7 @@ impl ThumbnailPipeline {
                     cancel_token,
                 )
             }
-            FileType::Other => {
+            None => {
                 // Unknown formats are still tried with the `image` crate for local files.
                 local_thumbnail_result(
                     image_generic::extract_image_thumbnail(file_path, hint),
@@ -316,92 +288,34 @@ impl ThumbnailPipeline {
     }
 }
 
-enum FileType {
-    Jpeg,
-    Image, // PNG, TIFF, BMP, GIF, WebP, ... decoded by the image crate
-    Raw,
-    Video,
-    Pdf,
-    Other,
-}
-
-fn classify_content_type(content_type: Option<&str>) -> FileType {
-    let ct = match content_type {
-        Some(ct) => ct.to_lowercase(),
-        None => return FileType::Other,
-    };
-
+fn classify_content_type(content_type: Option<&str>) -> Option<MediaFormat> {
+    let ct = content_type?.to_lowercase();
     if ct.contains("jpeg") || ct.contains("jpg") {
-        FileType::Jpeg
+        Some(MediaFormat::Jpeg)
     } else if ct.contains("pdf") {
-        FileType::Pdf
+        Some(MediaFormat::Pdf)
     } else if ct.contains("video") {
-        FileType::Video
+        Some(MediaFormat::Video)
     } else if is_raw_content_type(&ct) {
-        FileType::Raw
+        Some(MediaFormat::Raw)
     } else if ct.starts_with("image/")
         || ct.contains("vnd.ms-photo")
         || ct.contains("jpeg-xr")
         || ct.contains("jpegxl")
     {
-        FileType::Image
+        Some(MediaFormat::Image)
     } else {
-        FileType::Other
+        None
     }
 }
 
-fn classify_for_local_path(file_path: &Path, content_type: Option<&str>) -> FileType {
-    let ext = file_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_lowercase())
-        .unwrap_or_default();
-
+fn classify_for_local_path(file_path: &Path, content_type: Option<&str>) -> Option<MediaFormat> {
+    let by_extension = MediaFormat::from_path(file_path);
     // RAW extensions win over MIME so DNG is not treated as image/tiff.
-    if raw::is_known_raw_extension(&ext) {
-        return FileType::Raw;
+    if by_extension == Some(MediaFormat::Raw) {
+        return by_extension;
     }
-
-    let by_mime = classify_content_type(content_type);
-    if !matches!(by_mime, FileType::Other) {
-        return by_mime;
-    }
-
-    if matches!(ext.as_str(), "jpg" | "jpeg") {
-        FileType::Jpeg
-    } else if matches!(
-        ext.as_str(),
-        "png"
-            | "gif"
-            | "bmp"
-            | "webp"
-            | "tif"
-            | "tiff"
-            | "ico"
-            | "avif"
-            | "heic"
-            | "heif"
-            | "hif"
-            | "jp2"
-            | "j2k"
-            | "j2c"
-            | "jpc"
-            | "jpf"
-            | "jpx"
-            | "jpm"
-            | "jxr"
-            | "hdp"
-            | "wdp"
-            | "jxl"
-    ) {
-        FileType::Image
-    } else if ext == "pdf" {
-        FileType::Pdf
-    } else if matches!(ext.as_str(), "mp4" | "mov" | "mkv" | "avi" | "mj2") {
-        FileType::Video
-    } else {
-        FileType::Other
-    }
+    classify_content_type(content_type).or(by_extension)
 }
 
 fn is_raw_content_type(ct: &str) -> bool {
@@ -578,7 +492,7 @@ async fn generate_from_downloaded_temp_path(
     let cancel_token = cancel_token.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        ThumbnailPipeline::generate_from_path_result_with_cancellation(
+        ThumbnailPipeline::generate_from_path(
             &decode_path,
             &hint,
             content_type.as_deref(),

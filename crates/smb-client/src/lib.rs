@@ -13,6 +13,8 @@ pub mod file;
 pub mod netbios;
 pub mod packet;
 pub mod session;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod transform;
 pub mod transport;
 pub mod tree;
@@ -34,12 +36,12 @@ pub use auth::spnego::{
     decode_neg_token_resp, encode_neg_token_resp, spnego_initial_context_token_ntlm,
     spnego_neg_token_resp_ntlm, SpnegoNegState, SpnegoNegTokenResp,
 };
-pub use connection::{SmbConnection, SmbConnectionError, SmbResponse};
+pub use connection::{SmbConnectionError, SmbResponse};
 pub use copychunk::{
-    copy_chunks_actor, copy_file_chunks_actor, decode_copychunk_response,
-    decode_resume_key_response, request_resume_key_actor, smb2_srv_copychunk_copy, SmbCopyChunk,
-    SmbCopyChunkResponse, DEFAULT_COPYCHUNK_CHUNK_BYTES, DEFAULT_COPYCHUNK_MAX_CHUNKS,
-    FSCTL_SRV_COPYCHUNK, FSCTL_SRV_REQUEST_RESUME_KEY, SMB2_RESUME_KEY_BYTES,
+    copy_chunks, copy_file_chunks, decode_copychunk_response, decode_resume_key_response,
+    request_resume_key, smb2_srv_copychunk_copy, SmbCopyChunk, SmbCopyChunkResponse,
+    DEFAULT_COPYCHUNK_CHUNK_BYTES, DEFAULT_COPYCHUNK_MAX_CHUNKS, FSCTL_SRV_COPYCHUNK,
+    FSCTL_SRV_REQUEST_RESUME_KEY, SMB2_RESUME_KEY_BYTES,
 };
 pub use crypto::{
     derive_smb2_signing_key, sign_smb2_packet_aes_cmac, sign_smb2_packet_hmac_sha256,
@@ -49,18 +51,13 @@ pub use crypto::{
     SMB311_PREAUTH_HASH_BYTES,
 };
 pub use dir::{
-    close_directory, close_directory_actor, create_directory_actor,
-    decode_file_id_both_directory_entries, delete_directory_actor, list_directory_once,
-    list_directory_once_actor, open_directory_for_list, open_directory_for_list_actor,
-    query_directory_entries, query_directory_entries_actor, rename_directory_actor,
-    set_directory_basic_info_actor, SmbDirectoryEntry, SmbOpenDirectory,
-    DEFAULT_DIRECTORY_OUTPUT_BUFFER_LENGTH,
+    create_directory, decode_file_id_both_directory_entries, list_directory_once,
+    SmbDirectoryEntry, DEFAULT_DIRECTORY_OUTPUT_BUFFER_LENGTH,
 };
 pub use file::{
-    close_file, close_file_actor, delete_file_actor, open_file_and_read_actor, open_file_for_read,
-    open_file_for_read_actor, open_file_for_write_actor, read_file_at, read_file_ranges_pipelined,
-    rename_file_actor, set_file_basic_info_actor, write_file_at_actor, write_file_chunks_pipelined,
-    SmbOpenFile, SmbReadRange, DEFAULT_READ_CHUNK_LENGTH, DEFAULT_READ_PIPELINE_DEPTH,
+    close, delete, open_file_and_read, open_file_for_read, open_file_for_write,
+    read_file_ranges_pipelined, rename, set_basic_info, write_file_at, write_file_chunks_pipelined,
+    SmbHandle, SmbReadRange, DEFAULT_READ_CHUNK_LENGTH, DEFAULT_READ_PIPELINE_DEPTH,
     DEFAULT_WRITE_CHUNK_LENGTH,
 };
 pub use netbios::{decode_direct_tcp_header, encode_direct_tcp_header};
@@ -100,18 +97,15 @@ pub use packet::tree_connect::{
 };
 pub use packet::write::{Smb2WriteChannel, Smb2WriteFlags, Smb2WriteRequest, Smb2WriteResponse};
 pub use session::{
-    authenticate_guest_actor, authenticate_ntlm_v2, authenticate_ntlm_v2_actor,
-    NtlmV2SecurityConfig, NtlmV2Session, NtlmV2SessionSetup, SmbSessionError,
+    authenticate_guest, authenticate_ntlm_v2, NtlmV2SecurityConfig, NtlmV2Session,
+    NtlmV2SessionSetup, SmbSessionError,
 };
 pub use transform::{
     derive_smb311_encryption_keys, derive_smb3_encryption_keys, Smb3EncryptionContext,
     Smb3EncryptionKeys, SMB3_TRANSFORM_HEADER_BYTES,
 };
 pub use transport::{DirectTcpTransport, SmbTransportError};
-pub use tree::{
-    tree_connect_share, tree_connect_share_actor, tree_connect_unc, tree_connect_unc_actor,
-    unc_share_path, SmbTree, SmbTreeError,
-};
+pub use tree::{tree_connect_share, tree_connect_unc, unc_share_path, SmbTree, SmbTreeError};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SmbClientError {

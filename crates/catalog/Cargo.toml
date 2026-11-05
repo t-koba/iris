@@ -4,7 +4,7 @@ version = "0.4.0"
 edition = "2021"
 
 [dependencies]
-iris-core-domain = { workspace = true }
+iris-core-domain = { workspace = true, features = ["sqlite"] }
 rusqlite = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

@@ -586,15 +586,11 @@ impl BackendAdapter for PCloudAdapter {
     fn capabilities(&self) -> CapabilitySet {
         CapabilitySet {
             can_range_read: true,
-            can_range_write: false,
-            can_direct_thumbnail: false,
             can_rename: true,
-            can_clone: false,
             can_server_side_copy: true,
-            can_provide_progress: false,
             can_verify_by_checksum: true,
-            can_trash: false,
             can_etag: true,
+            ..CapabilitySet::default()
         }
     }
 }

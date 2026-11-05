@@ -5,13 +5,10 @@ use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-mod connection;
 mod conversions;
 mod objects;
 mod snapshots;
 mod thumbnails;
-
-use connection::configure_connection;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
@@ -74,6 +71,9 @@ pub struct CachedDirectoryEntry {
     pub is_inaccessible: bool,
 }
 
+/// A small mmap saves virtual memory; hot pages are already in SQLite's page cache.
+const CATALOG_MMAP_BYTES: u64 = 32 * 1024 * 1024;
+
 /// SQLite cache index for listings and thumbnails.
 pub struct CatalogRepository {
     conn: Connection,
@@ -81,17 +81,15 @@ pub struct CatalogRepository {
 
 impl CatalogRepository {
     pub fn open(db_path: &Path) -> Result<Self, CatalogError> {
-        let conn = Connection::open(db_path)?;
-        configure_connection(&conn, true)?;
-        schema::initialize_schema(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: schema::open(Some(db_path), CATALOG_MMAP_BYTES)?,
+        })
     }
 
     pub fn open_in_memory() -> Result<Self, CatalogError> {
-        let conn = Connection::open_in_memory()?;
-        configure_connection(&conn, false)?;
-        schema::initialize_schema(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: schema::open(None, CATALOG_MMAP_BYTES)?,
+        })
     }
 
     pub fn evict(&self) -> Result<u64, CatalogError> {

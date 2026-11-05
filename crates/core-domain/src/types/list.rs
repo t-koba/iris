@@ -74,6 +74,25 @@ pub struct ListEntry {
 }
 
 impl ListEntry {
+    /// An entry known only by name (metadata level L0).
+    pub fn new(object_ref: ObjectRef, name: String, is_dir: bool) -> Self {
+        Self {
+            object_ref,
+            sort_name_key: Self::sort_name_key_for(&name),
+            sort_extension_key: Self::sort_extension_key_for(&name),
+            name,
+            is_dir,
+            metadata_level: MetadataLevel::L0,
+            size: None,
+            mtime: None,
+            ctime: None,
+            is_symlink: false,
+            symlink_target: None,
+            is_inaccessible: false,
+            annotation: None,
+        }
+    }
+
     pub fn from_listed_entry(entry: ListedEntry) -> Self {
         match entry {
             ListedEntry::NameOnly(entry) => Self::from_name_entry(entry),
@@ -90,19 +109,9 @@ impl ListEntry {
             is_inaccessible,
         } = entry;
         Self {
-            object_ref,
-            sort_name_key: Self::sort_name_key_for(&name),
-            sort_extension_key: Self::sort_extension_key_for(&name),
-            name,
-            is_dir,
-            metadata_level: MetadataLevel::L0,
-            size: None,
-            mtime: None,
-            ctime: None,
             is_symlink,
-            symlink_target: None,
             is_inaccessible,
-            annotation: None,
+            ..Self::new(object_ref, name, is_dir)
         }
     }
 

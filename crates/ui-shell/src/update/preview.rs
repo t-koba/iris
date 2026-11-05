@@ -3,6 +3,7 @@ use crate::runtime::app_runtime;
 use crate::state::{AppState, EntryCacheStamp, FolderStats, PreviewData};
 use iced::widget::image as iced_image;
 use iced::Task;
+use iris_core_domain::media::MediaFormat;
 use iris_core_domain::types::object::ObjectRef;
 use iris_core_domain::types::thumbnail::{ImageFormat, ThumbnailHint};
 use std::path::PathBuf;
@@ -177,10 +178,10 @@ pub fn start_preview_load(state: &mut AppState, version: u64) -> Task<Message> {
 
 async fn load_preview_visual(
     object_ref: &ObjectRef,
-    ext: &str,
+    format: MediaFormat,
     cached_thumbnail: Option<iced_image::Handle>,
 ) -> Option<iced_image::Handle> {
-    if is_video_extension(ext) {
+    if format == MediaFormat::Video {
         if let Some(cached_thumbnail) = cached_thumbnail {
             return Some(cached_thumbnail);
         }
@@ -191,12 +192,10 @@ async fn load_preview_visual(
 
     let path = &object_ref.display_path;
     let hint = ThumbnailHint {
-        max_dimension: if is_raw_extension(ext) {
-            PREVIEW_RAW_MAX_DIMENSION
-        } else if is_video_extension(ext) {
-            PREVIEW_VIDEO_MAX_DIMENSION
-        } else {
-            PREVIEW_JPEG_MAX_DIMENSION
+        max_dimension: match format {
+            MediaFormat::Raw => PREVIEW_RAW_MAX_DIMENSION,
+            MediaFormat::Video => PREVIEW_VIDEO_MAX_DIMENSION,
+            _ => PREVIEW_JPEG_MAX_DIMENSION,
         },
         preferred_formats: vec![ImageFormat::Jpeg, ImageFormat::WebP, ImageFormat::Png],
     };
@@ -204,7 +203,12 @@ async fn load_preview_visual(
         .first()
         .map(|mime| mime.to_string());
     let generated = app_runtime()
-        .generate_thumbnail(object_ref, &hint, content_type.as_deref())
+        .generate_thumbnail(
+            object_ref,
+            &hint,
+            content_type.as_deref(),
+            &tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .ok()?;
 
@@ -221,10 +225,11 @@ async fn load_preview_data(
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
+    let format = MediaFormat::from_extension(&ext);
 
-    if is_jpeg_extension(&ext) || is_image_extension(&ext) || is_raw_extension(&ext) {
+    if let Some(format) = format.filter(|format| format.is_image()) {
         let handle = if mode.wants_visual {
-            load_preview_visual(&object_ref, &ext, None).await
+            load_preview_visual(&object_ref, format, None).await
         } else {
             None
         };
@@ -258,9 +263,9 @@ async fn load_preview_data(
         });
     }
 
-    if ext == "pdf" {
+    if format == Some(MediaFormat::Pdf) {
         let thumbnail = if mode.wants_visual {
-            load_preview_visual(&object_ref, &ext, None).await
+            load_preview_visual(&object_ref, MediaFormat::Pdf, None).await
         } else {
             None
         };
@@ -285,13 +290,13 @@ async fn load_preview_data(
         });
     }
 
-    if is_video_extension(&ext) {
+    if format == Some(MediaFormat::Video) {
         if !mode.wants_visual {
             return None;
         }
 
         return Some(PreviewData::Video {
-            thumbnail: load_preview_visual(&object_ref, &ext, cached_thumbnail).await,
+            thumbnail: load_preview_visual(&object_ref, MediaFormat::Video, cached_thumbnail).await,
             duration_secs: None,
         });
     }
@@ -339,47 +344,6 @@ pub fn is_text_extension(ext: &str) -> bool {
             | "csv"
             | "log"
     )
-}
-
-pub fn is_image_extension(ext: &str) -> bool {
-    matches!(
-        ext,
-        "jpg"
-            | "jpeg"
-            | "png"
-            | "gif"
-            | "bmp"
-            | "webp"
-            | "tiff"
-            | "tif"
-            | "heic"
-            | "heif"
-            | "hif"
-            | "avif"
-            | "jp2"
-            | "j2k"
-            | "j2c"
-            | "jpc"
-            | "jpf"
-            | "jpx"
-            | "jpm"
-            | "jxr"
-            | "hdp"
-            | "wdp"
-            | "jxl"
-    )
-}
-
-pub fn is_jpeg_extension(ext: &str) -> bool {
-    matches!(ext, "jpg" | "jpeg")
-}
-
-pub fn is_raw_extension(ext: &str) -> bool {
-    iris_thumb_preview::raw::is_known_raw_extension(ext)
-}
-
-pub fn is_video_extension(ext: &str) -> bool {
-    matches!(ext, "mp4" | "mov" | "mkv" | "avi" | "mj2")
 }
 
 /// File count, folder count and total size of the direct children.

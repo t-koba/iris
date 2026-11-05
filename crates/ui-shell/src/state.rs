@@ -27,7 +27,9 @@ pub use layout::{
     SortKey, SortOrder, ViewMode,
 };
 pub(crate) use navigation::list_entry_kind;
-pub use navigation::{BreadcrumbSegment, EntryIndex, PaneLoadState, PaneState, PathSuggestion};
+pub use navigation::{
+    local_breadcrumbs, BreadcrumbSegment, EntryIndex, PaneLoadState, PaneState, PathSuggestion,
+};
 pub use settings::{
     normalize_notification_timeout_secs, notification_timeout_input_from_secs,
     parse_notification_timeout_input_secs, parse_smb_port_input, CacheEncryptionPolicy,
@@ -547,9 +549,8 @@ fn notification_expires_at(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iris_core_domain::types::list::ListEntry;
-    use iris_core_domain::types::metadata::MetadataLevel;
-    use iris_core_domain::types::object::{BackendId, ObjectKey, ObjectRef, StableId};
+    use crate::test_support::tmp_entry;
+
     use iris_core_domain::types::transfer::JobId;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -768,10 +769,10 @@ mod tests {
     fn filter_select_all_and_focus_use_visible_entries() {
         let mut pane = PaneState {
             entries: vec![
-                test_entry("alpha.txt"),
-                test_entry("bravo.log"),
-                test_entry("alphabet.md"),
-                test_entry("charlie.txt"),
+                tmp_entry("alpha.txt"),
+                tmp_entry("bravo.log"),
+                tmp_entry("alphabet.md"),
+                tmp_entry("charlie.txt"),
             ],
             ..PaneState::default()
         };
@@ -783,16 +784,16 @@ mod tests {
         assert_eq!(pane.selected_indices, [0, 2].into_iter().collect());
         assert_eq!(pane.focused_index, Some(0));
 
-        pane.focus_next();
+        pane.move_focus_by(1);
         assert_eq!(pane.focused_index, Some(2));
-        pane.focus_previous();
+        pane.move_focus_by(-1);
         assert_eq!(pane.focused_index, Some(0));
     }
 
     #[test]
     fn filter_matching_normalizes_unicode_to_nfc() {
         let mut pane = PaneState {
-            entries: vec![test_entry("café.txt"), test_entry("resume.txt")],
+            entries: vec![tmp_entry("café.txt"), tmp_entry("resume.txt")],
             ..PaneState::default()
         };
         pane.set_filter_query("cafe\u{301}".to_string());
@@ -804,10 +805,10 @@ mod tests {
     fn filter_range_selection_skips_hidden_entries() {
         let mut pane = PaneState {
             entries: vec![
-                test_entry("alpha.txt"),
-                test_entry("bravo.log"),
-                test_entry("alpine.png"),
-                test_entry("charlie.txt"),
+                tmp_entry("alpha.txt"),
+                tmp_entry("bravo.log"),
+                tmp_entry("alpine.png"),
+                tmp_entry("charlie.txt"),
             ],
             ..PaneState::default()
         };
@@ -822,11 +823,11 @@ mod tests {
 
     #[test]
     fn filter_tokens_apply_to_visible_entries() {
-        let mut photo = test_entry("photo.jpg");
+        let mut photo = tmp_entry("photo.jpg");
         photo.size = Some(3 * 1024 * 1024);
-        let mut pdf = test_entry("scan.pdf");
+        let mut pdf = tmp_entry("scan.pdf");
         pdf.size = Some(512 * 1024);
-        let mut video = test_entry("clip.mp4");
+        let mut video = tmp_entry("clip.mp4");
         video.size = Some(8 * 1024 * 1024);
         let mut pane = PaneState {
             entries: vec![photo, pdf, video],
@@ -842,7 +843,7 @@ mod tests {
     #[test]
     fn filter_tokens_keep_parse_warnings() {
         let mut pane = PaneState {
-            entries: vec![test_entry("photo.jpg")],
+            entries: vec![tmp_entry("photo.jpg")],
             ..PaneState::default()
         };
 
@@ -854,9 +855,9 @@ mod tests {
 
     #[test]
     fn date_sort_uses_modified_time_until_capture_time_is_available() {
-        let mut older = test_entry("older.jpg");
+        let mut older = tmp_entry("older.jpg");
         older.mtime = Some(UNIX_EPOCH + Duration::from_secs(10));
-        let mut newer = test_entry("newer.jpg");
+        let mut newer = tmp_entry("newer.jpg");
         newer.mtime = Some(UNIX_EPOCH + Duration::from_secs(20));
         let mut pane = PaneState {
             entries: vec![newer, older],
@@ -883,10 +884,10 @@ mod tests {
 
     #[test]
     fn sort_entries_projects_visible_order_without_remapping_selection() {
-        let file_alpha = test_entry("alpha.txt");
-        let mut dir_beta = test_entry("beta");
+        let file_alpha = tmp_entry("alpha.txt");
+        let mut dir_beta = tmp_entry("beta");
         dir_beta.is_dir = true;
-        let file_charlie = test_entry("charlie.txt");
+        let file_charlie = tmp_entry("charlie.txt");
         let mut pane = PaneState {
             entries: vec![file_alpha, dir_beta, file_charlie],
             sort_key: SortKey::Name,
@@ -918,13 +919,13 @@ mod tests {
     #[test]
     fn append_entries_merges_into_visible_projection_without_reordering_entries() {
         let mut pane = PaneState {
-            entries: vec![test_entry("mango.txt"), test_entry("zulu.txt")],
+            entries: vec![tmp_entry("mango.txt"), tmp_entry("zulu.txt")],
             sort_key: SortKey::Name,
             ..PaneState::default()
         };
         pane.sort_entries();
 
-        pane.append_entries(vec![test_entry("alpha.txt"), test_entry("omega.txt")]);
+        pane.append_entries(vec![tmp_entry("alpha.txt"), tmp_entry("omega.txt")]);
 
         assert_eq!(
             pane.visible_entries()
@@ -944,12 +945,12 @@ mod tests {
     #[test]
     fn append_entries_respects_active_filter_projection() {
         let mut pane = PaneState {
-            entries: vec![test_entry("alpha-one.txt"), test_entry("bravo.txt")],
+            entries: vec![tmp_entry("alpha-one.txt"), tmp_entry("bravo.txt")],
             ..PaneState::default()
         };
         pane.set_filter_query("alpha".to_string());
 
-        pane.append_entries(vec![test_entry("charlie.txt"), test_entry("alpha-two.txt")]);
+        pane.append_entries(vec![tmp_entry("charlie.txt"), tmp_entry("alpha-two.txt")]);
 
         assert_eq!(pane.visible_indices(), &[0, 3]);
         assert_eq!(
@@ -964,9 +965,9 @@ mod tests {
     fn entry_projection_rebuilds_strictly_increasing_list_row_offsets() {
         let mut pane = PaneState::default();
         pane.replace_entries(vec![
-            test_entry("alpha.txt"),
-            test_entry("bravo.txt"),
-            test_entry("charlie.txt"),
+            tmp_entry("alpha.txt"),
+            tmp_entry("bravo.txt"),
+            tmp_entry("charlie.txt"),
         ]);
 
         assert_eq!(pane.visible_list_row_offsets.len(), 4);
@@ -979,7 +980,7 @@ mod tests {
             3.0 * crate::widgets::metrics::LIST_ROW_HEIGHT
         );
 
-        pane.append_entries(vec![test_entry("delta.txt")]);
+        pane.append_entries(vec![tmp_entry("delta.txt")]);
         pane.set_filter_query("a".to_string());
 
         assert_eq!(
@@ -995,7 +996,7 @@ mod tests {
     #[test]
     fn visible_positions_track_sort_append_and_filter_projection() {
         let mut pane = PaneState {
-            entries: vec![test_entry("bravo.txt"), test_entry("delta.txt")],
+            entries: vec![tmp_entry("bravo.txt"), tmp_entry("delta.txt")],
             sort_key: SortKey::Name,
             ..PaneState::default()
         };
@@ -1004,7 +1005,7 @@ mod tests {
         assert_eq!(pane.visible_position(0), Some(0));
         assert_eq!(pane.visible_position(1), Some(1));
 
-        pane.append_entries(vec![test_entry("alpha.txt"), test_entry("charlie.txt")]);
+        pane.append_entries(vec![tmp_entry("alpha.txt"), tmp_entry("charlie.txt")]);
 
         assert_eq!(pane.visible_indices(), &[2, 0, 3, 1]);
         assert_eq!(pane.visible_position(2), Some(0));
@@ -1023,12 +1024,12 @@ mod tests {
 
     #[test]
     fn grid_visible_sections_track_sort_append_and_filter_projection() {
-        let mut dir_zeta = test_entry("zeta");
+        let mut dir_zeta = tmp_entry("zeta");
         dir_zeta.is_dir = true;
-        let file_alpha = test_entry("alpha.txt");
-        let mut dir_beta = test_entry("beta");
+        let file_alpha = tmp_entry("alpha.txt");
+        let mut dir_beta = tmp_entry("beta");
         dir_beta.is_dir = true;
-        let file_gamma = test_entry("gamma.txt");
+        let file_gamma = tmp_entry("gamma.txt");
         let mut pane = PaneState {
             entries: vec![dir_zeta, file_alpha, dir_beta, file_gamma],
             sort_key: SortKey::Name,
@@ -1040,9 +1041,9 @@ mod tests {
         assert_eq!(pane.visible_folder_indices(), &[2, 0]);
         assert_eq!(pane.visible_file_indices(), &[1, 3]);
 
-        let mut dir_delta = test_entry("delta");
+        let mut dir_delta = tmp_entry("delta");
         dir_delta.is_dir = true;
-        pane.append_entries(vec![dir_delta, test_entry("bravo.txt")]);
+        pane.append_entries(vec![dir_delta, tmp_entry("bravo.txt")]);
 
         assert_eq!(pane.visible_folder_indices(), &[2, 4, 0]);
         assert_eq!(pane.visible_file_indices(), &[1, 5, 3]);
@@ -1056,12 +1057,12 @@ mod tests {
     #[test]
     fn entry_path_index_tracks_replace_append_and_clear() {
         let mut pane = PaneState::default();
-        pane.replace_entries(vec![test_entry("alpha.txt"), test_entry("bravo.txt")]);
+        pane.replace_entries(vec![tmp_entry("alpha.txt"), tmp_entry("bravo.txt")]);
 
         assert_eq!(pane.entry_index_by_display_path("/tmp/alpha.txt"), Some(0));
         assert_eq!(pane.entry_index_by_display_path("/tmp/bravo.txt"), Some(1));
 
-        pane.append_entries(vec![test_entry("charlie.txt")]);
+        pane.append_entries(vec![tmp_entry("charlie.txt")]);
         pane.selection_anchor_path = Some("/tmp/charlie.txt".to_string());
 
         assert_eq!(
@@ -1080,7 +1081,7 @@ mod tests {
     #[test]
     fn entry_path_index_supports_mutable_lookup() {
         let mut pane = PaneState::default();
-        pane.replace_entries(vec![test_entry("alpha.txt"), test_entry("bravo.txt")]);
+        pane.replace_entries(vec![tmp_entry("alpha.txt"), tmp_entry("bravo.txt")]);
 
         let entry = pane.entry_mut_by_display_path("/tmp/bravo.txt").unwrap();
         entry.size = Some(42);
@@ -1092,8 +1093,8 @@ mod tests {
     #[test]
     fn entry_object_key_index_tracks_replace_append_and_clear() {
         let mut pane = PaneState::default();
-        let alpha = test_entry("alpha.txt");
-        let bravo = test_entry("bravo.txt");
+        let alpha = tmp_entry("alpha.txt");
+        let bravo = tmp_entry("bravo.txt");
         let alpha_key = alpha.object_ref.key.clone();
         let bravo_key = bravo.object_ref.key.clone();
         pane.replace_entries(vec![alpha, bravo]);
@@ -1101,7 +1102,7 @@ mod tests {
         assert_eq!(pane.entry_index_by_object_key(&alpha_key), Some(0));
         assert_eq!(pane.entry_index_by_object_key(&bravo_key), Some(1));
 
-        let charlie = test_entry("charlie.txt");
+        let charlie = tmp_entry("charlie.txt");
         let charlie_key = charlie.object_ref.key.clone();
         pane.append_entries(vec![charlie]);
 
@@ -1115,11 +1116,11 @@ mod tests {
 
     #[test]
     fn append_entries_merges_non_name_sort_keys() {
-        let mut small = test_entry("small.bin");
+        let mut small = tmp_entry("small.bin");
         small.size = Some(10);
-        let mut large = test_entry("large.bin");
+        let mut large = tmp_entry("large.bin");
         large.size = Some(30);
-        let mut middle = test_entry("middle.bin");
+        let mut middle = tmp_entry("middle.bin");
         middle.size = Some(20);
         let mut pane = PaneState {
             entries: vec![small, large],
@@ -1149,7 +1150,7 @@ mod tests {
                 entries: names
                     .iter()
                     .enumerate()
-                    .map(|(index, name)| test_entry(&format!("{name}-{index}.txt")))
+                    .map(|(index, name)| tmp_entry(&format!("{name}-{index}.txt")))
                     .collect(),
                 ..PaneState::default()
             };
@@ -1165,32 +1166,6 @@ mod tests {
             if let Some(focused) = pane.focused_index {
                 proptest::prop_assert!(visible.contains(&focused));
             }
-        }
-    }
-
-    fn test_entry(name: &str) -> ListEntry {
-        let display_path = format!("/tmp/{name}");
-        ListEntry {
-            object_ref: ObjectRef {
-                key: ObjectKey {
-                    backend_id: BackendId("local".to_string()),
-                    stable_id: StableId(display_path.clone()),
-                },
-                parent_stable_id: None,
-                display_path,
-            },
-            sort_name_key: ListEntry::sort_name_key_for(name),
-            sort_extension_key: ListEntry::sort_extension_key_for(name),
-            name: name.to_string(),
-            is_dir: false,
-            metadata_level: MetadataLevel::L1,
-            size: None,
-            mtime: None,
-            ctime: None,
-            is_symlink: false,
-            symlink_target: None,
-            is_inaccessible: false,
-            annotation: None,
         }
     }
 }

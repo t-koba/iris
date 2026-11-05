@@ -13,7 +13,7 @@ use iris_core_domain::types::progress::ProgressInfo;
 use iris_core_domain::types::read_handle::ReadHandle;
 use iris_core_domain::types::session::BackendSession;
 use iris_core_domain::types::thumbnail::{ThumbnailHint, ThumbnailResult};
-use iris_transfer::executor::client_relay_copy;
+use iris_transfer::executor::{client_relay_copy, CopyRelayOptions};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::{duplex, AsyncWriteExt};
@@ -225,22 +225,17 @@ impl BackendAdapter for MemoryBackend {
 
 pub fn bench_copy(c: &mut Criterion, bench_name: &str, backend_name: &str, size_bytes: usize) {
     let runtime = Runtime::new().expect("tokio runtime");
-    let progress = watch::channel(ProgressInfo {
-        bytes_completed: 0,
-        bytes_total: Some(size_bytes as u64),
-        files_completed: 0,
-        files_total: Some(1),
-    });
+    let progress = watch::channel(ProgressInfo::single_file(0, Some(size_bytes as u64), false));
     let source_caps = CapabilitySet {
         can_range_read: true,
         can_range_write: false,
         can_provide_progress: true,
         can_verify_by_checksum: true,
-        ..CapabilitySet::none()
+        ..CapabilitySet::default()
     };
     let destination_caps = CapabilitySet {
         can_provide_progress: true,
-        ..CapabilitySet::none()
+        ..CapabilitySet::default()
     };
     let source = MemoryBackend::new(&format!("{backend_name}-src"), source_caps);
     let destination = MemoryBackend::new(&format!("{backend_name}-dst"), destination_caps);
@@ -262,6 +257,7 @@ pub fn bench_copy(c: &mut Criterion, bench_name: &str, backend_name: &str, size_
                         &destination,
                         &dst_ref,
                         &progress.0,
+                        CopyRelayOptions::default(),
                     ))
                     .expect("relay copy");
             });

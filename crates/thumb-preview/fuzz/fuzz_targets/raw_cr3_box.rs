@@ -9,6 +9,6 @@ fuzz_target!(|data: &[u8]| {
     std::fs::write(file.path(), data).expect("write temp file");
     let path = file.path().with_extension("cr3");
     std::fs::rename(file.path(), &path).expect("rename temp file");
-    let _ = raw::extract_raw_thumbnail(&path, 256);
+    let _ = raw::extract_raw_thumbnail(&path, 256, &tokio_util::sync::CancellationToken::new());
     let _ = std::fs::remove_file(path);
 });

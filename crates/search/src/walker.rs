@@ -35,11 +35,7 @@ pub struct WalkResult {
     pub stats: WalkStats,
 }
 
-pub fn walk_local(root: &Path, options: &WalkOptions) -> std::io::Result<WalkResult> {
-    walk_local_with_cancel(root, options, || false)
-}
-
-pub fn walk_local_with_cancel<C>(
+pub fn walk_local<C>(
     root: &Path,
     options: &WalkOptions,
     mut is_cancelled: C,
@@ -117,7 +113,7 @@ fn record_from_metadata(path: &Path, metadata: &fs::Metadata) -> SegmentRecord {
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| path_string.clone());
-    let kind = classify_kind(path, metadata);
+    let kind = IndexedKind::for_path(path, metadata.is_dir());
     SegmentRecord {
         path: path_string,
         name,
@@ -140,31 +136,7 @@ fn record_from_metadata(path: &Path, metadata: &fs::Metadata) -> SegmentRecord {
     }
 }
 
-fn classify_kind(path: &Path, metadata: &fs::Metadata) -> IndexedKind {
-    if metadata.is_dir() {
-        return IndexedKind::Directory;
-    }
-    let Some(extension) = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.to_ascii_lowercase())
-    else {
-        return IndexedKind::File;
-    };
-    match extension.as_str() {
-        "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "heif" | "hif" | "tif" | "tiff"
-        | "bmp" | "avif" | "jp2" | "j2k" | "j2c" | "jpc" | "jpf" | "jpx" | "jpm" | "jxr"
-        | "hdp" | "wdp" | "jxl" | "arw" | "cr2" | "cr3" | "nef" | "nrw" | "orf" | "rw2" | "raf"
-        | "dng" | "x3f" => IndexedKind::Image,
-        "mp4" | "mov" | "m4v" | "mkv" | "avi" | "webm" | "mpg" | "mpeg" | "mj2" => {
-            IndexedKind::Video
-        }
-        "pdf" => IndexedKind::Pdf,
-        _ => IndexedKind::File,
-    }
-}
-
-fn system_time_to_secs(value: SystemTime) -> i64 {
+pub fn system_time_to_secs(value: SystemTime) -> i64 {
     match value.duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_secs().min(i64::MAX as u64) as i64,
         Err(error) => -(error.duration().as_secs().min(i64::MAX as u64) as i64),
@@ -187,7 +159,7 @@ mod tests {
         fs::write(dir.path().join("a.jpg"), b"jpg").expect("jpg");
         fs::write(dir.path().join("nested/c.mp4"), b"video").expect("video");
 
-        let result = walk_local(dir.path(), &WalkOptions::default()).expect("walk");
+        let result = walk_local(dir.path(), &WalkOptions::default(), || false).expect("walk");
         let names = result
             .records
             .iter()
@@ -214,7 +186,7 @@ mod tests {
                 .expect("modern image");
         }
 
-        let result = walk_local(dir.path(), &WalkOptions::default()).expect("walk");
+        let result = walk_local(dir.path(), &WalkOptions::default(), || false).expect("walk");
         assert_eq!(result.records.len(), 5);
         assert!(result
             .records
@@ -236,6 +208,7 @@ mod tests {
                 include_hidden: false,
                 max_entries: None,
             },
+            || false,
         )
         .expect("walk");
 
@@ -263,6 +236,7 @@ mod tests {
                 max_entries: Some(1),
                 ..Default::default()
             },
+            || false,
         )
         .expect("walk");
 
@@ -276,8 +250,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(dir.path().join("a.txt"), b"a").expect("a");
 
-        let result =
-            walk_local_with_cancel(dir.path(), &WalkOptions::default(), || true).expect("walk");
+        let result = walk_local(dir.path(), &WalkOptions::default(), || true).expect("walk");
 
         assert!(result.records.is_empty());
         assert_eq!(result.stats.visited_dirs, 0);
@@ -292,7 +265,7 @@ mod tests {
         fs::write(dir.path().join("b.txt"), b"b").expect("b");
         let mut checks = 0;
 
-        let result = walk_local_with_cancel(dir.path(), &WalkOptions::default(), || {
+        let result = walk_local(dir.path(), &WalkOptions::default(), || {
             checks += 1;
             checks > 1
         })
@@ -314,7 +287,7 @@ mod tests {
         fs::write(outside.path().join("outside.pdf"), b"outside").expect("outside");
         symlink(outside.path(), dir.path().join("outside-link")).expect("symlink");
 
-        let result = walk_local(dir.path(), &WalkOptions::default()).expect("walk");
+        let result = walk_local(dir.path(), &WalkOptions::default(), || false).expect("walk");
 
         assert!(result.records.is_empty());
         assert_eq!(result.stats.skipped_symlinks, 1);

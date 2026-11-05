@@ -156,21 +156,38 @@ fn decode_jpeg_xr(data: &[u8]) -> Option<DynamicImage> {
     let mut pixels = vec![0u8; stride.checked_mul(height as usize)?];
     decoder.copy_all(&mut pixels, stride).ok()?;
 
+    let plane = Plane {
+        data: &pixels,
+        width,
+        height,
+        stride,
+    };
     let mut rgba = match format {
         PixelFormat::PixelFormatBlackWhite => unpack_monochrome(&pixels, width, height, stride),
-        PixelFormat::PixelFormat16bppRGB555 => unpack_rgb16(&pixels, width, height, stride, false),
-        PixelFormat::PixelFormat16bppRGB565 => unpack_rgb16(&pixels, width, height, stride, true),
-        PixelFormat::PixelFormat32bppRGB101010 => unpack_rgb101010(&pixels, width, height, stride),
+        PixelFormat::PixelFormat16bppRGB555 => map_pixels(plane, 2, |px| Some(rgb16(px, false))),
+        PixelFormat::PixelFormat16bppRGB565 => map_pixels(plane, 2, |px| Some(rgb16(px, true))),
+        PixelFormat::PixelFormat32bppRGB101010 => map_pixels(plane, 4, rgb101010),
         _ if info.bit_depth() == BitDepthBits::Eight => {
-            unpack_u8(&pixels, width, height, stride, &info)
+            unpack_channels(plane, &info, 1, |s| s[0], |s| s[0])
         }
         _ if info.bit_depth() == BitDepthBits::Sixteen => {
-            unpack_u16(&pixels, width, height, stride, &info)
+            let to_u8 =
+                |s: &[u8]| ((u32::from(u16::from_le_bytes([s[0], s[1]])) + 128) / 257) as u8;
+            unpack_channels(plane, &info, 2, to_u8, to_u8)
         }
         _ if info.bit_depth() == BitDepthBits::ThirtyTwoF
             && matches!(info.color_format(), ColorFormat::RGB | ColorFormat::YOnly) =>
         {
-            unpack_f32(&pixels, width, height, stride, &info)
+            let value = |s: &[u8]| f32::from_le_bytes([s[0], s[1], s[2], s[3]]);
+            // scRGB is linear and may exceed 1.0. Reinhard keeps HDR highlights visible.
+            let tone_map = |s: &[u8]| {
+                let linear = value(s).max(0.0);
+                ((linear / (1.0 + linear)).powf(1.0 / 2.2) * 255.0)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            };
+            let alpha = |s: &[u8]| (value(s).clamp(0.0, 1.0) * 255.0) as u8;
+            unpack_channels(plane, &info, 4, tone_map, alpha)
         }
         _ => None,
     }?;
@@ -201,73 +218,26 @@ fn unpack_monochrome(data: &[u8], width: u32, height: u32, stride: usize) -> Opt
     Some(out)
 }
 
-fn unpack_rgb16(
-    data: &[u8],
+/// Decoded pixel rows as copied out of the decoder.
+#[derive(Clone, Copy)]
+struct Plane<'a> {
+    data: &'a [u8],
     width: u32,
     height: u32,
     stride: usize,
-    rgb565: bool,
-) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(
-        (width as usize)
-            .checked_mul(height as usize)?
-            .checked_mul(4)?,
-    );
-    for row in data.chunks_exact(stride).take(height as usize) {
-        for px in row.chunks_exact(2).take(width as usize) {
-            let value = u16::from_le_bytes([px[0], px[1]]);
-            let (r5, g, b5, gbits) = if rgb565 {
-                ((value >> 11) & 31, (value >> 5) & 63, value & 31, 63)
-            } else {
-                ((value >> 10) & 31, (value >> 5) & 31, value & 31, 31)
-            };
-            out.extend_from_slice(&[
-                ((r5 * 255 + 15) / 31) as u8,
-                ((g * 255 + gbits / 2) / gbits) as u8,
-                ((b5 * 255 + 15) / 31) as u8,
-                255,
-            ]);
-        }
-    }
-    Some(out)
 }
 
-fn unpack_rgb101010(data: &[u8], width: u32, height: u32, stride: usize) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(
-        (width as usize)
-            .checked_mul(height as usize)?
-            .checked_mul(4)?,
-    );
-    for row in data.chunks_exact(stride).take(height as usize) {
-        for px in row.chunks_exact(4).take(width as usize) {
-            let value = u32::from_le_bytes(px.try_into().ok()?);
-            let b = value & 0x3ff;
-            let g = (value >> 10) & 0x3ff;
-            let r = (value >> 20) & 0x3ff;
-            out.extend_from_slice(&[
-                ((r * 255 + 511) / 1023) as u8,
-                ((g * 255 + 511) / 1023) as u8,
-                ((b * 255 + 511) / 1023) as u8,
-                255,
-            ]);
-        }
-    }
-    Some(out)
-}
-
-fn unpack_u8(
-    data: &[u8],
-    width: u32,
-    height: u32,
-    stride: usize,
-    info: &jpegxr::PixelInfo,
+/// Converts every `bytes_per_pixel`-wide pixel of each row to RGBA.
+fn map_pixels(
+    Plane {
+        data,
+        width,
+        height,
+        stride,
+    }: Plane<'_>,
+    bytes_per_pixel: usize,
+    mut convert: impl FnMut(&[u8]) -> Option<[u8; 4]>,
 ) -> Option<Vec<u8>> {
-    use jpegxr::ColorFormat;
-    let channels = info.channels();
-    let bytes_per_pixel = info.bits_per_pixel().checked_add(7)? / 8;
-    if channels == 0 || channels > 5 {
-        return None;
-    }
     let mut out = Vec::with_capacity(
         (width as usize)
             .checked_mul(height as usize)?
@@ -275,159 +245,84 @@ fn unpack_u8(
     );
     for row in data.chunks_exact(stride).take(height as usize) {
         for px in row.chunks_exact(bytes_per_pixel).take(width as usize) {
-            let rgba = match info.color_format() {
-                ColorFormat::YOnly => [px[0], px[0], px[0], 255],
-                ColorFormat::RGB if channels >= 3 => {
-                    let (r, b) = if info.bgr() {
-                        (px[2], px[0])
-                    } else {
-                        (px[0], px[2])
-                    };
-                    [
-                        r,
-                        px[1],
-                        b,
-                        if info.has_alpha() {
-                            px[channels - 1]
-                        } else {
-                            255
-                        },
-                    ]
-                }
-                ColorFormat::CMYK if channels >= 4 => {
-                    let k = 255u16 - px[3] as u16;
-                    let convert =
-                        |component: u8| (((255u16 - component as u16) * k + 127) / 255) as u8;
-                    [
-                        convert(px[0]),
-                        convert(px[1]),
-                        convert(px[2]),
-                        if info.has_alpha() && channels >= 5 {
-                            px[4]
-                        } else {
-                            255
-                        },
-                    ]
-                }
-                _ => return None,
-            };
-            out.extend_from_slice(&rgba);
+            out.extend_from_slice(&convert(px)?);
         }
     }
     Some(out)
 }
 
-fn unpack_u16(
-    data: &[u8],
-    width: u32,
-    height: u32,
-    stride: usize,
-    info: &jpegxr::PixelInfo,
-) -> Option<Vec<u8>> {
-    use jpegxr::ColorFormat;
-    let channels = info.channels();
-    let bytes_per_pixel = info.bits_per_pixel().checked_add(7)? / 8;
-    if channels == 0 || channels > 5 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(
-        (width as usize)
-            .checked_mul(height as usize)?
-            .checked_mul(4)?,
-    );
-    for row in data.chunks_exact(stride).take(height as usize) {
-        for px in row.chunks_exact(bytes_per_pixel).take(width as usize) {
-            let sample = |idx: usize| u16::from_le_bytes([px[idx * 2], px[idx * 2 + 1]]);
-            let to_u8 = |value: u16| ((value as u32 + 128) / 257) as u8;
-            let rgba = match info.color_format() {
-                ColorFormat::YOnly => {
-                    let y = to_u8(sample(0));
-                    [y, y, y, 255]
-                }
-                ColorFormat::RGB if channels >= 3 => {
-                    let (r, b) = if info.bgr() {
-                        (sample(2), sample(0))
-                    } else {
-                        (sample(0), sample(2))
-                    };
-                    [
-                        r,
-                        sample(1),
-                        b,
-                        if info.has_alpha() {
-                            sample(channels - 1)
-                        } else {
-                            u16::MAX
-                        },
-                    ]
-                    .map(to_u8)
-                }
-                _ => return None,
-            };
-            out.extend_from_slice(&rgba);
-        }
-    }
-    Some(out)
-}
-
-fn unpack_f32(
-    data: &[u8],
-    width: u32,
-    height: u32,
-    stride: usize,
-    info: &jpegxr::PixelInfo,
-) -> Option<Vec<u8>> {
-    use jpegxr::ColorFormat;
-    let channels = info.channels();
-    let bytes_per_pixel = info.bits_per_pixel().checked_add(7)? / 8;
-    if channels == 0 || channels > 4 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(
-        (width as usize)
-            .checked_mul(height as usize)?
-            .checked_mul(4)?,
-    );
-    let map = |value: f32| {
-        // scRGB is linear and may exceed 1.0. Reinhard keeps HDR highlights visible.
-        let linear = value.max(0.0);
-        let mapped = linear / (1.0 + linear);
-        (mapped.powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u8
+fn rgb16(px: &[u8], rgb565: bool) -> [u8; 4] {
+    let value = u16::from_le_bytes([px[0], px[1]]);
+    let (r5, g, b5, gbits) = if rgb565 {
+        ((value >> 11) & 31, (value >> 5) & 63, value & 31, 63)
+    } else {
+        ((value >> 10) & 31, (value >> 5) & 31, value & 31, 31)
     };
-    for row in data.chunks_exact(stride).take(height as usize) {
-        for px in row.chunks_exact(bytes_per_pixel).take(width as usize) {
-            let sample = |idx: usize| {
-                let offset = idx * 4;
-                f32::from_le_bytes([px[offset], px[offset + 1], px[offset + 2], px[offset + 3]])
-            };
-            let rgba = match info.color_format() {
-                ColorFormat::YOnly => {
-                    let y = map(sample(0));
-                    [y, y, y, 255]
-                }
-                ColorFormat::RGB if channels >= 3 => {
-                    let (r, b) = if info.bgr() {
-                        (sample(2), sample(0))
-                    } else {
-                        (sample(0), sample(2))
-                    };
-                    [
-                        map(r),
-                        map(sample(1)),
-                        map(b),
-                        if info.has_alpha() {
-                            (sample(channels - 1).clamp(0.0, 1.0) * 255.0) as u8
-                        } else {
-                            255
-                        },
-                    ]
-                }
-                _ => return None,
-            };
-            out.extend_from_slice(&rgba);
-        }
+    [
+        ((r5 * 255 + 15) / 31) as u8,
+        ((g * 255 + gbits / 2) / gbits) as u8,
+        ((b5 * 255 + 15) / 31) as u8,
+        255,
+    ]
+}
+
+fn rgb101010(px: &[u8]) -> Option<[u8; 4]> {
+    let value = u32::from_le_bytes(px.try_into().ok()?);
+    let scale = |component: u32| ((component * 255 + 511) / 1023) as u8;
+    Some([
+        scale((value >> 20) & 0x3ff),
+        scale((value >> 10) & 0x3ff),
+        scale(value & 0x3ff),
+        255,
+    ])
+}
+
+/// Gray, RGB(A) or CMYK(A) pixels whose channels are `unit` bytes wide; `color` and `alpha`
+/// convert one channel to 8 bits.
+fn unpack_channels(
+    plane: Plane<'_>,
+    info: &jpegxr::PixelInfo,
+    unit: usize,
+    color: impl Fn(&[u8]) -> u8,
+    alpha: impl Fn(&[u8]) -> u8,
+) -> Option<Vec<u8>> {
+    use jpegxr::ColorFormat;
+    let channels = info.channels();
+    if channels == 0 || channels > 5 {
+        return None;
     }
-    Some(out)
+    let bytes_per_pixel = info.bits_per_pixel().checked_add(7)? / 8;
+    map_pixels(plane, bytes_per_pixel, |px| {
+        let channel = |index: usize| px.get(index * unit..(index + 1) * unit);
+        let c = |index: usize| channel(index).map(&color);
+        Some(match info.color_format() {
+            ColorFormat::YOnly => {
+                let y = c(0)?;
+                [y, y, y, 255]
+            }
+            ColorFormat::RGB if channels >= 3 => {
+                let (r, b) = if info.bgr() { (2, 0) } else { (0, 2) };
+                let a = if info.has_alpha() {
+                    channel(channels - 1).map(&alpha)?
+                } else {
+                    255
+                };
+                [c(r)?, c(1)?, c(b)?, a]
+            }
+            ColorFormat::CMYK if channels >= 4 => {
+                let k = 255 - u16::from(c(3)?);
+                let convert =
+                    |component: u8| (((255 - u16::from(component)) * k + 127) / 255) as u8;
+                let a = if info.has_alpha() && channels >= 5 {
+                    channel(4).map(&alpha)?
+                } else {
+                    255
+                };
+                [convert(c(0)?), convert(c(1)?), convert(c(2)?), a]
+            }
+            _ => return None,
+        })
+    })
 }
 
 fn unpremultiply_rgba(pixels: &mut [u8]) {

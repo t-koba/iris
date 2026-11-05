@@ -329,7 +329,7 @@ fn view_filter_bar(state: &AppState, pane_idx: usize) -> Element<'_, Message> {
         .padding([2, crate::views::theme::ZONE_PADDING as u16])
         .height(Length::Fixed(height))
         .width(Length::Fill)
-        .style(crate::views::theme::toolbar_style)
+        .style(crate::views::theme::sunken_panel_style)
         .into()
 }
 
@@ -821,29 +821,12 @@ fn draw_gps_grid(frame: &mut canvas::Frame, area: Rectangle, viewport: MapViewpo
     let stroke = canvas::Stroke::default()
         .with_color(Color::from_rgba8(160, 170, 180, 0.25))
         .with_width(1.0);
-    for tile in visible_tiles(viewport, area.width, area.height) {
-        let bounds = tile_bounds(tile);
-        let (left, top) = viewport.world_to_screen(
-            LatLon {
-                lat: bounds.max_lat,
-                lon: bounds.min_lon,
-            },
-            area.width,
-            area.height,
-        );
-        let (right, bottom) = viewport.world_to_screen(
-            LatLon {
-                lat: bounds.min_lat,
-                lon: bounds.max_lon,
-            },
-            area.width,
-            area.height,
-        );
+    for rect in visible_tiles(viewport, area.width, area.height)
+        .into_iter()
+        .filter_map(|tile| tile_screen_rect(tile, area, viewport))
+    {
         frame.stroke(
-            &canvas::Path::rectangle(
-                Point::new(left.min(right), top.min(bottom)),
-                Size::new((right - left).abs(), (bottom - top).abs()),
-            ),
+            &canvas::Path::rectangle(rect.position(), rect.size()),
             stroke,
         );
     }
@@ -866,30 +849,21 @@ fn draw_map_tiles(
     }
 }
 
-fn tile_screen_rect(tile: TileCoord, area: Rectangle, viewport: MapViewport) -> Option<Rectangle> {
-    let bounds = tile_bounds(tile);
-    let (left, top) = viewport.world_to_screen(
-        LatLon {
-            lat: bounds.max_lat,
-            lon: bounds.min_lon,
-        },
-        area.width,
-        area.height,
-    );
-    let (right, bottom) = viewport.world_to_screen(
-        LatLon {
-            lat: bounds.min_lat,
-            lon: bounds.max_lon,
-        },
-        area.width,
-        area.height,
-    );
-    let rect = Rectangle {
+/// The screen rectangle covering `bounds`.
+fn screen_rect(bounds: MapGpsBounds, area: Rectangle, viewport: MapViewport) -> Rectangle {
+    let corner = |lat, lon| viewport.world_to_screen(LatLon { lat, lon }, area.width, area.height);
+    let (left, top) = corner(bounds.max_lat, bounds.min_lon);
+    let (right, bottom) = corner(bounds.min_lat, bounds.max_lon);
+    Rectangle {
         x: left.min(right),
         y: top.min(bottom),
         width: (right - left).abs(),
         height: (bottom - top).abs(),
-    };
+    }
+}
+
+fn tile_screen_rect(tile: TileCoord, area: Rectangle, viewport: MapViewport) -> Option<Rectangle> {
+    let rect = screen_rect(tile_bounds(tile), area, viewport);
     (rect.width > 0.5 && rect.height > 0.5).then_some(rect)
 }
 
@@ -899,24 +873,9 @@ fn draw_gps_bounds(
     viewport: MapViewport,
     bounds: MapGpsBounds,
 ) {
-    let (left, top) = viewport.world_to_screen(
-        LatLon {
-            lat: bounds.max_lat,
-            lon: bounds.min_lon,
-        },
-        area.width,
-        area.height,
-    );
-    let (right, bottom) = viewport.world_to_screen(
-        LatLon {
-            lat: bounds.min_lat,
-            lon: bounds.max_lon,
-        },
-        area.width,
-        area.height,
-    );
-    let rect_pos = Point::new(left.min(right), top.min(bottom));
-    let rect_size = Size::new((right - left).abs().max(3.0), (bottom - top).abs().max(3.0));
+    let rect = screen_rect(bounds, area, viewport);
+    let rect_pos = rect.position();
+    let rect_size = Size::new(rect.width.max(3.0), rect.height.max(3.0));
     frame.fill_rectangle(rect_pos, rect_size, Color::from_rgba8(82, 139, 255, 0.22));
     frame.stroke_rectangle(
         rect_pos,

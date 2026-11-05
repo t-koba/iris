@@ -1,6 +1,7 @@
 use crate::packet::create::{Smb2FileAttributes, Smb2FileId};
-use crate::packet::header::SMB2_HEADER_BYTES;
-use crate::wire::{le_u16, le_u32, le_u64};
+use crate::wire::{
+    check_fixed_body, le_u16, le_u32, le_u64, push_u16, push_u32, push_u64, response_body,
+};
 use crate::SmbClientError;
 
 const CLOSE_REQUEST_STRUCTURE_SIZE: u16 = 24;
@@ -37,18 +38,11 @@ impl Smb2CloseRequest {
     }
 
     pub fn decode(body: &[u8]) -> Result<Self, SmbClientError> {
-        if body.len() < CLOSE_REQUEST_FIXED_BYTES {
-            return Err(SmbClientError::ShortFrame {
-                expected: CLOSE_REQUEST_FIXED_BYTES,
-                actual: body.len(),
-            });
-        }
-        let structure_size = le_u16(body, 0);
-        if structure_size != CLOSE_REQUEST_STRUCTURE_SIZE {
-            return Err(SmbClientError::InvalidStructureSize {
-                size: structure_size,
-            });
-        }
+        check_fixed_body(
+            body,
+            CLOSE_REQUEST_FIXED_BYTES,
+            CLOSE_REQUEST_STRUCTURE_SIZE,
+        )?;
 
         Ok(Self {
             flags: Smb2CloseFlags(le_u16(body, 2)),
@@ -74,21 +68,11 @@ pub struct Smb2CloseResponse {
 
 impl Smb2CloseResponse {
     pub fn decode_packet(packet: &[u8]) -> Result<Self, SmbClientError> {
-        let body_offset = SMB2_HEADER_BYTES;
-        let required_len = body_offset + CLOSE_RESPONSE_FIXED_BYTES;
-        if packet.len() < required_len {
-            return Err(SmbClientError::ShortFrame {
-                expected: required_len,
-                actual: packet.len(),
-            });
-        }
-        let body = &packet[body_offset..];
-        let structure_size = le_u16(body, 0);
-        if structure_size != CLOSE_RESPONSE_STRUCTURE_SIZE {
-            return Err(SmbClientError::InvalidStructureSize {
-                size: structure_size,
-            });
-        }
+        let body = response_body(
+            packet,
+            CLOSE_RESPONSE_FIXED_BYTES,
+            CLOSE_RESPONSE_STRUCTURE_SIZE,
+        )?;
 
         Ok(Self {
             flags: Smb2CloseFlags(le_u16(body, 2)),
@@ -103,21 +87,10 @@ impl Smb2CloseResponse {
     }
 }
 
-fn push_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_u32(bytes: &mut Vec<u8>, value: u32) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_u64(bytes: &mut Vec<u8>, value: u64) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packet::header::SMB2_HEADER_BYTES;
     use crate::packet::header::{Smb2Command, Smb2Header};
 
     #[test]

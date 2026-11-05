@@ -1,14 +1,15 @@
 use crate::packet::create::{Smb2FileAttributes, Smb2FileId};
 use crate::packet::header::SMB2_HEADER_BYTES;
-use crate::wire::{checked_body_tail_slice, le_u16, le_u32, le_u64};
+use crate::wire::{
+    check_fixed_body, checked_body_tail_slice, checked_u16_len, checked_u32_len, encode_utf16le,
+    le_u16, le_u32, le_u64, push_u16, push_u32, push_u64, response_body,
+};
 use crate::SmbClientError;
 
 const SET_INFO_REQUEST_STRUCTURE_SIZE: u16 = 33;
 const SET_INFO_RESPONSE_STRUCTURE_SIZE: u16 = 2;
 const SET_INFO_REQUEST_FIXED_BYTES: usize = 32;
 const SET_INFO_RESPONSE_FIXED_BYTES: usize = 2;
-const U16_MAX_USIZE: usize = u16::MAX as usize;
-const U32_MAX_USIZE: usize = u32::MAX as usize;
 const FILE_BASIC_INFORMATION_BYTES: usize = 40;
 const FILE_RENAME_INFORMATION_FIXED_BYTES: usize = 20;
 
@@ -90,18 +91,11 @@ impl Smb2SetInfoRequest {
     }
 
     pub fn decode(body: &[u8]) -> Result<Self, SmbClientError> {
-        if body.len() < SET_INFO_REQUEST_FIXED_BYTES {
-            return Err(SmbClientError::ShortFrame {
-                expected: SET_INFO_REQUEST_FIXED_BYTES,
-                actual: body.len(),
-            });
-        }
-        let structure_size = le_u16(body, 0);
-        if structure_size != SET_INFO_REQUEST_STRUCTURE_SIZE {
-            return Err(SmbClientError::InvalidStructureSize {
-                size: structure_size,
-            });
-        }
+        check_fixed_body(
+            body,
+            SET_INFO_REQUEST_FIXED_BYTES,
+            SET_INFO_REQUEST_STRUCTURE_SIZE,
+        )?;
 
         let buffer_length = le_u32(body, 4) as usize;
         let buffer_offset = le_u16(body, 8) as usize;
@@ -166,59 +160,13 @@ pub struct Smb2SetInfoResponse;
 
 impl Smb2SetInfoResponse {
     pub fn decode_packet(packet: &[u8]) -> Result<Self, SmbClientError> {
-        let body_offset = SMB2_HEADER_BYTES;
-        let required_len = body_offset + SET_INFO_RESPONSE_FIXED_BYTES;
-        if packet.len() < required_len {
-            return Err(SmbClientError::ShortFrame {
-                expected: required_len,
-                actual: packet.len(),
-            });
-        }
-        let body = &packet[body_offset..];
-        let structure_size = le_u16(body, 0);
-        if structure_size != SET_INFO_RESPONSE_STRUCTURE_SIZE {
-            return Err(SmbClientError::InvalidStructureSize {
-                size: structure_size,
-            });
-        }
+        response_body(
+            packet,
+            SET_INFO_RESPONSE_FIXED_BYTES,
+            SET_INFO_RESPONSE_STRUCTURE_SIZE,
+        )?;
         Ok(Self)
     }
-}
-
-fn checked_u16_len(field: &'static str, length: usize) -> Result<u16, SmbClientError> {
-    u16::try_from(length).map_err(|_| SmbClientError::FieldTooLarge {
-        field,
-        length,
-        max: U16_MAX_USIZE,
-    })
-}
-
-fn checked_u32_len(field: &'static str, length: usize) -> Result<u32, SmbClientError> {
-    u32::try_from(length).map_err(|_| SmbClientError::FieldTooLarge {
-        field,
-        length,
-        max: U32_MAX_USIZE,
-    })
-}
-
-fn push_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_u32(bytes: &mut Vec<u8>, value: u32) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_u64(bytes: &mut Vec<u8>, value: u64) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-
-fn encode_utf16le(value: &str) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(value.len() * 2);
-    for unit in value.encode_utf16() {
-        bytes.extend_from_slice(&unit.to_le_bytes());
-    }
-    bytes
 }
 
 #[cfg(test)]

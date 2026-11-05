@@ -41,3 +41,25 @@ pub struct MediaMetadata {
     pub gps_lat: Option<f64>,
     pub gps_lon: Option<f64>,
 }
+
+impl MediaMetadata {
+    /// "Make Model", or just the model when it already starts with the make.
+    pub fn camera_label(&self) -> Option<String> {
+        let make = self
+            .camera_make
+            .as_deref()
+            .filter(|value| !value.is_empty());
+        let model = self
+            .camera_model
+            .as_deref()
+            .filter(|value| !value.is_empty());
+        match (make, model) {
+            (Some(make), Some(model)) if model.to_lowercase().starts_with(&make.to_lowercase()) => {
+                Some(model.to_string())
+            }
+            (Some(make), Some(model)) => Some(format!("{make} {model}")),
+            (Some(value), None) | (None, Some(value)) => Some(value.to_string()),
+            (None, None) => None,
+        }
+    }
+}

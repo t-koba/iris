@@ -24,19 +24,11 @@ fn list_entry(backend_id: &str, display_path: &str, is_dir: bool, size: Option<u
         .expect("file name")
         .to_string();
     ListEntry {
-        object_ref: object_ref(backend_id, display_path),
-        sort_name_key: ListEntry::sort_name_key_for(&name),
-        sort_extension_key: ListEntry::sort_extension_key_for(&name),
-        name,
-        is_dir,
         metadata_level: MetadataLevel::L1,
         size,
         mtime: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
         ctime: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_699_900_000)),
-        is_symlink: false,
-        symlink_target: None,
-        is_inaccessible: false,
-        annotation: None,
+        ..ListEntry::new(object_ref(backend_id, display_path), name, is_dir)
     }
 }
 
@@ -47,7 +39,8 @@ fn pane_with_entries(current_path: &str, entries: Vec<ListEntry>) -> PaneState {
     pane.rebuild_visible_indices();
     pane.navigation_history.push(current_path.to_string());
     pane.history_index = pane.navigation_history.len();
-    pane.rebuild_breadcrumbs();
+    pane.breadcrumb_segments =
+        iris_ui_shell::state::local_breadcrumbs(std::path::Path::new(&pane.current_path));
     pane
 }
 

@@ -11,6 +11,7 @@ mod thumbnail_bridge;
 mod transfer_driver;
 mod transfer_verify;
 
+pub(crate) use fileops_dispatch::local_list_entry;
 pub use thumbnail_bridge::ThumbnailGenerationError;
 
 use crate::input::dnd::DndOperation;
@@ -58,8 +59,8 @@ use iris_thumb_preview::encoded::probe_encoded_image_bytes;
 use iris_thumb_preview::metadata::ImageMetadata;
 use iris_thumb_preview::pipeline::ThumbnailPipeline;
 use iris_transfer::executor::{
-    client_relay_copy_with_options, move_via_relay_with_verify_and_control, CopyRelayOptions,
-    MoveRelayOptions, ResumableTransferContext, TransferControl, TransferResult,
+    client_relay_copy, move_via_relay_with_verify_and_control, CopyRelayOptions, MoveRelayOptions,
+    ResumableTransferContext, TransferControl, TransferResult,
 };
 use iris_transfer::job_manager::{ConcurrencyLimits, JobManager};
 use iris_transfer::method_selector::{
@@ -79,16 +80,7 @@ use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
-pub struct RestoredJob {
-    pub id: JobId,
-    pub description: String,
-    pub state: JobState,
-    pub files_total: u64,
-}
-
-#[derive(Clone, Debug)]
 pub struct TransferItemOutcome {
-    pub skipped: bool,
     pub bytes_completed: u64,
 }
 

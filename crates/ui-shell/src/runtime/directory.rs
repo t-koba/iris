@@ -1,33 +1,12 @@
 use super::*;
+use crate::state::{local_breadcrumbs, BreadcrumbSegment};
+use iris_backends::localfs::adapter::metadata_result;
 use tokio::task::JoinSet;
 
 const STAT_OBJECT_CONCURRENCY: usize = 16;
 
 /// `/Users/me` -> `/`, `Users`, `me`; `C:\\Users` -> `C:`, `Users` (the drive and its root are
 /// one crumb).
-fn local_breadcrumbs(path: &Path) -> Vec<(String, String)> {
-    let mut segments: Vec<(String, String)> = Vec::new();
-    let mut accumulated = PathBuf::new();
-    for component in path.components() {
-        accumulated.push(component);
-        let full_path = accumulated.to_string_lossy().into_owned();
-        match component {
-            std::path::Component::Prefix(prefix) => {
-                segments.push((prefix.as_os_str().to_string_lossy().into_owned(), full_path));
-            }
-            std::path::Component::RootDir => match segments.last_mut() {
-                Some(drive) => drive.1 = full_path,
-                None => segments.push(("/".to_string(), full_path)),
-            },
-            std::path::Component::Normal(segment) => {
-                segments.push((segment.to_string_lossy().into_owned(), full_path));
-            }
-            std::path::Component::CurDir | std::path::Component::ParentDir => {}
-        }
-    }
-    segments
-}
-
 impl AppRuntime {
     pub(crate) fn cached_directory_entries(
         &self,
@@ -323,7 +302,7 @@ impl AppRuntime {
         candidates
     }
 
-    pub fn breadcrumbs_for_display_path(&self, path: &str) -> Vec<(String, String)> {
+    pub fn breadcrumbs_for_display_path(&self, path: &str) -> Vec<BreadcrumbSegment> {
         if let Some((backend_id, relative_path)) = self.parse_virtual_display_path(path) {
             let backend_name = self
                 .registered_backends
@@ -334,11 +313,17 @@ impl AppRuntime {
                 .map(|backend| backend.display_name.clone())
                 .unwrap_or_else(|| backend_id.0.clone());
             let root_path = virtual_root_path(&backend_id).to_string_lossy().to_string();
-            let mut segments = vec![(backend_name, root_path.clone())];
+            let mut segments = vec![BreadcrumbSegment {
+                name: backend_name,
+                full_path: root_path.clone(),
+            }];
             let mut current = root_path;
             for part in relative_path.split('/').filter(|part| !part.is_empty()) {
                 current = join_display_path(&current, part);
-                segments.push((part.to_string(), current.clone()));
+                segments.push(BreadcrumbSegment {
+                    name: part.to_string(),
+                    full_path: current.clone(),
+                });
             }
             return segments;
         }
@@ -469,21 +454,7 @@ impl AppRuntime {
             let metadata = tokio::fs::metadata(path)
                 .await
                 .map_err(|error| error.to_string())?;
-            return Ok(MetadataResult {
-                level: MetadataLevel::L1,
-                is_dir: metadata.is_dir(),
-                size: if metadata.is_file() {
-                    Some(metadata.len())
-                } else {
-                    None
-                },
-                mtime: metadata.modified().ok(),
-                ctime: metadata.created().ok(),
-                content_type: mime_guess::from_path(path)
-                    .first()
-                    .map(|mime| mime.to_string()),
-                etag: None,
-            });
+            return Ok(metadata_result(path, &metadata, MetadataLevel::L1));
         }
 
         let source = self.source_object_ref(object, &resolved)?;
@@ -951,21 +922,7 @@ impl AppRuntime {
 
 fn stat_local_path_sync(path: &Path) -> Result<MetadataResult, String> {
     let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
-    Ok(MetadataResult {
-        level: MetadataLevel::L1,
-        is_dir: metadata.is_dir(),
-        size: if metadata.is_file() {
-            Some(metadata.len())
-        } else {
-            None
-        },
-        mtime: metadata.modified().ok(),
-        ctime: metadata.created().ok(),
-        content_type: mime_guess::from_path(path)
-            .first()
-            .map(|mime| mime.to_string()),
-        etag: None,
-    })
+    Ok(metadata_result(path, &metadata, MetadataLevel::L1))
 }
 
 #[cfg(test)]
@@ -976,7 +933,10 @@ mod tests {
     #[test]
     fn local_breadcrumbs_start_at_the_root() {
         assert_eq!(
-            local_breadcrumbs(Path::new("/Users/me")),
+            local_breadcrumbs(Path::new("/Users/me"))
+                .into_iter()
+                .map(|segment| (segment.name, segment.full_path))
+                .collect::<Vec<_>>(),
             vec![
                 ("/".to_string(), "/".to_string()),
                 ("Users".to_string(), "/Users".to_string()),
@@ -989,7 +949,10 @@ mod tests {
     #[test]
     fn local_breadcrumbs_start_at_the_drive() {
         assert_eq!(
-            local_breadcrumbs(Path::new(r"C:\Users")),
+            local_breadcrumbs(Path::new(r"C:\Users"))
+                .into_iter()
+                .map(|segment| (segment.name, segment.full_path))
+                .collect::<Vec<_>>(),
             vec![
                 ("C:".to_string(), r"C:\".to_string()),
                 ("Users".to_string(), r"C:\Users".to_string()),

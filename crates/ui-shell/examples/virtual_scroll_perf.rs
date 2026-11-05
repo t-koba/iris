@@ -32,19 +32,11 @@ fn list_entry(index: usize) -> ListEntry {
     let name = format!("asset-{index:06}.jpg");
     let display_path = format!("/Users/test/Pictures/{name}");
     ListEntry {
-        object_ref: object_ref(&display_path),
-        sort_name_key: ListEntry::sort_name_key_for(&name),
-        sort_extension_key: ListEntry::sort_extension_key_for(&name),
-        name,
-        is_dir: false,
         metadata_level: MetadataLevel::L1,
         size: Some(256 * 1024 + index as u64),
         mtime: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
         ctime: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_699_900_000)),
-        is_symlink: false,
-        symlink_target: None,
-        is_inaccessible: false,
-        annotation: None,
+        ..ListEntry::new(object_ref(&display_path), name, false)
     }
 }
 
@@ -55,7 +47,8 @@ fn pane_with_entries() -> PaneState {
     pane.rebuild_visible_indices();
     pane.navigation_history.push(pane.current_path.clone());
     pane.history_index = pane.navigation_history.len();
-    pane.rebuild_breadcrumbs();
+    pane.breadcrumb_segments =
+        iris_ui_shell::state::local_breadcrumbs(std::path::Path::new(&pane.current_path));
     pane
 }
 

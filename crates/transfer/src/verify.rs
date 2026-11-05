@@ -192,7 +192,7 @@ mod tests {
     use iris_core_domain::types::progress::ByteRange;
     use iris_core_domain::types::read_handle::ReadHandle;
     use iris_core_domain::types::session::BackendSession;
-    use iris_core_domain::types::thumbnail::{ThumbnailHint, ThumbnailResult};
+
     use std::pin::Pin;
     use std::time::{Duration, SystemTime};
     use tokio::io::AsyncRead;
@@ -299,16 +299,6 @@ mod tests {
             })
         }
 
-        async fn get_thumbnail(
-            &self,
-            _object: &ObjectRef,
-            _hint: ThumbnailHint,
-        ) -> Result<ThumbnailResult, BackendError> {
-            Err(BackendError::Unsupported {
-                operation: "get_thumbnail",
-            })
-        }
-
         async fn get_metadata(
             &self,
             _object: &ObjectRef,
@@ -324,15 +314,12 @@ mod tests {
         fn capabilities(&self) -> CapabilitySet {
             CapabilitySet {
                 can_range_read: true,
-                can_range_write: false,
-                can_direct_thumbnail: false,
                 can_rename: true,
-                can_clone: false,
-                can_server_side_copy: false,
                 can_provide_progress: true,
                 can_verify_by_checksum: true,
                 can_trash: true,
                 can_etag: true,
+                ..CapabilitySet::default()
             }
         }
     }

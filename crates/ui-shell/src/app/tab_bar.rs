@@ -160,7 +160,7 @@ pub(super) fn view_tab_bar(state: &AppState, pane_idx: usize) -> Element<'_, Mes
     .width(Length::Fill)
     .height(Length::Fixed(30.0))
     .padding([2, crate::views::theme::ZONE_PADDING as u16])
-    .style(crate::views::theme::toolbar_style)
+    .style(crate::views::theme::sunken_panel_style)
     .into()
 }
 

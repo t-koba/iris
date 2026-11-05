@@ -7,7 +7,6 @@ use crate::update::thumbnail::clear_thumbnail_cache;
 use iced::futures::SinkExt;
 use iced::stream;
 use iced::Task;
-use iris_backends::localfs::stable_id::get_stable_id_from_metadata;
 use iris_core_domain::types::list::ListEntry;
 use iris_core_domain::types::metadata::{MediaMetadata, MetadataLevel};
 use iris_core_domain::types::object::{BackendId, ObjectKey, ObjectRef, StableId};
@@ -16,7 +15,7 @@ use iris_search::filter::{facets_for_records, verify_content_match, FilterModel,
 use iris_search::reconcile::reconcile_segment;
 use iris_search::segment::{IndexedKind, Segment, SegmentRecord};
 use iris_search::stream::{filter_segment_incremental, FilterEvent};
-use iris_search::walker::{walk_local_with_cancel, WalkOptions};
+use iris_search::walker::{walk_local, WalkOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -94,27 +93,15 @@ pub fn navigate_to_path(state: &mut AppState, path: String) -> Task<Message> {
     state.pane_mut(0).load_state = PaneLoadState::LoadingInitial;
     state.pane_mut(0).scroll_y = 0.0;
     state.pane_mut(0).push_to_history(canonical.clone());
-    refresh_breadcrumbs(state);
+    refresh_breadcrumbs(state, 0);
 
     load_directory_progressively(canonical, state.show_hidden_files)
 }
 
-pub fn refresh_breadcrumbs(state: &mut AppState) {
-    let current_path = state.pane(0).current_path.clone();
-    state.pane_mut(0).breadcrumb_segments = app_runtime()
-        .breadcrumbs_for_display_path(&current_path)
-        .into_iter()
-        .map(|(name, full_path)| crate::state::BreadcrumbSegment { name, full_path })
-        .collect();
-}
-
-pub fn refresh_breadcrumbs_for_pane(state: &mut AppState, pane_idx: usize) {
+pub fn refresh_breadcrumbs(state: &mut AppState, pane_idx: usize) {
     let current_path = state.pane(pane_idx).current_path.clone();
-    state.pane_mut(pane_idx).breadcrumb_segments = app_runtime()
-        .breadcrumbs_for_display_path(&current_path)
-        .into_iter()
-        .map(|(name, full_path)| crate::state::BreadcrumbSegment { name, full_path })
-        .collect();
+    state.pane_mut(pane_idx).breadcrumb_segments =
+        app_runtime().breadcrumbs_for_display_path(&current_path);
 }
 
 pub async fn read_directory(path: String, show_hidden: bool) -> Result<Vec<ListEntry>, String> {
@@ -199,7 +186,7 @@ pub fn recursive_filter_task(
                 let walk_token = cancellation_token.clone();
                 let walk_root = root.clone();
                 let walk_result = tokio::task::spawn_blocking(move || {
-                    walk_local_with_cancel(
+                    walk_local(
                         &walk_root,
                         &WalkOptions {
                             recursive: true,
@@ -452,28 +439,10 @@ fn apply_media_metadata_to_record(record: &mut SegmentRecord, media: &MediaMetad
     record.height = media.height;
     record.capture_secs = media.capture_naive_secs;
     record.capture_offset_min = media.capture_offset_min;
-    record.camera = camera_label(media);
+    record.camera = media.camera_label();
     record.lens = media.lens_model.clone();
     record.gps_lat = media.gps_lat.map(|value| value as f32);
     record.gps_lon = media.gps_lon.map(|value| value as f32);
-}
-
-fn camera_label(media: &MediaMetadata) -> Option<String> {
-    match (
-        media.camera_make.as_ref().filter(|value| !value.is_empty()),
-        media
-            .camera_model
-            .as_ref()
-            .filter(|value| !value.is_empty()),
-    ) {
-        (Some(make), Some(model)) if model.to_lowercase().starts_with(&make.to_lowercase()) => {
-            Some(model.clone())
-        }
-        (Some(make), Some(model)) => Some(format!("{} {}", make, model)),
-        (Some(make), None) => Some(make.clone()),
-        (None, Some(model)) => Some(model.clone()),
-        (None, None) => None,
-    }
 }
 
 async fn list_entries_for_paths_with_annotations(
@@ -492,7 +461,15 @@ async fn list_entries_for_paths_with_annotations(
             .map(|parent| app_runtime().stable_id_for_path(parent))
             .unwrap_or_else(|| StableId(path.clone()));
         let mut entry =
-            build_local_list_entry_safe(full_path, name, &backend_id, &parent_stable_id).await;
+            crate::runtime::local_list_entry(full_path, name, &backend_id, &parent_stable_id).await;
+        if !entry.is_inaccessible {
+            app_runtime().cache_list_entry_metadata(
+                &entry.object_ref,
+                entry.size,
+                entry.mtime,
+                None,
+            );
+        }
         entry.annotation = annotation;
         entries.push(entry);
     }
@@ -515,157 +492,30 @@ fn pdf_content_snippet(path: &Path, query: &str) -> Option<String> {
     verify_content_match(&text, query, 18).map(|snippet| snippet.snippet)
 }
 
-/// Returns the entry even when metadata fails, marked `is_inaccessible`.
-async fn build_local_list_entry_safe(
-    full_path: PathBuf,
-    name: String,
-    backend_id: &BackendId,
-    parent_stable_id: &StableId,
-) -> ListEntry {
-    let display_path = full_path.to_string_lossy().to_string();
-
-    // symlink_metadata describes the link itself and usually succeeds even without permission.
-    let link_meta = tokio::fs::symlink_metadata(&full_path).await;
-
-    match link_meta {
-        Ok(lm) => {
-            let is_symlink = lm.is_symlink();
-            let symlink_target = if is_symlink {
-                tokio::fs::read_link(&full_path)
-                    .await
-                    .ok()
-                    .map(|t| t.to_string_lossy().to_string())
-            } else {
-                None
-            };
-            // Use the link itself for broken links or unreadable targets.
-            let metadata = if is_symlink {
-                tokio::fs::metadata(&full_path).await.unwrap_or(lm)
-            } else {
-                lm
-            };
-
-            let is_dir = metadata.is_dir();
-            let size = if is_dir { None } else { Some(metadata.len()) };
-            let mtime = metadata.modified().ok();
-            let ctime = metadata.created().ok();
-            let stable_id = get_stable_id_from_metadata(&full_path, &metadata)
-                .unwrap_or_else(|_| StableId(display_path.clone()));
-            let object_ref = ObjectRef {
-                key: ObjectKey {
-                    backend_id: backend_id.clone(),
-                    stable_id,
-                },
-                parent_stable_id: Some(parent_stable_id.clone()),
-                display_path,
-            };
-            app_runtime().cache_list_entry_metadata(&object_ref, size, mtime, None);
-
-            ListEntry {
-                object_ref,
-                sort_name_key: ListEntry::sort_name_key_for(&name),
-                sort_extension_key: ListEntry::sort_extension_key_for(&name),
-                name,
-                is_dir,
-                metadata_level: MetadataLevel::L1,
-                size,
-                mtime,
-                ctime,
-                is_symlink,
-                symlink_target,
-                is_inaccessible: false,
-                annotation: None,
-            }
-        }
-        Err(_) => {
-            // Metadata could not be read (e.g. permission denied).
-            let stable_id = StableId(display_path.clone());
-            ListEntry {
-                object_ref: ObjectRef {
-                    key: ObjectKey {
-                        backend_id: backend_id.clone(),
-                        stable_id,
-                    },
-                    parent_stable_id: Some(parent_stable_id.clone()),
-                    display_path,
-                },
-                sort_name_key: ListEntry::sort_name_key_for(&name),
-                sort_extension_key: ListEntry::sort_extension_key_for(&name),
-                name,
-                is_dir: false,
-                metadata_level: MetadataLevel::L0,
-                size: None,
-                mtime: None,
-                ctime: None,
-                is_symlink: false,
-                symlink_target: None,
-                is_inaccessible: true,
-                annotation: None,
-            }
-        }
-    }
-}
-
 async fn build_local_l0_entry_safe(
     entry: tokio::fs::DirEntry,
     name: String,
     backend_id: &BackendId,
     parent_stable_id: &StableId,
 ) -> ListEntry {
-    let full_path = entry.path();
-    let display_path = full_path.to_string_lossy().to_string();
-    let file_type = match entry.file_type().await {
-        Ok(file_type) => file_type,
-        Err(_) => {
-            return ListEntry {
-                object_ref: ObjectRef {
-                    key: ObjectKey {
-                        backend_id: backend_id.clone(),
-                        stable_id: StableId(display_path.clone()),
-                    },
-                    parent_stable_id: Some(parent_stable_id.clone()),
-                    display_path,
-                },
-                sort_name_key: ListEntry::sort_name_key_for(&name),
-                sort_extension_key: ListEntry::sort_extension_key_for(&name),
-                name,
-                is_dir: false,
-                metadata_level: MetadataLevel::L0,
-                size: None,
-                mtime: None,
-                ctime: None,
-                is_symlink: false,
-                symlink_target: None,
-                is_inaccessible: true,
-                annotation: None,
-            };
-        }
-    };
-
-    let is_symlink = file_type.is_symlink();
-    let is_dir = file_type.is_dir();
-
-    ListEntry {
-        object_ref: ObjectRef {
-            key: ObjectKey {
-                backend_id: backend_id.clone(),
-                stable_id: StableId(display_path.clone()),
-            },
-            parent_stable_id: Some(parent_stable_id.clone()),
-            display_path,
+    let display_path = entry.path().to_string_lossy().to_string();
+    let object_ref = ObjectRef {
+        key: ObjectKey {
+            backend_id: backend_id.clone(),
+            stable_id: StableId(display_path.clone()),
         },
-        sort_name_key: ListEntry::sort_name_key_for(&name),
-        sort_extension_key: ListEntry::sort_extension_key_for(&name),
-        name,
-        is_dir,
-        metadata_level: MetadataLevel::L0,
-        size: None,
-        mtime: None,
-        ctime: None,
-        is_symlink,
-        symlink_target: None,
-        is_inaccessible: false,
-        annotation: None,
+        parent_stable_id: Some(parent_stable_id.clone()),
+        display_path,
+    };
+    match entry.file_type().await {
+        Ok(file_type) => ListEntry {
+            is_symlink: file_type.is_symlink(),
+            ..ListEntry::new(object_ref, name, file_type.is_dir())
+        },
+        Err(_) => ListEntry {
+            is_inaccessible: true,
+            ..ListEntry::new(object_ref, name, false)
+        },
     }
 }
 
