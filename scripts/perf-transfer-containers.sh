@@ -11,6 +11,8 @@ work_root="${IRIS_PERF_WORK_ROOT:-}"
 keep="${IRIS_PERF_KEEP_CONTAINERS:-0}"
 sftp_image="${IRIS_PERF_SFTP_IMAGE:-atmoz/sftp:alpine}"
 sftp_port="${IRIS_PERF_SFTP_PORT:-2222}"
+ready_timeout="${IRIS_PERF_READY_TIMEOUT_SECONDS:-60}"
+ssh_keyscan_timeout="${IRIS_PERF_SSH_KEYSCAN_TIMEOUT_SECONDS:-5}"
 smb_image="${IRIS_PERF_SAMBA_IMAGE:-dperson/samba}"
 smb_port="${IRIS_PERF_SMB_PORT:-1445}"
 smb_mount="${IRIS_PERF_SMB_MOUNT:-}"
@@ -36,6 +38,8 @@ Environment:
   IRIS_PERF_SMALL_BYTES      Small-file size in bytes (default: 16384).
   IRIS_PERF_SFTP_IMAGE       SFTP container image (default: atmoz/sftp:alpine).
   IRIS_PERF_SFTP_PORT        Host SFTP port (default: 2222).
+  IRIS_PERF_READY_TIMEOUT_SECONDS Readiness deadline (default: 60).
+  IRIS_PERF_SSH_KEYSCAN_TIMEOUT_SECONDS Per-scan timeout (default: 5).
   IRIS_PERF_SAMBA_IMAGE      Samba container image (default: dperson/samba).
   IRIS_PERF_SMB_PORT         Host SMB port (default: 1445).
   IRIS_PERF_SMB_MOUNT        Existing SMB mount path to benchmark. If unset,
@@ -62,11 +66,21 @@ require_cmd() {
   }
 }
 
+validate_timeout() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "$value" =~ ^[1-9][0-9]{0,17}$ ]]; then
+    echo "$name must be a positive integer" >&2
+    exit 2
+  fi
+}
+
 wait_for_port() {
   local host="$1"
   local port="$2"
   local label="$3"
-  for _ in $(seq 1 60); do
+  local deadline=$((SECONDS + ready_timeout))
+  while (( SECONDS < deadline )); do
     if nc -z "$host" "$port" >/dev/null 2>&1; then
       return 0
     fi
@@ -97,11 +111,26 @@ start_sftp() {
 
 prepare_known_hosts() {
   local home_dir="$work_root/home"
+  local known_hosts="$home_dir/.ssh/known_hosts"
+  local scan_output="$work_root/ssh-keyscan.out"
+  local scan_error="$work_root/ssh-keyscan.err"
+  local deadline=$((SECONDS + ready_timeout))
   mkdir -p "$home_dir/.ssh"
   chmod 700 "$home_dir/.ssh"
-  ssh-keyscan -p "$sftp_port" 127.0.0.1 >"$home_dir/.ssh/known_hosts" 2>/dev/null
-  chmod 600 "$home_dir/.ssh/known_hosts"
-  export HOME="$home_dir"
+  while (( SECONDS < deadline )); do
+    if ssh-keyscan -T "$ssh_keyscan_timeout" -p "$sftp_port" 127.0.0.1 >"$scan_output" 2>"$scan_error" && [[ -s "$scan_output" ]]; then
+      mv "$scan_output" "$known_hosts"
+      chmod 600 "$known_hosts"
+      export HOME="$home_dir"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "SFTP server did not provide an SSH host key within ${ready_timeout}s" >&2
+  if [[ -s "$scan_error" ]]; then
+    tail -n 5 "$scan_error" >&2
+  fi
+  return 1
 }
 
 run_sftp_benchmarks() {
@@ -243,8 +272,22 @@ run_smb_benchmarks() {
   )
 }
 
+report_container() {
+  local name="$1"
+  if ! docker container inspect "$name" >/dev/null 2>&1; then
+    return 0
+  fi
+  docker inspect --format 'container={{.Name}} state={{.State.Status}} exit_code={{.State.ExitCode}} error={{.State.Error}}' "$name" >&2 || true
+  docker logs --tail 20 "$name" 2>&1 | sed 's/iris/[redacted]/g' | tail -c 8192 >&2 || true
+}
+
 cleanup() {
   local status=$?
+  if (( status != 0 )); then
+    echo "Container diagnostics after transfer smoke failure:" >&2
+    report_container "$sftp_container"
+    report_container "$smb_container"
+  fi
   if [[ "$keep" != "1" ]]; then
     if [[ -n "${mounted_by_script:-}" ]]; then
       umount "$mounted_by_script" >/dev/null 2>&1 || true
@@ -258,6 +301,9 @@ cleanup() {
   fi
   exit "$status"
 }
+
+validate_timeout IRIS_PERF_READY_TIMEOUT_SECONDS "$ready_timeout"
+validate_timeout IRIS_PERF_SSH_KEYSCAN_TIMEOUT_SECONDS "$ssh_keyscan_timeout"
 
 require_cmd docker
 require_cmd nc
