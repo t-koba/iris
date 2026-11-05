@@ -1172,6 +1172,27 @@ pub(super) fn view_pane_content(state: &AppState, pane_idx: usize) -> Element<'_
     let content: Element<'_, Message> = if let PaneLoadState::Failed { message } = &pane.load_state
     {
         let retry_path = pane.current_path.clone();
+        // A folder that was deleted or a volume that vanished would otherwise be a dead end.
+        let parent_path = std::path::Path::new(&pane.current_path)
+            .parent()
+            .map(|parent| parent.to_string_lossy().into_owned())
+            .filter(|parent| {
+                app_runtime().is_virtual_display_path(parent)
+                    || !app_runtime().is_virtual_display_path(&pane.current_path)
+            });
+        let up_button = parent_path.map(|parent| {
+            button(
+                row![
+                    crate::views::theme::icon("\u{E5D8}").size(14),
+                    text(tr("toolbar-up")).size(12),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+            )
+            .padding([7, 14])
+            .style(button::secondary)
+            .on_press(Message::Pane(pane_idx, PaneMessage::NavigateToPath(parent)))
+        });
         container(
             column![
                 crate::views::theme::icon("\u{F8B6}")
@@ -1197,6 +1218,7 @@ pub(super) fn view_pane_content(state: &AppState, pane_idx: usize) -> Element<'_
                     PaneMessage::NavigateToPath(retry_path),
                 )),
             ]
+            .push(up_button)
             .spacing(12)
             .align_x(iced::Alignment::Center),
         )
