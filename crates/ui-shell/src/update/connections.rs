@@ -1,10 +1,12 @@
 use super::helpers::navigate_to_path;
+use super::pane::navigate_pane_to_path;
 use crate::i18n::{tr, tr_with};
 use crate::messages::{ConnectionMessage, Message};
 use crate::runtime::{app_runtime, CloudSidebarLocation, SmbNativeConnectRequest};
 use crate::state::{
     parse_smb_port_input, AppState, CloudConnectFormState, CloudProvider, DialogState,
-    NetworkConnectFormState, NetworkProtocol, PaneLoadState, SidebarGroup, SidebarItem,
+    NetworkConnectFormState, NetworkProtocol, NotificationAction, NotificationSeverity,
+    SidebarGroup, SidebarItem,
 };
 use iced::Task;
 use iris_platform_integration::mount::MountedVolume;
@@ -118,26 +120,51 @@ pub fn handle(state: &mut AppState, message: ConnectionMessage) -> Task<Message>
                 },
             )
         }
-        ConnectionMessage::UnmountVolumeCompleted(result) => {
-            match result {
-                Ok(path) => {
-                    app_runtime().unregister_mount(Path::new(&path));
-                    for group in &mut state.sidebar_groups {
-                        group.items.retain(|item| item.path != path);
-                    }
-                    if state.pane(0).current_path.starts_with(&path) {
-                        if let Some(home) = dirs_next::home_dir() {
-                            return navigate_to_path(state, home.to_string_lossy().to_string());
-                        }
-                    }
-                }
-                Err(message) => {
-                    state.pane_mut(0).load_state = PaneLoadState::Failed { message };
-                }
+        ConnectionMessage::UnmountVolumeCompleted(Ok(path)) => {
+            app_runtime().unregister_mount(Path::new(&path));
+            for group in &mut state.sidebar_groups {
+                group.items.retain(|item| item.path != path);
             }
+            leave_unmounted_volume(state, Path::new(&path))
+        }
+        ConnectionMessage::UnmountVolumeCompleted(Err(message)) => {
+            // The volume is still mounted, so the listings stay as they are.
+            state.add_notification(
+                NotificationSeverity::Error,
+                tr("notification-eject-failed-title"),
+                message,
+                vec![NotificationAction::Dismiss],
+            );
             Task::none()
         }
     }
+}
+
+/// Moves every tab that shows the ejected volume to the home folder; active tabs reload now,
+/// the others when they are next shown.
+fn leave_unmounted_volume(state: &mut AppState, mount_path: &Path) -> Task<Message> {
+    let fallback = dirs_next::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/"))
+        .to_string_lossy()
+        .into_owned();
+    let mut active_panes = Vec::new();
+    for (pane_idx, is_active, tab) in state.all_tabs_mut() {
+        if !Path::new(&tab.current_path).starts_with(mount_path) {
+            continue;
+        }
+        if is_active {
+            active_panes.push(pane_idx);
+        } else {
+            tab.current_path = fallback.clone();
+            tab.push_to_history(fallback.clone());
+        }
+    }
+    Task::batch(
+        active_panes
+            .into_iter()
+            .map(|pane_idx| navigate_pane_to_path(state, pane_idx, fallback.clone()))
+            .collect::<Vec<_>>(),
+    )
 }
 
 pub fn set_network_protocol(state: &mut AppState, protocol: NetworkProtocol) {
@@ -673,5 +700,67 @@ fn cloud_sidebar_item(location: CloudSidebarLocation) -> SidebarItem {
         badge: "Cl".to_string(),
         badge_color: [0.2, 0.6, 0.85, 1.0],
         ejectable: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::PaneLoadState;
+
+    fn home() -> String {
+        dirs_next::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/"))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn ejecting_a_volume_moves_every_tab_inside_it_home() {
+        let mut state = AppState::default();
+        state.pane_mut(0).current_path = "/Volumes/Card/DCIM".to_string();
+        state.open_tab(0);
+        state.pane_mut(0).current_path = "/Users/me".to_string();
+        state.pane_mut(1).current_path = "/Volumes/Card".to_string();
+        state.open_tab(1);
+        // Shares a string prefix with the ejected volume but is a different volume.
+        state.pane_mut(1).current_path = "/Volumes/Card2".to_string();
+        let _ = state.switch_tab(1, 0);
+
+        let _ = handle(
+            &mut state,
+            ConnectionMessage::UnmountVolumeCompleted(Ok("/Volumes/Card".to_string())),
+        );
+
+        let pane0 = state.pane_tabs(0).tabs();
+        assert_eq!(
+            pane0[0].current_path,
+            home(),
+            "inactive tab leaves the volume"
+        );
+        assert_eq!(pane0[1].current_path, "/Users/me");
+        let pane1 = state.pane_tabs(1).tabs();
+        assert_eq!(
+            pane1[0].current_path,
+            home(),
+            "active tab of pane 1 leaves too"
+        );
+        assert_eq!(pane1[1].current_path, "/Volumes/Card2");
+    }
+
+    #[test]
+    fn failed_eject_reports_a_notification_and_keeps_the_listing() {
+        let mut state = AppState::default();
+        state.pane_mut(0).current_path = "/Volumes/Card".to_string();
+        state.pane_mut(0).load_state = PaneLoadState::Loaded;
+
+        let _ = handle(
+            &mut state,
+            ConnectionMessage::UnmountVolumeCompleted(Err("busy".to_string())),
+        );
+
+        assert_eq!(state.pane(0).load_state, PaneLoadState::Loaded);
+        assert_eq!(state.notifications.len(), 1);
+        assert_eq!(state.notifications[0].message, "busy");
     }
 }

@@ -305,6 +305,20 @@ impl AppState {
         [self.pane(0), self.pane(1)]
     }
 
+    /// Every tab of both panes as `(pane index, is the pane's active tab, tab)`.
+    pub fn all_tabs_mut(&mut self) -> impl Iterator<Item = (usize, bool, &mut PaneState)> {
+        self.panes
+            .iter_mut()
+            .enumerate()
+            .flat_map(|(pane_idx, tabs)| {
+                let active = tabs.active;
+                tabs.tabs
+                    .iter_mut()
+                    .enumerate()
+                    .map(move |(tab_idx, tab)| (pane_idx, tab_idx == active, tab))
+            })
+    }
+
     pub fn open_tab(&mut self, pane_idx: usize) -> usize {
         let current = self.panes[pane_idx].active();
         let mut tab = PaneState {

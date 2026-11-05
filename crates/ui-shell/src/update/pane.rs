@@ -1322,7 +1322,11 @@ fn accept_path_suggestion(state: &mut AppState, pane_idx: usize) {
 }
 
 /// Pane 0 loads progressively, pane 1 loads in full.
-fn navigate_pane_to_path(state: &mut AppState, pane_idx: usize, path: String) -> Task<Message> {
+pub(crate) fn navigate_pane_to_path(
+    state: &mut AppState,
+    pane_idx: usize,
+    path: String,
+) -> Task<Message> {
     if pane_idx == 0 {
         navigate_to_path(state, path)
     } else {
