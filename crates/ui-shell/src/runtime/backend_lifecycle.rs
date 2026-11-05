@@ -59,7 +59,6 @@ impl AppRuntime {
             open_cache_dir,
             index_cache_dir,
             tile_cache_dir,
-            map_tile_http_client: map_tiles::build_map_tile_http_client(),
             map_tile_cache_writes: AtomicU64::new(0),
             session_cache: Arc::new(
                 SessionCache::new()

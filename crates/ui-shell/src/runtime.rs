@@ -197,7 +197,6 @@ pub struct AppRuntime {
     open_cache_dir: PathBuf,
     index_cache_dir: PathBuf,
     tile_cache_dir: PathBuf,
-    map_tile_http_client: reqwest::Client,
     map_tile_cache_writes: AtomicU64,
     session_cache: Arc<SessionCache>,
     cache_encryption_policy: Mutex<CacheEncryptionPolicy>,

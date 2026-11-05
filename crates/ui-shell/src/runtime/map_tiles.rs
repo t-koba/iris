@@ -10,15 +10,23 @@ const MAP_TILE_CACHE_MAINTENANCE_INTERVAL: u64 = 32;
 const MAP_TILE_TOUCH_INTERVAL: StdDuration = StdDuration::from_secs(60 * 60);
 static MAP_TILE_FETCH_LOCKS: OnceLock<Vec<tokio::sync::Mutex<()>>> = OnceLock::new();
 
-pub(super) fn build_map_tile_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .tcp_nodelay(true)
-        .connect_timeout(StdDuration::from_secs(5))
-        .timeout(StdDuration::from_secs(15))
-        .pool_idle_timeout(StdDuration::from_secs(90))
-        .pool_max_idle_per_host(8)
-        .build()
-        .expect("failed to build map tile HTTP client")
+/// Built on first use: map tiles are optional, and a TLS set-up failure must only disable them
+/// rather than stop the app at start-up.
+fn map_tile_http_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .tcp_nodelay(true)
+                .connect_timeout(StdDuration::from_secs(5))
+                .timeout(StdDuration::from_secs(15))
+                .pool_idle_timeout(StdDuration::from_secs(90))
+                .pool_max_idle_per_host(8)
+                .build()
+                .map_err(|error| format!("map tile HTTP client is unavailable: {error}"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 impl AppRuntime {
@@ -54,8 +62,7 @@ impl AppRuntime {
             return Ok(bytes);
         }
 
-        let mut response = self
-            .map_tile_http_client
+        let mut response = map_tile_http_client()?
             .get(osm_tile_url(tile))
             .header(reqwest::header::USER_AGENT, MAP_TILE_USER_AGENT)
             .send()
