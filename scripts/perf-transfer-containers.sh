@@ -23,6 +23,7 @@ smb_min_protocol="${IRIS_PERF_SMB_MIN_PROTOCOL:-}"
 smb_max_protocol="${IRIS_PERF_SMB_MAX_PROTOCOL:-}"
 smb_server_signing="${IRIS_PERF_SMB_SERVER_SIGNING:-}"
 smb_encryption="${IRIS_PERF_SMB_ENCRYPTION:-}"
+smb_log_level="${IRIS_PERF_SMB_LOG_LEVEL:-1 auth:5 auth_audit:5}"
 
 usage() {
   cat <<'USAGE'
@@ -202,6 +203,7 @@ start_samba() {
   if [[ -n "$smb_encryption" ]]; then
     samba_args+=(-g "smb encrypt = $smb_encryption")
   fi
+  samba_args+=(-g "log level = $smb_log_level")
   docker "${samba_args[@]}" >/dev/null
   wait_for_port 127.0.0.1 "$smb_port" "Samba container"
 }
@@ -288,6 +290,14 @@ report_container() {
   fi
   docker inspect --format 'container={{.Name}} state={{.State.Status}} exit_code={{.State.ExitCode}} error={{.State.Error}}' "$name" >&2 || true
   docker logs --tail 20 "$name" 2>&1 | sed 's/iris/[redacted]/g' | tail -c 8192 >&2 || true
+  if [[ "$name" == "$smb_container" ]]; then
+    echo "Samba log files (last 4096 bytes each; combined output capped at 8192 bytes):" >&2
+    docker exec "$name" sh -c 'for file in /var/log/samba/log.*; do
+      [ -f "$file" ] || continue
+      printf "\n--- %s ---\n" "$file"
+      tail -c 4096 "$file"
+    done' 2>&1 | sed 's/iris/[redacted]/g' | tail -c 8192 >&2 || true
+  fi
 }
 
 cleanup() {
