@@ -164,33 +164,20 @@ fn encode_resized_image(
 #[cfg(target_os = "macos")]
 mod macos_imageio {
     use super::*;
+    use crate::macos_ffi::*;
     use std::ffi::CString;
     use std::os::raw::c_void;
 
-    type CFTypeRef = *const c_void;
-    type CFURLRef = *const c_void;
     type CFDictionaryRef = *const c_void;
     type CFStringRef = *const c_void;
     type CFNumberRef = *const c_void;
     type CGImageSourceRef = *const c_void;
     type CGImageRef = *const c_void;
-    type CGColorSpaceRef = *const c_void;
-    type CGContextRef = *mut c_void;
-    type CFIndex = isize;
-    type CFAllocatorRef = *const c_void;
 
     const K_CF_ALLOCATOR_DEFAULT: CFAllocatorRef = std::ptr::null();
-    const K_CG_IMAGE_ALPHA_PREMULTIPLIED_LAST: u32 = 1;
 
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
-        fn CFRelease(cf: CFTypeRef);
-        fn CFURLCreateFromFileSystemRepresentation(
-            alloc: CFAllocatorRef,
-            path: *const u8,
-            len: CFIndex,
-            is_dir: bool,
-        ) -> CFURLRef;
         fn CFDictionaryCreate(
             alloc: CFAllocatorRef,
             keys: *const CFTypeRef,
@@ -228,39 +215,8 @@ mod macos_imageio {
     extern "C" {
         fn CGImageGetWidth(image: CGImageRef) -> usize;
         fn CGImageGetHeight(image: CGImageRef) -> usize;
-        fn CGColorSpaceCreateDeviceRGB() -> CGColorSpaceRef;
-        fn CGBitmapContextCreate(
-            data: *mut c_void,
-            width: usize,
-            height: usize,
-            bits_per_component: usize,
-            bytes_per_row: usize,
-            space: CGColorSpaceRef,
-            bitmap_info: u32,
-        ) -> CGContextRef;
         fn CGContextDrawImage(ctx: CGContextRef, rect: CGRect, image: CGImageRef);
-        fn CGContextRelease(ctx: CGContextRef);
-        fn CGColorSpaceRelease(cs: CGColorSpaceRef);
         fn CGImageRelease(image: CGImageRef);
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct CGRect {
-        origin: CGPoint,
-        size: CGSize,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct CGPoint {
-        x: f64,
-        y: f64,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct CGSize {
-        width: f64,
-        height: f64,
     }
 
     pub fn decode_with_imageio(file_path: &Path, max_dimension: u32) -> Option<ThumbnailResult> {
@@ -484,21 +440,11 @@ mod windows_wic {
         ) -> HRESULT,
     }
 
-    // IWICFormatConverter additional method
+    // IWICFormatConverter vtable. `base` must stay the first field: COM vtables place the
+    // parent interface's entries at the start.
     #[repr(C)]
     struct IWICFormatConverterVtbl {
-        // IWICBitmapSource (8 entries)
-        query_interface:
-            unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
-        add_ref: unsafe extern "system" fn(*mut c_void) -> ULONG,
-        release: unsafe extern "system" fn(*mut c_void) -> ULONG,
-        get_size: unsafe extern "system" fn(*mut c_void, *mut UINT, *mut UINT) -> HRESULT,
-        _get_pixel_format: *const c_void,
-        _get_resolution: *const c_void,
-        _copy_palette: *const c_void,
-        copy_pixels:
-            unsafe extern "system" fn(*mut c_void, *const c_void, UINT, UINT, *mut u8) -> HRESULT,
-        // IWICFormatConverter
+        base: IWICBitmapSourceVtbl,
         initialize: unsafe extern "system" fn(
             *mut c_void, // this
             *mut c_void, // source (IWICBitmapSource)
@@ -510,20 +456,10 @@ mod windows_wic {
         ) -> HRESULT,
     }
 
-    // IWICBitmapScaler additional method
+    // IWICBitmapScaler vtable: IWICBitmapSource entries followed by its own method.
     #[repr(C)]
     struct IWICBitmapScalerVtbl {
-        query_interface:
-            unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
-        add_ref: unsafe extern "system" fn(*mut c_void) -> ULONG,
-        release: unsafe extern "system" fn(*mut c_void) -> ULONG,
-        get_size: unsafe extern "system" fn(*mut c_void, *mut UINT, *mut UINT) -> HRESULT,
-        _get_pixel_format: *const c_void,
-        _get_resolution: *const c_void,
-        _copy_palette: *const c_void,
-        copy_pixels:
-            unsafe extern "system" fn(*mut c_void, *const c_void, UINT, UINT, *mut u8) -> HRESULT,
-        // IWICBitmapScaler
+        base: IWICBitmapSourceVtbl,
         initialize: unsafe extern "system" fn(
             *mut c_void, // this
             *mut c_void, // source (IWICBitmapSource)
@@ -701,7 +637,7 @@ mod windows_wic {
             let stride = scaled_w * 4;
             let buf_size = stride * scaled_h;
             let mut pixel_data = vec![0u8; buf_size as usize];
-            let hr = (converter_vtbl.copy_pixels)(
+            let hr = (converter_vtbl.base.copy_pixels)(
                 converter.as_raw(),
                 std::ptr::null(),
                 stride,

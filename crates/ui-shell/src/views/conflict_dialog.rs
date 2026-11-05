@@ -21,56 +21,14 @@ pub fn view_conflict_dialog<'a>(
     content = content.push(iced::widget::rule::horizontal(1));
 
     content = content.push(text(tr("conflict-source")).size(12));
-    content = content.push(
-        container(
-            column![
-                text(truncate_path(source_path, 40)).size(11),
-                text(tr_with(
-                    "conflict-file-info",
-                    &[
-                        ("size", format_size(source_size).into()),
-                        (
-                            "modified",
-                            (&source_mtime
-                                .map(format_time)
-                                .unwrap_or_else(|| tr("conflict-metadata-unavailable")))
-                                .into()
-                        )
-                    ]
-                ))
-                .size(10),
-            ]
-            .spacing(2),
-        )
-        .padding(8)
-        .style(theme::dialog_card_style),
-    );
+    content = content.push(file_card(source_path, source_size, source_mtime));
 
     content = content.push(text(tr("conflict-existing-file")).size(12));
-    content = content.push(
-        container(
-            column![
-                text(truncate_path(destination_path, 40)).size(11),
-                text(tr_with(
-                    "conflict-file-info",
-                    &[
-                        ("size", format_size(destination_size).into()),
-                        (
-                            "modified",
-                            (&destination_mtime
-                                .map(format_time)
-                                .unwrap_or_else(|| tr("conflict-metadata-unavailable")))
-                                .into()
-                        )
-                    ]
-                ))
-                .size(10),
-            ]
-            .spacing(2),
-        )
-        .padding(8)
-        .style(theme::dialog_card_style),
-    );
+    content = content.push(file_card(
+        destination_path,
+        destination_size,
+        destination_mtime,
+    ));
 
     let size_comparison = if source_size > destination_size {
         tr("conflict-source-larger")
@@ -170,6 +128,34 @@ fn truncate_path(path: &str, max_len: usize) -> String {
     let start = path.chars().take(head).collect::<String>();
     let end = path.chars().skip(char_count - tail).collect::<String>();
     format!("{start}...{end}")
+}
+
+/// Path, size and modification time of one side of the conflict.
+fn file_card<'a>(
+    path: &str,
+    size: u64,
+    mtime: Option<std::time::SystemTime>,
+) -> Element<'a, Message> {
+    let modified = mtime
+        .map(format_time)
+        .unwrap_or_else(|| tr("conflict-metadata-unavailable"));
+    container(
+        column![
+            text(truncate_path(path, 40)).size(11),
+            text(tr_with(
+                "conflict-file-info",
+                &[
+                    ("size", format_size(size).into()),
+                    ("modified", modified.into()),
+                ],
+            ))
+            .size(10),
+        ]
+        .spacing(2),
+    )
+    .padding(8)
+    .style(theme::dialog_card_style)
+    .into()
 }
 
 #[cfg(test)]

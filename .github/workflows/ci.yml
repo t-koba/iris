@@ -120,11 +120,8 @@ jobs:
           cargo bloat --release -p iris-ui-shell --no-default-features --features minimal -n 20 --crates > /tmp/iris-bloat.txt
           ! rg -i 'ffmpeg|pdfium' /tmp/iris-bloat.txt
 
-      - name: UI shell integration smoke
-        run: cargo test -p iris-ui-shell --test integration_smoke --locked
-
-      - name: Thumb preview RAW smoke
-        run: cargo test -p iris-thumb-preview --test golden --locked
+      - name: Tests
+        run: cargo test --workspace --locked
 
       - name: Native SFTP and SMB container integration
         if: matrix.os == 'ubuntu-latest'

@@ -560,28 +560,7 @@ async fn authenticate_with_default_key(
 
     let preferred_hash = preferred_rsa_hash(handle).await?;
     for key_path in key_paths {
-        let private_key = russh::keys::load_secret_key(&key_path, None)
-            .map_err(|error| format!("failed to load SSH key {}: {error}", key_path.display()))?;
-        let key = Arc::new(private_key);
-        let auth_key = PrivateKeyWithHashAlg::new(
-            Arc::clone(&key),
-            rsa_hash_for_algorithm(key.algorithm(), preferred_hash),
-        );
-        let result = handle
-            .authenticate_publickey(username.to_string(), auth_key)
-            .await
-            .map_err(|error| {
-                format!(
-                    "default-key authentication failed with {}: {error}",
-                    key_path.display()
-                )
-            })?;
-        if result.success() {
-            debug!(
-                username_hash = %iris_core_domain::observability::path_hash(username),
-                key_path_hash = %iris_core_domain::observability::stable_hash(key_path.as_os_str().as_encoded_bytes()),
-                "sftp.auth_default_key_success"
-            );
+        if try_private_key(handle, username, &key_path, None, preferred_hash).await? {
             return Ok(());
         }
     }
@@ -590,6 +569,41 @@ async fn authenticate_with_default_key(
         "default SSH key authentication failed for {}",
         username
     ))
+}
+
+/// Loads `key_path` and offers it; `Ok(false)` means the server rejected the key.
+async fn try_private_key(
+    handle: &mut SshHandle,
+    username: &str,
+    key_path: &Path,
+    passphrase: Option<&str>,
+    preferred_hash: Option<HashAlg>,
+) -> Result<bool, String> {
+    let private_key = russh::keys::load_secret_key(key_path, passphrase)
+        .map_err(|error| format!("failed to load SSH key {}: {error}", key_path.display()))?;
+    let key = Arc::new(private_key);
+    let auth_key = PrivateKeyWithHashAlg::new(
+        Arc::clone(&key),
+        rsa_hash_for_algorithm(key.algorithm(), preferred_hash),
+    );
+    let accepted = handle
+        .authenticate_publickey(username.to_string(), auth_key)
+        .await
+        .map_err(|error| {
+            format!(
+                "public key authentication failed with {}: {error}",
+                key_path.display()
+            )
+        })?
+        .success();
+    if accepted {
+        debug!(
+            username_hash = %iris_core_domain::observability::path_hash(username),
+            key_path_hash = %iris_core_domain::observability::stable_hash(key_path.as_os_str().as_encoded_bytes()),
+            "sftp.auth_public_key_success"
+        );
+    }
+    Ok(accepted)
 }
 
 async fn authenticate_with_identity_file(
@@ -603,31 +617,8 @@ async fn authenticate_with_identity_file(
     }
 
     let preferred_hash = preferred_rsa_hash(handle).await?;
-    let private_key = russh::keys::load_secret_key(
-        key_path,
-        (!mapping.ssh_password.is_empty()).then_some(mapping.ssh_password.as_str()),
-    )
-    .map_err(|error| format!("failed to load SSH key {}: {error}", key_path.display()))?;
-    let key = Arc::new(private_key);
-    let auth_key = PrivateKeyWithHashAlg::new(
-        Arc::clone(&key),
-        rsa_hash_for_algorithm(key.algorithm(), preferred_hash),
-    );
-    let result = handle
-        .authenticate_publickey(username.to_string(), auth_key)
-        .await
-        .map_err(|error| {
-            format!(
-                "identity-file authentication failed with {}: {error}",
-                key_path.display()
-            )
-        })?;
-    if result.success() {
-        debug!(
-            username_hash = %iris_core_domain::observability::path_hash(username),
-            key_path_hash = %iris_core_domain::observability::stable_hash(key_path.as_os_str().as_encoded_bytes()),
-            "sftp.auth_identity_file_success"
-        );
+    let passphrase = (!mapping.ssh_password.is_empty()).then_some(mapping.ssh_password.as_str());
+    if try_private_key(handle, username, key_path, passphrase, preferred_hash).await? {
         return Ok(());
     }
 

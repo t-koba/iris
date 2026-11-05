@@ -1,3 +1,5 @@
+//! Watches folders, mounted volumes and cloud connections and reports changes to the UI.
+
 use iris_platform_integration::file_watch::{
     watch_directory, watch_path, FileWatchHandle, WatchEvent,
 };

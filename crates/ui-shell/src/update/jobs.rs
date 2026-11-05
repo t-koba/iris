@@ -37,19 +37,7 @@ pub fn handle(state: &mut AppState, message: JobMessage) -> Task<Message> {
                 return process_pending_operation(state);
             }
         }
-        JobMessage::Cancel(job_id) => {
-            dismiss_job_decisions(state, &job_id);
-            app_runtime().cancel_job(&job_id);
-            if let Some(job) = state.jobs.iter_mut().find(|job| job.id == job_id) {
-                job.state = JobState::Canceled;
-            }
-            if let Some(pending) = &state.pending_operation {
-                if pending.job_id == job_id {
-                    state.pending_operation = None;
-                    state.active_dialog = None;
-                }
-            }
-        }
+        JobMessage::Cancel(job_id) => cancel_job_state(state, &job_id),
         JobMessage::Retry(job_id) => {
             let failed_in_this_session = state
                 .pending_operation

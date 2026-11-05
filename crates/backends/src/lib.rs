@@ -1,3 +1,6 @@
+//! `BackendAdapter` implementations: the local file system (NFS mounts included), SMB, S3
+//! and pCloud.
+
 pub mod common;
 pub mod localfs;
 pub mod pcloud;

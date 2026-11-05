@@ -1,3 +1,5 @@
+//! Path normalization, display paths and URL parsing.
+
 pub mod display;
 pub mod normalize;
 pub mod platform;

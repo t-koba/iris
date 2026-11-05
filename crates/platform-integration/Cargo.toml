@@ -2,6 +2,8 @@
 name = "iris-platform-integration"
 version.workspace = true
 edition = "2021"
+description = "OS integration: mounts, trash, credentials, file watching and file times."
+publish = false
 
 [dependencies]
 thiserror = { workspace = true }

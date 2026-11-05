@@ -1,3 +1,6 @@
+//! Filters and recursive search: file listing segments, Bloom-filter content candidates and
+//! fuzzy name matching.
+
 pub mod bloom;
 pub mod filter;
 pub mod ngram;

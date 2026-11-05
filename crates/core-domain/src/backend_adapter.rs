@@ -216,11 +216,16 @@ pub trait BackendAdapter: Send + Sync {
         })
     }
 
+    /// Metadata at the requested `level`. The default takes `stat` and records the level.
     async fn get_metadata(
         &self,
         object: &ObjectRef,
         level: MetadataLevel,
-    ) -> Result<MetadataResult, BackendError>;
+    ) -> Result<MetadataResult, BackendError> {
+        let mut result = self.stat(object).await?;
+        result.level = level;
+        Ok(result)
+    }
 
     async fn get_stable_id(&self, object: &ObjectRef) -> Result<StableId, BackendError>;
 

@@ -30,6 +30,7 @@ impl<T> DirectTcpTransport<T> {
         }
     }
 
+    #[cfg(test)]
     pub fn with_max_payload_len(mut self, max_payload_len: usize) -> Self {
         self.max_payload_len = max_payload_len.min(DIRECT_TCP_MAX_PAYLOAD_BYTES);
         self

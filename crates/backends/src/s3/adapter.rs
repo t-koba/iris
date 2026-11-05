@@ -150,12 +150,7 @@ impl BackendAdapter for S3Adapter {
             .bucket(&self.config.bucket)
             .send()
             .await
-            .map_err(|e| {
-                BackendError::Network(NetworkErrorDetail {
-                    message: format!("S3 bucket access failed: {}", e),
-                    is_timeout: false,
-                })
-            })?;
+            .map_err(|e| self.network_error("bucket access", e))?;
 
         Ok(BackendSession {
             backend_id: self.backend_id.clone(),
@@ -192,12 +187,10 @@ impl BackendAdapter for S3Adapter {
             request = request.continuation_token(c.0);
         }
 
-        let response = request.send().await.map_err(|e| {
-            BackendError::Network(NetworkErrorDetail {
-                message: format!("S3 list failed: {}", e),
-                is_timeout: false,
-            })
-        })?;
+        let response = request
+            .send()
+            .await
+            .map_err(|e| self.network_error("list", e))?;
 
         let mut entries = Vec::new();
 
@@ -298,12 +291,7 @@ impl BackendAdapter for S3Adapter {
             .key(&key)
             .send()
             .await
-            .map_err(|e| {
-                BackendError::Network(NetworkErrorDetail {
-                    message: format!("S3 head failed: {}", e),
-                    is_timeout: false,
-                })
-            })?;
+            .map_err(|e| self.network_error("head", e))?;
 
         let mtime = response.last_modified().and_then(|t| {
             let secs = t.secs();
@@ -345,12 +333,10 @@ impl BackendAdapter for S3Adapter {
             request = request.range(range_str);
         }
 
-        let response = request.send().await.map_err(|e| {
-            BackendError::Network(NetworkErrorDetail {
-                message: format!("S3 get failed: {}", e),
-                is_timeout: false,
-            })
-        })?;
+        let response = request
+            .send()
+            .await
+            .map_err(|e| self.network_error("get", e))?;
 
         let content_length = response.content_length().map(|l| l as u64);
         let body = response.body.into_async_read();
@@ -409,19 +395,7 @@ impl BackendAdapter for S3Adapter {
     ) -> Result<MultipartUploadSession, BackendError> {
         let requested_key = self.object_key(dst);
         let key = self.resolve_write_key(requested_key, &on_conflict).await?;
-        let response = self
-            .client()
-            .await?
-            .create_multipart_upload()
-            .bucket(&self.config.bucket)
-            .key(&key)
-            .send()
-            .await
-            .map_err(|error| self.network_error("create_multipart_upload", error))?;
-        let upload_id = response
-            .upload_id()
-            .map(str::to_string)
-            .ok_or_else(|| self.network_error("create_multipart_upload", "missing upload id"))?;
+        let upload_id = self.start_multipart_upload(&key).await?;
 
         Ok(MultipartUploadSession {
             destination: ObjectRef {
@@ -568,12 +542,7 @@ impl BackendAdapter for S3Adapter {
             .body(aws_sdk_s3::primitives::ByteStream::from_static(b""))
             .send()
             .await
-            .map_err(|e| {
-                BackendError::Network(NetworkErrorDetail {
-                    message: format!("S3 mkdir failed: {}", e),
-                    is_timeout: false,
-                })
-            })?;
+            .map_err(|e| self.network_error("mkdir", e))?;
 
         let display_path = self.display_path_from_key(&dir_key)?;
 
@@ -609,12 +578,7 @@ impl BackendAdapter for S3Adapter {
             .key(&dst_key)
             .send()
             .await
-            .map_err(|e| {
-                BackendError::Network(NetworkErrorDetail {
-                    message: format!("S3 copy failed: {}", e),
-                    is_timeout: false,
-                })
-            })?;
+            .map_err(|e| self.network_error("copy", e))?;
 
         Ok(self.next_ticket(OperationKind::Copy))
     }
@@ -651,52 +615,17 @@ impl BackendAdapter for S3Adapter {
                     .key(&key)
                     .send()
                     .await
-                    .map_err(|e| {
-                        BackendError::Network(NetworkErrorDetail {
-                            message: format!("S3 delete failed: {}", e),
-                            is_timeout: false,
-                        })
-                    })?;
+                    .map_err(|e| self.network_error("delete", e))?;
             }
         }
 
         Ok(self.next_ticket(OperationKind::Delete))
     }
 
-    async fn get_metadata(
-        &self,
-        object: &ObjectRef,
-        level: MetadataLevel,
-    ) -> Result<MetadataResult, BackendError> {
-        let mut result = self.stat(object).await?;
-        result.level = level;
-        Ok(result)
-    }
-
     async fn get_stable_id(&self, object: &ObjectRef) -> Result<StableId, BackendError> {
         // The ETag serves as the stable id.
-        let key = self.object_key(object);
-        let response = self
-            .client()
-            .await?
-            .head_object()
-            .bucket(&self.config.bucket)
-            .key(&key)
-            .send()
-            .await
-            .map_err(|e| {
-                BackendError::Network(NetworkErrorDetail {
-                    message: format!("S3 head for stable_id failed: {}", e),
-                    is_timeout: false,
-                })
-            })?;
-
-        let etag = response
-            .e_tag()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| key.clone());
-
-        Ok(StableId(etag))
+        let etag = self.stat(object).await?.etag;
+        Ok(StableId(etag.unwrap_or_else(|| self.object_key(object))))
     }
 
     fn capabilities(&self) -> CapabilitySet {

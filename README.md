@@ -124,21 +124,7 @@ cargo build --release -p iris-ui-shell --no-default-features --features minimal
 
 ## 開発
 
-```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
+開発者向けの情報は `docs/` にあります。
 
-| 内容 | コマンド |
-|---|---|
-| fuzz（nightly と `cargo-fuzz` が必要） | `FUZZ_RUNS=1000 ./scripts/fuzz-all.sh` |
-| SFTP / SMB の結合テスト（Docker が必要） | `./scripts/perf-transfer-containers.sh` |
-| 依存クレートの脆弱性監査（`cargo-audit`） | `./scripts/audit-dependencies.sh` |
-| パッケージ作成 | `./scripts/package-macos-app.sh`、`./scripts/package-linux-appdir.sh`、`./scripts/package-windows.ps1` |
-
-GitHub Actions の構成は次のとおりです。
-
-- `ci.yml`: push・プルリクエストのたびと週に 1 回、整形・lint・テスト・ビルドを実行します
-- `release.yml`: `main` 上の version 一致 `v<version>` タグから、3 つの OS のアーカイブ・インストーラと SHA-256 チェックサムを検証して GitHub Release に添付します
-- `fuzz-long.yml`: 週に 1 回、長時間の fuzz を実行します
+- [docs/architecture.md](docs/architecture.md): クレートの構成と主な処理の流れ
+- [docs/development.md](docs/development.md): ビルド、テスト、コードの決まり、リリース、CI
