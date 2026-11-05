@@ -51,7 +51,7 @@ fn application_settings() -> Settings {
 }
 
 fn window_settings() -> window::Settings {
-    let mut settings = window::Settings {
+    let settings = window::Settings {
         icon: load_window_icon(),
         // Closing goes through `CloseRequested` so pending settings are written before exit.
         exit_on_close_request: false,
@@ -63,16 +63,20 @@ fn window_settings() -> window::Settings {
     };
 
     #[cfg(target_os = "linux")]
-    {
+    let settings = {
+        let mut settings = settings;
         settings.platform_specific.application_id = APP_ID.to_string();
-    }
+        settings
+    };
 
     #[cfg(target_os = "macos")]
-    {
+    let settings = {
+        let mut settings = settings;
         settings.platform_specific.title_hidden = true;
         settings.platform_specific.titlebar_transparent = true;
         settings.platform_specific.fullsize_content_view = true;
-    }
+        settings
+    };
 
     settings
 }

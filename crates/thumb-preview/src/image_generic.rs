@@ -388,7 +388,6 @@ mod windows_wic {
     type HRESULT = i32;
     type UINT = u32;
     type ULONG = u32;
-    type BOOL = i32;
     type LPCWSTR = *const u16;
 
     #[repr(C)]
