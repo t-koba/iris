@@ -42,9 +42,49 @@ fn resolve_within(parent: &Path, child: &Path) -> Result<PathBuf, PlatformError>
     Ok(result)
 }
 
+/// `photo.jpg` -> the first free `photo (1).jpg`, `photo (2).jpg`, ... next to it.
+///
+/// A dangling symlink counts as taken: creating a file at its path would fail.
+pub fn unique_sibling_path(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = path
+        .extension()
+        .map(|ext| format!(".{}", ext.to_string_lossy()))
+        .unwrap_or_default();
+    (1u64..)
+        .map(|index| path.with_file_name(format!("{stem} ({index}){ext}")))
+        .find(|candidate| std::fs::symlink_metadata(candidate).is_err())
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unique_sibling_path_skips_taken_names_including_dangling_links() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let original = temp.path().join("photo.jpg");
+        std::fs::write(&original, b"x").expect("write original");
+        std::fs::write(temp.path().join("photo (1).jpg"), b"x").expect("write first copy");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("missing", temp.path().join("photo (2).jpg"))
+            .expect("dangling link");
+
+        let expected = if cfg!(unix) {
+            "photo (3).jpg"
+        } else {
+            "photo (2).jpg"
+        };
+        assert_eq!(unique_sibling_path(&original), temp.path().join(expected));
+        assert_eq!(
+            unique_sibling_path(&temp.path().join("README")),
+            temp.path().join("README (1)")
+        );
+    }
 
     #[test]
     fn test_resolve_within_normal() {

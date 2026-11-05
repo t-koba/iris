@@ -291,7 +291,7 @@ impl AppRuntime {
                 .unwrap_or("download"),
         ));
         if local_path.exists() {
-            local_path = unique_existing_path(&local_path);
+            local_path = unique_sibling_path(&local_path);
         }
         if let Some(parent) = local_path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;

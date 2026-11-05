@@ -1,6 +1,4 @@
-use crate::common::{
-    generate_conflict_name, open_file_for_read, write_range_to_file, write_stream_to_file,
-};
+use crate::common::{open_file_for_read, write_range_to_file, write_stream_to_file};
 use crate::localfs::capabilities::localfs_capabilities;
 use crate::localfs::reflink::{platform_may_support_reflink, try_reflink_copy};
 use crate::localfs::stable_id::get_stable_id;
@@ -18,7 +16,7 @@ use iris_core_domain::types::read_handle::ReadHandle;
 use iris_core_domain::types::session::BackendSession;
 use iris_core_domain::types::thumbnail::{ThumbnailHint, ThumbnailResult};
 use iris_platform_integration::copy::{platform_copy, stream_file_copy};
-use iris_platform_integration::path::ensure_within;
+use iris_platform_integration::path::{ensure_within, unique_sibling_path};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -736,7 +734,7 @@ fn handle_conflict(
                 display_path: dst_path.to_string_lossy().to_string(),
             },
         }),
-        ConflictResolution::Rename => Ok(generate_conflict_name(dst_path)),
+        ConflictResolution::Rename => Ok(unique_sibling_path(dst_path)),
         ConflictResolution::Overwrite => Ok(dst_path.to_path_buf()),
     }
 }

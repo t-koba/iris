@@ -53,6 +53,7 @@ use iris_platform_integration::default_app;
 use iris_platform_integration::mount::{
     list_mounted_volumes, MountedVolume, NetworkMountProtocol, VolumeKind,
 };
+use iris_platform_integration::path::unique_sibling_path;
 use iris_thumb_preview::encoded::probe_encoded_image_bytes;
 use iris_thumb_preview::metadata::ImageMetadata;
 use iris_thumb_preview::pipeline::ThumbnailPipeline;
@@ -316,30 +317,11 @@ fn resolve_destination_path(
 
     match resolution {
         ConflictResolution::Overwrite | ConflictResolution::Skip => Ok(requested_dst.to_path_buf()),
-        ConflictResolution::Rename => Ok(generate_unique_path(requested_dst)),
+        ConflictResolution::Rename => Ok(unique_sibling_path(requested_dst)),
         ConflictResolution::Fail => Err(format!(
             "destination already exists: {}",
             requested_dst.display()
         )),
-    }
-}
-
-fn generate_unique_path(path: &Path) -> PathBuf {
-    let stem = path
-        .file_stem()
-        .map(|segment| segment.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let ext = path
-        .extension()
-        .map(|segment| format!(".{}", segment.to_string_lossy()))
-        .unwrap_or_default();
-    let mut index = 1u32;
-    loop {
-        let candidate = path.with_file_name(format!("{} ({}){}", stem, index, ext));
-        if !candidate.exists() {
-            return candidate;
-        }
-        index += 1;
     }
 }
 
@@ -603,24 +585,4 @@ fn cloud_account_backend_id(config: &CloudAccountConfig) -> &str {
 
 fn is_cloud_backend_id(backend_id: &BackendId) -> bool {
     backend_id.0.starts_with("s3:") || backend_id.0.starts_with("pcloud:")
-}
-
-fn unique_existing_path(path: &Path) -> PathBuf {
-    let stem = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("download");
-    let ext = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| format!(".{}", ext))
-        .unwrap_or_default();
-    let mut index = 1u32;
-    loop {
-        let candidate = path.with_file_name(format!("{} ({}){}", stem, index, ext));
-        if !candidate.exists() {
-            return candidate;
-        }
-        index += 1;
-    }
 }

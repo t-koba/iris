@@ -1,7 +1,7 @@
 use iris_core_domain::types::error::BackendError;
 use iris_core_domain::types::list::ListCursor;
 use std::fs::OpenOptions;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::pin::Pin;
 use tokio::fs;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
@@ -15,25 +15,6 @@ pub fn parse_cursor_offset(cursor: Option<ListCursor>) -> Result<usize, BackendE
             )))
         }),
         None => Ok(0),
-    }
-}
-
-pub fn generate_conflict_name(path: &Path) -> PathBuf {
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let ext = path
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
-    let mut counter = 1u32;
-    loop {
-        let candidate = path.with_file_name(format!("{} ({}){}", stem, counter, ext));
-        if !candidate.exists() {
-            return candidate;
-        }
-        counter += 1;
     }
 }
 
