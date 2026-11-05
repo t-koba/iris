@@ -158,12 +158,31 @@ pub fn view_conflict_dialog<'a>(
         .into()
 }
 
+/// Keeps the first third and the last two thirds of `max_len` characters. Counts characters,
+/// not bytes: slicing a Japanese path at a byte offset would panic.
 fn truncate_path(path: &str, max_len: usize) -> String {
-    if path.len() <= max_len {
-        path.to_string()
-    } else {
-        let start = &path[..max_len / 3];
-        let end = &path[path.len() - max_len * 2 / 3..];
-        format!("{}...{}", start, end)
+    let char_count = path.chars().count();
+    if char_count <= max_len {
+        return path.to_string();
+    }
+    let head = max_len / 3;
+    let tail = max_len * 2 / 3;
+    let start = path.chars().take(head).collect::<String>();
+    let end = path.chars().skip(char_count - tail).collect::<String>();
+    format!("{start}...{end}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_path_cuts_on_character_boundaries() {
+        let path = format!("/Users/me/{}/photo.jpg", "\u{5199}\u{771f}".repeat(40));
+        let truncated = truncate_path(&path, 30);
+        assert_eq!(truncated.chars().count(), 33);
+        assert!(truncated.starts_with("/Users/me/"));
+        assert!(truncated.ends_with("/photo.jpg"));
+        assert_eq!(truncate_path("/short", 30), "/short");
     }
 }
