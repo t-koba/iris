@@ -1,5 +1,5 @@
-use crate::io::binary_reader::{join_to_backend_error, RemoteRangeReader, RemoteWindowSource};
-use crate::raw::{extract_raw_metadata, supports_raw_extension};
+use crate::io::binary_reader::{RemoteRangeReader, RemoteWindowSource};
+use crate::raw::extract_raw_metadata;
 use chrono::NaiveDateTime;
 use iris_core_domain::backend_adapter::BackendAdapter;
 use iris_core_domain::media::MediaFormat;
@@ -10,12 +10,6 @@ use std::collections::HashSet;
 use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
-
-const X3F_SIGNATURE: &[u8; 4] = b"FOVb";
-const X3F_FILE_VERSION_OFFSET: u64 = 4;
-const X3F_IMAGE_WIDTH_OFFSET: u64 = 0x28;
-const X3F_IMAGE_HEIGHT_OFFSET: u64 = 0x2C;
-const X3F_ROTATION_OFFSET: u64 = 0x30;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ImageMetadata {
@@ -91,7 +85,11 @@ pub async fn extract_image_metadata_from_backend(
         extract_image_metadata_remote_blocking(backend, object, len, runtime_handle)
     })
     .await
-    .map_err(join_to_backend_error)
+    .map_err(|error| {
+        BackendError::Internal(Box::new(std::io::Error::other(format!(
+            "metadata extraction task failed: {error}"
+        ))))
+    })
 }
 
 fn extract_image_metadata_remote_blocking(
@@ -100,19 +98,21 @@ fn extract_image_metadata_remote_blocking(
     len: u64,
     runtime_handle: tokio::runtime::Handle,
 ) -> ImageMetadata {
-    let source = Arc::new(RemoteWindowSource::new(
-        backend,
-        object.clone(),
-        len,
-        runtime_handle,
-    ));
-    let mut metadata = if is_x3f_path(Path::new(&object.display_path)) {
-        extract_x3f_header_metadata(&source)
-    } else {
-        ImageMetadata::default()
-    };
+    let source = RemoteWindowSource::new(backend.as_ref(), &object, len, runtime_handle, None);
+    let mut metadata = ImageMetadata::default();
+    #[cfg(feature = "raw-full")]
+    if Path::new(&object.display_path)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("x3f"))
+    {
+        if let Some(header) = crate::raw::x3f_header_metadata(&source) {
+            metadata.width = header.width;
+            metadata.height = header.height;
+            metadata.exif_entries = header.entries;
+        }
+    }
 
-    if let Some((width, height)) = probe_image_dimensions(RemoteRangeReader::new(source.clone())) {
+    if let Some((width, height)) = probe_image_dimensions(RemoteRangeReader::new(&source)) {
         if metadata.width.is_none() {
             metadata.width = Some(width);
         }
@@ -121,7 +121,7 @@ fn extract_image_metadata_remote_blocking(
         }
     }
 
-    let extracted = extract_filtered_exif_metadata(RemoteRangeReader::new(source));
+    let extracted = extract_filtered_exif_metadata(RemoteRangeReader::new(&source));
     if metadata.width.is_none() {
         metadata.width = extracted.width;
     }
@@ -369,65 +369,6 @@ fn merge_metadata_entries(entries: &mut Vec<(String, String)>, additional: Vec<(
 
 fn is_raw_path(path: &Path) -> bool {
     MediaFormat::from_path(path) == Some(MediaFormat::Raw)
-}
-
-fn is_x3f_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| supports_raw_extension(ext) && ext.eq_ignore_ascii_case("x3f"))
-}
-
-fn extract_x3f_header_metadata(source: &RemoteWindowSource) -> ImageMetadata {
-    let mut metadata = ImageMetadata::default();
-    if source.len() < X3F_ROTATION_OFFSET + 4 {
-        return metadata;
-    }
-
-    let Ok(signature) = source.read_range(0, 4) else {
-        return metadata;
-    };
-    if signature.as_slice() != X3F_SIGNATURE {
-        return metadata;
-    }
-
-    let Ok(file_version) = source.read_range(X3F_FILE_VERSION_OFFSET, 4) else {
-        return metadata;
-    };
-    let Ok(width) = source.read_range(X3F_IMAGE_WIDTH_OFFSET, 4) else {
-        return metadata;
-    };
-    let Ok(height) = source.read_range(X3F_IMAGE_HEIGHT_OFFSET, 4) else {
-        return metadata;
-    };
-    let Ok(rotation) = source.read_range(X3F_ROTATION_OFFSET, 4) else {
-        return metadata;
-    };
-
-    metadata.width = read_u32_le(&width).filter(|value| *value > 0);
-    metadata.height = read_u32_le(&height).filter(|value| *value > 0);
-    if let Some(version) = read_u32_le(&file_version) {
-        metadata
-            .exif_entries
-            .push(("File Version".to_string(), format_x3f_file_version(version)));
-    }
-    if let Some(rotation) = read_u32_le(&rotation) {
-        metadata
-            .exif_entries
-            .push(("Rotation".to_string(), rotation.to_string()));
-    }
-
-    metadata
-}
-
-fn format_x3f_file_version(raw: u32) -> String {
-    format!("{}.{}", raw >> 16, raw & 0xFFFF)
-}
-
-fn read_u32_le(bytes: &[u8]) -> Option<u32> {
-    if bytes.len() < 4 {
-        return None;
-    }
-    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn extract_tiff_structured_metadata(
-    source: &mut SourceFile,
+    source: &impl BlockingBinaryReader,
 ) -> Option<StructuredRawMetadata> {
     let dimensions = extract_tiff_primary_dimensions(source);
     Some(StructuredRawMetadata {
@@ -15,7 +15,7 @@ pub(super) fn extract_tiff_structured_metadata(
 
 #[cfg(feature = "raw-full")]
 pub(super) fn extract_x3f_structured_metadata(
-    source: &mut SourceFile,
+    source: &impl BlockingBinaryReader,
 ) -> Option<StructuredRawMetadata> {
     if source.len() < X3F_ROTATION_OFFSET + 4 {
         return None;
@@ -75,7 +75,7 @@ pub(super) fn push_metadata_entry(entries: &mut Vec<(String, String)>, tag: &str
     entries.push((tag.to_string(), value));
 }
 
-fn tiff_root_entries(tiff: Tiff, source: &SourceFile) -> Vec<(String, String)> {
+fn tiff_root_entries(tiff: Tiff, source: &impl BlockingBinaryReader) -> Vec<(String, String)> {
     let mut entries = Vec::new();
     let root = tiff.root_entries(source);
     for entry in &root {

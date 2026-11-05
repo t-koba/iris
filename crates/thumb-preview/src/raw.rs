@@ -1,6 +1,4 @@
-use crate::io::binary_reader::{
-    BlockingBinaryReader, BorrowedRemoteWindowSource, RemoteSource, SourceFile,
-};
+use crate::io::binary_reader::{BlockingBinaryReader, RemoteWindowSource, SourceFile};
 use iris_core_domain::backend_adapter::BackendAdapter;
 use iris_core_domain::types::error::BackendError;
 use iris_core_domain::types::metadata::MediaMetadata;
@@ -129,10 +127,10 @@ pub struct RawMetadata {
 }
 
 #[derive(Debug, Default)]
-struct StructuredRawMetadata {
-    width: Option<u32>,
-    height: Option<u32>,
-    entries: Vec<(String, String)>,
+pub(crate) struct StructuredRawMetadata {
+    pub(crate) width: Option<u32>,
+    pub(crate) height: Option<u32>,
+    pub(crate) entries: Vec<(String, String)>,
 }
 
 /// Extracts the embedded JPEG preview; RAW data itself is never decoded because it is too slow.
@@ -204,35 +202,33 @@ pub async fn extract_raw_thumbnail_from_backend_with_cancellation(
     let Some(len) = backend.stat(object).await?.size else {
         return Ok(None);
     };
-    let source = RemoteSource::with_cancellation(backend, object, len, cancel_token.clone());
-
-    let candidate = with_blocking_remote_source(
-        &source,
-        |blocking| match ext.as_str() {
-            "cr3" => extract_cr3_embedded_jpeg(blocking, max_dimension),
-            #[cfg(feature = "raw-full")]
-            "raf" => extract_raf_embedded_jpeg(blocking, max_dimension),
-            #[cfg(feature = "raw-full")]
-            "x3f" => extract_x3f_embedded_jpeg(blocking, max_dimension),
-            _ => extract_tiff_embedded_jpeg(blocking, max_dimension),
+    let found = with_blocking_remote_source(
+        backend,
+        object,
+        len,
+        |source| {
+            let candidate = match ext.as_str() {
+                "cr3" => extract_cr3_embedded_jpeg(source, max_dimension),
+                #[cfg(feature = "raw-full")]
+                "raf" => extract_raf_embedded_jpeg(source, max_dimension),
+                #[cfg(feature = "raw-full")]
+                "x3f" => extract_x3f_embedded_jpeg(source, max_dimension),
+                _ => extract_tiff_embedded_jpeg(source, max_dimension),
+            }?;
+            let (width, height) = (candidate.width, candidate.height);
+            Some((candidate.into_bytes(source)?, width, height))
         },
         cancel_token,
     )?;
-    let Some(candidate) = candidate else {
+    let Some((jpeg, width, height)) = found else {
         return Ok(None);
     };
     ensure_not_cancelled(cancel_token)?;
 
     debug!(
         "extracted structured embedded JPEG preview from remote RAW: {} ({}x{})",
-        object.display_path, candidate.width, candidate.height
+        object.display_path, width, height
     );
-
-    let width = candidate.width;
-    let height = candidate.height;
-    let Some(jpeg) = candidate.into_remote_bytes(&source).await? else {
-        return Ok(None);
-    };
 
     Ok(crate::jpeg::fit_existing_or_resize_jpeg(
         jpeg,
@@ -255,20 +251,22 @@ fn ensure_not_cancelled(cancel_token: &CancellationToken) -> Result<(), BackendE
     }
 }
 
-pub(super) fn with_blocking_remote_source<T>(
-    source: &RemoteSource<'_>,
-    f: impl FnOnce(&BorrowedRemoteWindowSource<'_>) -> T + Send,
+/// Runs `f` on a scoped thread, where blocking reads of the remote object are allowed.
+fn with_blocking_remote_source<T>(
+    backend: &dyn BackendAdapter,
+    object: &ObjectRef,
+    len: u64,
+    f: impl FnOnce(&RemoteWindowSource<'_>) -> T + Send,
     cancel_token: &CancellationToken,
 ) -> Result<T, BackendError>
 where
     T: Send,
 {
-    let runtime_handle = tokio::runtime::Handle::current();
-    let blocking = BorrowedRemoteWindowSource::new(
-        source.backend(),
-        source.object(),
-        source.len(),
-        runtime_handle,
+    let blocking = RemoteWindowSource::new(
+        backend,
+        object,
+        len,
+        tokio::runtime::Handle::current(),
         Some(cancel_token.clone()),
     );
     let output = std::thread::scope(|scope| match scope.spawn(|| f(&blocking)).join() {
@@ -282,14 +280,22 @@ where
     }
 }
 
+/// Size and header entries of an X3F file.
+#[cfg(feature = "raw-full")]
+pub(crate) fn x3f_header_metadata(
+    source: &impl BlockingBinaryReader,
+) -> Option<StructuredRawMetadata> {
+    extract_x3f_structured_metadata(source)
+}
+
 pub fn extract_raw_metadata(file_path: &Path) -> Option<RawMetadata> {
     let ext = supported_raw_extension(file_path)?;
-    let mut source = SourceFile::open(file_path)?;
+    let source = SourceFile::open(file_path)?;
 
     let mut structured = match ext.as_str() {
         #[cfg(feature = "raw-full")]
-        "x3f" => extract_x3f_structured_metadata(&mut source),
-        _ => extract_tiff_structured_metadata(&mut source),
+        "x3f" => extract_x3f_structured_metadata(&source),
+        _ => extract_tiff_structured_metadata(&source),
     }
     .unwrap_or_default();
 
@@ -362,18 +368,6 @@ impl StructuredJpegCandidate {
         match self.source {
             StructuredCandidateSource::FileRange { start, len } => source.read_range(start, len),
             StructuredCandidateSource::InlineBytes(bytes) => Some(bytes),
-        }
-    }
-
-    async fn into_remote_bytes(
-        self,
-        source: &RemoteSource<'_>,
-    ) -> Result<Option<Vec<u8>>, BackendError> {
-        match self.source {
-            StructuredCandidateSource::FileRange { start, len } => {
-                source.read_range(start, len).await
-            }
-            StructuredCandidateSource::InlineBytes(bytes) => Ok(Some(bytes)),
         }
     }
 }
