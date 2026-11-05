@@ -6,7 +6,18 @@ pub fn handle_dialog(state: &mut AppState, message: DialogMessage) -> Task<Messa
         DialogMessage::Close => {
             state.remote_transport_edit_buffer = None;
             state.shortcut_recording_action = None;
-            state.active_dialog = None;
+            let closed = state.active_dialog.take();
+            // The transfer waits for this answer; dismissing the question stops it instead of
+            // leaving the job running forever.
+            if matches!(closed, Some(DialogState::Conflict { .. })) {
+                if let Some(job_id) = state
+                    .pending_operation
+                    .as_ref()
+                    .map(|pending| pending.job_id.clone())
+                {
+                    return update(state, Message::AbortJob(job_id));
+                }
+            }
         }
         DialogMessage::InputChanged(value) => {
             if let Some(DialogState::CreateFolder { input_value }) = &mut state.active_dialog {

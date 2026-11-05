@@ -860,8 +860,13 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
             if pending.job_id != job_id || pending.next_index() != Some(task_index) {
                 return Task::none();
             }
-            // The check is over; the item itself starts once the conflict is resolved.
-            pending.in_flight = 0;
+            if result.is_err() {
+                // The file cannot even be checked: it fails like a transfer, so Retry checks it
+                // again and Skip moves past it.
+                let _ = pending.take_next_index();
+                pending.failed.push(task_index);
+                pending.in_flight = 0;
+            }
             match result {
                 Ok(Some(conflict)) => {
                     state.active_dialog = Some(DialogState::Conflict {

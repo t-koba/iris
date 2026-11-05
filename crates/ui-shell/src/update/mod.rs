@@ -661,6 +661,58 @@ mod tests {
     }
 
     #[test]
+    fn dismissing_the_conflict_question_stops_the_transfer() {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 2, 1);
+        if let Some(pending) = &mut state.pending_operation {
+            pending.remember_resolution = None;
+        }
+        let _ = process_pending_operation(&mut state);
+        state.active_dialog = Some(DialogState::Conflict {
+            source: test_list_entry("/src/0", "0").object_ref,
+            destination_path: "/dst/0".to_string(),
+            source_size: 1,
+            destination_size: 2,
+            source_mtime: None,
+            destination_mtime: None,
+            remember_choice: false,
+        });
+
+        let _ = update(&mut state, crate::messages::DialogMessage::Close.into());
+
+        assert!(state.pending_operation.is_none());
+        assert_eq!(
+            state
+                .jobs
+                .iter()
+                .find(|job| job.id == job_id)
+                .map(|job| job.state.clone()),
+            Some(JobState::Canceled)
+        );
+    }
+
+    #[test]
+    fn skip_after_a_failed_conflict_check_moves_past_that_file() {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 2, 1);
+        if let Some(pending) = &mut state.pending_operation {
+            pending.remember_resolution = None;
+        }
+        let _ = process_pending_operation(&mut state);
+
+        let _ = update(
+            &mut state,
+            Message::ConflictCheckCompleted(job_id.clone(), 0, Err("unreachable".to_string())),
+        );
+        let _ = update(&mut state, Message::SkipError(job_id.clone()));
+
+        // The next conflict check is for file 1, not file 0 again.
+        let pending = state.pending_operation.as_ref().expect("pending");
+        assert_eq!(pending.next_index(), Some(1));
+        assert_eq!(pending.in_flight, 1);
+    }
+
+    #[test]
     fn toggling_hidden_files_reloads_both_panes() {
         let mut state = AppState::default();
         state.dual_pane_enabled = true;
