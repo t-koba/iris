@@ -179,6 +179,10 @@ impl AppRuntime {
     }
 
     pub fn complete_job(&self, job_id: &JobId) {
+        self.active_transfers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&job_id.0);
         self.clear_active_job_progress(job_id);
         self.persist_job_state(job_id, JobState::Completed);
         self.job_manager.update_state(job_id, JobState::Completed);

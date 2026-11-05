@@ -101,11 +101,15 @@ impl AppRuntime {
         base_bytes_completed: u64,
     ) -> Result<TransferItemOutcome, String> {
         let task_id = persisted_task_id(&job_id, task_index);
-        let control = TransferControl::new();
-        self.active_transfers
+        // One control per job, shared by all of its files in flight, so Pause and Cancel reach
+        // every one of them (and files started while paused wait).
+        let control = self
+            .active_transfers
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(job_id.0, control.clone());
+            .entry(job_id.0)
+            .or_default()
+            .clone();
 
         let (progress_tx, mut progress_rx) = watch::channel(ProgressInfo {
             bytes_completed: 0,
@@ -171,11 +175,6 @@ impl AppRuntime {
             }
         };
         self.job_manager.update_progress(&job_id, aggregate_bytes);
-
-        self.active_transfers
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(&job_id.0);
 
         match transfer_result {
             Ok(outcome) => {

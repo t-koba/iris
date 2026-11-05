@@ -194,12 +194,14 @@ impl TransferControl {
         }
     }
 
+    /// `send_replace`, not `send`: with no transfer subscribed at the moment, `send` would drop
+    /// the request and the next file of the job would start unpaused.
     pub fn pause(&self) {
-        let _ = self.pause_tx.send(true);
+        self.pause_tx.send_replace(true);
     }
 
     pub fn resume(&self) {
-        let _ = self.pause_tx.send(false);
+        self.pause_tx.send_replace(false);
     }
 
     pub fn cancel(&self) {
@@ -770,6 +772,16 @@ mod tests {
         );
         assert_eq!(file_mtime(&dst_file), source_mtime);
         assert!(!src_file.exists(), "source is deleted after verification");
+    }
+
+    #[tokio::test]
+    async fn pause_requested_before_any_transfer_subscribes_still_applies() {
+        let control = TransferControl::new();
+        control.pause();
+
+        assert!(*control.pause_receiver().borrow());
+        control.resume();
+        assert!(!*control.pause_receiver().borrow());
     }
 
     type MockMultipartUploads = Arc<Mutex<HashMap<String, (String, HashMap<i32, Vec<u8>>)>>>;
