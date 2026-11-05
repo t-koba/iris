@@ -70,8 +70,7 @@ fn serde_layout_roundtrip_preserves_sidebar_groups() {
                 name: "Places".to_string(),
                 collapsed: true,
                 items: Vec::new(),
-                system: true,
-                kind: Some(crate::state::SidebarGroupKind::Places),
+                kind: crate::state::SidebarGroupKind::Places,
             },
             SidebarGroupConfig {
                 name: "Favorites".to_string(),
@@ -83,8 +82,7 @@ fn serde_layout_roundtrip_preserves_sidebar_groups() {
                     badge_color: [0.5, 0.5, 0.5, 1.0],
                     ejectable: false,
                 }],
-                system: false,
-                kind: None,
+                kind: crate::state::SidebarGroupKind::Favorites,
             },
         ],
         tabs: vec![
@@ -123,7 +121,10 @@ fn serde_layout_roundtrip_preserves_sidebar_groups() {
     assert_eq!(parsed.secondary_list_columns[2].width, 188.0);
     assert_eq!(parsed.sidebar_groups.len(), 2);
     assert_eq!(parsed.sidebar_groups[0].name, "Places");
-    assert!(parsed.sidebar_groups[0].system);
+    assert_eq!(
+        parsed.sidebar_groups[0].kind,
+        crate::state::SidebarGroupKind::Places
+    );
     assert_eq!(parsed.sidebar_groups[1].items[0].name, "src");
     assert_eq!(parsed.tabs.len(), 3);
     assert_eq!(parsed.tabs[1].pane, 0);

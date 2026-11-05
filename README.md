@@ -25,7 +25,7 @@ Rust と [iced](https://iced.rs) で作ったクロスプラットフォーム�
 | OS | 状態 |
 |---|---|
 | macOS 14 以降 | 標準ビルド |
-| Linux（Wayland） | 標準ビルド |
+| Linux（Wayland / X11） | 標準ビルド |
 | Windows | `minimal` ビルド（動画・PDF プレビューなし） |
 
 ビルドには `rust-toolchain.toml` で指定した Rust（1.97.1）を使います。
@@ -104,6 +104,6 @@ cargo test --workspace
 
 GitHub Actions の構成は次のとおりです。
 
-- `ci.yml`: push のたびに整形・lint・テスト・ビルドを実行します
+- `ci.yml`: push・プルリクエストのたびと週に 1 回、整形・lint・テスト・ビルドを実行します
 - `release.yml`: `v*` タグを push すると、3 つの OS のパッケージを Release に添付します
 - `fuzz-long.yml`: 週に 1 回、長時間の fuzz を実行します

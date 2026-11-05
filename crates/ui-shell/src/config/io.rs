@@ -211,19 +211,29 @@ where
         }
     };
 
-    let reason = match serde_json::from_str::<serde_json::Value>(&content) {
-        Err(error) => format!("invalid-json-{error}"),
-        Ok(value) => match schema_version_quarantine_reason(&value) {
-            Err(reason) => reason,
-            Ok(()) => match serde_json::from_value(value) {
-                Ok(config) => return config,
-                Err(error) => format!("invalid-shape-{error}"),
-            },
-        },
-    };
-    quarantine_config_file(&path, &reason).await;
-    quarantined.push(file_name.to_string());
-    T::default()
+    match parse_segment(&content) {
+        Ok(config) => config,
+        Err(reason) => {
+            quarantine_config_file(&path, &reason).await;
+            quarantined.push(file_name.to_string());
+            T::default()
+        }
+    }
+}
+
+/// Parses one config file; the error is the quarantine reason.
+fn parse_segment<T: for<'de> Deserialize<'de>>(content: &str) -> Result<T, String> {
+    let value = serde_json::from_str::<serde_json::Value>(content)
+        .map_err(|error| format!("invalid-json-{error}"))?;
+    schema_version_quarantine_reason(&value)?;
+    serde_json::from_value(value).map_err(|error| format!("invalid-shape-{error}"))
+}
+
+/// Parses `content` as each config file kind; the entry point of the `config_load` fuzz target.
+pub fn parse_config_files(content: &str) {
+    let _ = parse_segment::<SettingsFile>(content);
+    let _ = parse_segment::<LayoutFile>(content);
+    let _ = parse_segment::<ConnectionsFile>(content);
 }
 
 pub(super) fn schema_version_quarantine_reason(value: &serde_json::Value) -> Result<(), String> {

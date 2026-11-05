@@ -95,10 +95,7 @@ pub struct SidebarGroupConfig {
     pub name: String,
     pub collapsed: bool,
     pub items: Vec<SidebarItemConfig>,
-    pub system: bool,
-    /// Missing in files written before kinds existed; inferred from `name` and `system` then.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<crate::state::SidebarGroupKind>,
+    pub kind: crate::state::SidebarGroupKind,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

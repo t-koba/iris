@@ -83,8 +83,7 @@ pub(super) fn layout_config_snapshot(state: &AppState) -> LayoutConfig {
                         })
                         .collect()
                 },
-                system: group.is_system(),
-                kind: Some(group.kind),
+                kind: group.kind,
             })
             .collect(),
         remote_transport_mappings: state.remote_transport_mappings.clone(),
@@ -521,9 +520,7 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
 fn restore_sidebar_groups(state: &mut AppState, saved: &[crate::config::SidebarGroupConfig]) {
     state.sidebar_groups.retain(SidebarGroup::is_system);
     for group in saved {
-        let Some(kind) = group.kind.or_else(|| legacy_sidebar_group_kind(group)) else {
-            continue;
-        };
+        let kind = group.kind;
         if kind.is_system() {
             if let Some(existing) = state
                 .sidebar_groups
@@ -550,29 +547,6 @@ fn restore_sidebar_groups(state: &mut AppState, saved: &[crate::config::SidebarG
                 .collect(),
             kind,
         });
-    }
-}
-
-/// Files written before group kinds were saved only had translated names; match them against
-/// every bundled language. Unknown system groups are dropped (they are rebuilt at start-up).
-fn legacy_sidebar_group_kind(
-    group: &crate::config::SidebarGroupConfig,
-) -> Option<crate::state::SidebarGroupKind> {
-    use crate::state::SidebarGroupKind;
-
-    let named = |kind: SidebarGroupKind| {
-        crate::i18n::translations_of(kind.default_name_key()).contains(&group.name)
-    };
-    if group.system {
-        [SidebarGroupKind::Places, SidebarGroupKind::Volumes]
-            .into_iter()
-            .find(|kind| named(*kind))
-    } else if named(SidebarGroupKind::Favorites) {
-        Some(SidebarGroupKind::Favorites)
-    } else if named(SidebarGroupKind::Cloud) {
-        Some(SidebarGroupKind::Cloud)
-    } else {
-        Some(SidebarGroupKind::Custom)
     }
 }
 
@@ -649,12 +623,11 @@ mod sidebar_restore_tests {
     use crate::config::SidebarGroupConfig;
     use crate::state::SidebarGroupKind;
 
-    fn saved(name: &str, system: bool, kind: Option<SidebarGroupKind>) -> SidebarGroupConfig {
+    fn saved(name: &str, kind: SidebarGroupKind) -> SidebarGroupConfig {
         SidebarGroupConfig {
             name: name.to_string(),
             collapsed: true,
             items: Vec::new(),
-            system,
             kind,
         }
     }
@@ -674,11 +647,10 @@ mod sidebar_restore_tests {
         restore_sidebar_groups(
             &mut state,
             &[
-                // Written by an older version in Japanese: kinds are inferred from the names.
-                saved(&places_ja, true, None),
-                saved(&favorites_ja, false, None),
-                saved("Work", false, None),
-                saved("Volumes", true, Some(SidebarGroupKind::Volumes)),
+                saved(&places_ja, SidebarGroupKind::Places),
+                saved(&favorites_ja, SidebarGroupKind::Favorites),
+                saved("Work", SidebarGroupKind::Custom),
+                saved("Volumes", SidebarGroupKind::Volumes),
             ],
         );
 
