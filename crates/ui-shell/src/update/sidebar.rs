@@ -11,6 +11,7 @@ pub fn handle(state: &mut AppState, message: SidebarMessage) -> Task<Message> {
         SidebarMessage::ToggleVisibility => {
             state.sidebar_visible = !state.sidebar_visible;
             state.responsive_sidebar_dismissed = false;
+            return save_layout_config();
         }
         SidebarMessage::ToggleGroupCollapsed(group_idx) => {
             if let Some(group) = state.sidebar_groups.get_mut(group_idx) {

@@ -91,6 +91,18 @@ pub(super) fn layout_config_snapshot(state: &AppState) -> LayoutConfig {
     }
 }
 
+/// After the preview or properties panel was shown or hidden: reload what it shows and save it.
+fn right_panel_visibility_changed(state: &mut AppState) -> Task<Message> {
+    state.responsive_right_panel_dismissed = false;
+    clear_preview_state(state);
+    let preview_task = if state.preview_panel_visible || state.properties_panel_visible {
+        refresh_preview_for_selection(state)
+    } else {
+        Task::none()
+    };
+    Task::batch([preview_task, Task::done(Message::SaveLayoutConfig)])
+}
+
 fn close_quick_look(state: &mut AppState) -> Task<Message> {
     if !state.quick_look_open {
         return Task::none();
@@ -178,11 +190,7 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
     match message {
         Message::TogglePreviewPanel => {
             state.preview_panel_visible = !state.preview_panel_visible;
-            state.responsive_right_panel_dismissed = false;
-            clear_preview_state(state);
-            if state.preview_panel_visible || state.properties_panel_visible {
-                return refresh_preview_for_selection(state);
-            }
+            return right_panel_visibility_changed(state);
         }
         Message::ToggleQuickLook => {
             if state.quick_look_open {
@@ -224,11 +232,7 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
         }
         Message::TogglePropertiesPanel => {
             state.properties_panel_visible = !state.properties_panel_visible;
-            state.responsive_right_panel_dismissed = false;
-            clear_preview_state(state);
-            if state.preview_panel_visible || state.properties_panel_visible {
-                return refresh_preview_for_selection(state);
-            }
+            return right_panel_visibility_changed(state);
         }
         Message::DismissResponsiveSidebar => {
             state.responsive_sidebar_dismissed = true;
