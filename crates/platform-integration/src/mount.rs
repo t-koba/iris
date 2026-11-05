@@ -1,8 +1,19 @@
 use crate::error::PlatformError;
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+/// Commands that talk to a server (share listing, mounting) give up after this long, so an
+/// unreachable host cannot leave the connect dialog spinning forever.
+const NETWORK_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+/// Unmounting a busy volume or reading the mount table should be quick.
+const LOCAL_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+/// After the OS accepted a mount request (macOS may first ask for a password in Finder), how
+/// long to wait for the new volume to appear.
+const MOUNT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetworkMountProtocol {
@@ -101,7 +112,11 @@ fn sort_mounted_volumes(volumes: &mut [MountedVolume]) {
 }
 
 pub fn mount_network_share(request: &NetworkMountRequest) -> Result<MountedVolume, PlatformError> {
-    let before: HashSet<PathBuf> = list_mounted_volumes()?
+    let mounted = list_mounted_volumes()?;
+    if let Some(existing) = find_existing_network_mount(&mounted, request) {
+        return Ok(existing);
+    }
+    let before: HashSet<PathBuf> = mounted
         .into_iter()
         .map(|volume| volume.mount_path)
         .collect();
@@ -109,7 +124,11 @@ pub fn mount_network_share(request: &NetworkMountRequest) -> Result<MountedVolum
     #[cfg(target_os = "macos")]
     {
         let url = network_mount_url(request);
-        run_command(Command::new("open").arg(url), "network mount via open")?;
+        run_command(
+            Command::new("open").arg(url),
+            "network mount via open",
+            NETWORK_COMMAND_TIMEOUT,
+        )?;
     }
 
     #[cfg(target_os = "linux")]
@@ -118,7 +137,13 @@ pub fn mount_network_share(request: &NetworkMountRequest) -> Result<MountedVolum
         run_command(
             Command::new("gio").args(["mount", &url]),
             "network mount via gio",
+            NETWORK_COMMAND_TIMEOUT,
         )?;
+        // gvfs serves every share below one FUSE mount, so the mount table shows nothing new;
+        // ask gio where it put this one.
+        if let Some(volume) = gvfs_volume_for_url(&url, request.protocol.kind()) {
+            return Ok(volume);
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -137,6 +162,24 @@ pub fn mount_network_share(request: &NetworkMountRequest) -> Result<MountedVolum
     discover_new_volume(&before, request.protocol.kind())
 }
 
+/// Mounting a share that is already mounted makes no new volume appear; reuse the mount.
+fn find_existing_network_mount(
+    mounted: &[MountedVolume],
+    request: &NetworkMountRequest,
+) -> Option<MountedVolume> {
+    let wanted_share = request.share_path.trim_matches('/');
+    mounted
+        .iter()
+        .filter(|volume| volume.kind == request.protocol.kind())
+        .find(|volume| {
+            resolve_remote_mount_info(&volume.mount_path).is_some_and(|info| {
+                info.server.eq_ignore_ascii_case(request.server.trim())
+                    && info.remote_path.trim_matches('/') == wanted_share
+            })
+        })
+        .cloned()
+}
+
 pub fn unmount_volume(path: &Path) -> Result<(), PlatformError> {
     #[cfg(target_os = "macos")]
     {
@@ -145,6 +188,7 @@ pub fn unmount_volume(path: &Path) -> Result<(), PlatformError> {
                 .arg("unmount")
                 .arg(path.as_os_str()),
             "diskutil unmount",
+            LOCAL_COMMAND_TIMEOUT,
         )
     }
 
@@ -156,8 +200,15 @@ pub fn unmount_volume(path: &Path) -> Result<(), PlatformError> {
                 .arg("-u")
                 .arg(path.as_os_str()),
             "gio mount -u",
+            LOCAL_COMMAND_TIMEOUT,
         )
-        .or_else(|_| run_command(Command::new("umount").arg(path.as_os_str()), "umount"))
+        .or_else(|_| {
+            run_command(
+                Command::new("umount").arg(path.as_os_str()),
+                "umount",
+                LOCAL_COMMAND_TIMEOUT,
+            )
+        })
     }
 
     #[cfg(target_os = "windows")]
@@ -170,6 +221,7 @@ pub fn unmount_volume(path: &Path) -> Result<(), PlatformError> {
         run_command(
             Command::new("net").args(["use", &drive, "/delete", "/y"]),
             "net use /delete",
+            LOCAL_COMMAND_TIMEOUT,
         )
     }
 
@@ -186,21 +238,16 @@ fn discover_new_volume(
     before: &HashSet<PathBuf>,
     expected_kind: VolumeKind,
 ) -> Result<MountedVolume, PlatformError> {
-    for _ in 0..30 {
+    let deadline = Instant::now() + MOUNT_DISCOVERY_TIMEOUT;
+    while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(500));
 
-        let mut candidates = list_mounted_volumes()?;
-        candidates.retain(|volume| !before.contains(&volume.mount_path));
-
-        if let Some(volume) = candidates
-            .iter()
-            .find(|volume| volume.kind == expected_kind)
-            .cloned()
-        {
-            return Ok(volume);
-        }
-
-        if let Some(volume) = candidates.pop() {
+        // Some platforms only know "a network drive" (Windows), so accept that too; anything
+        // else (a USB stick plugged in meanwhile) is not the share that was requested.
+        if let Some(volume) = list_mounted_volumes()?.into_iter().find(|volume| {
+            !before.contains(&volume.mount_path)
+                && (volume.kind == expected_kind || volume.kind == VolumeKind::OtherNetwork)
+        }) {
             return Ok(volume);
         }
     }
@@ -225,12 +272,11 @@ pub fn list_network_shares(
 #[cfg(target_os = "windows")]
 fn list_smb_shares(server: &str, _username: Option<&str>) -> Result<Vec<String>, PlatformError> {
     let target = format!(r"\\{}", server);
-    let output = Command::new("net")
-        .args(["view", &target])
-        .output()
-        .map_err(|e| PlatformError::Mount {
-            message: format!("net view failed: {}", e),
-        })?;
+    let output = command_output(
+        Command::new("net").args(["view", &target]),
+        "net view",
+        NETWORK_COMMAND_TIMEOUT,
+    )?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut shares = Vec::new();
     for line in stdout.lines() {
@@ -243,7 +289,7 @@ fn list_smb_shares(server: &str, _username: Option<&str>) -> Result<Vec<String>,
             shares.push(parts[0].to_string());
         }
     }
-    Ok(shares)
+    shares_or_command_error(shares, &output, "net view")
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -255,9 +301,7 @@ fn list_smb_shares(server: &str, username: Option<&str>) -> Result<Vec<String>, 
             cmd.arg("-U").arg(user);
         }
     }
-    let output = cmd.output().map_err(|e| PlatformError::Mount {
-        message: format!("smbclient failed: {}", e),
-    })?;
+    let output = command_output(&mut cmd, "smbclient", NETWORK_COMMAND_TIMEOUT)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut shares = Vec::new();
     let mut in_share_section = false;
@@ -278,6 +322,18 @@ fn list_smb_shares(server: &str, username: Option<&str>) -> Result<Vec<String>, 
             }
         }
     }
+    shares_or_command_error(shares, &output, "smbclient")
+}
+
+/// A failed listing (unreachable host, refused login) must not look like "no shares".
+fn shares_or_command_error(
+    shares: Vec<String>,
+    output: &Output,
+    description: &str,
+) -> Result<Vec<String>, PlatformError> {
+    if shares.is_empty() && !output.status.success() {
+        return Err(command_failure(output, description));
+    }
     Ok(shares)
 }
 
@@ -291,12 +347,11 @@ fn list_nfs_exports(_server: &str) -> Result<Vec<String>, PlatformError> {
 
 #[cfg(not(target_os = "windows"))]
 fn list_nfs_exports(server: &str) -> Result<Vec<String>, PlatformError> {
-    let output = Command::new("showmount")
-        .args(["-e", server])
-        .output()
-        .map_err(|e| PlatformError::Mount {
-            message: format!("showmount failed: {}", e),
-        })?;
+    let output = command_output(
+        Command::new("showmount").args(["-e", server]),
+        "showmount",
+        NETWORK_COMMAND_TIMEOUT,
+    )?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut exports = Vec::new();
     for line in stdout.lines().skip(1) {
@@ -308,9 +363,10 @@ fn list_nfs_exports(server: &str) -> Result<Vec<String>, PlatformError> {
             }
         }
     }
-    Ok(exports)
+    shares_or_command_error(exports, &output, "showmount")
 }
 
+#[cfg(not(target_os = "windows"))]
 fn network_mount_url(request: &NetworkMountRequest) -> String {
     let share_path = request.share_path.trim_start_matches('/');
     match request.protocol {
@@ -324,15 +380,19 @@ fn network_mount_url(request: &NetworkMountRequest) -> String {
     }
 }
 
-fn run_command(command: &mut Command, description: &str) -> Result<(), PlatformError> {
-    let output = command.output().map_err(|error| PlatformError::Mount {
-        message: format!("failed to execute {}: {}", description, error),
-    })?;
-
+fn run_command(
+    command: &mut Command,
+    description: &str,
+    timeout: Duration,
+) -> Result<(), PlatformError> {
+    let output = command_output(command, description, timeout)?;
     if output.status.success() {
         return Ok(());
     }
+    Err(command_failure(&output, description))
+}
 
+fn command_failure(output: &Output, description: &str) -> PlatformError {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let details = if stderr.trim().is_empty() {
@@ -341,14 +401,82 @@ fn run_command(command: &mut Command, description: &str) -> Result<(), PlatformE
         stderr.trim()
     };
 
-    Err(PlatformError::Mount {
+    PlatformError::Mount {
         message: format!("{} failed: {}", description, details),
+    }
+}
+
+/// Like `Command::output`, but kills the command after `timeout`. Stdin is closed so a tool
+/// that wants to prompt for a password fails instead of waiting for input nobody can give.
+fn command_output(
+    command: &mut Command,
+    description: &str,
+    timeout: Duration,
+) -> Result<Output, PlatformError> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| PlatformError::Mount {
+            message: format!("failed to execute {}: {}", description, error),
+        })?;
+    // Drain both pipes while waiting so a chatty command cannot block on a full pipe.
+    let stdout = read_pipe_in_background(child.stdout.take());
+    let stderr = read_pipe_in_background(child.stderr.take());
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(PlatformError::Mount {
+                    message: format!(
+                        "{} did not finish within {} seconds",
+                        description,
+                        timeout.as_secs()
+                    ),
+                });
+            }
+            Err(error) => {
+                return Err(PlatformError::Mount {
+                    message: format!("failed to wait for {}: {}", description, error),
+                })
+            }
+        }
+    };
+
+    // A helper the command left running may keep the pipe open; do not wait for it.
+    let collect = |pipe: mpsc::Receiver<Vec<u8>>| {
+        pipe.recv_timeout(Duration::from_secs(1))
+            .unwrap_or_default()
+    };
+    Ok(Output {
+        status,
+        stdout: collect(stdout),
+        stderr: collect(stderr),
     })
+}
+
+fn read_pipe_in_background(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
+    let (sender, receiver) = mpsc::channel();
+    if let Some(mut pipe) = pipe {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            let _ = sender.send(bytes);
+        });
+    }
+    receiver
 }
 
 #[cfg(target_os = "macos")]
 fn list_mounted_volumes_macos() -> Result<Vec<MountedVolume>, PlatformError> {
     let boot_volume_path = std::fs::canonicalize("/").unwrap_or_else(|_| PathBuf::from("/"));
+    let mount_table = macos_mount_table();
     let mut volumes = Vec::new();
 
     let entries = std::fs::read_dir("/Volumes").map_err(|error| PlatformError::Mount {
@@ -362,7 +490,11 @@ fn list_mounted_volumes_macos() -> Result<Vec<MountedVolume>, PlatformError> {
         }
 
         let resolved = std::fs::canonicalize(&mount_path).unwrap_or_else(|_| mount_path.clone());
-        let kind = macos_mount_kind(&mount_path).unwrap_or(VolumeKind::Other);
+        let kind = mount_table
+            .iter()
+            .find(|(path, _)| *path == mount_path)
+            .map(|(_, kind)| *kind)
+            .unwrap_or(VolumeKind::Other);
         volumes.push(MountedVolume {
             name: entry.file_name().to_string_lossy().to_string(),
             ejectable: resolved != boot_volume_path,
@@ -375,27 +507,32 @@ fn list_mounted_volumes_macos() -> Result<Vec<MountedVolume>, PlatformError> {
     Ok(volumes)
 }
 
+/// Mount points and their kinds from one run of `mount` (not one run per volume).
 #[cfg(target_os = "macos")]
-fn macos_mount_kind(mount_path: &Path) -> Option<VolumeKind> {
-    let output = Command::new("mount").output().ok()?;
-    let mount_output = String::from_utf8_lossy(&output.stdout);
-    let mount_str = mount_path.to_string_lossy();
+fn macos_mount_table() -> Vec<(PathBuf, VolumeKind)> {
+    let Ok(output) = command_output(&mut Command::new("mount"), "mount", LOCAL_COMMAND_TIMEOUT)
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_macos_mount_line)
+        .collect()
+}
 
-    for line in mount_output.lines() {
-        if !line.contains(&format!(" on {} ", mount_str)) {
-            continue;
-        }
-
-        if line.contains("(smbfs,") {
-            return Some(VolumeKind::Smb);
-        }
-        if line.contains("(nfs,") {
-            return Some(VolumeKind::Nfs);
-        }
-        return Some(VolumeKind::Local);
-    }
-
-    None
+/// `//user@server/share on /Volumes/share (smbfs, nodev, ...)`
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_mount_line(line: &str) -> Option<(PathBuf, VolumeKind)> {
+    let (_, rest) = line.split_once(" on ")?;
+    let (mount_point, options) = rest.rsplit_once(" (")?;
+    let fs_type = options.split([',', ')']).next()?.trim();
+    let kind = match fs_type {
+        "smbfs" => VolumeKind::Smb,
+        "nfs" => VolumeKind::Nfs,
+        "afpfs" | "webdav" => VolumeKind::OtherNetwork,
+        _ => VolumeKind::Local,
+    };
+    Some((PathBuf::from(mount_point), kind))
 }
 
 /// Parses the output of `mount` on macOS:
@@ -403,7 +540,7 @@ fn macos_mount_kind(mount_path: &Path) -> Option<VolumeKind> {
 /// NFS: `server:/export on /Volumes/nfs (nfs, ...)`
 #[cfg(target_os = "macos")]
 fn resolve_remote_mount_info_macos(mount_path: &Path) -> Option<RemoteMountInfo> {
-    let output = Command::new("mount").output().ok()?;
+    let output = command_output(&mut Command::new("mount"), "mount", LOCAL_COMMAND_TIMEOUT).ok()?;
     let mount_output = String::from_utf8_lossy(&output.stdout);
     let mount_str = mount_path.to_string_lossy();
 
@@ -555,9 +692,115 @@ fn list_mounted_volumes_linux() -> Result<Vec<MountedVolume>, PlatformError> {
             mount_path,
         });
     }
+    volumes.extend(gvfs_volumes());
 
     sort_mounted_volumes(&mut volumes);
     Ok(volumes)
+}
+
+/// Shares mounted through GIO (`gio mount`, the desktop file manager) live as directories of
+/// the single gvfs FUSE mount, which the mount table hides below `/run`.
+#[cfg(target_os = "linux")]
+fn gvfs_volumes() -> Vec<MountedVolume> {
+    let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(Path::new(&runtime_dir).join("gvfs")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let (kind, name) = parse_gvfs_mount_name(&entry.file_name().to_string_lossy())?;
+            Some(MountedVolume {
+                name,
+                mount_path: entry.path(),
+                ejectable: true,
+                kind,
+            })
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn gvfs_volume_for_url(url: &str, kind: VolumeKind) -> Option<MountedVolume> {
+    let output = command_output(
+        Command::new("gio").args(["info", url]),
+        "gio info",
+        NETWORK_COMMAND_TIMEOUT,
+    )
+    .ok()?;
+    let local_path = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("local path:"))
+        .map(|path| PathBuf::from(path.trim()))?;
+    let name = local_path
+        .file_name()
+        .and_then(|name| parse_gvfs_mount_name(&name.to_string_lossy()))
+        .map(|(_, name)| name)
+        .unwrap_or_else(|| local_path.to_string_lossy().into_owned());
+    Some(MountedVolume {
+        name,
+        mount_path: local_path,
+        ejectable: true,
+        kind,
+    })
+}
+
+/// `smb-share:server=nas,share=photos` -> (Smb, "photos"); `nfs:host=nas,prefix=%2Fexport` ->
+/// (Nfs, "export"). Local devices (MTP, cameras) are not network volumes and are skipped.
+#[cfg(any(target_os = "linux", test))]
+fn parse_gvfs_mount_name(file_name: &str) -> Option<(VolumeKind, String)> {
+    let (scheme, params) = file_name.split_once(':')?;
+    let value = |key: &str| {
+        params.split(',').find_map(|pair| {
+            let (name, value) = pair.split_once('=')?;
+            (name == key).then(|| percent_decode(value))
+        })
+    };
+    match scheme {
+        "smb-share" => Some((VolumeKind::Smb, value("share")?)),
+        "nfs" => {
+            let host = value("host")?;
+            let export = value("prefix").unwrap_or_default();
+            let name = export
+                .trim_end_matches('/')
+                .rsplit('/')
+                .find(|segment| !segment.is_empty())
+                .map(str::to_string)
+                .unwrap_or(host);
+            Some((VolumeKind::Nfs, name))
+        }
+        "sftp" | "ftp" | "ftps" | "dav" | "davs" | "afp-volume" => Some((
+            VolumeKind::OtherNetwork,
+            value("volume").or_else(|| value("host"))?,
+        )),
+        _ => None,
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let hex = bytes
+            .get(index + 1..index + 3)
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match (bytes[index], hex) {
+            (b'%', Some(byte)) => {
+                decoded.push(byte);
+                index += 3;
+            }
+            (byte, _) => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 #[cfg(target_os = "linux")]
@@ -608,49 +851,60 @@ fn unescape_proc_mount_path(value: &str) -> String {
 
 #[cfg(target_os = "windows")]
 fn list_mounted_volumes_windows() -> Result<Vec<MountedVolume>, PlatformError> {
-    let output = Command::new("cmd")
-        .args(["/C", "wmic logicaldisk get Name,DriveType"])
-        .output()
-        .map_err(|error| PlatformError::Mount {
-            message: format!("failed to query logical drives: {}", error),
-        })?;
-
+    // `wmic` is no longer installed by default on current Windows 11; PowerShell's CIM query
+    // returns the same columns.
+    let output = command_output(
+        Command::new("cmd").args(["/C", "wmic logicaldisk get Name,DriveType"]),
+        "wmic logicaldisk",
+        LOCAL_COMMAND_TIMEOUT,
+    )
+    .ok()
+    .filter(|output| output.status.success())
+    .map(Ok)
+    .unwrap_or_else(|| {
+        command_output(
+            Command::new("powershell").args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-CimInstance Win32_LogicalDisk | ForEach-Object { \"$($_.DriveType) $($_.DeviceID)\" }",
+            ]),
+            "Get-CimInstance Win32_LogicalDisk",
+            LOCAL_COMMAND_TIMEOUT,
+        )
+    })?;
     if !output.status.success() {
-        return Err(PlatformError::Mount {
-            message: "wmic logicaldisk failed".to_string(),
-        });
+        return Err(command_failure(&output, "logical drive query"));
     }
 
-    let mut volumes = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines().skip(1) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
+    let mut volumes = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_windows_logical_disk_line)
+        .collect::<Vec<_>>();
+    sort_mounted_volumes(&mut volumes);
+    Ok(volumes)
+}
 
-        let columns: Vec<_> = trimmed.split_whitespace().collect();
-        if columns.len() != 2 {
-            continue;
-        }
-
-        let drive_type = columns[0];
-        let name = columns[1];
-        let kind = if drive_type == "4" {
+/// `"<DriveType> <Name>"`, e.g. `"3 C:"`; header and blank lines yield `None`.
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_logical_disk_line(line: &str) -> Option<MountedVolume> {
+    let mut columns = line.split_whitespace();
+    let drive_type = columns.next()?.parse::<u32>().ok()?;
+    let name = columns.next()?;
+    if columns.next().is_some() {
+        return None;
+    }
+    Some(MountedVolume {
+        name: name.to_string(),
+        mount_path: PathBuf::from(format!("{name}\\")),
+        // 2: removable, 4: network drive.
+        ejectable: matches!(drive_type, 2 | 4),
+        kind: if drive_type == 4 {
             VolumeKind::OtherNetwork
         } else {
             VolumeKind::Local
-        };
-
-        volumes.push(MountedVolume {
-            name: name.to_string(),
-            mount_path: PathBuf::from(name),
-            ejectable: drive_type == "2" || drive_type == "4",
-            kind,
-        });
-    }
-
-    sort_mounted_volumes(&mut volumes);
-    Ok(volumes)
+        },
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -665,6 +919,7 @@ fn mount_network_share_windows(request: &NetworkMountRequest) -> Result<(), Plat
             run_command(
                 Command::new("net").args(["use", "*", &target, "/persistent:no"]),
                 "net use",
+                NETWORK_COMMAND_TIMEOUT,
             )
         }
         NetworkMountProtocol::Nfs => {
@@ -672,7 +927,99 @@ fn mount_network_share_windows(request: &NetworkMountRequest) -> Result<(), Plat
             run_command(
                 Command::new("mount").args(["-o", "anon", &target, "*"]),
                 "mount",
+                NETWORK_COMMAND_TIMEOUT,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gvfs_mount_names_map_to_network_volumes() {
+        assert_eq!(
+            parse_gvfs_mount_name("smb-share:server=nas.local,share=photos,user=me"),
+            Some((VolumeKind::Smb, "photos".to_string()))
+        );
+        assert_eq!(
+            parse_gvfs_mount_name("nfs:host=nas,prefix=%2Fexport%2Fmedia"),
+            Some((VolumeKind::Nfs, "media".to_string()))
+        );
+        assert_eq!(
+            parse_gvfs_mount_name("sftp:host=build.example.com,user=ci"),
+            Some((VolumeKind::OtherNetwork, "build.example.com".to_string()))
+        );
+        assert_eq!(parse_gvfs_mount_name("mtp:host=Android_1234"), None);
+        assert_eq!(parse_gvfs_mount_name("not-a-mount"), None);
+    }
+
+    #[test]
+    fn percent_decoding_keeps_invalid_escapes_verbatim() {
+        assert_eq!(percent_decode("My%20Share"), "My Share");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    #[test]
+    fn macos_mount_lines_yield_mount_point_and_kind() {
+        assert_eq!(
+            parse_macos_mount_line(
+                "//me@nas._smb._tcp.local/Photos on /Volumes/Photos (smbfs, nodev, nosuid, mounted by me)"
+            ),
+            Some((PathBuf::from("/Volumes/Photos"), VolumeKind::Smb))
+        );
+        assert_eq!(
+            parse_macos_mount_line("nas:/export on /Volumes/My Export (nfs, nodev)"),
+            Some((PathBuf::from("/Volumes/My Export"), VolumeKind::Nfs))
+        );
+        assert_eq!(
+            parse_macos_mount_line("/dev/disk4s1 on /Volumes/USB (msdos, local, nodev)"),
+            Some((PathBuf::from("/Volumes/USB"), VolumeKind::Local))
+        );
+        assert_eq!(parse_macos_mount_line("garbage"), None);
+    }
+
+    #[test]
+    fn windows_logical_disk_lines_parse_wmic_and_powershell_output() {
+        let network = parse_windows_logical_disk_line("4  Z:").expect("network drive");
+        assert_eq!(network.kind, VolumeKind::OtherNetwork);
+        assert!(network.ejectable);
+        assert_eq!(network.name, "Z:");
+        let fixed = parse_windows_logical_disk_line("3 C:").expect("fixed drive");
+        assert_eq!(fixed.kind, VolumeKind::Local);
+        assert!(!fixed.ejectable);
+        assert!(parse_windows_logical_disk_line("DriveType  Name").is_none());
+        assert!(parse_windows_logical_disk_line("").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_output_kills_commands_that_exceed_the_timeout() {
+        let started = Instant::now();
+        let result = command_output(
+            Command::new("sleep").arg("5"),
+            "sleep",
+            Duration::from_millis(200),
+        );
+        assert!(
+            matches!(result, Err(PlatformError::Mount { message }) if message.contains("did not finish"))
+        );
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_share_listing_is_an_error_rather_than_no_shares() {
+        let output = command_output(
+            Command::new("sh").args(["-c", "echo 'Connection to nas failed' >&2; exit 1"]),
+            "smbclient",
+            Duration::from_secs(5),
+        )
+        .expect("run sh");
+        let error = shares_or_command_error(Vec::new(), &output, "smbclient")
+            .expect_err("failure must surface");
+        assert!(error.to_string().contains("Connection to nas failed"));
     }
 }
