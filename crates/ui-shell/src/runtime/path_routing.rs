@@ -54,19 +54,22 @@ impl AppRuntime {
             .max_by_key(|backend| backend.root_path.as_os_str().len());
 
         if let Some(backend) = selected.take() {
+            // The backend may have been unregistered (a volume was ejected) since the list was
+            // copied; fall through to the local file system instead of failing.
             let adapter = self
                 .registry
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .get(&backend.backend_id)
-                .unwrap_or_else(|| panic!("missing adapter for {}", backend.backend_id.0));
-            return ResolvedBackend {
-                backend_id: backend.backend_id,
-                root_path: backend.root_path,
-                kind: backend.kind,
-                root_stable_id: backend.root_stable_id,
-                adapter,
-            };
+                .get(&backend.backend_id);
+            if let Some(adapter) = adapter {
+                return ResolvedBackend {
+                    backend_id: backend.backend_id,
+                    root_path: backend.root_path,
+                    kind: backend.kind,
+                    root_stable_id: backend.root_stable_id,
+                    adapter,
+                };
+            }
         }
 
         #[cfg(windows)]
