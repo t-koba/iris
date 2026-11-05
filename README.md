@@ -22,22 +22,57 @@ Rust と [iced](https://iced.rs) で作ったクロスプラットフォーム�
 
 ## 動作環境
 
-| OS | 状態 |
+| OS | リリース版 |
 |---|---|
-| macOS 14 以降 | 標準ビルド |
-| Linux（Wayland / X11） | 標準ビルド |
-| Windows | `minimal` ビルド（動画・PDF プレビューなし） |
+| macOS 14 以降 | 標準プレビュー機能を含む |
+| Linux（Wayland / X11） | 標準 feature でビルド。PDFium は同梱されず、PDF の実行時条件は下記を参照 |
+| Windows | `minimal` 構成。動画・PDF は無効で、RAW は ARW・CR3・DNG・NEF のみ |
 
-ビルドには `rust-toolchain.toml` で指定した Rust（1.97.1）を使います。
+ソースビルドに使う Rust は `rust-toolchain.toml` で指定しています（1.97.1）。
 
-標準ビルドには、次のライブラリも必要です。
+### ソースから標準ビルドする場合
 
-- **FFmpeg の開発用ライブラリと `pkg-config`**（動画サムネイル用）
-  - macOS: `brew install ffmpeg pkg-config`
-  - Ubuntu: `sudo apt-get install pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev`
-- **pdfium の共有ライブラリ**（macOS 以外で PDF をプレビューする場合のみ。実行時に読み込みます）。
-  実行ファイルと同じフォルダ、作業ディレクトリ、システムのライブラリパスの順に探し、
-  見つからなければ PDF のサムネイルだけを省きます
+標準 feature は `video`・`pdf`・`raw-full` です。動画プレビューには FFmpeg の開発用ライブラリと `pkg-config` が必要です。
+
+- macOS: `brew install ffmpeg pkg-config`
+- Ubuntu: `sudo apt-get install pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev`
+
+macOS 以外で PDF をプレビューするには、実行時に PDFium 共有ライブラリが必要です。Iris は実行ファイルの隣、作業ディレクトリ、システムのライブラリパスの順に探し、見つからない場合は PDF サムネイルを表示しません。
+
+## リリースのダウンロードとインストール
+
+[GitHub Releases](https://github.com/t-koba/iris/releases) から利用する OS のファイルをダウンロードしてください。`v<version>` タグはルート `Cargo.toml` の workspace version と一致し、`main` 上のコミットを指す必要があります。公開前に全 OS の成果物と SHA-256 チェックサムを検証するため、一部の OS だけの不完全なリリースは公開されません。各成果物には同名の `.sha256` ファイルが付属します。
+
+### macOS
+
+- `Iris-macos.zip`: 展開して `Iris.app` を `/Applications` に移動します。
+- `Iris-macos.pkg`: インストーラを実行すると `Iris.app` が `/Applications` にインストールされます。
+
+macOS 14 以降が必要です。コード署名 ID が設定されていないビルドではアプリは ad-hoc 署名になり、公証は notary profile が設定された場合に限られます。`.pkg` インストーラ自体は署名・公証されません。Gatekeeper の警告が出ないことは保証されないため、配布時の署名状況を確認してください。
+
+### Linux
+
+- `iris_<version>_<arch>.deb`: Debian/Ubuntu 系では、ダウンロードしたファイルを指定してインストールします。
+
+  ```bash
+  sudo apt install ./iris_<version>_<arch>.deb
+  ```
+
+  削除する場合は `sudo apt remove iris` を実行します。`.deb` はリンクされた共有ライブラリの依存関係を宣言します。
+- `Iris-linux-appdir.tar.gz`: 展開後、`Iris.AppDir/AppRun` を実行します。これは AppDir のアーカイブであり、AppImage ではありません。ホストに必要な共有ライブラリが必要です。
+
+現在の Linux リリース成果物には PDFium が含まれません。互換 PDFium 共有ライブラリが実行ファイルの隣、作業ディレクトリ、またはシステムのライブラリパスにない場合、PDF サムネイルは表示されません。
+
+### Windows
+
+- `Iris-windows.zip`: 展開して `Iris.exe` を実行します。
+- `Iris-windows-setup.exe`: 管理者権限なしのユーザー単位で `%LOCALAPPDATA%\Programs\Iris` にインストールします。スタートメニューに登録され、インストーラでデスクトップショートカットも選べます。アンインストールは Windows のアプリ一覧から行えます。
+
+現在の Windows リリースは `minimal` ビルドです。動画・PDF プレビューと `raw-full` の RAW 形式は含まれません。また、現在の workflow では実行ファイルやインストーラにコード署名を行わないため、Windows の警告や SmartScreen の表示は環境によって異なります。
+
+### チェックサムの確認
+
+インストール前に成果物と同名の `.sha256` ファイルを使って SHA-256 を確認してください。Linux では `sha256sum -c Iris-linux-appdir.tar.gz.sha256`、macOS では `shasum -a 256 -c Iris-macos.zip.sha256` を使えます。Windows PowerShell では `Get-FileHash -Algorithm SHA256 .\Iris-windows.zip` の値を `Iris-windows.zip.sha256` の先頭のハッシュと照合してください。
 
 ## ビルドと実行
 
@@ -105,5 +140,5 @@ cargo test --workspace
 GitHub Actions の構成は次のとおりです。
 
 - `ci.yml`: push・プルリクエストのたびと週に 1 回、整形・lint・テスト・ビルドを実行します
-- `release.yml`: `v*` タグを push すると、3 つの OS のパッケージを Release に添付します
+- `release.yml`: `main` 上の version 一致 `v<version>` タグから、3 つの OS のアーカイブ・インストーラと SHA-256 チェックサムを検証して GitHub Release に添付します
 - `fuzz-long.yml`: 週に 1 回、長時間の fuzz を実行します
