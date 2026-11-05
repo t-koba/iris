@@ -1,5 +1,7 @@
 use super::*;
 use iris_backends::localfs::adapter::metadata_result;
+use iris_backends::localfs::stable_id::get_stable_id_from_metadata;
+use iris_core_domain::types::list::ListEntry;
 
 impl AppRuntime {
     pub async fn open_object(&self, object: &ObjectRef) -> Result<(), String> {
@@ -340,7 +342,7 @@ impl AppRuntime {
         &self,
         dir: &ObjectRef,
         resolved: &ResolvedBackend,
-    ) -> Result<Vec<iris_core_domain::types::list::ListEntry>, String> {
+    ) -> Result<Vec<ListEntry>, String> {
         if self.negative_cache_contains(
             &resolved.backend_id,
             &dir.display_path,
@@ -348,7 +350,9 @@ impl AppRuntime {
         ) {
             return Ok(Vec::new());
         }
-        if resolved.kind == VolumeKind::Local && !self.is_virtual_display_path(&dir.display_path) {
+        let entries = if resolved.kind == VolumeKind::Local
+            && !self.is_virtual_display_path(&dir.display_path)
+        {
             let mut read_dir = tokio::fs::read_dir(&dir.display_path)
                 .await
                 .map_err(|error| error.to_string())?;
@@ -358,132 +362,43 @@ impl AppRuntime {
                 .await
                 .map_err(|error| error.to_string())?
             {
-                let path = entry.path();
-                let full_path = path.to_string_lossy().to_string();
                 let name = entry.file_name().to_string_lossy().to_string();
-
-                let link_meta = match tokio::fs::symlink_metadata(&path).await {
-                    Ok(m) => m,
-                    Err(_) => {
-                        entries.push(iris_core_domain::types::list::ListEntry {
-                            object_ref: ObjectRef {
-                                key: ObjectKey {
-                                    backend_id: resolved.backend_id.clone(),
-                                    stable_id: StableId(full_path.clone()),
-                                },
-                                parent_stable_id: Some(dir.key.stable_id.clone()),
-                                display_path: full_path,
-                            },
-                            sort_name_key:
-                                iris_core_domain::types::list::ListEntry::sort_name_key_for(&name),
-                            sort_extension_key:
-                                iris_core_domain::types::list::ListEntry::sort_extension_key_for(
-                                    &name,
-                                ),
-                            name,
-                            is_dir: false,
-                            metadata_level: iris_core_domain::types::metadata::MetadataLevel::L0,
-                            size: None,
-                            mtime: None,
-                            ctime: None,
-                            is_symlink: false,
-                            symlink_target: None,
-                            is_inaccessible: true,
-                            annotation: None,
-                        });
-                        continue;
-                    }
-                };
-
-                let is_symlink = link_meta.is_symlink();
-                let symlink_target = if is_symlink {
-                    tokio::fs::read_link(&path)
-                        .await
-                        .ok()
-                        .map(|t| t.to_string_lossy().to_string())
-                } else {
-                    None
-                };
-                let metadata = if is_symlink {
-                    tokio::fs::metadata(&path).await.unwrap_or(link_meta)
-                } else {
-                    link_meta
-                };
-                entries.push(iris_core_domain::types::list::ListEntry {
-                    object_ref: ObjectRef {
-                        key: ObjectKey {
-                            backend_id: resolved.backend_id.clone(),
-                            stable_id: get_local_stable_id(&path)
-                                .unwrap_or_else(|_| StableId(full_path.clone())),
-                        },
-                        parent_stable_id: Some(dir.key.stable_id.clone()),
-                        display_path: full_path,
-                    },
-                    sort_name_key: iris_core_domain::types::list::ListEntry::sort_name_key_for(
-                        &name,
-                    ),
-                    sort_extension_key:
-                        iris_core_domain::types::list::ListEntry::sort_extension_key_for(&name),
-                    name,
-                    is_dir: metadata.is_dir(),
-                    metadata_level: iris_core_domain::types::metadata::MetadataLevel::L1,
-                    size: if metadata.is_file() {
-                        Some(metadata.len())
-                    } else {
-                        None
-                    },
-                    mtime: metadata.modified().ok(),
-                    ctime: metadata.created().ok(),
-                    is_symlink,
-                    symlink_target,
-                    is_inaccessible: false,
-                    annotation: None,
-                });
-            }
-            if entries.is_empty() {
-                self.remember_negative_path(
-                    &resolved.backend_id,
-                    &dir.display_path,
-                    NegativeCacheKind::EmptyDirectory,
+                entries.push(
+                    local_list_entry(entry.path(), name, &resolved.backend_id, &dir.key.stable_id)
+                        .await,
                 );
-            } else {
-                self.clear_negative_path(&resolved.backend_id, &dir.display_path);
             }
-            self.record_directory_snapshot(
-                &resolved.backend_id,
-                &dir.key.stable_id,
-                entries.len(),
-                true,
-            );
-            return Ok(entries);
-        }
-
-        let source_dir = self.source_object_ref(dir, resolved)?;
-        let mut entries = Vec::new();
-        let mut cursor = None;
-        loop {
-            let page = resolved
-                .adapter
-                .list_names(&source_dir, cursor.clone())
-                .await
-                .map_err(|error| error.to_string())?;
-            for listed_entry in page.entries {
-                let mut entry =
-                    iris_core_domain::types::list::ListEntry::from_listed_entry(listed_entry);
-                self.remember_remote_path(
-                    &resolved.backend_id,
-                    &entry.object_ref.display_path,
-                    &entry.object_ref.key.stable_id,
-                );
-                entry.object_ref.display_path = self
-                    .absolute_display_path(&resolved.backend_id, &entry.object_ref.display_path);
-                entries.push(entry);
+            entries
+        } else {
+            let source_dir = self.source_object_ref(dir, resolved)?;
+            let mut entries = Vec::new();
+            let mut cursor = None;
+            loop {
+                let page = resolved
+                    .adapter
+                    .list_names(&source_dir, cursor.clone())
+                    .await
+                    .map_err(|error| error.to_string())?;
+                for listed_entry in page.entries {
+                    let mut entry = ListEntry::from_listed_entry(listed_entry);
+                    self.remember_remote_path(
+                        &resolved.backend_id,
+                        &entry.object_ref.display_path,
+                        &entry.object_ref.key.stable_id,
+                    );
+                    entry.object_ref.display_path = self.absolute_display_path(
+                        &resolved.backend_id,
+                        &entry.object_ref.display_path,
+                    );
+                    entries.push(entry);
+                }
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
             }
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                break;
-            }
-        }
+            entries
+        };
         if entries.is_empty() {
             self.remember_negative_path(
                 &resolved.backend_id,
@@ -500,6 +415,82 @@ impl AppRuntime {
             true,
         );
         Ok(entries)
+    }
+}
+
+/// An L1 entry for a local path; when metadata cannot be read it is marked `is_inaccessible`.
+pub(crate) async fn local_list_entry(
+    full_path: PathBuf,
+    name: String,
+    backend_id: &BackendId,
+    parent_stable_id: &StableId,
+) -> ListEntry {
+    let display_path = full_path.to_string_lossy().to_string();
+
+    // symlink_metadata describes the link itself and usually succeeds even without permission.
+    let link_meta = tokio::fs::symlink_metadata(&full_path).await;
+
+    match link_meta {
+        Ok(lm) => {
+            let is_symlink = lm.is_symlink();
+            let symlink_target = if is_symlink {
+                tokio::fs::read_link(&full_path)
+                    .await
+                    .ok()
+                    .map(|t| t.to_string_lossy().to_string())
+            } else {
+                None
+            };
+            // Use the link itself for broken links or unreadable targets.
+            let metadata = if is_symlink {
+                tokio::fs::metadata(&full_path).await.unwrap_or(lm)
+            } else {
+                lm
+            };
+
+            let is_dir = metadata.is_dir();
+            let size = if is_dir { None } else { Some(metadata.len()) };
+            let mtime = metadata.modified().ok();
+            let ctime = metadata.created().ok();
+            let stable_id = get_stable_id_from_metadata(&full_path, &metadata)
+                .unwrap_or_else(|_| StableId(display_path.clone()));
+            let object_ref = ObjectRef {
+                key: ObjectKey {
+                    backend_id: backend_id.clone(),
+                    stable_id,
+                },
+                parent_stable_id: Some(parent_stable_id.clone()),
+                display_path,
+            };
+            ListEntry {
+                metadata_level: MetadataLevel::L1,
+                size,
+                mtime,
+                ctime,
+                is_symlink,
+                symlink_target,
+                ..ListEntry::new(object_ref, name, is_dir)
+            }
+        }
+        Err(_) => {
+            // Metadata could not be read (e.g. permission denied).
+            let stable_id = StableId(display_path.clone());
+            ListEntry {
+                is_inaccessible: true,
+                ..ListEntry::new(
+                    ObjectRef {
+                        key: ObjectKey {
+                            backend_id: backend_id.clone(),
+                            stable_id,
+                        },
+                        parent_stable_id: Some(parent_stable_id.clone()),
+                        display_path,
+                    },
+                    name,
+                    false,
+                )
+            }
+        }
     }
 }
 

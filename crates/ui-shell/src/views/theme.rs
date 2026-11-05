@@ -124,7 +124,8 @@ fn hairline(theme: &Theme) -> Color {
     }
 }
 
-pub fn toolbar_style(theme: &Theme) -> container::Style {
+/// Toolbar, status bar, sidebar and list header.
+pub fn sunken_panel_style(theme: &Theme) -> container::Style {
     container::Style {
         background: Some(iced::Background::Color(surface_sunken(theme))),
         border: Border {
@@ -138,30 +139,6 @@ pub fn toolbar_style(theme: &Theme) -> container::Style {
 
 pub fn breadcrumb_style(theme: &Theme) -> container::Style {
     container::Style {
-        border: Border {
-            color: hairline(theme),
-            width: 1.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
-
-pub fn status_bar_style(theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(surface_sunken(theme))),
-        border: Border {
-            color: hairline(theme),
-            width: 1.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
-
-pub fn sidebar_style(theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(surface_sunken(theme))),
         border: Border {
             color: hairline(theme),
             width: 1.0,
@@ -367,18 +344,6 @@ pub fn tab_button_style(theme: &Theme, status: button::Status, selected: bool) -
         button::Status::Active => {}
     }
     style
-}
-
-pub fn list_header_style(theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(surface_sunken(theme))),
-        border: Border {
-            color: hairline(theme),
-            width: 1.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    }
 }
 
 pub fn list_row_alt_style(theme: &Theme) -> container::Style {

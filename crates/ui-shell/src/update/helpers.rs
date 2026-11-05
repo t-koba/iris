@@ -7,7 +7,6 @@ use crate::update::thumbnail::clear_thumbnail_cache;
 use iced::futures::SinkExt;
 use iced::stream;
 use iced::Task;
-use iris_backends::localfs::stable_id::get_stable_id_from_metadata;
 use iris_core_domain::types::list::ListEntry;
 use iris_core_domain::types::metadata::{MediaMetadata, MetadataLevel};
 use iris_core_domain::types::object::{BackendId, ObjectKey, ObjectRef, StableId};
@@ -474,7 +473,15 @@ async fn list_entries_for_paths_with_annotations(
             .map(|parent| app_runtime().stable_id_for_path(parent))
             .unwrap_or_else(|| StableId(path.clone()));
         let mut entry =
-            build_local_list_entry_safe(full_path, name, &backend_id, &parent_stable_id).await;
+            crate::runtime::local_list_entry(full_path, name, &backend_id, &parent_stable_id).await;
+        if !entry.is_inaccessible {
+            app_runtime().cache_list_entry_metadata(
+                &entry.object_ref,
+                entry.size,
+                entry.mtime,
+                None,
+            );
+        }
         entry.annotation = annotation;
         entries.push(entry);
     }
@@ -495,84 +502,6 @@ fn recursive_content_annotation(
 fn pdf_content_snippet(path: &Path, query: &str) -> Option<String> {
     let text = iris_thumb_preview::pdf_text::extract_pdf_text(path, 64).text;
     verify_content_match(&text, query, 18).map(|snippet| snippet.snippet)
-}
-
-/// Returns the entry even when metadata fails, marked `is_inaccessible`.
-async fn build_local_list_entry_safe(
-    full_path: PathBuf,
-    name: String,
-    backend_id: &BackendId,
-    parent_stable_id: &StableId,
-) -> ListEntry {
-    let display_path = full_path.to_string_lossy().to_string();
-
-    // symlink_metadata describes the link itself and usually succeeds even without permission.
-    let link_meta = tokio::fs::symlink_metadata(&full_path).await;
-
-    match link_meta {
-        Ok(lm) => {
-            let is_symlink = lm.is_symlink();
-            let symlink_target = if is_symlink {
-                tokio::fs::read_link(&full_path)
-                    .await
-                    .ok()
-                    .map(|t| t.to_string_lossy().to_string())
-            } else {
-                None
-            };
-            // Use the link itself for broken links or unreadable targets.
-            let metadata = if is_symlink {
-                tokio::fs::metadata(&full_path).await.unwrap_or(lm)
-            } else {
-                lm
-            };
-
-            let is_dir = metadata.is_dir();
-            let size = if is_dir { None } else { Some(metadata.len()) };
-            let mtime = metadata.modified().ok();
-            let ctime = metadata.created().ok();
-            let stable_id = get_stable_id_from_metadata(&full_path, &metadata)
-                .unwrap_or_else(|_| StableId(display_path.clone()));
-            let object_ref = ObjectRef {
-                key: ObjectKey {
-                    backend_id: backend_id.clone(),
-                    stable_id,
-                },
-                parent_stable_id: Some(parent_stable_id.clone()),
-                display_path,
-            };
-            app_runtime().cache_list_entry_metadata(&object_ref, size, mtime, None);
-
-            ListEntry {
-                metadata_level: MetadataLevel::L1,
-                size,
-                mtime,
-                ctime,
-                is_symlink,
-                symlink_target,
-                ..ListEntry::new(object_ref, name, is_dir)
-            }
-        }
-        Err(_) => {
-            // Metadata could not be read (e.g. permission denied).
-            let stable_id = StableId(display_path.clone());
-            ListEntry {
-                is_inaccessible: true,
-                ..ListEntry::new(
-                    ObjectRef {
-                        key: ObjectKey {
-                            backend_id: backend_id.clone(),
-                            stable_id,
-                        },
-                        parent_stable_id: Some(parent_stable_id.clone()),
-                        display_path,
-                    },
-                    name,
-                    false,
-                )
-            }
-        }
-    }
 }
 
 async fn build_local_l0_entry_safe(

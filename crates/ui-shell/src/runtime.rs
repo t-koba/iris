@@ -11,6 +11,7 @@ mod thumbnail_bridge;
 mod transfer_driver;
 mod transfer_verify;
 
+pub(crate) use fileops_dispatch::local_list_entry;
 pub use thumbnail_bridge::ThumbnailGenerationError;
 
 use crate::input::dnd::DndOperation;

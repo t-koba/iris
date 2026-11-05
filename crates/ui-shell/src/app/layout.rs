@@ -832,7 +832,7 @@ fn view_main_layout(state: &AppState) -> Element<'_, Message> {
     if resolved.sidebar_inline {
         layout = layout.push(
             container(sidebar::view_sidebar(state))
-                .style(theme::sidebar_style)
+                .style(theme::sunken_panel_style)
                 .width(Length::Fixed(resolved.sidebar_width))
                 .height(Length::Fill),
         );
@@ -996,7 +996,7 @@ fn view_main_layout(state: &AppState) -> Element<'_, Message> {
                 .spacing(4)
                 .height(Length::Fill),
         )
-        .style(theme::sidebar_style)
+        .style(theme::sunken_panel_style)
         .padding([4, 8])
         .width(Length::Fixed(resolved.sidebar_width))
         .height(Length::Fill);

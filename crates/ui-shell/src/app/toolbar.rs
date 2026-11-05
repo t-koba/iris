@@ -115,7 +115,7 @@ pub(super) fn view_title_bar_controls(state: &AppState) -> Element<'_, Message> 
             .spacing(theme::GROUP_SPACING)
             .align_y(iced::Alignment::Center),
     )
-    .style(theme::toolbar_style)
+    .style(theme::sunken_panel_style)
     .padding([2, theme::ZONE_PADDING as u16])
     .width(Length::Fill)
     .height(Length::Fixed(theme::TOOLBAR_HEIGHT))
@@ -337,7 +337,7 @@ pub(super) fn toolbar_wrap<'a>(
     };
 
     container(content)
-        .style(theme::toolbar_style)
+        .style(theme::sunken_panel_style)
         .padding(padding)
         .width(Length::Fill)
         .height(Length::Shrink)
@@ -459,7 +459,7 @@ pub(super) fn view_status_bar(state: &AppState) -> Element<'_, Message> {
             .align_y(iced::Alignment::Center)
             .height(Length::Shrink),
     )
-    .style(theme::status_bar_style)
+    .style(theme::sunken_panel_style)
     .padding([3, theme::ZONE_PADDING as u16])
     .width(Length::Fill)
     .height(Length::Fixed(theme::STATUS_BAR_HEIGHT))

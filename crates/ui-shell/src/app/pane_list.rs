@@ -154,7 +154,7 @@ fn build_list_rows<'a>(
             u64::MAX,
             0.0,
             container(header)
-                .style(theme::list_header_style)
+                .style(theme::sunken_panel_style)
                 .padding([2, 8])
                 .width(Length::Fill)
                 .into(),

@@ -329,7 +329,7 @@ fn view_filter_bar(state: &AppState, pane_idx: usize) -> Element<'_, Message> {
         .padding([2, crate::views::theme::ZONE_PADDING as u16])
         .height(Length::Fixed(height))
         .width(Length::Fill)
-        .style(crate::views::theme::toolbar_style)
+        .style(crate::views::theme::sunken_panel_style)
         .into()
 }
 
@@ -821,29 +821,12 @@ fn draw_gps_grid(frame: &mut canvas::Frame, area: Rectangle, viewport: MapViewpo
     let stroke = canvas::Stroke::default()
         .with_color(Color::from_rgba8(160, 170, 180, 0.25))
         .with_width(1.0);
-    for tile in visible_tiles(viewport, area.width, area.height) {
-        let bounds = tile_bounds(tile);
-        let (left, top) = viewport.world_to_screen(
-            LatLon {
-                lat: bounds.max_lat,
-                lon: bounds.min_lon,
-            },
-            area.width,
-            area.height,
-        );
-        let (right, bottom) = viewport.world_to_screen(
-            LatLon {
-                lat: bounds.min_lat,
-                lon: bounds.max_lon,
-            },
-            area.width,
-            area.height,
-        );
+    for rect in visible_tiles(viewport, area.width, area.height)
+        .into_iter()
+        .filter_map(|tile| tile_screen_rect(tile, area, viewport))
+    {
         frame.stroke(
-            &canvas::Path::rectangle(
-                Point::new(left.min(right), top.min(bottom)),
-                Size::new((right - left).abs(), (bottom - top).abs()),
-            ),
+            &canvas::Path::rectangle(rect.position(), rect.size()),
             stroke,
         );
     }
