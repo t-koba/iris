@@ -171,9 +171,10 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                     state.pending_external_drop_token.wrapping_add(1);
                 let token = state.pending_external_drop_token;
 
+                // Each dropped file arrives as its own event; commit once the burst settles.
                 return Task::perform(
                     async move {
-                        std::thread::sleep(Duration::from_millis(30));
+                        tokio::time::sleep(Duration::from_millis(30)).await;
                         token
                     },
                     Message::CommitExternalDrop,
