@@ -93,7 +93,7 @@ jpeg-decoder = "0.3"
 pdfium-render = "0.9"
 
 # Video
-ffmpeg-next = "8.1"
+ffmpeg-next = "9.0"
 
 # S3
 # S3 injects Smithy's Hyper 1.x client and uses ring for TLS, like reqwest and russh.
