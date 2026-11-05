@@ -250,8 +250,17 @@ mod tests {
         std::fs::create_dir_all(old.parent().unwrap()).expect("create old parent");
         std::fs::create_dir_all(new.parent().unwrap()).expect("create new parent");
         std::fs::write(&old, vec![1; 8]).expect("write old");
-        std::thread::sleep(std::time::Duration::from_millis(5));
         std::fs::write(&new, vec![2; 8]).expect("write new");
+        // Explicit times: file systems stamp writes with a coarse clock, so back-to-back writes
+        // can share an mtime and make the eviction order depend on directory order.
+        for (path, secs) in [(&old, 1_000), (&new, 2_000)] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .expect("open tile")
+                .set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+                .expect("set tile time");
+        }
 
         evict_map_tile_cache_dir(temp.path(), 8).expect("evict");
 

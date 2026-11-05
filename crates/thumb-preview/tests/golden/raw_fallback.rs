@@ -2,7 +2,6 @@ use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use iris_core_domain::types::error::BackendError;
 use iris_core_domain::types::thumbnail::ThumbnailHint;
 use iris_thumb_preview::pipeline::ThumbnailPipeline;
-use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
@@ -91,28 +90,37 @@ fn raw_formats_extract_expected_embedded_preview_bytes() {
         ),
     ];
 
-    for (extension, jpeg, builder) in cases {
+    let references = cases
+        .iter()
+        .map(|(extension, jpeg, _)| (*extension, downscaled_reference(jpeg)))
+        .collect::<Vec<_>>();
+    for (extension, jpeg, builder) in &cases {
+        let extension = *extension;
         let path = temp.path().join(format!("sample.{extension}"));
-        std::fs::write(&path, builder(&jpeg)).expect("write synthetic raw");
+        std::fs::write(&path, builder(jpeg)).expect("write synthetic raw");
 
         let result = ThumbnailPipeline::generate_from_path(&path, &hint, Some("image/jpeg"))
             .unwrap_or_else(|| panic!("expected embedded preview for .{extension}"));
-        let actual_hash = sha256_hex(&result.data);
-        let expected_hash = match extension {
-            "arw" => "ce0d2a350b0289546bb6c6a342c1b6d98037a3859231068295fa9165aa922304",
-            "cr2" => "d2ffa368d27811eeec7c6430a43bef73415f818c92b6208070c84d1c5fd96ab2",
-            "cr3" => "8037b41aa902aa20cdbc52bf0db63e9a231cb097ca83271487c02777d4e66ca6",
-            "dng" => "bdc942d0cf104407b005a45478bcc148fbc1e6f7920dff640042369e17f4ef06",
-            "nef" => "6e7e7b111e1b1e39254821e66879a5c127045149944b3f186d2497dd869d2497",
-            "orf" => "b67c2a7c446bfeb97470022103f744625f0ae021db252bde56fee416db7dfc49",
-            "raf" => "3c8c602b5875f2571973fede4b26e07787e5bde6841f7fed0a2a56b262ab21c4",
-            "rw2" => "4e7813cae95061125c40c337e2b9388b17f3bc41a663d7a7c88de168bd194b04",
-            "x3f" => "eac61389e83d4570ebde3c60c23b0b3e150aebeb84f973c6db4081a6c12cddd9",
-            _ => unreachable!("covered above"),
-        };
-        assert_eq!(
-            actual_hash, expected_hash,
-            "final thumbnail hash changed for .{extension}"
+        // Byte hashes are platform specific: jpeg-decoder's SIMD IDCT differs between x86_64 and
+        // aarch64. Compare pixels instead, against the embedded preview itself and against the
+        // previews of the other formats, so extracting the wrong image still fails.
+        let actual = decode_rgb(&result.data);
+        let mut own_error = f64::INFINITY;
+        let mut closest_other_error = f64::INFINITY;
+        for (reference_extension, reference) in &references {
+            let error = mean_abs_error(&actual, reference);
+            if *reference_extension == extension {
+                own_error = error;
+            } else {
+                closest_other_error = closest_other_error.min(error);
+            }
+        }
+        // The high-frequency test pattern aliases differently under DCT scaling and box
+        // filtering (about 24 levels); a different preview is about 72 levels away.
+        assert!(
+            own_error < 40.0 && own_error * 2.0 < closest_other_error,
+            ".{extension} thumbnail is not its embedded preview: own error {own_error:.1}, \
+             closest other preview {closest_other_error:.1}"
         );
         assert_eq!((result.width, result.height), (256, 192));
         assert_eq!(
@@ -128,14 +136,25 @@ fn raw_formats_extract_expected_embedded_preview_bytes() {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
+fn decode_rgb(jpeg: &[u8]) -> RgbImage {
+    image::load_from_memory_with_format(jpeg, ImageFormat::Jpeg)
+        .expect("decode jpeg")
+        .to_rgb8()
+}
+
+fn downscaled_reference(jpeg: &[u8]) -> RgbImage {
+    image::imageops::thumbnail(&decode_rgb(jpeg), 256, 192)
+}
+
+fn mean_abs_error(left: &RgbImage, right: &RgbImage) -> f64 {
+    assert_eq!(left.dimensions(), right.dimensions());
+    let total = left
+        .as_raw()
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+        .zip(right.as_raw())
+        .map(|(a, b)| u64::from(a.abs_diff(*b)))
+        .sum::<u64>();
+    total as f64 / left.as_raw().len() as f64
 }
 
 #[test]
