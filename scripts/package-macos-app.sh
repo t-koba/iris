@@ -7,6 +7,7 @@ binary_name="Iris"
 target_dir="$repo_root/target/package-macos"
 app_root="$repo_root/dist/macos/Iris.app"
 zip_path="$repo_root/dist/macos/Iris-macos.zip"
+pkg_path="$repo_root/dist/macos/Iris-macos.pkg"
 contents_dir="$app_root/Contents"
 macos_dir="$contents_dir/MacOS"
 resources_dir="$contents_dir/Resources"
@@ -17,6 +18,11 @@ notary_profile="${IRIS_MACOS_NOTARY_PROFILE:-}"
 deployment_target="${IRIS_MACOS_DEPLOYMENT_TARGET:-14.0}"
 export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
 version=$(sed -n '/^\[workspace.package\]$/,/^\[/{s/^version = "\([^" ]*\)".*/\1/p;}' "$repo_root/Cargo.toml" | head -n 1)
+
+if [[ -z "$version" ]]; then
+    echo "missing root Cargo workspace package version" >&2
+    exit 1
+fi
 
 typeset -A bundled_dylibs
 
@@ -95,7 +101,7 @@ assert_no_unbundled_dependencies() {
 }
 
 cd "$repo_root"
-build_args=(cargo build --release -p iris-ui-shell --bin "$binary_name")
+build_args=(cargo build --locked --release -p iris-ui-shell --bin "$binary_name")
 case "$build_variant" in
     product) ;;
     minimal)
@@ -181,5 +187,16 @@ if [[ -n "$notary_profile" ]]; then
     ditto -c -k --sequesterRsrc --keepParent "$app_root" "$zip_path"
 fi
 
+# Package the final signed (and, when configured, stapled) app without changing it.
+# This installer is unsigned: an app-signing identity is not an installer identity,
+# and the ZIP notarization above does not notarize the installer.
+rm -f "$pkg_path"
+pkgbuild --component "$app_root" \
+    --install-location /Applications \
+    --identifier dev.tk.iris \
+    --version "$version" \
+    "$pkg_path"
+
 echo "created $app_root"
 echo "created $zip_path"
+echo "created $pkg_path (unsigned installer; not notarized)"

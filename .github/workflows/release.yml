@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -60,21 +60,31 @@ jobs:
           plutil -extract CFBundleShortVersionString raw -o - dist/macos/Iris.app/Contents/Info.plist | grep -Fx "${GITHUB_REF_NAME#v}"
           zipinfo -1 dist/macos/Iris-macos.zip | grep -Fx "Iris.app/Contents/MacOS/Iris"
           codesign --verify --deep --strict --verbose=2 dist/macos/Iris.app
-      - name: Generate macOS checksum
+          pkgutil --payload-files dist/macos/Iris-macos.pkg > "$RUNNER_TEMP/iris-pkg-payload.txt"
+          grep -E '(^|/)Iris\.app/Contents/MacOS/Iris$' "$RUNNER_TEMP/iris-pkg-payload.txt"
+      - name: Generate macOS checksums
         run: |
           cd dist/macos
-          shasum -a 256 Iris-macos.zip > Iris-macos.zip.sha256
-          shasum -a 256 -c Iris-macos.zip.sha256
-      - name: Upload release asset
-        uses: softprops/action-gh-release@v3
+          for file in Iris-macos.zip Iris-macos.pkg; do
+            shasum -a 256 "$file" > "$file.sha256"
+            shasum -a 256 -c "$file.sha256"
+          done
+      - name: Stage macOS release assets
+        uses: actions/upload-artifact@v4
         with:
-          files: |
+          name: release-macos
+          if-no-files-found: error
+          path: |
             dist/macos/Iris-macos.zip
             dist/macos/Iris-macos.zip.sha256
+            dist/macos/Iris-macos.pkg
+            dist/macos/Iris-macos.pkg.sha256
 
   package-linux:
     needs: release-preflight
     runs-on: ubuntu-latest
+    outputs:
+      deb-arch: ${{ steps.deb.outputs.arch }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -86,7 +96,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y zsh pkg-config clang ffmpeg \
+          sudo apt-get install -y zsh pkg-config clang ffmpeg dpkg-dev \
             libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev
       - name: Package Linux AppDir
@@ -98,17 +108,47 @@ jobs:
           tar -tzf dist/linux/Iris-linux-appdir.tar.gz | grep -Fx "Iris.AppDir/AppRun"
           tar -tzf dist/linux/Iris-linux-appdir.tar.gz | grep -Fx "Iris.AppDir/usr/bin/Iris"
           tar -tzf dist/linux/Iris-linux-appdir.tar.gz | grep -Fx "Iris.AppDir/usr/share/applications/iris.desktop"
-      - name: Generate Linux checksum
+      - name: Verify Debian installer
+        id: deb
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          arch="$(dpkg --print-architecture)"
+          deb="dist/linux/iris_${version}_${arch}.deb"
+          shopt -s nullglob
+          packages=(dist/linux/*.deb)
+          [[ ${#packages[@]} -eq 1 && "${packages[0]}" == "$deb" ]]
+          [[ "$(dpkg-deb -f "$deb" Package)" == iris ]]
+          [[ "$(dpkg-deb -f "$deb" Version)" == "$version" ]]
+          [[ "$(dpkg-deb -f "$deb" Architecture)" == "$arch" ]]
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb"
+          sudo apt-get install -y "./$deb"
+          trap 'sudo apt-get remove -y iris' EXIT
+          test -x /usr/bin/Iris
+          test -f /usr/share/applications/iris.desktop
+          cmp dist/linux/Iris.AppDir/usr/bin/Iris /usr/bin/Iris
+          sudo apt-get remove -y iris
+          trap - EXIT
+          test ! -e /usr/bin/Iris
+          echo "arch=$arch" >> "$GITHUB_OUTPUT"
+      - name: Generate Linux checksums
         run: |
           cd dist/linux
-          sha256sum Iris-linux-appdir.tar.gz > Iris-linux-appdir.tar.gz.sha256
-          sha256sum -c Iris-linux-appdir.tar.gz.sha256
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v3
+          for file in Iris-linux-appdir.tar.gz iris_*.deb; do
+            sha256sum "$file" > "$file.sha256"
+            sha256sum -c "$file.sha256"
+          done
+      - name: Stage Linux release assets
+        uses: actions/upload-artifact@v4
         with:
-          files: |
+          name: release-linux
+          if-no-files-found: error
+          path: |
             dist/linux/Iris-linux-appdir.tar.gz
             dist/linux/Iris-linux-appdir.tar.gz.sha256
+            dist/linux/*.deb
+            dist/linux/*.deb.sha256
 
   package-windows:
     needs: release-preflight
@@ -121,6 +161,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-windows-cargo
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --version=6.7.1 --allow-downgrade --yes --no-progress
+          if ($LASTEXITCODE -notin @(0, 3010)) { throw "Inno Setup installation failed" }
+          exit 0
       - name: Package Windows app
         env:
           IRIS_BUILD_VARIANT: minimal
@@ -139,22 +185,87 @@ jobs:
           } finally {
             $zip.Dispose()
           }
-      - name: Generate Windows checksum
+      - name: Smoke-test Windows installer
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:RUNNER_TEMP "Iris-install-smoke"
+          $setup = (Resolve-Path "dist/windows/Iris-windows-setup.exe").Path
+          $result = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$installDir`"")
+          if ($result.ExitCode -ne 0) { throw "Installer failed: $($result.ExitCode)" }
+          try {
+            $installed = Get-FileHash -Algorithm SHA256 (Join-Path $installDir "Iris.exe")
+            $portable = Get-FileHash -Algorithm SHA256 "dist/windows/Iris/Iris.exe"
+            if ($installed.Hash -ne $portable.Hash) { throw "Installed executable differs from portable executable" }
+          } finally {
+            $result = Start-Process -FilePath (Join-Path $installDir "unins000.exe") -Wait -PassThru -ArgumentList @(
+              '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+            if ($result.ExitCode -ne 0) { throw "Uninstaller failed: $($result.ExitCode)" }
+          }
+          if (Test-Path (Join-Path $installDir "Iris.exe")) { throw "Uninstaller left Iris.exe behind" }
+      - name: Generate Windows checksums
         shell: pwsh
         run: |
           Push-Location dist/windows
           try {
-            $hash = Get-FileHash -Algorithm SHA256 Iris-windows.zip
-            "$($hash.Hash.ToLowerInvariant())  Iris-windows.zip" | Out-File -Encoding ascii Iris-windows.zip.sha256
-            $expected = (Get-Content Iris-windows.zip.sha256).Split(" ")[0]
-            $actual = (Get-FileHash -Algorithm SHA256 Iris-windows.zip).Hash.ToLowerInvariant()
-            if ($actual -ne $expected) { throw "checksum verification failed" }
+            foreach ($file in @("Iris-windows.zip", "Iris-windows-setup.exe")) {
+              $hash = Get-FileHash -Algorithm SHA256 $file
+              "$($hash.Hash.ToLowerInvariant())  $file" | Out-File -Encoding ascii "$file.sha256"
+              $expected = (Get-Content "$file.sha256").Split(" ")[0]
+              $actual = (Get-FileHash -Algorithm SHA256 $file).Hash.ToLowerInvariant()
+              if ($actual -ne $expected) { throw "checksum verification failed: $file" }
+            }
           } finally {
             Pop-Location
           }
-      - name: Upload release asset
-        uses: softprops/action-gh-release@v3
+      - name: Stage Windows release assets
+        uses: actions/upload-artifact@v4
         with:
-          files: |
+          name: release-windows
+          if-no-files-found: error
+          path: |
             dist/windows/Iris-windows.zip
             dist/windows/Iris-windows.zip.sha256
+            dist/windows/Iris-windows-setup.exe
+            dist/windows/Iris-windows-setup.exe.sha256
+
+  publish:
+    needs: [package-macos, package-linux, package-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download staged release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist/release
+      - name: Verify complete release set
+        shell: bash
+        env:
+          DEB_ARCH: ${{ needs.package-linux.outputs.deb-arch }}
+        run: |
+          cd dist/release
+          payloads=(
+            Iris-macos.zip
+            Iris-macos.pkg
+            Iris-linux-appdir.tar.gz
+            "iris_${GITHUB_REF_NAME#v}_${DEB_ARCH}.deb"
+            Iris-windows.zip
+            Iris-windows-setup.exe
+          )
+          for file in "${payloads[@]}"; do
+            printf '%s\n' "$file" "$file.sha256"
+          done | sort > "$RUNNER_TEMP/expected-release-files"
+          find . -mindepth 1 -printf '%P\n' | sort > "$RUNNER_TEMP/actual-release-files"
+          diff -u "$RUNNER_TEMP/expected-release-files" "$RUNNER_TEMP/actual-release-files"
+          for file in "${payloads[@]}"; do
+            test -s "$file"
+            sha256sum -c "$file.sha256"
+          done
+      - name: Publish complete release
+        uses: softprops/action-gh-release@v3
+        with:
+          fail_on_unmatched_files: true
+          files: dist/release/*
