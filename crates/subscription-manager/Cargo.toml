@@ -3,6 +3,7 @@ name = "iris-subscription-manager"
 version = "0.4.0"
 edition = "2021"
 description = "Watches folders, volumes and cloud connections for changes."
+publish = false
 
 [dependencies]
 iris-platform-integration = { workspace = true }

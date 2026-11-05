@@ -3,6 +3,7 @@ name = "iris-jobstore"
 version = "0.4.0"
 edition = "2021"
 description = "SQLite store that lets transfer jobs resume after a restart."
+publish = false
 
 [dependencies]
 iris-core-domain = { workspace = true, features = ["sqlite"] }
