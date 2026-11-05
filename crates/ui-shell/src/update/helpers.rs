@@ -15,7 +15,7 @@ use iris_search::filter::{facets_for_records, verify_content_match, FilterModel,
 use iris_search::reconcile::reconcile_segment;
 use iris_search::segment::{IndexedKind, Segment, SegmentRecord};
 use iris_search::stream::{filter_segment_incremental, FilterEvent};
-use iris_search::walker::{walk_local_with_cancel, WalkOptions};
+use iris_search::walker::{walk_local, WalkOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -186,7 +186,7 @@ pub fn recursive_filter_task(
                 let walk_token = cancellation_token.clone();
                 let walk_root = root.clone();
                 let walk_result = tokio::task::spawn_blocking(move || {
-                    walk_local_with_cancel(
+                    walk_local(
                         &walk_root,
                         &WalkOptions {
                             recursive: true,

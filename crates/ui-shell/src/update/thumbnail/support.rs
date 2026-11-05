@@ -58,12 +58,7 @@ pub(super) async fn generate_one_thumbnail(
                 preferred_formats: vec![ImageFormat::Jpeg, ImageFormat::WebP, ImageFormat::Png],
             };
             app_runtime()
-                .generate_thumbnail_detailed_with_cancellation(
-                    &object_ref,
-                    &hint,
-                    content_type.as_deref(),
-                    &cancel_token,
-                )
+                .generate_thumbnail(&object_ref, &hint, content_type.as_deref(), &cancel_token)
                 .await
         }
     });

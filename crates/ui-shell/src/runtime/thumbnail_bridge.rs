@@ -82,28 +82,11 @@ impl AppRuntime {
         }
     }
 
-    pub async fn generate_thumbnail(
-        &self,
-        object: &ObjectRef,
-        hint: &ThumbnailHint,
-        content_type: Option<&str>,
-    ) -> Result<ThumbnailResult, String> {
-        let cancel_token = CancellationToken::new();
-        self.generate_thumbnail_detailed_with_cancellation(
-            object,
-            hint,
-            content_type,
-            &cancel_token,
-        )
-        .await
-        .map_err(|error| error.to_string())
-    }
-
     #[tracing::instrument(
         skip(self, hint, cancel_token),
         fields(path = %object.display_path, max_dimension = hint.max_dimension)
     )]
-    pub async fn generate_thumbnail_detailed_with_cancellation(
+    pub async fn generate_thumbnail(
         &self,
         object: &ObjectRef,
         hint: &ThumbnailHint,
@@ -149,7 +132,7 @@ impl AppRuntime {
             let content_type = content_type.map(str::to_owned);
             let cancel_token = cancel_token.clone();
             tokio::task::spawn_blocking(move || {
-                ThumbnailPipeline::generate_from_path_result_with_cancellation(
+                ThumbnailPipeline::generate_from_path(
                     &path,
                     &hint,
                     content_type.as_deref(),
@@ -163,7 +146,7 @@ impl AppRuntime {
             let object_ref = self
                 .source_object_ref(object, &resolved)
                 .map_err(ThumbnailGenerationError::Failed)?;
-            ThumbnailPipeline::generate_with_cancellation(
+            ThumbnailPipeline::generate(
                 resolved.adapter.as_ref(),
                 &object_ref,
                 hint,

@@ -43,22 +43,12 @@ fn ensure_not_cancelled(cancel_token: &CancellationToken) -> Result<(), BackendE
 }
 
 impl ThumbnailPipeline {
-    /// Tries each pipeline stage in order through the backend adapter.
-    pub async fn generate(
-        backend: &dyn BackendAdapter,
-        object: &ObjectRef,
-        hint: &ThumbnailHint,
-        content_type: Option<&str>,
-    ) -> Result<ThumbnailResult, BackendError> {
-        let cancel_token = CancellationToken::new();
-        Self::generate_with_cancellation(backend, object, hint, content_type, &cancel_token).await
-    }
-
     #[tracing::instrument(
         skip(backend, hint, cancel_token),
         fields(path = %object.display_path, max_dimension = hint.max_dimension)
     )]
-    pub async fn generate_with_cancellation(
+    /// Tries each pipeline stage in order through the backend adapter.
+    pub async fn generate(
         backend: &dyn BackendAdapter,
         object: &ObjectRef,
         hint: &ThumbnailHint,
@@ -172,7 +162,7 @@ impl ThumbnailPipeline {
                 decode_in_memory(full_data, hint, cancel_token).await
             }
             Some(MediaFormat::Raw) => {
-                if let Some(result) = raw::extract_raw_thumbnail_from_backend_with_cancellation(
+                if let Some(result) = raw::extract_raw_thumbnail_from_backend(
                     backend,
                     object,
                     hint.max_dimension,
@@ -217,23 +207,7 @@ impl ThumbnailPipeline {
         }
     }
 
-    /// Generates a thumbnail straight from a local path, bypassing the backend adapter.
     pub fn generate_from_path(
-        file_path: &Path,
-        hint: &ThumbnailHint,
-        content_type: Option<&str>,
-    ) -> Option<ThumbnailResult> {
-        let cancel_token = CancellationToken::new();
-        Self::generate_from_path_result_with_cancellation(
-            file_path,
-            hint,
-            content_type,
-            &cancel_token,
-        )
-        .ok()
-    }
-
-    pub fn generate_from_path_result_with_cancellation(
         file_path: &Path,
         hint: &ThumbnailHint,
         content_type: Option<&str>,
@@ -268,11 +242,8 @@ impl ThumbnailPipeline {
                     });
                 }
 
-                let result = raw::extract_raw_thumbnail_with_cancellation(
-                    file_path,
-                    hint.max_dimension,
-                    cancel_token,
-                );
+                let result =
+                    raw::extract_raw_thumbnail(file_path, hint.max_dimension, cancel_token);
                 if let Some(thumbnail) = result {
                     return Ok(thumbnail);
                 }
@@ -521,7 +492,7 @@ async fn generate_from_downloaded_temp_path(
     let cancel_token = cancel_token.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        ThumbnailPipeline::generate_from_path_result_with_cancellation(
+        ThumbnailPipeline::generate_from_path(
             &decode_path,
             &hint,
             content_type.as_deref(),

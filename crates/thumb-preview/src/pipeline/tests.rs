@@ -4,6 +4,7 @@ use iris_core_domain::types::error::BackendError;
 use std::fs::File;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
+use tokio_util::sync::CancellationToken;
 
 #[test]
 fn classify_raw_by_extension_when_mime_missing() {
@@ -91,9 +92,15 @@ async fn generate_does_not_redownload_a_complete_short_remote_probe() {
         preferred_formats: vec![iris_core_domain::types::thumbnail::ImageFormat::Png],
     };
 
-    let result = ThumbnailPipeline::generate(&backend, &object, &hint, Some("image/png"))
-        .await
-        .expect("generate thumbnail from temp file");
+    let result = ThumbnailPipeline::generate(
+        &backend,
+        &object,
+        &hint,
+        Some("image/png"),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("generate thumbnail from temp file");
     assert_eq!(result.width, 1);
     assert_eq!(result.height, 1);
     assert_eq!(result.data.len(), expected_len);
@@ -128,9 +135,15 @@ async fn generate_requests_only_the_tail_after_a_large_remote_probe() {
         preferred_formats: vec![iris_core_domain::types::thumbnail::ImageFormat::Png],
     };
 
-    let result = ThumbnailPipeline::generate(&backend, &object, &hint, Some("image/bmp"))
-        .await
-        .expect("generate thumbnail from range reads");
+    let result = ThumbnailPipeline::generate(
+        &backend,
+        &object,
+        &hint,
+        Some("image/bmp"),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("generate thumbnail from range reads");
     assert_eq!((result.width, result.height), (32, 32));
 
     let reads = reads.lock().expect("lock reads");
@@ -162,9 +175,15 @@ async fn generate_raw_thumbnail_via_structured_range_reads() {
         preferred_formats: vec![iris_core_domain::types::thumbnail::ImageFormat::Jpeg],
     };
 
-    let result = ThumbnailPipeline::generate(&backend, &object, &hint, Some("image/x-adobe-dng"))
-        .await
-        .expect("generate structured RAW thumbnail");
+    let result = ThumbnailPipeline::generate(
+        &backend,
+        &object,
+        &hint,
+        Some("image/x-adobe-dng"),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("generate structured RAW thumbnail");
 
     assert_eq!((result.width, result.height), (96, 64));
     let reads = reads.lock().expect("lock reads");
@@ -191,8 +210,14 @@ async fn generate_raw_without_embedded_preview_returns_unsupported() {
         preferred_formats: vec![iris_core_domain::types::thumbnail::ImageFormat::Jpeg],
     };
 
-    let result =
-        ThumbnailPipeline::generate(&backend, &object, &hint, Some("image/x-adobe-dng")).await;
+    let result = ThumbnailPipeline::generate(
+        &backend,
+        &object,
+        &hint,
+        Some("image/x-adobe-dng"),
+        &CancellationToken::new(),
+    )
+    .await;
 
     assert!(matches!(
         result,
@@ -221,9 +246,14 @@ fn generate_local_raw_thumbnail_does_not_modify_source_mtime() {
         max_dimension: 128,
         preferred_formats: vec![iris_core_domain::types::thumbnail::ImageFormat::Jpeg],
     };
-    let result = ThumbnailPipeline::generate_from_path(&path, &hint, Some("image/x-adobe-dng"));
+    let result = ThumbnailPipeline::generate_from_path(
+        &path,
+        &hint,
+        Some("image/x-adobe-dng"),
+        &CancellationToken::new(),
+    );
 
-    assert!(result.is_some(), "thumbnail should be generated");
+    assert!(result.is_ok(), "thumbnail should be generated");
     let metadata = std::fs::metadata(&path).expect("stat raw");
     assert_eq!(metadata.modified().ok(), Some(expected_mtime));
     let _ = std::fs::remove_file(path);

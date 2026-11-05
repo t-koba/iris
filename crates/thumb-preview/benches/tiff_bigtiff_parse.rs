@@ -15,7 +15,9 @@ fn bench_tiff_bigtiff_parse(c: &mut Criterion) {
     group.bench_function("tiff", |b| {
         b.iter(|| {
             std::hint::black_box(iris_thumb_preview::raw::extract_raw_thumbnail(
-                &tiff_path, 256,
+                &tiff_path,
+                256,
+                &tokio_util::sync::CancellationToken::new(),
             ))
         });
     });
@@ -24,6 +26,7 @@ fn bench_tiff_bigtiff_parse(c: &mut Criterion) {
             std::hint::black_box(iris_thumb_preview::raw::extract_raw_thumbnail(
                 &bigtiff_path,
                 256,
+                &tokio_util::sync::CancellationToken::new(),
             ))
         });
     });

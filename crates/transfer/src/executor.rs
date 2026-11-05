@@ -261,28 +261,9 @@ fn source_resume_identity(metadata: &MetadataResult) -> Option<String> {
     ))
 }
 
-/// Reads `src` and writes `dst`, reporting byte progress on the watch channel.
-#[tracing::instrument(skip(src_backend, dst_backend, progress_tx), fields(src = %src.display_path, dst = %dst.display_path))]
-pub async fn client_relay_copy(
-    src_backend: &dyn BackendAdapter,
-    src: &ObjectRef,
-    dst_backend: &dyn BackendAdapter,
-    dst: &ObjectRef,
-    progress_tx: &watch::Sender<ProgressInfo>,
-) -> Result<TransferResult, BackendError> {
-    client_relay_copy_with_options(
-        src_backend,
-        src,
-        dst_backend,
-        dst,
-        progress_tx,
-        CopyRelayOptions::default(),
-    )
-    .await
-}
-
 #[tracing::instrument(skip(src_backend, dst_backend, progress_tx, options), fields(src = %src.display_path, dst = %dst.display_path))]
-pub async fn client_relay_copy_with_options(
+/// Reads `src` and writes `dst`, reporting byte progress on the watch channel.
+pub async fn client_relay_copy(
     src_backend: &dyn BackendAdapter,
     src: &ObjectRef,
     dst_backend: &dyn BackendAdapter,
@@ -529,7 +510,7 @@ pub async fn move_via_relay_with_verify_and_control(
     } = options;
     let copy_span = info_span!("transfer.copy_relay");
     let copy_result = async {
-        client_relay_copy_with_options(
+        client_relay_copy(
             src_backend,
             src,
             dst_backend,
@@ -638,9 +619,16 @@ mod tests {
             files_total: None,
         });
 
-        let result = client_relay_copy(&src_backend, &src_ref, &dst_backend, &dst_ref, &tx)
-            .await
-            .expect("relay copy should succeed");
+        let result = client_relay_copy(
+            &src_backend,
+            &src_ref,
+            &dst_backend,
+            &dst_ref,
+            &tx,
+            CopyRelayOptions::default(),
+        )
+        .await
+        .expect("relay copy should succeed");
 
         assert_eq!(result.bytes_transferred, 21);
 
@@ -694,6 +682,7 @@ mod tests {
             &dst_backend,
             &make_ref("local-dst", "photo.jpg"),
             &tx,
+            CopyRelayOptions::default(),
         )
         .await
         .expect("relay copy");
@@ -1326,9 +1315,16 @@ mod tests {
             files_total: None,
         });
 
-        let result = client_relay_copy(&src_backend, &src, &dst_backend, &dst, &tx)
-            .await
-            .expect("relay copy should succeed");
+        let result = client_relay_copy(
+            &src_backend,
+            &src,
+            &dst_backend,
+            &dst,
+            &tx,
+            CopyRelayOptions::default(),
+        )
+        .await
+        .expect("relay copy should succeed");
 
         assert_eq!(result.bytes_transferred, 6);
         assert_eq!(dst_backend.stream_write_count(), 1);
@@ -1355,9 +1351,16 @@ mod tests {
             files_total: None,
         });
 
-        let result = client_relay_copy(&src_backend, &src, &dst_backend, &dst, &tx)
-            .await
-            .expect("chunked relay copy should succeed");
+        let result = client_relay_copy(
+            &src_backend,
+            &src,
+            &dst_backend,
+            &dst,
+            &tx,
+            CopyRelayOptions::default(),
+        )
+        .await
+        .expect("chunked relay copy should succeed");
 
         assert_eq!(result.bytes_transferred, total_len);
         assert_eq!(dst_backend.get("large-copy.bin"), Some(payload));
@@ -1406,7 +1409,7 @@ mod tests {
             backoff_factor: 2.0,
         };
 
-        let result = client_relay_copy_with_options(
+        let result = client_relay_copy(
             &src_backend,
             &src,
             &dst_backend,
@@ -1479,7 +1482,7 @@ mod tests {
             files_total: None,
         });
 
-        client_relay_copy_with_options(
+        client_relay_copy(
             &src_backend,
             &src,
             &dst_backend,
@@ -1553,7 +1556,7 @@ mod tests {
             entry_index: 9,
         };
         dst_backend.fail_multipart_after_successes(1);
-        let first_result = client_relay_copy_with_options(
+        let first_result = client_relay_copy(
             &src_backend,
             &src,
             &dst_backend,
@@ -1581,7 +1584,7 @@ mod tests {
             job_id: job_id.clone(),
             entry_index: 9,
         };
-        let resumed = client_relay_copy_with_options(
+        let resumed = client_relay_copy(
             &src_backend,
             &src,
             &dst_backend,
@@ -1677,7 +1680,7 @@ mod tests {
             files_total: None,
         });
 
-        client_relay_copy_with_options(
+        client_relay_copy(
             &src_backend,
             &src,
             &dst_backend,

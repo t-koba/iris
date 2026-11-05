@@ -13,7 +13,7 @@ use iris_core_domain::types::progress::ProgressInfo;
 use iris_core_domain::types::read_handle::ReadHandle;
 use iris_core_domain::types::session::BackendSession;
 use iris_core_domain::types::thumbnail::{ThumbnailHint, ThumbnailResult};
-use iris_transfer::executor::client_relay_copy;
+use iris_transfer::executor::{client_relay_copy, CopyRelayOptions};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::{duplex, AsyncWriteExt};
@@ -257,6 +257,7 @@ pub fn bench_copy(c: &mut Criterion, bench_name: &str, backend_name: &str, size_
                         &destination,
                         &dst_ref,
                         &progress.0,
+                        CopyRelayOptions::default(),
                     ))
                     .expect("relay copy");
             });

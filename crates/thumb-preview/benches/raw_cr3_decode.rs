@@ -9,7 +9,13 @@ fn bench_raw_cr3_decode(c: &mut Criterion) {
     std::fs::write(&path, &fixture).expect("write fixture");
 
     c.bench_function("raw_cr3_decode/extract_embedded_preview", |b| {
-        b.iter(|| std::hint::black_box(iris_thumb_preview::raw::extract_raw_thumbnail(&path, 256)));
+        b.iter(|| {
+            std::hint::black_box(iris_thumb_preview::raw::extract_raw_thumbnail(
+                &path,
+                256,
+                &tokio_util::sync::CancellationToken::new(),
+            ))
+        });
     });
 
     let _ = std::fs::remove_file(path);

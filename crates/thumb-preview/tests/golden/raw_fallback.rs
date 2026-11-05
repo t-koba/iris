@@ -52,8 +52,13 @@ fn raw_formats_extract_expected_embedded_preview_bytes() {
         let path = temp.path().join(format!("sample.{extension}"));
         std::fs::write(&path, builder(jpeg)).expect("write synthetic raw");
 
-        let result = ThumbnailPipeline::generate_from_path(&path, &hint, Some("image/jpeg"))
-            .unwrap_or_else(|| panic!("expected embedded preview for .{extension}"));
+        let result = ThumbnailPipeline::generate_from_path(
+            &path,
+            &hint,
+            Some("image/jpeg"),
+            &CancellationToken::new(),
+        )
+        .unwrap_or_else(|error| panic!("expected embedded preview for .{extension}: {error}"));
         // Byte hashes are platform specific: jpeg-decoder's SIMD IDCT differs between x86_64 and
         // aarch64. Compare pixels instead, against the embedded preview itself and against the
         // previews of the other formats, so extracting the wrong image still fails.
@@ -123,12 +128,8 @@ fn raw_formats_without_structured_preview_return_unsupported() {
         let path = temp.path().join(format!("missing-preview.{extension}"));
         std::fs::write(&path, &disguised_jpeg).expect("write disguised raw");
 
-        let result = ThumbnailPipeline::generate_from_path_result_with_cancellation(
-            &path,
-            &hint,
-            Some("image/jpeg"),
-            &cancel_token,
-        );
+        let result =
+            ThumbnailPipeline::generate_from_path(&path, &hint, Some("image/jpeg"), &cancel_token);
 
         assert!(
             matches!(

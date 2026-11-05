@@ -137,12 +137,7 @@ pub(crate) struct StructuredRawMetadata {
 /// Returns `None` when there is no embedded preview (the UI shows a fallback icon).
 ///
 /// The container structure is parsed directly; there is no brute-force JPEG marker scan.
-pub fn extract_raw_thumbnail(file_path: &Path, max_dimension: u32) -> Option<ThumbnailResult> {
-    let cancel_token = CancellationToken::new();
-    extract_raw_thumbnail_with_cancellation(file_path, max_dimension, &cancel_token)
-}
-
-pub fn extract_raw_thumbnail_with_cancellation(
+pub fn extract_raw_thumbnail(
     file_path: &Path,
     max_dimension: u32,
     cancel_token: &CancellationToken,
@@ -185,7 +180,7 @@ pub fn extract_raw_thumbnail_with_cancellation(
 
 /// Same as above over backend range reads: candidates come from parsing the structure
 /// and only the selected JPEG range is fetched.
-pub async fn extract_raw_thumbnail_from_backend_with_cancellation(
+pub async fn extract_raw_thumbnail_from_backend(
     backend: &dyn BackendAdapter,
     object: &ObjectRef,
     max_dimension: u32,

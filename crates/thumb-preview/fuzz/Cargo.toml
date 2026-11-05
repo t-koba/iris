@@ -10,6 +10,7 @@ cargo-fuzz = true
 [workspace]
 
 [dependencies]
+tokio-util = "0.7"
 libfuzzer-sys = "0.4"
 iris-core-domain = { path = "../../core-domain" }
 iris-thumb-preview = { path = "..", default-features = false, features = ["raw-full"] }

@@ -8,7 +8,7 @@ use crate::test_fixtures::{
 fn thumbnail_of(extension: &str, bytes: &[u8], max_dimension: u32) -> Option<ThumbnailResult> {
     let path = temp_path(extension);
     std::fs::write(&path, bytes).expect("write fixture");
-    let result = extract_raw_thumbnail(&path, max_dimension);
+    let result = extract_raw_thumbnail(&path, max_dimension, &CancellationToken::new());
     let _ = std::fs::remove_file(path);
     result
 }

@@ -534,7 +534,7 @@ impl AppRuntime {
                 .await
             }
             CopyMethod::ClientRelayCopy => {
-                let result = client_relay_copy_with_options(
+                let result = client_relay_copy(
                     src_resolved.adapter.as_ref(),
                     &src_ref,
                     dst_resolved.adapter.as_ref(),

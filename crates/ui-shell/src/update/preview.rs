@@ -203,7 +203,12 @@ async fn load_preview_visual(
         .first()
         .map(|mime| mime.to_string());
     let generated = app_runtime()
-        .generate_thumbnail(object_ref, &hint, content_type.as_deref())
+        .generate_thumbnail(
+            object_ref,
+            &hint,
+            content_type.as_deref(),
+            &tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .ok()?;
 

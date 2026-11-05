@@ -59,8 +59,8 @@ use iris_thumb_preview::encoded::probe_encoded_image_bytes;
 use iris_thumb_preview::metadata::ImageMetadata;
 use iris_thumb_preview::pipeline::ThumbnailPipeline;
 use iris_transfer::executor::{
-    client_relay_copy_with_options, move_via_relay_with_verify_and_control, CopyRelayOptions,
-    MoveRelayOptions, ResumableTransferContext, TransferControl, TransferResult,
+    client_relay_copy, move_via_relay_with_verify_and_control, CopyRelayOptions, MoveRelayOptions,
+    ResumableTransferContext, TransferControl, TransferResult,
 };
 use iris_transfer::job_manager::{ConcurrencyLimits, JobManager};
 use iris_transfer::method_selector::{

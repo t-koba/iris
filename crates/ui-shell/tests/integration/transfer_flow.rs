@@ -11,7 +11,7 @@ use iris_core_domain::types::options::{ConflictResolution, CopyOptions, DeleteMo
 use iris_core_domain::types::progress::{ByteRange, ProgressInfo};
 use iris_core_domain::types::read_handle::ReadHandle;
 use iris_core_domain::types::session::BackendSession;
-use iris_transfer::executor::{client_relay_copy_with_options, CopyRelayOptions, TransferControl};
+use iris_transfer::executor::{client_relay_copy, CopyRelayOptions, TransferControl};
 use std::pin::Pin;
 use tempfile::tempdir;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -66,7 +66,7 @@ async fn transfer_control_supports_pause_resume_and_cancel() {
         resume_after.resume();
     });
 
-    let completed = client_relay_copy_with_options(
+    let completed = client_relay_copy(
         &src_backend,
         &src_ref,
         &dst_backend,
@@ -96,7 +96,7 @@ async fn transfer_control_supports_pause_resume_and_cancel() {
         cancel_after.cancel();
     });
 
-    let error = client_relay_copy_with_options(
+    let error = client_relay_copy(
         &cancel_backend,
         &slow_src,
         &dst_backend,
