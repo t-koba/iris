@@ -2,9 +2,10 @@
 Type=Application
 Name=Iris
 Comment=Cross-platform file manager
-Exec=Iris
+Exec=Iris %F
 Icon=iris
 Terminal=false
 Categories=Utility;FileManager;
+MimeType=inode/directory;
 StartupNotify=true
 StartupWMClass=iris
