@@ -258,19 +258,11 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
         Message::PruneExpiredNotifications => {
             state.remove_expired_notifications();
         }
-        Message::SkipError(_job_id) => {
-            if let Some(pending) = &mut state.pending_operation {
-                if pending.current_index < pending.items.len() {
-                    app_runtime().skip_task(&pending.job_id, pending.current_index);
-                    pending.current_index += 1;
-                }
-                if let Some(job) = state.jobs.iter_mut().find(|job| job.id == pending.job_id) {
-                    job.state = JobState::Running;
-                }
-            }
-            return process_pending_operation(state);
+        Message::SkipError(job_id) => {
+            return resolve_failed_items(state, &job_id, false);
         }
         Message::AbortJob(job_id) => {
+            dismiss_job_decisions(state, &job_id);
             app_runtime().cancel_job(&job_id);
             if let Some(pending) = &state.pending_operation {
                 if pending.job_id == job_id {

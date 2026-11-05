@@ -80,6 +80,8 @@ pub enum ConflictMessage {
 
 #[derive(Debug, Clone)]
 pub enum JobMessage {
+    /// The job was written to the job store and its transfers may start.
+    Persisted(JobId),
     Pause(JobId),
     Resume(JobId),
     Cancel(JobId),
@@ -381,7 +383,8 @@ pub enum Message {
     },
     OpenObjectCompleted(Result<(), String>),
     ConflictCheckCompleted(JobId, usize, Result<Option<ConflictMetadata>, String>),
-    PendingItemCompleted(JobId, Result<PendingItemResult, String>),
+    /// Job, item index, outcome.
+    PendingItemCompleted(JobId, usize, Result<PendingItemResult, String>),
 
     ToggleHiddenFiles,
     PruneExpiredNotifications,

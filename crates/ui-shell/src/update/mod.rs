@@ -544,6 +544,122 @@ mod tests {
         assert!(rename.error_message.is_some());
     }
 
+    fn running_transfer(state: &mut AppState, item_count: usize, max_in_flight: usize) -> JobId {
+        let job_id = JobId(8_000_000 + item_count as u64);
+        let items = (0..item_count)
+            .map(|index| PendingFileItem {
+                source: test_list_entry(&format!("/src/{index}"), &index.to_string()).object_ref,
+                destination_path: format!("/dst/{index}"),
+            })
+            .collect();
+        let mut pending =
+            PendingFileOperation::new(job_id.clone(), items, false, None, max_in_flight);
+        pending.persisted = true;
+        pending.rsync_failed = true;
+        pending.remember_resolution = Some(ConflictResolution::Overwrite);
+        state.pending_operation = Some(pending);
+        state.jobs.push(JobDisplayInfo {
+            id: job_id.clone(),
+            description: String::new(),
+            state: JobState::Running,
+            progress: ProgressInfo {
+                bytes_completed: 0,
+                bytes_total: None,
+                files_completed: 0,
+                files_total: Some(item_count as u64),
+            },
+            speed_samples: std::collections::VecDeque::new(),
+            speed_bps: None,
+        });
+        job_id
+    }
+
+    fn item_done() -> Result<crate::messages::PendingItemResult, String> {
+        Ok(crate::messages::PendingItemResult {
+            skipped: false,
+            bytes_completed: 10,
+            files_completed: 1,
+        })
+    }
+
+    #[test]
+    fn each_finished_transfer_starts_the_next_file() {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 5, 2);
+
+        let _ = process_pending_operation(&mut state);
+        let pending = state.pending_operation.as_ref().expect("pending");
+        assert_eq!((pending.in_flight, pending.current_index), (2, 2));
+
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(job_id, 1, item_done()),
+        );
+
+        let pending = state.pending_operation.as_ref().expect("pending");
+        assert_eq!((pending.in_flight, pending.current_index), (2, 3));
+    }
+
+    #[test]
+    fn skip_after_a_failure_skips_the_failed_file_not_the_next_one() {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 4, 2);
+        let _ = process_pending_operation(&mut state);
+
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(job_id.clone(), 0, Err("disk full".to_string())),
+        );
+        // The other file in flight finishes, but nothing new starts while a decision is pending.
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(job_id.clone(), 1, item_done()),
+        );
+        let pending = state.pending_operation.as_ref().expect("pending");
+        assert_eq!(pending.failed, vec![0]);
+        assert_eq!((pending.in_flight, pending.current_index), (0, 2));
+        assert_eq!(state.notifications.len(), 1);
+
+        let _ = update(&mut state, Message::SkipError(job_id));
+
+        let pending = state.pending_operation.as_ref().expect("pending");
+        assert!(pending.failed.is_empty());
+        // Files 2 and 3 start; none of them was skipped in place of file 0.
+        assert_eq!((pending.in_flight, pending.current_index), (2, 4));
+        assert!(
+            state.notifications.is_empty(),
+            "the decision is no longer offered"
+        );
+    }
+
+    #[test]
+    fn retry_after_a_failure_starts_the_failed_file_again_first() {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 3, 1);
+        let _ = process_pending_operation(&mut state);
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(job_id.clone(), 0, Err("timeout".to_string())),
+        );
+
+        let _ = update(
+            &mut state,
+            crate::messages::JobMessage::Retry(job_id.clone()).into(),
+        );
+
+        let pending = state.pending_operation.as_ref().expect("pending");
+        assert!(pending.failed.is_empty() && pending.retry.is_empty());
+        assert_eq!((pending.in_flight, pending.current_index), (1, 1));
+        assert_eq!(
+            state
+                .jobs
+                .iter()
+                .find(|job| job.id == job_id)
+                .map(|job| job.state.clone()),
+            Some(JobState::Running)
+        );
+    }
+
     #[test]
     fn toggling_hidden_files_reloads_both_panes() {
         let mut state = AppState::default();
@@ -1089,16 +1205,15 @@ mod tests {
             }],
             performed_at: std::time::SystemTime::UNIX_EPOCH,
         };
-        state.pending_operation = Some(PendingFileOperation {
-            items: Vec::new(),
-            current_index: 0,
-            is_move: true,
-            remember_resolution: None,
+        let mut pending = PendingFileOperation::new(
             job_id,
-            in_flight: 0,
-            rsync_failed: false,
-            undo_action: Some(PendingUndoAction::PushRedo(op.clone())),
-        });
+            Vec::new(),
+            true,
+            Some(PendingUndoAction::PushRedo(op.clone())),
+            4,
+        );
+        pending.persisted = true;
+        state.pending_operation = Some(pending);
 
         let _ = process_pending_operation(&mut state);
 

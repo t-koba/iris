@@ -1,5 +1,5 @@
 use crate::input::dnd::{DndOperation, DndState, DndTarget};
-use crate::messages::{Message, PendingItemResult};
+use crate::messages::{JobMessage, Message, PendingItemResult};
 use crate::runtime::app_runtime;
 use crate::state::{
     AppState, JobDisplayInfo, NotificationAction, NotificationSeverity, PendingFileItem,
@@ -19,9 +19,11 @@ mod dnd_ops;
 mod pending_ops;
 
 pub use dnd_ops::{current_dnd_operation, perform_dnd_drop, perform_external_drop};
+pub(crate) use pending_ops::max_concurrent_transfers_for_items;
 pub use pending_ops::{
-    apply_conflict_resolution, fail_pending_job, process_pending_operation,
-    start_pending_file_operation, start_pending_file_operation_with_undo_action,
+    apply_conflict_resolution, dismiss_job_decisions, fail_pending_job, process_pending_operation,
+    resolve_failed_items, start_pending_file_operation,
+    start_pending_file_operation_with_undo_action,
 };
 
 const JOB_SPEED_SMOOTHING_WINDOW: Duration = Duration::from_secs(3);

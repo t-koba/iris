@@ -52,27 +52,39 @@ pub fn start_pending_file_operation_with_undo_action(
         speed_bps: None,
     });
 
-    state.pending_operation = Some(PendingFileOperation {
+    let max_in_flight = max_concurrent_transfers_for_items(&items);
+    let persisted_items = items.clone();
+    state.pending_operation = Some(PendingFileOperation::new(
+        job_id.clone(),
         items,
-        current_index: 0,
         is_move,
-        remember_resolution: None,
-        job_id,
-        in_flight: 0,
-        rsync_failed: false,
         undo_action,
-    });
+        max_in_flight,
+    ));
 
-    if let Some(pending) = &state.pending_operation {
-        let _ = app_runtime().persist_pending_job(
-            &pending.job_id,
-            &description,
-            &pending.items,
-            is_move,
-        );
-    }
-
-    process_pending_operation(state)
+    // Persisting walks the sources to record their sizes, which can take long for big folders
+    // or network shares; do it off the UI thread and start the transfers when it is stored.
+    Task::perform(
+        async move {
+            let persisted_job_id = job_id.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                app_runtime().persist_pending_job(
+                    &persisted_job_id,
+                    &description,
+                    &persisted_items,
+                    is_move,
+                )
+            })
+            .await;
+            if let Ok(Err(error)) | Err(error) = result.map_err(|error| error.to_string()) {
+                tracing::warn!(
+                    "failed to persist transfer job; it cannot resume after restart: {error}"
+                );
+            }
+            job_id
+        },
+        |job_id| Message::Job(JobMessage::Persisted(job_id)),
+    )
 }
 
 /// Files transferred concurrently, so one file's I/O wait overlaps another's reads and writes.
@@ -80,7 +92,7 @@ const DEFAULT_MAX_CONCURRENT_TRANSFERS: usize = 4;
 /// SMB transfers run one at a time on macOS.
 const MAX_CONCURRENT_SMB_TRANSFERS: usize = 1;
 
-fn max_concurrent_transfers_for_items(items: &[PendingFileItem]) -> usize {
+pub(crate) fn max_concurrent_transfers_for_items(items: &[PendingFileItem]) -> usize {
     if cfg!(target_os = "macos") {
         let runtime = app_runtime();
         let uses_smb = items.iter().any(|item| {
@@ -97,71 +109,43 @@ fn max_concurrent_transfers_for_items(items: &[PendingFileItem]) -> usize {
 }
 
 pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
-    let pending_snapshot = match &state.pending_operation {
-        Some(p) => p.clone(),
-        None => return Task::none(),
+    let Some(pending) = &state.pending_operation else {
+        return Task::none();
     };
-
-    if let Some(job) = state.jobs.iter().find(|j| j.id == pending_snapshot.job_id) {
-        if job.state == JobState::Paused || job.state == JobState::Canceled {
-            return Task::none();
-        }
+    let job_state = state
+        .jobs
+        .iter()
+        .find(|job| job.id == pending.job_id)
+        .map(|job| job.state.clone());
+    // Paused and canceled jobs start nothing; a failed one waits for Retry, Skip or Abort.
+    if !pending.persisted
+        || !pending.failed.is_empty()
+        || matches!(
+            job_state,
+            Some(JobState::Paused | JobState::Canceled | JobState::Failed)
+        )
+    {
+        return Task::none();
     }
 
-    if pending_snapshot.current_index >= pending_snapshot.items.len() {
-        let mut completion_tasks = vec![Task::done(Message::Refresh)];
-        match pending_snapshot.undo_action {
-            Some(PendingUndoAction::RecordTransfer) => {
-                let undo_kind = if pending_snapshot.is_move {
-                    UndoOpKind::Move
-                } else {
-                    UndoOpKind::Copy
-                };
-                let undo_items = pending_snapshot
-                    .items
-                    .iter()
-                    .map(|item| UndoItem {
-                        source_path: PathBuf::from(&item.source.display_path),
-                        destination_path: PathBuf::from(&item.destination_path),
-                        size: None,
-                        mtime: None,
-                        trashed_path: None,
-                    })
-                    .collect();
-                completion_tasks.push(record_undo_op_task(undo_kind, undo_items));
-            }
-            Some(PendingUndoAction::RecordOp(op)) => {
-                state.undo_journal.push_undo_from_redo(op);
-            }
-            Some(PendingUndoAction::PushRedo(op)) => {
-                state.undo_journal.push_redo(op);
-            }
-            None => {}
-        }
-        if let Some(job) = state
-            .jobs
-            .iter_mut()
-            .find(|j| j.id == pending_snapshot.job_id)
-        {
-            job.state = JobState::Completed;
-            reset_job_speed(job);
-        }
-        app_runtime().complete_job(&pending_snapshot.job_id);
-        state.pending_operation = None;
-        state.add_notification(
-            NotificationSeverity::Info,
-            tr("file-operation-completed-title"),
-            tr("file-operation-completed-body"),
-            vec![NotificationAction::Dismiss],
-        );
-        return Task::batch(completion_tasks);
+    if pending.all_started() {
+        return if pending.in_flight == 0 {
+            finish_pending_operation(state)
+        } else {
+            Task::none()
+        };
     }
 
     // No conflict policy yet: check conflicts one file at a time.
-    if pending_snapshot.remember_resolution.is_none() {
-        let item = pending_snapshot.items[pending_snapshot.current_index].clone();
-        let job_id = pending_snapshot.job_id.clone();
-        let task_index = pending_snapshot.current_index;
+    if pending.remember_resolution.is_none() {
+        if pending.in_flight > 0 {
+            return Task::none();
+        }
+        let Some(index) = pending.next_index() else {
+            return Task::none();
+        };
+        let item = pending.items[index].clone();
+        let job_id = pending.job_id.clone();
         if let Some(pending) = &mut state.pending_operation {
             pending.in_flight = 1;
         }
@@ -171,36 +155,34 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
                     .conflict_metadata(&item.source, &item.destination_path)
                     .await
             },
-            move |result| Message::ConflictCheckCompleted(job_id.clone(), task_index, result),
+            move |result| Message::ConflictCheckCompleted(job_id.clone(), index, result),
         );
     }
 
-    // Conflict policy decided: dispatch up to N files at once.
-    let resolution = pending_snapshot
+    let resolution = pending
         .remember_resolution
         .clone()
         .unwrap_or(ConflictResolution::Overwrite);
-
     let base_bytes = state
         .jobs
         .iter()
-        .find(|job| job.id == pending_snapshot.job_id)
+        .find(|job| job.id == pending.job_id)
         .map(|job| job.progress.bytes_completed)
         .unwrap_or(0);
 
-    let remaining = pending_snapshot.items.len() - pending_snapshot.current_index;
-
-    // rsync fast path for the remaining files: only when both ends are local-mount paths, rsync is
-    // available, and the policy is not Rename (rsync cannot rename).
+    // rsync fast path for all remaining files: only for a fresh start (nothing in flight or to
+    // retry), when both ends are local-mount paths, rsync is available, and the policy is not
+    // Rename (rsync cannot rename).
+    let remaining = pending.items.len() - pending.current_index;
     if remaining >= 2
+        && pending.in_flight == 0
+        && pending.retry.is_empty()
         && !matches!(resolution, ConflictResolution::Rename)
-        && !pending_snapshot.rsync_failed
+        && !pending.rsync_failed
     {
-        let items: Vec<PendingFileItem> =
-            pending_snapshot.items[pending_snapshot.current_index..].to_vec();
-        let job_id = pending_snapshot.job_id.clone();
-        let is_move = pending_snapshot.is_move;
-        let res = resolution;
+        let items = pending.items[pending.current_index..].to_vec();
+        let job_id = pending.job_id.clone();
+        let is_move = pending.is_move;
         let item_count = items.len();
         // Advance current_index past every file; the single rsync task is the one in flight.
         if let Some(pending) = &mut state.pending_operation {
@@ -210,84 +192,155 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
         return Task::perform(
             async move {
                 let runtime = app_runtime();
-                match runtime.try_rsync_batch(&items, is_move, &res).await {
+                match runtime.try_rsync_batch(&items, is_move, &resolution).await {
                     Ok(Some(total_bytes)) => Ok(PendingItemResult {
                         skipped: false,
                         bytes_completed: total_bytes,
                         files_completed: item_count as u64,
                     }),
-                    _ => {
-                        // Sentinel meaning "fall back to the normal path".
-                        Ok(PendingItemResult {
-                            skipped: false,
-                            bytes_completed: 0,
-                            files_completed: 0, // 0 requests the fallback
-                        })
-                    }
+                    // Sentinel meaning "fall back to the normal path".
+                    _ => Ok(PendingItemResult {
+                        skipped: false,
+                        bytes_completed: 0,
+                        files_completed: 0,
+                    }),
                 }
             },
             move |result| Message::RsyncBatchCompleted(job_id.clone(), item_count, result),
         );
     }
 
-    let max_concurrent_transfers = max_concurrent_transfers_for_items(
-        &pending_snapshot.items[pending_snapshot.current_index..],
-    );
-    let batch_size = remaining.min(max_concurrent_transfers.max(1));
-
-    let mut tasks = Vec::with_capacity(batch_size);
-    for offset in 0..batch_size {
-        let idx = pending_snapshot.current_index + offset;
-        let item = pending_snapshot.items[idx].clone();
+    // Keep up to `max_in_flight` transfers running: each completion starts the next file, so a
+    // slow file does not hold back the others.
+    let Some(pending) = &mut state.pending_operation else {
+        return Task::none();
+    };
+    let mut tasks = Vec::new();
+    while pending.in_flight < pending.max_in_flight {
+        let Some(index) = pending.take_next_index() else {
+            break;
+        };
         tasks.push(spawn_apply_one_item(
-            &pending_snapshot.job_id,
-            idx,
-            &item,
-            pending_snapshot.is_move,
+            &pending.job_id,
+            index,
+            &pending.items[index],
+            pending.is_move,
             resolution.clone(),
             base_bytes,
         ));
+        pending.in_flight += 1;
     }
-
-    if let Some(pending) = &mut state.pending_operation {
-        pending.current_index += batch_size;
-        pending.in_flight = batch_size;
-    }
-
     Task::batch(tasks)
+}
+
+fn finish_pending_operation(state: &mut AppState) -> Task<Message> {
+    let Some(pending) = state.pending_operation.take() else {
+        return Task::none();
+    };
+    let mut completion_tasks = vec![Task::done(Message::Refresh)];
+    match pending.undo_action {
+        Some(PendingUndoAction::RecordTransfer) => {
+            let undo_kind = if pending.is_move {
+                UndoOpKind::Move
+            } else {
+                UndoOpKind::Copy
+            };
+            let undo_items = pending
+                .items
+                .iter()
+                .map(|item| UndoItem {
+                    source_path: PathBuf::from(&item.source.display_path),
+                    destination_path: PathBuf::from(&item.destination_path),
+                    size: None,
+                    mtime: None,
+                    trashed_path: None,
+                })
+                .collect();
+            completion_tasks.push(record_undo_op_task(undo_kind, undo_items));
+        }
+        Some(PendingUndoAction::RecordOp(op)) => {
+            state.undo_journal.push_undo_from_redo(op);
+        }
+        Some(PendingUndoAction::PushRedo(op)) => {
+            state.undo_journal.push_redo(op);
+        }
+        None => {}
+    }
+    if let Some(job) = state.jobs.iter_mut().find(|job| job.id == pending.job_id) {
+        job.state = JobState::Completed;
+        reset_job_speed(job);
+    }
+    app_runtime().complete_job(&pending.job_id);
+    state.add_notification(
+        NotificationSeverity::Info,
+        tr("file-operation-completed-title"),
+        tr("file-operation-completed-body"),
+        vec![NotificationAction::Dismiss],
+    );
+    Task::batch(completion_tasks)
 }
 
 pub fn apply_conflict_resolution(
     state: &mut AppState,
     resolution: ConflictResolution,
 ) -> Task<Message> {
-    let pending_snapshot = match &state.pending_operation {
-        Some(p) => p.clone(),
-        None => return Task::none(),
-    };
-
-    if pending_snapshot.current_index >= pending_snapshot.items.len() {
+    let base_bytes = state
+        .pending_operation
+        .as_ref()
+        .and_then(|pending| state.jobs.iter().find(|job| job.id == pending.job_id))
+        .map(|job| job.progress.bytes_completed)
+        .unwrap_or(0);
+    let Some(pending) = &mut state.pending_operation else {
         return Task::none();
-    }
-    let item = pending_snapshot.items[pending_snapshot.current_index].clone();
-    let task = spawn_apply_one_item(
-        &pending_snapshot.job_id,
-        pending_snapshot.current_index,
-        &item,
-        pending_snapshot.is_move,
+    };
+    let Some(index) = pending.take_next_index() else {
+        return Task::none();
+    };
+    pending.in_flight = 1;
+    spawn_apply_one_item(
+        &pending.job_id,
+        index,
+        &pending.items[index],
+        pending.is_move,
         resolution,
-        state
-            .jobs
-            .iter()
-            .find(|job| job.id == pending_snapshot.job_id)
-            .map(|job| job.progress.bytes_completed)
-            .unwrap_or(0),
-    );
-    if let Some(pending) = &mut state.pending_operation {
-        pending.current_index += 1;
-        pending.in_flight = 1;
+        base_bytes,
+    )
+}
+
+/// Retry: the failed items start again (before new ones); Skip: they are recorded as skipped.
+pub fn resolve_failed_items(state: &mut AppState, job_id: &JobId, retry: bool) -> Task<Message> {
+    dismiss_job_decisions(state, job_id);
+    let Some(pending) = state
+        .pending_operation
+        .as_mut()
+        .filter(|pending| pending.job_id == *job_id)
+    else {
+        return Task::none();
+    };
+    let failed = std::mem::take(&mut pending.failed);
+    if retry {
+        // `retry` is used as a stack; keep the original order.
+        pending.retry.extend(failed.into_iter().rev());
+    } else {
+        for index in failed {
+            app_runtime().skip_task(job_id, index);
+        }
     }
-    task
+    if let Some(job) = state.jobs.iter_mut().find(|job| job.id == *job_id) {
+        job.state = JobState::Running;
+    }
+    app_runtime().resume_job(job_id);
+    process_pending_operation(state)
+}
+
+/// Removes the Retry / Skip / Abort notification of a job once one of them was chosen.
+pub fn dismiss_job_decisions(state: &mut AppState, job_id: &JobId) {
+    state.notifications.retain(|notification| {
+        !notification
+            .actions
+            .iter()
+            .any(|action| action.job_id() == Some(job_id))
+    });
 }
 
 fn spawn_apply_one_item(
@@ -321,7 +374,7 @@ fn spawn_apply_one_item(
                     files_completed: 1,
                 })
         },
-        move |result| Message::PendingItemCompleted(callback_job_id, result),
+        move |result| Message::PendingItemCompleted(callback_job_id, task_index, result),
     )
 }
 

@@ -797,10 +797,15 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                 }
             }
         }
-        Message::PendingItemCompleted(job_id, result) => match result {
-            Ok(item_result) => {
-                if !item_result.skipped {
+        Message::PendingItemCompleted(job_id, index, result) => {
+            let is_current_job = state
+                .pending_operation
+                .as_ref()
+                .is_some_and(|pending| pending.job_id == job_id);
+            match result {
+                Ok(item_result) => {
                     if let Some(job) = state.jobs.iter_mut().find(|j| j.id == job_id) {
+                        // Skipped files are done too, so progress still reaches the total.
                         job.progress.files_completed += 1;
                         job.progress.bytes_completed += item_result.bytes_completed;
                         // Estimate bytes_total from the average of the completed files.
@@ -813,37 +818,50 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                         }
                         update_job_speed(job);
                     }
-                }
-                // Start the next batch once every in-flight item has finished.
-                if let Some(pending) = &mut state.pending_operation {
-                    if pending.job_id == job_id {
-                        pending.in_flight = pending.in_flight.saturating_sub(1);
-                        if pending.in_flight > 0 {
-                            return Task::none();
-                        }
+                    if !is_current_job {
+                        return Task::none();
                     }
+                    if let Some(pending) = &mut state.pending_operation {
+                        pending.in_flight = pending.in_flight.saturating_sub(1);
+                    }
+                    return process_pending_operation(state);
                 }
-                return process_pending_operation(state);
-            }
-            Err(error) => {
-                if error == "transfer canceled" {
+                Err(error) if error == "transfer canceled" => {
                     if let Some(job) = state.jobs.iter_mut().find(|j| j.id == job_id) {
                         job.state = JobState::Canceled;
                         reset_job_speed(job);
                     }
-                    state.pending_operation = None;
+                    if is_current_job {
+                        state.pending_operation = None;
+                    }
                     return Task::none();
                 }
-                fail_pending_job(state, &job_id, &error);
+                Err(error) => {
+                    if !is_current_job {
+                        return Task::none();
+                    }
+                    let first_failure = state.pending_operation.as_mut().is_some_and(|pending| {
+                        pending.in_flight = pending.in_flight.saturating_sub(1);
+                        pending.failed.push(index);
+                        pending.failed.len() == 1
+                    });
+                    // Transfers already running finish; nothing new starts until the user
+                    // decides. One notification covers every failure of the job.
+                    if first_failure {
+                        fail_pending_job(state, &job_id, &error);
+                    }
+                }
             }
-        },
+        }
         Message::ConflictCheckCompleted(job_id, task_index, result) => {
-            let Some(pending) = &state.pending_operation else {
+            let Some(pending) = &mut state.pending_operation else {
                 return Task::none();
             };
-            if pending.job_id != job_id || pending.current_index != task_index {
+            if pending.job_id != job_id || pending.next_index() != Some(task_index) {
                 return Task::none();
             }
+            // The check is over; the item itself starts once the conflict is resolved.
+            pending.in_flight = 0;
             match result {
                 Ok(Some(conflict)) => {
                     state.active_dialog = Some(DialogState::Conflict {

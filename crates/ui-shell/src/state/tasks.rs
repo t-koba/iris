@@ -184,6 +184,7 @@ pub struct PendingFileItem {
 #[derive(Clone, Debug)]
 pub struct PendingFileOperation {
     pub items: Vec<PendingFileItem>,
+    /// Next item that has never been started.
     pub current_index: usize,
     pub is_move: bool,
     pub remember_resolution: Option<ConflictResolution>,
@@ -191,6 +192,62 @@ pub struct PendingFileOperation {
     pub in_flight: usize,
     pub rsync_failed: bool,
     pub undo_action: Option<PendingUndoAction>,
+    /// Items that failed and wait for Retry, Skip or Abort; nothing new starts meanwhile.
+    pub failed: Vec<usize>,
+    /// Failed items the user chose to retry; they start before new items.
+    pub retry: Vec<usize>,
+    /// Items transferred at the same time.
+    pub max_in_flight: usize,
+    /// The job is in the job store, so its tasks can be updated and resumed after a restart.
+    pub persisted: bool,
+}
+
+impl PendingFileOperation {
+    pub fn new(
+        job_id: JobId,
+        items: Vec<PendingFileItem>,
+        is_move: bool,
+        undo_action: Option<PendingUndoAction>,
+        max_in_flight: usize,
+    ) -> Self {
+        Self {
+            items,
+            current_index: 0,
+            is_move,
+            remember_resolution: None,
+            job_id,
+            in_flight: 0,
+            rsync_failed: false,
+            undo_action,
+            failed: Vec::new(),
+            retry: Vec::new(),
+            max_in_flight: max_in_flight.max(1),
+            persisted: false,
+        }
+    }
+
+    /// The item to start next: a retried one first, then the next new one.
+    pub fn next_index(&self) -> Option<usize> {
+        self.retry
+            .last()
+            .copied()
+            .or_else(|| (self.current_index < self.items.len()).then_some(self.current_index))
+    }
+
+    /// Marks [`Self::next_index`] as started.
+    pub fn take_next_index(&mut self) -> Option<usize> {
+        if let Some(index) = self.retry.pop() {
+            return Some(index);
+        }
+        let index = (self.current_index < self.items.len()).then_some(self.current_index)?;
+        self.current_index += 1;
+        Some(index)
+    }
+
+    /// Every item has been started at least once and none waits for a retry.
+    pub fn all_started(&self) -> bool {
+        self.retry.is_empty() && self.current_index >= self.items.len()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -216,6 +273,16 @@ pub enum NotificationAction {
 }
 
 impl NotificationAction {
+    /// The job a decision button acts on.
+    pub fn job_id(&self) -> Option<&JobId> {
+        match self {
+            NotificationAction::Retry(job_id)
+            | NotificationAction::SkipAndContinue(job_id)
+            | NotificationAction::AbortAll(job_id) => Some(job_id),
+            NotificationAction::Dismiss => None,
+        }
+    }
+
     pub fn requires_user_decision(&self) -> bool {
         matches!(
             self,
