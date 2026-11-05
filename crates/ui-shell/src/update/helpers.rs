@@ -72,15 +72,21 @@ pub fn directory_signature(entries: &[ListEntry]) -> Vec<DirectorySignatureRow> 
     signature
 }
 
-pub fn navigate_to_path(state: &mut AppState, path: String) -> Task<Message> {
-    let canonical = if app_runtime().is_virtual_display_path(&path) {
+/// The path a pane shows for `path`: `.` and `..` resolved lexically.
+///
+/// No file system access: this runs on the UI thread, and a dead network mount would block
+/// `canonicalize` indefinitely. Symlinked folders keep the path they were opened through, so
+/// Up returns to where the user came from.
+pub fn pane_display_path(path: String) -> String {
+    if app_runtime().is_virtual_display_path(&path) {
         path
     } else {
-        std::path::Path::new(&path)
-            .canonicalize()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or(path)
-    };
+        iris_path_service::normalize_local_path(std::path::Path::new(&path))
+    }
+}
+
+pub fn navigate_to_path(state: &mut AppState, path: String) -> Task<Message> {
+    let canonical = pane_display_path(path);
 
     state.pane_mut(0).current_path = canonical.clone();
     reset_directory_state(state);
@@ -1069,6 +1075,27 @@ pub fn pane_under_cursor(state: &AppState, position: iced::Point) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn pane_paths_resolve_dot_segments_but_keep_symlinked_folders() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real = temp.path().join("real");
+        std::fs::create_dir(&real).expect("create real");
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("create link");
+
+        let through_link = link.join("sub").join("..");
+        assert_eq!(
+            pane_display_path(through_link.to_string_lossy().into_owned()),
+            link.to_string_lossy()
+        );
+        // Nothing is read from disk: a path that does not exist normalizes the same way.
+        assert_eq!(
+            pane_display_path("/no/such/./dir/../folder".to_string()),
+            "/no/such/folder"
+        );
+    }
     use iris_search::filter::GpsBounds;
 
     #[tokio::test]

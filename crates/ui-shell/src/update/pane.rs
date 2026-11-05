@@ -1322,14 +1322,7 @@ pub(crate) fn navigate_pane_to_path(
     if pane_idx == 0 {
         navigate_to_path(state, path)
     } else {
-        let canonical = if app_runtime().is_virtual_display_path(&path) {
-            path
-        } else {
-            std::path::Path::new(&path)
-                .canonicalize()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or(path)
-        };
+        let canonical = pane_display_path(path);
         {
             let pane = state.pane_mut(1);
             pane.current_path = canonical.clone();

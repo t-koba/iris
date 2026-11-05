@@ -21,7 +21,8 @@ pub fn normalize_local_path(path: &Path) -> String {
     for component in path.components() {
         match component {
             Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(Path::new("/")),
+            // The platform's separator ("\\" on Windows), not a literal "/".
+            Component::RootDir => normalized.push(component.as_os_str()),
             Component::Normal(segment) => normalized.push(segment),
             Component::CurDir => {}
             Component::ParentDir => {
