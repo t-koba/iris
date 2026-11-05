@@ -45,9 +45,22 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thumbnail::*;
 
+/// Bundled so Help works in installed builds, where the source tree does not exist.
+const HELP_DOCUMENT: &str = include_str!("../../../../README.md");
+
+/// Writes the bundled help next to the app's other data (plain text, which every OS can show)
+/// and opens it.
 fn open_help_document() -> Result<(), String> {
-    let help_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
-    open::that(help_path).map_err(|error| error.to_string())
+    let dir = dirs_next::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("iris")
+        .join("help");
+    let path = dir.join("Iris-Help.txt");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(HELP_DOCUMENT) {
+        std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        std::fs::write(&path, HELP_DOCUMENT).map_err(|error| error.to_string())?;
+    }
+    open::that(&path).map_err(|error| error.to_string())
 }
 
 pub fn update(state: &mut AppState, message: Message) -> Task<Message> {
