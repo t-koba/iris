@@ -176,7 +176,7 @@ fn create_file_for_write(
     Ok(file)
 }
 
-fn apply_platform_read_hints(file: &std::fs::File, sequential: bool) {
+fn apply_platform_read_hints(_file: &std::fs::File, sequential: bool) {
     if !sequential {
         return;
     }
@@ -186,8 +186,8 @@ fn apply_platform_read_hints(file: &std::fs::File, sequential: bool) {
         const F_RDAHEAD: i32 = 45;
         const F_NOCACHE: i32 = 48;
 
-        let _ = apply_macos_fcntl_hint(file, F_RDAHEAD, 1);
-        let _ = apply_macos_fcntl_hint(file, F_NOCACHE, 1);
+        let _ = apply_macos_fcntl_hint(_file, F_RDAHEAD, 1);
+        let _ = apply_macos_fcntl_hint(_file, F_NOCACHE, 1);
     }
 
     #[cfg(target_os = "linux")]
@@ -195,22 +195,22 @@ fn apply_platform_read_hints(file: &std::fs::File, sequential: bool) {
         const POSIX_FADV_SEQUENTIAL: i32 = 2;
         const POSIX_FADV_WILLNEED: i32 = 3;
 
-        let _ = apply_linux_fadvise(file, POSIX_FADV_SEQUENTIAL);
-        let _ = apply_linux_fadvise(file, POSIX_FADV_WILLNEED);
+        let _ = apply_linux_fadvise(_file, POSIX_FADV_SEQUENTIAL);
+        let _ = apply_linux_fadvise(_file, POSIX_FADV_WILLNEED);
     }
 }
 
-fn apply_platform_write_hints(file: &std::fs::File) {
+fn apply_platform_write_hints(_file: &std::fs::File) {
     #[cfg(target_os = "macos")]
     {
         const F_NOCACHE: i32 = 48;
-        let _ = apply_macos_fcntl_hint(file, F_NOCACHE, 1);
+        let _ = apply_macos_fcntl_hint(_file, F_NOCACHE, 1);
     }
 
     #[cfg(target_os = "linux")]
     {
         const POSIX_FADV_SEQUENTIAL: i32 = 2;
-        let _ = apply_linux_fadvise(file, POSIX_FADV_SEQUENTIAL);
+        let _ = apply_linux_fadvise(_file, POSIX_FADV_SEQUENTIAL);
     }
 }
 

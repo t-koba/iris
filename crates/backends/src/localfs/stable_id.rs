@@ -31,26 +31,26 @@ pub fn get_stable_id(path: &Path) -> Result<StableId, BackendError> {
 #[cfg(windows)]
 pub fn get_stable_id_from_metadata(
     path: &Path,
-    metadata: &Metadata,
+    _metadata: &Metadata,
 ) -> Result<StableId, BackendError> {
-    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
+    };
 
-    let volume_serial = metadata.volume_serial_number().ok_or_else(|| {
-        BackendError::Internal(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "volume serial number is unavailable for path '{}'",
-                path.display()
-            ),
-        )))
-    })?;
-    let file_index = metadata.file_index().ok_or_else(|| {
-        BackendError::Internal(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("file index is unavailable for path '{}'", path.display()),
-        )))
-    })?;
-    Ok(StableId(format!("{}:{}", volume_serial, file_index)))
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .map_err(|error| BackendError::Internal(Box::new(error)))?;
+    let handle = winapi_util::Handle::from_file(file);
+    let information = winapi_util::file::information(&handle)
+        .map_err(|error| BackendError::Internal(Box::new(error)))?;
+    Ok(StableId(format!(
+        "{}:{}",
+        information.volume_serial_number(),
+        information.file_index()
+    )))
 }
 
 #[cfg(not(any(unix, windows)))]
