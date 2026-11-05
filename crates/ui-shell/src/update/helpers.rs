@@ -1,3 +1,4 @@
+use crate::i18n::tr;
 use crate::messages::{DirectoryMessage, Message, PaneMessage};
 use crate::runtime::{app_runtime, StorageCategory};
 use crate::state::{AppState, PaneLoadState, StorageUsage};
@@ -126,7 +127,7 @@ pub async fn read_directory(path: String, show_hidden: bool) -> Result<Vec<ListE
     let path = PathBuf::from(&path);
     let mut rd = tokio::fs::read_dir(&path)
         .await
-        .map_err(|e| format!("{}: {}", path.display(), e))?;
+        .map_err(|error| folder_open_error(&error))?;
 
     let mut entries = Vec::new();
     let backend_id = app_runtime().backend_id_for_path(&path);
@@ -166,6 +167,18 @@ pub async fn read_directory(path: String, show_hidden: bool) -> Result<Vec<ListE
     }
 
     Ok(entries)
+}
+
+/// What the pane shows when a local folder cannot be listed. The pane already shows the path,
+/// so the common causes get a plain sentence; anything else keeps the OS message.
+pub(crate) fn folder_open_error(error: &std::io::Error) -> String {
+    tracing::debug!("failed to open folder: {error}");
+    match error.kind() {
+        std::io::ErrorKind::NotFound => tr("folder-error-not-found"),
+        std::io::ErrorKind::PermissionDenied => tr("folder-error-permission"),
+        std::io::ErrorKind::NotADirectory => tr("folder-error-not-a-folder"),
+        _ => error.to_string(),
+    }
 }
 
 pub fn recursive_filter_task(
@@ -1075,6 +1088,18 @@ pub fn pane_under_cursor(state: &AppState, position: iced::Point) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn missing_folder_reports_a_plain_message() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing = temp.path().join("gone");
+
+        let error = read_directory(missing.to_string_lossy().into_owned(), false)
+            .await
+            .expect_err("missing folder");
+
+        assert_eq!(error, tr("folder-error-not-found"));
+    }
 
     #[cfg(unix)]
     #[test]
