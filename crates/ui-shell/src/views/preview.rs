@@ -98,17 +98,7 @@ pub fn view_preview_panel(state: &AppState) -> Element<'_, Message> {
     let thumbnail_key = crate::state::ThumbnailCacheKey::from_entry(entry);
     let cached_thumbnail = || -> Option<Element<'_, Message>> {
         state.thumbnail_cache.get(&thumbnail_key).map(|thumbnail| {
-            let thumb: Element<'_, Message> = container(
-                iced_image(thumbnail.handle.clone())
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .content_fit(iced::ContentFit::Contain),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .into();
+            let thumb: Element<'_, Message> = fitted_image(thumbnail.handle.clone());
 
             if is_active_target && state.preview_loading {
                 column![thumb, text(tr("preview-loading")).size(9)]
@@ -154,48 +144,18 @@ pub fn view_preview_panel(state: &AppState) -> Element<'_, Message> {
             PreviewData::Image {
                 handle: Some(handle),
                 ..
-            } => container(
-                iced_image(handle.clone())
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .content_fit(iced::ContentFit::Contain),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .into(),
+            } => fitted_image(handle.clone()),
 
             PreviewData::Video {
                 thumbnail: Some(thumbnail),
                 ..
-            } => container(
-                iced_image(thumbnail.clone())
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .content_fit(iced::ContentFit::Contain),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .into(),
+            } => fitted_image(thumbnail.clone()),
 
             PreviewData::Pdf {
                 thumbnail: Some(thumbnail),
                 page_count,
             } => {
-                let img: Element<'_, Message> = container(
-                    iced_image(thumbnail.clone())
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .content_fit(iced::ContentFit::Contain),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill)
-                .into();
+                let img: Element<'_, Message> = fitted_image(thumbnail.clone());
                 if let Some(pages) = page_count {
                     column![
                         img,
@@ -273,4 +233,16 @@ pub fn view_preview_panel(state: &AppState) -> Element<'_, Message> {
         .style(theme::panel_style)
         .padding(8)
         .into()
+}
+
+/// An image scaled to fit, centered in all the available space.
+fn fitted_image<'a>(handle: iced::widget::image::Handle) -> Element<'a, Message> {
+    container(
+        iced_image(handle)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .content_fit(iced::ContentFit::Contain),
+    )
+    .center(Length::Fill)
+    .into()
 }

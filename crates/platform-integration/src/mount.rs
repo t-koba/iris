@@ -535,6 +535,31 @@ fn parse_macos_mount_line(line: &str) -> Option<(PathBuf, VolumeKind)> {
     Some((PathBuf::from(mount_point), kind))
 }
 
+/// `server/share[/subdir]`, the source of an SMB mount without its leading `//`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn smb_mount_info(source: &str, username: Option<String>) -> Option<RemoteMountInfo> {
+    let (server, share) = source.split_once('/').unwrap_or((source, ""));
+    (!server.is_empty()).then(|| RemoteMountInfo {
+        server: server.to_string(),
+        remote_path: share.to_string(),
+        username,
+        kind: VolumeKind::Smb,
+    })
+}
+
+/// `server:/export`, the source of an NFS mount.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn nfs_mount_info(source: &str) -> Option<RemoteMountInfo> {
+    let (server, export) = source.split_once(':').unwrap_or((source, ""));
+    let server = server.trim();
+    (!server.is_empty()).then(|| RemoteMountInfo {
+        server: server.to_string(),
+        remote_path: export.to_string(),
+        username: None,
+        kind: VolumeKind::Nfs,
+    })
+}
+
 /// Parses the output of `mount` on macOS:
 /// SMB: `//user@server/share on /Volumes/share (smbfs, ...)`
 /// NFS: `server:/export on /Volumes/nfs (nfs, ...)`
@@ -554,43 +579,15 @@ fn resolve_remote_mount_info_macos(mount_path: &Path) -> Option<RemoteMountInfo>
             let source = line.split(" on ").next()?;
             let source = source.trim_start_matches("//");
             // user@server/share or server/share
-            let (username, rest) = if source.contains('@') {
-                let mut parts = source.splitn(2, '@');
-                let user = parts.next().unwrap_or("");
-                let rest = parts.next().unwrap_or("");
-                (Some(user.to_string()), rest)
-            } else {
-                (None, source)
+            let (username, rest) = match source.split_once('@') {
+                Some((user, rest)) => (Some(user.to_string()), rest),
+                None => (None, source),
             };
-            // rest = "server/share" or "server/share/subdir"
-            let mut path_parts = rest.splitn(2, '/');
-            let server = path_parts.next()?.to_string();
-            let share = path_parts.next().unwrap_or("").to_string();
-            if server.is_empty() {
-                return None;
-            }
-            return Some(RemoteMountInfo {
-                server,
-                remote_path: share,
-                username,
-                kind: VolumeKind::Smb,
-            });
+            return smb_mount_info(rest, username);
         }
 
         if line.contains("(nfs,") || line.contains("(nfs)") {
-            let source = line.split(" on ").next()?;
-            let mut parts = source.splitn(2, ':');
-            let server = parts.next()?.trim().to_string();
-            let export = parts.next().unwrap_or("").to_string();
-            if server.is_empty() {
-                return None;
-            }
-            return Some(RemoteMountInfo {
-                server,
-                remote_path: export,
-                username: None,
-                kind: VolumeKind::Nfs,
-            });
+            return nfs_mount_info(line.split(" on ").next()?);
         }
     }
     None
@@ -620,39 +617,14 @@ fn resolve_remote_mount_info_linux(mount_path: &Path) -> Option<RemoteMountInfo>
 
         match fs_type {
             "cifs" | "smb3" | "smbfs" => {
-                // source = "//server/share"
-                let src = source.trim_start_matches("//");
-                let mut parts = src.splitn(2, '/');
-                let server = parts.next()?.to_string();
-                let share = parts.next().unwrap_or("").to_string();
                 let username = options
                     .split(',')
                     .find_map(|opt| opt.strip_prefix("username="))
                     .map(|u| u.to_string());
-                if server.is_empty() {
-                    return None;
-                }
-                return Some(RemoteMountInfo {
-                    server,
-                    remote_path: share,
-                    username,
-                    kind: VolumeKind::Smb,
-                });
+                return smb_mount_info(source.trim_start_matches("//"), username);
             }
             "nfs" | "nfs4" => {
-                // source = "server:/export"
-                let mut parts = source.splitn(2, ':');
-                let server = parts.next()?.to_string();
-                let export = parts.next().unwrap_or("").to_string();
-                if server.is_empty() {
-                    return None;
-                }
-                return Some(RemoteMountInfo {
-                    server,
-                    remote_path: export,
-                    username: None,
-                    kind: VolumeKind::Nfs,
-                });
+                return nfs_mount_info(source);
             }
             _ => {}
         }

@@ -42,48 +42,13 @@ pub const fn supports_pdf_thumbnails() -> bool {
 #[cfg(all(feature = "pdf", target_os = "macos"))]
 mod platform {
     use super::*;
+    use crate::macos_ffi::*;
     use std::os::raw::c_void;
-
-    type CFURLRef = *const c_void;
-    type CFAllocatorRef = *const c_void;
-
-    #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
-        fn CFURLCreateFromFileSystemRepresentation(
-            allocator: CFAllocatorRef,
-            buffer: *const u8,
-            buf_len: isize,
-            is_directory: bool,
-        ) -> CFURLRef;
-        fn CFRelease(cf: *const c_void);
-    }
 
     type CGPDFDocumentRef = *const c_void;
     type CGPDFPageRef = *const c_void;
-    type CGContextRef = *mut c_void;
-    type CGColorSpaceRef = *const c_void;
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct CGPoint {
-        x: f64,
-        y: f64,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct CGSize {
-        width: f64,
-        height: f64,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct CGRect {
-        origin: CGPoint,
-        size: CGSize,
-    }
 
     const K_CG_PDF_MEDIA_BOX: i32 = 0;
-    const K_CG_IMAGE_ALPHA_PREMULTIPLIED_LAST: u32 = 1;
 
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
@@ -92,18 +57,6 @@ mod platform {
         fn CGPDFDocumentGetPage(document: CGPDFDocumentRef, page_number: usize) -> CGPDFPageRef;
         fn CGPDFDocumentRelease(document: CGPDFDocumentRef);
         fn CGPDFPageGetBoxRect(page: CGPDFPageRef, box_type: i32) -> CGRect;
-        fn CGColorSpaceCreateDeviceRGB() -> CGColorSpaceRef;
-        fn CGColorSpaceRelease(color_space: CGColorSpaceRef);
-        fn CGBitmapContextCreate(
-            data: *mut c_void,
-            width: usize,
-            height: usize,
-            bits_per_component: usize,
-            bytes_per_row: usize,
-            color_space: CGColorSpaceRef,
-            bitmap_info: u32,
-        ) -> CGContextRef;
-        fn CGContextRelease(context: CGContextRef);
         fn CGContextSetRGBFillColor(context: CGContextRef, r: f64, g: f64, b: f64, a: f64);
         fn CGContextFillRect(context: CGContextRef, rect: CGRect);
         fn CGContextScaleCTM(context: CGContextRef, sx: f64, sy: f64);

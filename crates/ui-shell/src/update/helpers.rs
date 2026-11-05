@@ -119,41 +119,77 @@ pub async fn read_directory(path: String, show_hidden: bool) -> Result<Vec<ListE
     let mut entries = Vec::new();
     let backend_id = app_runtime().backend_id_for_path(&path);
     let parent_stable_id = app_runtime().stable_id_for_path(&path);
-    let mut snapshot_write =
-        app_runtime().begin_directory_snapshot_for_path(path.to_string_lossy().as_ref());
-    let mut snapshot_batch = Vec::with_capacity(DIRECTORY_BATCH_LIMIT);
+    let mut snapshot = SnapshotRecorder::begin(path.to_string_lossy().as_ref());
     while let Some(de) = rd.next_entry().await.map_err(|e| e.to_string())? {
         let name = de.file_name().to_string_lossy().to_string();
         let hidden = name.starts_with('.');
         let entry = build_local_l0_entry_safe(de, name, &backend_id, &parent_stable_id).await;
-        snapshot_batch.push(entry.clone());
-        if snapshot_batch.len() >= DIRECTORY_BATCH_LIMIT {
-            if snapshot_write.as_ref().is_some_and(|write| {
-                !app_runtime().append_directory_snapshot_entries(write, &snapshot_batch)
-            }) {
-                snapshot_write = None;
-            }
-            snapshot_batch.clear();
-        }
+        snapshot.push(&entry);
         if !show_hidden && hidden {
             continue;
         }
 
         entries.push(entry);
     }
-
-    if !snapshot_batch.is_empty()
-        && snapshot_write.as_ref().is_some_and(|write| {
-            !app_runtime().append_directory_snapshot_entries(write, &snapshot_batch)
-        })
-    {
-        snapshot_write = None;
-    }
-    if let Some(write) = snapshot_write {
-        let _ = app_runtime().complete_directory_snapshot(write);
-    }
+    snapshot.finish();
 
     Ok(entries)
+}
+
+/// The first batch of a progressive listing is its head; later ones are appended.
+fn listing_message(path: &str, entries: Vec<ListEntry>, head_sent: bool) -> Message {
+    let path = path.to_string();
+    let message = if head_sent {
+        PaneMessage::DirectoryBatchLoaded {
+            path,
+            entries,
+            done: false,
+        }
+    } else {
+        PaneMessage::DirectoryHeadLoaded { path, entries }
+    };
+    Message::Pane(0, message)
+}
+
+/// Writes a local listing into the directory snapshot cache in batches. A failed write stops
+/// recording; `finish` marks the snapshot complete.
+struct SnapshotRecorder {
+    write: Option<crate::runtime::DirectorySnapshotWrite>,
+    batch: Vec<ListEntry>,
+}
+
+impl SnapshotRecorder {
+    fn begin(path: &str) -> Self {
+        Self {
+            write: app_runtime().begin_directory_snapshot_for_path(path),
+            batch: Vec::with_capacity(DIRECTORY_BATCH_LIMIT),
+        }
+    }
+
+    fn push(&mut self, entry: &ListEntry) {
+        self.batch.push(entry.clone());
+        if self.batch.len() >= DIRECTORY_BATCH_LIMIT {
+            self.flush();
+        }
+    }
+
+    fn flush(&mut self) {
+        if !self.batch.is_empty()
+            && self.write.as_ref().is_some_and(|write| {
+                !app_runtime().append_directory_snapshot_entries(write, &self.batch)
+            })
+        {
+            self.write = None;
+        }
+        self.batch.clear();
+    }
+
+    fn finish(mut self) {
+        self.flush();
+        if let Some(write) = self.write.take() {
+            let _ = app_runtime().complete_directory_snapshot(write);
+        }
+    }
 }
 
 /// What the pane shows when a local folder cannot be listed. The pane already shows the path,
@@ -618,8 +654,7 @@ pub fn load_directory_progressively(path: String, show_hidden: bool) -> Task<Mes
 
                 let backend_id = app_runtime().backend_id_for_path(&local_path);
                 let parent_stable_id = app_runtime().stable_id_for_path(&local_path);
-                let mut snapshot_write = app_runtime().begin_directory_snapshot_for_path(&path);
-                let mut snapshot_batch = Vec::with_capacity(DIRECTORY_BATCH_LIMIT);
+                let mut snapshot = SnapshotRecorder::begin(&path);
                 let mut batch = Vec::with_capacity(DIRECTORY_HEAD_LIMIT);
                 let mut head_sent = false;
                 loop {
@@ -646,15 +681,7 @@ pub fn load_directory_progressively(path: String, show_hidden: bool) -> Task<Mes
                     let hidden = name.starts_with('.');
                     let entry =
                         build_local_l0_entry_safe(de, name, &backend_id, &parent_stable_id).await;
-                    snapshot_batch.push(entry.clone());
-                    if snapshot_batch.len() >= DIRECTORY_BATCH_LIMIT {
-                        if snapshot_write.as_ref().is_some_and(|write| {
-                            !app_runtime().append_directory_snapshot_entries(write, &snapshot_batch)
-                        }) {
-                            snapshot_write = None;
-                        }
-                        snapshot_batch.clear();
-                    }
+                    snapshot.push(&entry);
                     if !show_hidden && hidden {
                         continue;
                     }
@@ -694,37 +721,11 @@ pub fn load_directory_progressively(path: String, show_hidden: bool) -> Task<Mes
                     }
                 }
 
-                if !snapshot_batch.is_empty()
-                    && snapshot_write.as_ref().is_some_and(|write| {
-                        !app_runtime().append_directory_snapshot_entries(write, &snapshot_batch)
-                    })
-                {
-                    snapshot_write = None;
-                }
-                if let Some(write) = snapshot_write {
-                    let _ = app_runtime().complete_directory_snapshot(write);
-                }
+                snapshot.finish();
 
                 if !batch.is_empty() {
                     let entries = std::mem::take(&mut batch);
-                    let message = if head_sent {
-                        Message::Pane(
-                            0,
-                            PaneMessage::DirectoryBatchLoaded {
-                                path: path.clone(),
-                                entries,
-                                done: false,
-                            },
-                        )
-                    } else {
-                        Message::Pane(
-                            0,
-                            PaneMessage::DirectoryHeadLoaded {
-                                path: path.clone(),
-                                entries,
-                            },
-                        )
-                    };
+                    let message = listing_message(&path, entries, head_sent);
                     if output.send(message).await.is_err() {
                         return;
                     }

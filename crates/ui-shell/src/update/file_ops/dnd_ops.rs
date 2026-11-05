@@ -78,12 +78,7 @@ pub fn perform_dnd_drop(state: &mut AppState) -> Task<Message> {
         app_runtime().dnd_operation_for_drop(&source_refs, &target_dir, state.keyboard_modifiers);
 
     if matches!(operation, DndOperation::Link) {
-        state.add_notification(
-            NotificationSeverity::Warning,
-            tr("dnd-link-unsupported-title"),
-            tr("dnd-link-unsupported-body"),
-            vec![NotificationAction::Dismiss],
-        );
+        warn(state, "dnd-link-unsupported");
         return Task::none();
     }
 
@@ -95,12 +90,7 @@ pub fn perform_dnd_drop(state: &mut AppState) -> Task<Message> {
     for entry in source_entries {
         let source_path = PathBuf::from(&entry.object_ref.display_path);
 
-        if is_move && source_path.parent() == Some(target_dir.as_path()) {
-            skipped += 1;
-            continue;
-        }
-
-        if entry.is_dir && target_dir.starts_with(&source_path) {
+        if is_pointless_drop(&source_path, entry.is_dir, &target_dir, is_move) {
             skipped += 1;
             continue;
         }
@@ -112,12 +102,7 @@ pub fn perform_dnd_drop(state: &mut AppState) -> Task<Message> {
     }
 
     if skipped > 0 {
-        state.add_notification(
-            NotificationSeverity::Warning,
-            tr("dnd-skipped-items-title"),
-            tr("dnd-skipped-items-body"),
-            vec![NotificationAction::Dismiss],
-        );
+        warn(state, "dnd-skipped-items");
     }
 
     start_pending_file_operation(state, items, is_move)
@@ -143,12 +128,7 @@ pub fn perform_external_drop(
         app_runtime().dnd_operation_for_paths(&source_paths, &target_dir, state.keyboard_modifiers);
 
     if matches!(operation, DndOperation::Link) {
-        state.add_notification(
-            NotificationSeverity::Warning,
-            tr("dnd-link-unsupported-title"),
-            tr("dnd-link-unsupported-body"),
-            vec![NotificationAction::Dismiss],
-        );
+        warn(state, "dnd-link-unsupported");
         return Task::none();
     }
 
@@ -160,17 +140,8 @@ pub fn perform_external_drop(
     for source_path in source_paths {
         let file_name = file_name_from_path(&source_path.to_string_lossy());
 
-        if is_move && source_path.parent() == Some(target_dir.as_path()) {
-            skipped += 1;
-            continue;
-        }
-
-        let is_dir = source_path
-            .metadata()
-            .map(|metadata| metadata.is_dir())
-            .unwrap_or(false);
-
-        if is_move && is_dir && target_dir.starts_with(&source_path) {
+        let is_dir = source_path.is_dir();
+        if is_pointless_drop(&source_path, is_dir, &target_dir, is_move) {
             skipped += 1;
             continue;
         }
@@ -190,21 +161,11 @@ pub fn perform_external_drop(
     }
 
     if skipped > 0 {
-        state.add_notification(
-            NotificationSeverity::Warning,
-            tr("dnd-skipped-items-title"),
-            tr("dnd-skipped-items-body"),
-            vec![NotificationAction::Dismiss],
-        );
+        warn(state, "dnd-skipped-items");
     }
 
     if failed > 0 {
-        state.add_notification(
-            NotificationSeverity::Warning,
-            tr("dnd-failed-items-title"),
-            tr("dnd-failed-items-body"),
-            vec![NotificationAction::Dismiss],
-        );
+        warn(state, "dnd-failed-items");
     }
 
     start_pending_file_operation(state, items, is_move)
@@ -230,4 +191,20 @@ fn dnd_target_directory(state: &AppState, target: DndTarget) -> Option<PathBuf> 
             }
         }
     }
+}
+
+/// A move into the folder the item is already in does nothing, and a folder cannot be copied
+/// or moved into itself.
+fn is_pointless_drop(source: &Path, is_dir: bool, target_dir: &Path, is_move: bool) -> bool {
+    (is_move && source.parent() == Some(target_dir)) || (is_dir && target_dir.starts_with(source))
+}
+
+/// A warning notification whose title and body are `{key}-title` and `{key}-body`.
+fn warn(state: &mut AppState, key: &str) {
+    state.add_notification(
+        NotificationSeverity::Warning,
+        tr(&format!("{key}-title")),
+        tr(&format!("{key}-body")),
+        vec![NotificationAction::Dismiss],
+    );
 }

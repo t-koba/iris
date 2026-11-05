@@ -119,6 +119,25 @@ impl PendingRequest {
             Self::Single { deadline, .. } | Self::Compound { deadline, .. } => *deadline,
         }
     }
+
+    /// Answers the waiting caller with `error`; a compound request answers once.
+    fn fail(self, error: SmbConnectionError) {
+        match self {
+            Self::Single { response_tx, .. } => {
+                let _ = response_tx.send(Err(error));
+            }
+            Self::Compound { shared, .. } => {
+                let response_tx = shared
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .response_tx
+                    .take();
+                if let Some(response_tx) = response_tx {
+                    let _ = response_tx.send(Err(error));
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -988,24 +1007,9 @@ fn validate_response_identity(
 
 fn close_pending(pending: &mut HashMap<u64, PendingRequest>, reason: String) {
     for (_, request) in pending.drain() {
-        let error = SmbConnectionError::ActorStopped {
+        request.fail(SmbConnectionError::ActorStopped {
             reason: reason.clone(),
-        };
-        match request {
-            PendingRequest::Single { response_tx, .. } => {
-                let _ = response_tx.send(Err(error));
-            }
-            PendingRequest::Compound { shared, .. } => {
-                let response_tx = shared
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .response_tx
-                    .take();
-                if let Some(response_tx) = response_tx {
-                    let _ = response_tx.send(Err(error));
-                }
-            }
-        }
+        });
     }
 }
 
@@ -1026,28 +1030,17 @@ fn expire_pending(pending: &mut HashMap<u64, PendingRequest>, now: Instant) {
         let Some(request) = pending.remove(&message_id) else {
             continue;
         };
-        let error = SmbConnectionError::RequestTimedOut {
-            seconds: DEFAULT_REQUEST_TIMEOUT.as_secs(),
-        };
-        match request {
-            PendingRequest::Single { response_tx, .. } => {
-                let _ = response_tx.send(Err(error));
-            }
-            PendingRequest::Compound { shared, .. } => {
-                let response_tx = shared
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .response_tx
-                    .take();
-                if let Some(response_tx) = response_tx {
-                    let _ = response_tx.send(Err(error));
-                }
-                pending.retain(|_, request| match request {
-                    PendingRequest::Compound { shared: other, .. } => !Arc::ptr_eq(other, &shared),
-                    PendingRequest::Single { .. } => true,
-                });
-            }
+        // A compound request has one entry per message id; drop its siblings too.
+        if let PendingRequest::Compound { shared, .. } = &request {
+            let shared = Arc::clone(shared);
+            pending.retain(|_, other| match other {
+                PendingRequest::Compound { shared: other, .. } => !Arc::ptr_eq(other, &shared),
+                PendingRequest::Single { .. } => true,
+            });
         }
+        request.fail(SmbConnectionError::RequestTimedOut {
+            seconds: DEFAULT_REQUEST_TIMEOUT.as_secs(),
+        });
     }
 }
 

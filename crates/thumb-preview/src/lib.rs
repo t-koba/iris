@@ -2,6 +2,8 @@ pub mod encoded;
 pub mod image_generic;
 pub mod io;
 pub mod jpeg;
+#[cfg(target_os = "macos")]
+mod macos_ffi;
 pub mod metadata;
 mod modern_image;
 pub mod pdf;

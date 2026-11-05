@@ -48,10 +48,10 @@ pub(super) fn stbl_sample_ranges(
         return Vec::new();
     };
     let chunk_offsets = find_box_in_range(source, stbl.data_start(), stbl.end(), BOX_TYPE_CO64)
-        .and_then(|co64| parse_co64(source, co64))
+        .and_then(|co64| parse_chunk_offsets(source, co64, 8))
         .or_else(|| {
             find_box_in_range(source, stbl.data_start(), stbl.end(), BOX_TYPE_STCO)
-                .and_then(|stco| parse_stco(source, stco))
+                .and_then(|stco| parse_chunk_offsets(source, stco, 4))
         })
         .unwrap_or_default();
 
@@ -234,9 +234,11 @@ pub(super) fn parse_stz2_bytes(bytes: &[u8]) -> Option<SampleSizeTable> {
     })
 }
 
-pub(super) fn parse_co64(
+/// Chunk offsets from an `stco` (32-bit, `entry_bytes` 4) or `co64` (64-bit, 8) box.
+pub(super) fn parse_chunk_offsets(
     source: &impl BlockingBinaryReader,
     header: FileBoxHeader,
+    entry_bytes: usize,
 ) -> Option<Vec<u64>> {
     let bytes = source.read_range(
         header.data_start(),
@@ -249,43 +251,18 @@ pub(super) fn parse_co64(
     if entry_count == 0 {
         return None;
     }
-    let required_len = 8usize.checked_add(entry_count.checked_mul(8)?)?;
-    if bytes.len() < required_len {
-        return None;
-    }
-
-    let mut offsets = Vec::with_capacity(entry_count);
-    for chunk in bytes[8..required_len].chunks_exact(8) {
-        offsets.push(read_u64_be(chunk)?);
-    }
-    Some(offsets)
-}
-
-pub(super) fn parse_stco(
-    source: &impl BlockingBinaryReader,
-    header: FileBoxHeader,
-) -> Option<Vec<u64>> {
-    let bytes = source.read_range(
-        header.data_start(),
-        (header.size - header.header_len) as usize,
-    )?;
-    if bytes.len() < 8 {
-        return None;
-    }
-    let entry_count = read_u32_be(&bytes[4..8])? as usize;
-    if entry_count == 0 {
-        return None;
-    }
-    let required_len = 8usize.checked_add(entry_count.checked_mul(4)?)?;
-    if bytes.len() < required_len {
-        return None;
-    }
-
-    let mut offsets = Vec::with_capacity(entry_count);
-    for chunk in bytes[8..required_len].chunks_exact(4) {
-        offsets.push(read_u32_be(chunk)? as u64);
-    }
-    Some(offsets)
+    let required_len = 8usize.checked_add(entry_count.checked_mul(entry_bytes)?)?;
+    bytes
+        .get(8..required_len)?
+        .chunks_exact(entry_bytes)
+        .map(|chunk| {
+            if entry_bytes == 8 {
+                read_u64_be(chunk)
+            } else {
+                read_u32_be(chunk).map(u64::from)
+            }
+        })
+        .collect()
 }
 
 pub(super) fn parse_stsc(

@@ -465,13 +465,7 @@ fn system_item_row<'a>(
 ) -> Element<'a, Message> {
     let active_path = &state.active_pane().current_path;
     let is_current = *active_path == item.path;
-    let badge_color = Color::from_rgba(
-        item.badge_color[0],
-        item.badge_color[1],
-        item.badge_color[2],
-        item.badge_color[3],
-    );
-    let badge: Element<'_, Message> = theme::icon_badge_colored(&item.badge, badge_color);
+    let badge = item_badge(item);
 
     let mut row_content = Row::new()
         .spacing(6)
@@ -520,6 +514,11 @@ fn system_item_row<'a>(
         .into()
 }
 
+fn item_badge(item: &crate::state::SidebarItem) -> Element<'_, Message> {
+    let [r, g, b, a] = item.badge_color;
+    theme::icon_badge_colored(&item.badge, Color::from_rgba(r, g, b, a))
+}
+
 /// Only the drag handle starts a drag; clicking the name navigates.
 fn user_item_row<'a>(
     state: &'a AppState,
@@ -530,13 +529,7 @@ fn user_item_row<'a>(
 ) -> Element<'a, Message> {
     let active_path = &state.active_pane().current_path;
     let is_current = *active_path == item.path;
-    let badge_color = Color::from_rgba(
-        item.badge_color[0],
-        item.badge_color[1],
-        item.badge_color[2],
-        item.badge_color[3],
-    );
-    let badge: Element<'_, Message> = theme::icon_badge_colored(&item.badge, badge_color);
+    let badge = item_badge(item);
     let muted = theme::muted_color(&crate::app::theme(state));
 
     let pi = state.active_pane;

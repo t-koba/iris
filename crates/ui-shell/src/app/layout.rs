@@ -170,30 +170,36 @@ fn view_with_dialog<'a>(
 
     // A transfer waits on the conflict question, so a stray click beside it must not answer it.
     let closes_on_backdrop = !matches!(dialog, DialogState::Conflict { .. });
-    let backdrop = mouse_area(
-        container(
-            iced::widget::Space::new()
-                .width(Length::Fill)
-                .height(Length::Fill),
-        )
-        .style(crate::views::theme::dialog_backdrop_style)
-        .width(Length::Fill)
-        .height(Length::Fill),
-    );
-    let backdrop = if closes_on_backdrop {
-        backdrop.on_press(DialogMessage::Close.into())
-    } else {
-        backdrop
-    };
-
-    iced::widget::stack![
+    modal(
         main,
-        backdrop,
-        container(dialog_content).center(Length::Fill)
-    ]
+        dialog_content,
+        closes_on_backdrop.then(|| DialogMessage::Close.into()),
+    )
+}
+
+/// `content` centered over `main` and a dimmed backdrop; clicking the backdrop sends
+/// `on_backdrop`.
+fn modal<'a>(
+    main: Element<'a, Message>,
+    content: impl Into<Element<'a, Message>>,
+    on_backdrop: Option<Message>,
+) -> Element<'a, Message> {
+    let backdrop = container(
+        iced::widget::Space::new()
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .style(crate::views::theme::dialog_backdrop_style)
     .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    .height(Length::Fill);
+    let mut backdrop = mouse_area(backdrop);
+    if let Some(message) = on_backdrop {
+        backdrop = backdrop.on_press(message);
+    }
+    iced::widget::stack![main, backdrop, container(content).center(Length::Fill)]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 const DND_GHOST_WIDTH: f32 = 190.0;
@@ -631,26 +637,7 @@ fn view_with_command_palette<'a>(
     .padding(12)
     .width(Length::Fixed(width));
 
-    let backdrop = mouse_area(
-        container(
-            iced::widget::Space::new()
-                .width(Length::Fill)
-                .height(Length::Fill),
-        )
-        .style(theme::dialog_backdrop_style)
-        .width(Length::Fill)
-        .height(Length::Fill),
-    )
-    .on_press(Message::CloseCommandPalette);
-
-    iced::widget::stack![
-        main,
-        backdrop,
-        container(palette_content).center(Length::Fill)
-    ]
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    modal(main, palette_content, Some(Message::CloseCommandPalette))
 }
 
 fn view_with_quick_look<'a>(
@@ -708,26 +695,7 @@ fn view_with_quick_look<'a>(
     .width(Length::Fixed(overlay_width))
     .height(Length::Fixed(overlay_height));
 
-    let backdrop = mouse_area(
-        container(
-            iced::widget::Space::new()
-                .width(Length::Fill)
-                .height(Length::Fill),
-        )
-        .style(theme::dialog_backdrop_style)
-        .width(Length::Fill)
-        .height(Length::Fill),
-    )
-    .on_press(Message::CloseQuickLook);
-
-    iced::widget::stack![
-        main,
-        backdrop,
-        container(overlay_content).center(Length::Fill)
-    ]
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    modal(main, overlay_content, Some(Message::CloseQuickLook))
 }
 
 fn view_main_layout(state: &AppState) -> Element<'_, Message> {
@@ -795,7 +763,10 @@ fn view_main_layout(state: &AppState) -> Element<'_, Message> {
                         |_: &Theme| container::Style::default()
                     }),
             )
-            .push(resize_handle::pane_divider_handle(is_resizing_divider))
+            .push(resize_handle::resize_handle(
+                ResizeTarget::PaneDivider,
+                is_resizing_divider,
+            ))
             .push(
                 container(view_pane_content(state, 1))
                     .width(Length::FillPortion(right_ratio))
@@ -836,7 +807,7 @@ fn view_main_layout(state: &AppState) -> Element<'_, Message> {
                 .width(Length::Fixed(resolved.sidebar_width))
                 .height(Length::Fill),
         );
-        layout = layout.push(resize_handle::vertical_resize_handle(
+        layout = layout.push(resize_handle::resize_handle(
             ResizeTarget::Sidebar,
             is_resizing_sidebar,
         ));
@@ -846,136 +817,50 @@ fn view_main_layout(state: &AppState) -> Element<'_, Message> {
         && (state.preview_panel_visible || state.properties_panel_visible);
     let use_positional_layout = show_right_panel && state.preview_panel_visible;
 
-    match state.preview_position {
-        PreviewPosition::Left if use_positional_layout => {
-            let main_area: Element<'_, Message> = if let Some(title_bar) = title_bar {
-                Column::new()
-                    .push(title_bar)
-                    .push(body_area)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into()
-            } else {
-                body_area
-            };
+    let right_panel = || {
+        container(build_right_panel_content(state))
+            .width(Length::Fixed(resolved.right_panel_width))
+            .height(Length::Fill)
+    };
+    let right_handle = || resize_handle::resize_handle(ResizeTarget::RightPanel, is_resizing_right);
+    let positional = use_positional_layout.then_some(state.preview_position);
 
-            layout = layout.push(
-                container(build_right_panel_content(state))
-                    .width(Length::Fixed(resolved.right_panel_width))
-                    .height(Length::Fill),
-            );
-            layout = layout.push(resize_handle::vertical_resize_handle(
-                ResizeTarget::RightPanel,
-                is_resizing_right,
-            ));
-            layout = layout.push(
-                container(main_area)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .clip(true),
-            );
-        }
-        PreviewPosition::Top | PreviewPosition::Bottom if use_positional_layout => {
-            let preview_content = build_right_panel_content(state);
-            let main_with_preview = if state.preview_position == PreviewPosition::Top {
-                if let Some(title_bar) = title_bar {
-                    Column::new()
-                        .push(title_bar)
-                        .push(
-                            container(preview_content)
-                                .height(Length::Fixed(preview_panel_height))
-                                .width(Length::Fill),
-                        )
-                        .push(resize_handle::horizontal_resize_handle(
-                            ResizeTarget::PreviewPanel,
-                            is_resizing_preview,
-                        ))
-                        .push(body_area)
-                        .height(Length::Fill)
-                } else {
-                    Column::new()
-                        .push(
-                            container(preview_content)
-                                .height(Length::Fixed(preview_panel_height))
-                                .width(Length::Fill),
-                        )
-                        .push(resize_handle::horizontal_resize_handle(
-                            ResizeTarget::PreviewPanel,
-                            is_resizing_preview,
-                        ))
-                        .push(body_area)
-                        .height(Length::Fill)
-                }
-            } else if let Some(title_bar) = title_bar {
-                let main_area = Column::new()
-                    .push(title_bar)
-                    .push(body_area)
-                    .width(Length::Fill)
-                    .height(Length::Fill);
-                Column::new()
-                    .push(main_area)
-                    .push(resize_handle::horizontal_resize_handle(
-                        ResizeTarget::PreviewPanel,
-                        is_resizing_preview,
-                    ))
-                    .push(
-                        container(preview_content)
-                            .height(Length::Fixed(preview_panel_height))
-                            .width(Length::Fill),
-                    )
-                    .height(Length::Fill)
+    let mut main_column = Column::new().width(Length::Fill).height(Length::Fill);
+    if let Some(title_bar) = title_bar {
+        main_column = main_column.push(title_bar);
+    }
+    main_column = match positional {
+        Some(position @ (PreviewPosition::Top | PreviewPosition::Bottom)) => {
+            let preview = container(build_right_panel_content(state))
+                .height(Length::Fixed(preview_panel_height))
+                .width(Length::Fill);
+            let handle =
+                resize_handle::resize_handle(ResizeTarget::PreviewPanel, is_resizing_preview);
+            if position == PreviewPosition::Top {
+                main_column.push(preview).push(handle).push(body_area)
             } else {
-                Column::new()
-                    .push(body_area)
-                    .push(resize_handle::horizontal_resize_handle(
-                        ResizeTarget::PreviewPanel,
-                        is_resizing_preview,
-                    ))
-                    .push(
-                        container(preview_content)
-                            .height(Length::Fixed(preview_panel_height))
-                            .width(Length::Fill),
-                    )
-                    .height(Length::Fill)
-            };
-            layout = layout.push(
-                container(main_with_preview)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .clip(true),
-            );
-        }
-        _ => {
-            let main_area: Element<'_, Message> = if let Some(title_bar) = title_bar {
-                Column::new()
-                    .push(title_bar)
-                    .push(body_area)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into()
-            } else {
-                body_area
-            };
-            layout = layout.push(
-                container(main_area)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .clip(true),
-            );
-
-            if show_right_panel {
-                layout = layout.push(resize_handle::vertical_resize_handle(
-                    ResizeTarget::RightPanel,
-                    is_resizing_right,
-                ));
-                layout = layout.push(
-                    container(build_right_panel_content(state))
-                        .width(Length::Fixed(resolved.right_panel_width))
-                        .height(Length::Fill),
-                );
+                main_column.push(body_area).push(handle).push(preview)
             }
         }
-    }
+        _ => main_column.push(body_area),
+    };
+    let main_area = container(main_column)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .clip(true);
+
+    layout = match positional {
+        Some(PreviewPosition::Left) => layout
+            .push(right_panel())
+            .push(right_handle())
+            .push(main_area),
+        Some(PreviewPosition::Top | PreviewPosition::Bottom) => layout.push(main_area),
+        _ if show_right_panel => layout
+            .push(main_area)
+            .push(right_handle())
+            .push(right_panel()),
+        _ => layout.push(main_area),
+    };
 
     let mut main: Element<'_, Message> = container(layout)
         .width(Length::Fill)
