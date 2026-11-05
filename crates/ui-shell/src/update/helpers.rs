@@ -498,46 +498,24 @@ async fn build_local_l0_entry_safe(
     backend_id: &BackendId,
     parent_stable_id: &StableId,
 ) -> ListEntry {
-    let full_path = entry.path();
-    let display_path = full_path.to_string_lossy().to_string();
-    let file_type = match entry.file_type().await {
-        Ok(file_type) => file_type,
-        Err(_) => {
-            return ListEntry {
-                is_inaccessible: true,
-                ..ListEntry::new(
-                    ObjectRef {
-                        key: ObjectKey {
-                            backend_id: backend_id.clone(),
-                            stable_id: StableId(display_path.clone()),
-                        },
-                        parent_stable_id: Some(parent_stable_id.clone()),
-                        display_path,
-                    },
-                    name,
-                    false,
-                )
-            };
-        }
+    let display_path = entry.path().to_string_lossy().to_string();
+    let object_ref = ObjectRef {
+        key: ObjectKey {
+            backend_id: backend_id.clone(),
+            stable_id: StableId(display_path.clone()),
+        },
+        parent_stable_id: Some(parent_stable_id.clone()),
+        display_path,
     };
-
-    let is_symlink = file_type.is_symlink();
-    let is_dir = file_type.is_dir();
-
-    ListEntry {
-        is_symlink,
-        ..ListEntry::new(
-            ObjectRef {
-                key: ObjectKey {
-                    backend_id: backend_id.clone(),
-                    stable_id: StableId(display_path.clone()),
-                },
-                parent_stable_id: Some(parent_stable_id.clone()),
-                display_path,
-            },
-            name,
-            is_dir,
-        )
+    match entry.file_type().await {
+        Ok(file_type) => ListEntry {
+            is_symlink: file_type.is_symlink(),
+            ..ListEntry::new(object_ref, name, file_type.is_dir())
+        },
+        Err(_) => ListEntry {
+            is_inaccessible: true,
+            ..ListEntry::new(object_ref, name, false)
+        },
     }
 }
 
