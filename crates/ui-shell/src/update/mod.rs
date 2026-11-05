@@ -545,6 +545,22 @@ mod tests {
     }
 
     #[test]
+    fn toggling_hidden_files_reloads_both_panes() {
+        let mut state = AppState::default();
+        state.dual_pane_enabled = true;
+        state.pane_mut(0).current_path = "/tmp/left".to_string();
+        state.pane_mut(1).current_path = "/tmp/right".to_string();
+        state.pane_mut(0).load_state = PaneLoadState::Loaded;
+        state.pane_mut(1).load_state = PaneLoadState::Loaded;
+
+        let _ = update(&mut state, Message::ToggleHiddenFiles);
+
+        assert!(state.show_hidden_files);
+        assert!(state.pane(0).load_state.is_loading());
+        assert!(state.pane(1).load_state.is_loading());
+    }
+
+    #[test]
     fn inline_rename_rejects_parent_directory_name() {
         let mut state = AppState::default();
         state

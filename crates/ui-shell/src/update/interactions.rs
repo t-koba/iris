@@ -14,6 +14,35 @@ fn external_dnd_target(state: &AppState) -> Option<DndTarget> {
     }
 }
 
+/// Re-reads the folder shown in `pane_index`, keeping the current listing on screen meanwhile.
+fn refresh_pane(state: &mut AppState, pane_index: usize) -> Task<Message> {
+    let path = state.pane(pane_index).current_path.clone();
+    let load_state = if state.pane(pane_index).entries.is_empty() {
+        PaneLoadState::LoadingInitial
+    } else {
+        PaneLoadState::LoadingMore
+    };
+    state.pane_mut(pane_index).load_state = load_state;
+    let show_hidden = state.show_hidden_files;
+    if pane_index == 0 {
+        return Task::perform(
+            read_directory(path.clone(), show_hidden),
+            move |result| match result {
+                Ok(entries) => DirectoryMessage::Polled { path, entries }.into(),
+                Err(error) => DirectoryMessage::LoadFailed { path, error }.into(),
+            },
+        );
+    }
+
+    Task::perform(
+        read_directory(path.clone(), show_hidden),
+        move |result| match result {
+            Ok(entries) => Message::Pane(1, PaneMessage::DirectoryLoaded { path, entries }),
+            Err(error) => Message::Pane(1, PaneMessage::DirectoryLoadFailed { path, error }),
+        },
+    )
+}
+
 fn list_column_resized_width(kind: ListColumnKind, value: f32) -> f32 {
     match kind {
         ListColumnKind::Name => value.max(0.0),
@@ -239,35 +268,7 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
         Message::ModifiersChanged(modifiers) => {
             state.keyboard_modifiers = modifiers;
         }
-        Message::Refresh => {
-            let pane_index = state.active_pane;
-            let path = state.pane(pane_index).current_path.clone();
-            let load_state = if state.pane(pane_index).entries.is_empty() {
-                PaneLoadState::LoadingInitial
-            } else {
-                PaneLoadState::LoadingMore
-            };
-            state.pane_mut(pane_index).load_state = load_state;
-            if pane_index == 0 {
-                return Task::perform(
-                    read_directory(path.clone(), state.show_hidden_files),
-                    move |result| match result {
-                        Ok(entries) => DirectoryMessage::Polled { path, entries }.into(),
-                        Err(error) => DirectoryMessage::LoadFailed { path, error }.into(),
-                    },
-                );
-            }
-
-            let show_hidden = state.show_hidden_files;
-            return Task::perform(read_directory(path.clone(), show_hidden), move |result| {
-                match result {
-                    Ok(entries) => Message::Pane(1, PaneMessage::DirectoryLoaded { path, entries }),
-                    Err(error) => {
-                        Message::Pane(1, PaneMessage::DirectoryLoadFailed { path, error })
-                    }
-                }
-            });
-        }
+        Message::Refresh => return refresh_pane(state, state.active_pane),
         Message::SystemThemeChanged(mode) => {
             if state.theme_choice == crate::config::ThemeChoice::System {
                 state.system_theme = crate::state::theme_from_mode(mode);
@@ -287,7 +288,15 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
         }
         Message::ToggleHiddenFiles => {
             state.show_hidden_files = !state.show_hidden_files;
-            return update(state, Message::Refresh);
+            // The setting applies to both panes and is saved like any other.
+            let mut tasks = vec![
+                refresh_pane(state, 0),
+                Task::done(Message::SaveLayoutConfig),
+            ];
+            if state.dual_pane_enabled && !state.pane(1).current_path.is_empty() {
+                tasks.push(refresh_pane(state, 1));
+            }
+            return Task::batch(tasks);
         }
         Message::WindowResized(size) => {
             state.window_width = size.width;

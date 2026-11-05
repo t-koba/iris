@@ -877,13 +877,13 @@ pub fn load_directory_progressively(path: String, show_hidden: bool) -> Task<Mes
     )
 }
 
-pub fn load_secondary_directory_task(path: String) -> Task<Message> {
+pub fn load_secondary_directory_task(path: String, show_hidden: bool) -> Task<Message> {
     use crate::messages::PaneMessage;
     Task::run(
         stream::channel::<Message>(
             2,
             move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-                let cached_entries = app_runtime().cached_directory_entries(&path, false);
+                let cached_entries = app_runtime().cached_directory_entries(&path, show_hidden);
                 let recent_complete_snapshot = app_runtime().is_virtual_display_path(&path)
                     && app_runtime().has_recent_complete_directory_snapshot(&path);
                 if recent_complete_snapshot {
@@ -912,7 +912,7 @@ pub fn load_secondary_directory_task(path: String) -> Task<Message> {
                 {
                     return;
                 }
-                let message = match read_directory(path.clone(), false).await {
+                let message = match read_directory(path.clone(), show_hidden).await {
                     Ok(entries) => Message::Pane(
                         1,
                         PaneMessage::DirectoryLoaded {

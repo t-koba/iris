@@ -308,7 +308,7 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                 state.pane_mut(1).push_to_history(path.clone());
                 refresh_breadcrumbs_for_pane(state, 1);
                 return Task::batch([
-                    load_secondary_directory_task(path),
+                    load_secondary_directory_task(path, state.show_hidden_files),
                     Task::done(Message::SaveLayoutConfig),
                 ]);
             }
@@ -461,20 +461,29 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                     Task::none()
                 } else {
                     state.pane_mut(1).load_state = PaneLoadState::LoadingInitial;
-                    load_secondary_directory_task(secondary_path)
+                    load_secondary_directory_task(secondary_path, state.show_hidden_files)
                 };
                 return Task::batch([preview_task, window_task, primary_task, secondary_task]);
             }
-            // The start-up listing was read before the saved hidden-files setting was known.
-            if hidden_files_changed && !state.pane(0).current_path.is_empty() {
+            // The start-up listings were read before the saved hidden-files setting was known.
+            let mut tasks = vec![preview_task, window_task];
+            if hidden_files_changed {
                 let primary_path = state.pane(0).current_path.clone();
-                return Task::batch([
-                    preview_task,
-                    window_task,
-                    load_directory_progressively(primary_path, state.show_hidden_files),
-                ]);
+                let secondary_path = state.pane(1).current_path.clone();
+                if !primary_path.is_empty() {
+                    tasks.push(load_directory_progressively(
+                        primary_path,
+                        state.show_hidden_files,
+                    ));
+                }
+                if !secondary_path.is_empty() {
+                    tasks.push(load_secondary_directory_task(
+                        secondary_path,
+                        state.show_hidden_files,
+                    ));
+                }
             }
-            return Task::batch([preview_task, window_task]);
+            return Task::batch(tasks);
         }
         Message::LayoutConfigSaved(Err(error)) => {
             tracing::warn!("failed to save layout config: {}", error);

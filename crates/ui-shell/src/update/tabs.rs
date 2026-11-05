@@ -138,7 +138,7 @@ fn reload_active_tab(state: &mut AppState, pane: usize) -> Task<Message> {
     let load_task = if pane == 0 {
         load_directory_progressively(path, state.show_hidden_files)
     } else {
-        load_secondary_directory_task(path)
+        load_secondary_directory_task(path, state.show_hidden_files)
     };
     Task::batch([preview_task, load_task])
 }

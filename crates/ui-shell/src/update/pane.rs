@@ -1338,6 +1338,6 @@ pub(crate) fn navigate_pane_to_path(
         reset_pane_directory_state(state, 1);
         state.pane_mut(1).load_state = PaneLoadState::LoadingInitial;
         refresh_breadcrumbs_for_pane(state, 1);
-        load_secondary_directory_task(canonical)
+        load_secondary_directory_task(canonical, state.show_hidden_files)
     }
 }
