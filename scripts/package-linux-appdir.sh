@@ -53,6 +53,10 @@ EOF
 
 chmod +x "$appdir/AppRun" "$appdir/usr/bin/$binary_name"
 
+if [[ "$build_variant" = product ]]; then
+    "$repo_root/scripts/fetch-pdfium-runtime.sh" "$appdir"
+fi
+
 # Minimal builds still produce an AppDir, but only the default-feature product
 # is an installable Debian package. Reuse exactly the binary and desktop assets above.
 if [[ "$build_variant" = product ]]; then
@@ -73,7 +77,11 @@ Package: iris
 Architecture: any
 Description: Cross-platform file manager
 EOF
-    shlibdeps=$(cd "$deb_build_dir" && dpkg-shlibdeps -O -e"$deb_root/usr/bin/$binary_name")
+    # The bundled PDFium is loaded at run time, so include its own shared-library
+    # closure explicitly; dpkg-shlibdeps cannot discover dlopen() dependencies.
+    shlibdeps=$(cd "$deb_build_dir" && dpkg-shlibdeps -O \
+        -e"$deb_root/usr/bin/$binary_name" \
+        -e"$deb_root/usr/lib/iris/libpdfium.so")
     depends=$(printf '%s\n' "$shlibdeps" | sed -n 's/^shlibs:Depends=//p')
     if [[ -z "$depends" ]]; then
         echo "dpkg-shlibdeps returned no runtime dependencies" >&2

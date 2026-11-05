@@ -6,7 +6,7 @@
 - 標準ビルドには FFmpeg の開発用ライブラリと `pkg-config` が必要です。
   - macOS: `brew install ffmpeg pkg-config`
   - Ubuntu: `sudo apt-get install pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev`
-- macOS 以外で PDF のサムネイルを試すには pdfium の共有ライブラリを置きます（実行ファイルと同じフォルダ、作業ディレクトリ、システムのライブラリパスの順に探します）。
+- macOS 以外で PDF のサムネイルを試すには pdfium の共有ライブラリを置きます（実行ファイルと同じフォルダ、インストール先の `lib/iris`、作業ディレクトリ、システムのライブラリパスの順に探します）。
 - FFmpeg を入れずに開発するなら `--no-default-features --features minimal` でビルドします。
 
 ## ビルドと実行

@@ -208,23 +208,41 @@ mod platform {
     use super::*;
     use pdfium_render::prelude::*;
     use std::io::Cursor;
+    use std::path::PathBuf;
     use std::sync::OnceLock;
+
+    /// Directories that may hold a packaged PDFium library, in precedence order: beside the
+    /// executable, in the installation prefix's `lib/iris`, then the working directory. The
+    /// system search path is consulted after these.
+    fn pdfium_dirs(exe: Option<&Path>, cwd: Option<PathBuf>) -> Vec<PathBuf> {
+        let mut dirs = Vec::with_capacity(3);
+        if let Some(exe_dir) = exe.and_then(Path::parent) {
+            dirs.push(exe_dir.to_path_buf());
+            if let Some(prefix) = exe_dir.parent() {
+                dirs.push(prefix.join("lib").join("iris"));
+            }
+        }
+        if let Some(cwd) = cwd {
+            dirs.push(cwd);
+        }
+        dirs
+    }
 
     /// Binds pdfium once per process.
     ///
     /// `Pdfium::default()` panics when the shared library is missing, and the release profile
     /// aborts on panic, so binding goes through the fallible API. pdfium is optional at run time:
-    /// without it PDFs simply get no thumbnail. The library next to the executable wins (packaged
-    /// builds), then the working directory, then the system search path.
+    /// without it PDFs simply get no thumbnail. The library next to the executable wins, then the
+    /// installation prefix's `lib/iris` directory used by Linux packages, then the working
+    /// directory, then the system search path.
     fn pdfium() -> Option<&'static Pdfium> {
         static PDFIUM: OnceLock<Option<Pdfium>> = OnceLock::new();
         PDFIUM
             .get_or_init(|| {
-                let local_candidates = std::env::current_exe()
-                    .ok()
-                    .and_then(|exe| exe.parent().map(Path::to_path_buf))
+                let exe = std::env::current_exe().ok();
+                let dirs = pdfium_dirs(exe.as_deref(), std::env::current_dir().ok());
+                let local_candidates = dirs
                     .into_iter()
-                    .chain(std::env::current_dir().ok())
                     .map(|dir| Pdfium::pdfium_platform_library_name_at_path(&dir));
                 let bindings = local_candidates
                     .filter(|candidate| candidate.is_file())
@@ -288,5 +306,32 @@ mod platform {
     pub fn page_count(file_path: &Path) -> Option<u32> {
         let document = pdfium()?.load_pdf_from_file(file_path, None).ok()?;
         u32::try_from(document.pages().len()).ok()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::pdfium_dirs;
+        use std::path::{Path, PathBuf};
+
+        #[test]
+        fn search_order_prefers_executable_then_install_prefix_then_working_directory() {
+            let dirs = pdfium_dirs(
+                Some(Path::new("/usr/bin/Iris")),
+                Some(PathBuf::from("/work")),
+            );
+            assert_eq!(
+                dirs,
+                vec![
+                    PathBuf::from("/usr/bin"),
+                    PathBuf::from("/usr/lib/iris"),
+                    PathBuf::from("/work"),
+                ]
+            );
+        }
+
+        #[test]
+        fn search_order_without_executable_or_working_directory_is_empty() {
+            assert!(pdfium_dirs(None, None).is_empty());
+        }
     }
 }

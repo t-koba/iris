@@ -53,3 +53,7 @@ harness = false
 [[bench]]
 name = "jpeg_thumb_extract"
 harness = false
+
+[[example]]
+name = "pdf_thumbnail_smoke"
+required-features = ["pdf"]

@@ -18,6 +18,9 @@ env:
 jobs:
   release-preflight:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -30,6 +33,15 @@ jobs:
             echo "release tags must point to a commit reachable from main" >&2
             exit 1
           fi
+
+      - name: Verify pinned PDFium runtime
+        env:
+          IRIS_VERIFY_PDFIUM_PROVENANCE: "1"
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/fetch-pdfium-runtime.sh "$RUNNER_TEMP/iris-pdfium-preflight"
+          test -f "$RUNNER_TEMP/iris-pdfium-preflight/usr/lib/iris/libpdfium.so"
+          test -f "$RUNNER_TEMP/iris-pdfium-preflight/usr/share/doc/iris/pdfium/LICENSE"
 
       - name: Check tag matches crate version
         shell: bash
@@ -93,6 +105,9 @@ jobs:
   package-linux:
     needs: release-preflight
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      attestations: read
     outputs:
       deb-arch: ${{ steps.deb.outputs.arch }}
     steps:
@@ -110,7 +125,15 @@ jobs:
             libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev
       - name: Package Linux AppDir
+        env:
+          IRIS_VERIFY_PDFIUM_PROVENANCE: "1"
+          GH_TOKEN: ${{ github.token }}
         run: ./scripts/package-linux-appdir.sh
+      - name: Build PDFium smoke test
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: s
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/package-linux
+        run: cargo build --release -p iris-thumb-preview --example pdf_thumbnail_smoke --locked
       - name: Archive Linux AppDir
         run: tar -C dist/linux -czf dist/linux/Iris-linux-appdir.tar.gz Iris.AppDir
       - name: Verify Linux artifact
@@ -118,6 +141,9 @@ jobs:
           tar -tzf dist/linux/Iris-linux-appdir.tar.gz | grep -Fx "Iris.AppDir/AppRun"
           tar -tzf dist/linux/Iris-linux-appdir.tar.gz | grep -Fx "Iris.AppDir/usr/bin/Iris"
           tar -tzf dist/linux/Iris-linux-appdir.tar.gz | grep -Fx "Iris.AppDir/usr/share/applications/iris.desktop"
+          tar -tzf dist/linux/Iris-linux-appdir.tar.gz | grep -Fx "Iris.AppDir/usr/lib/iris/libpdfium.so"
+          tar -tzf dist/linux/Iris-linux-appdir.tar.gz | grep -Fx "Iris.AppDir/usr/share/doc/iris/pdfium/LICENSE"
+          tar -tzf dist/linux/Iris-linux-appdir.tar.gz | grep -Fx "Iris.AppDir/usr/share/doc/iris/pdfium/licenses/pdfium.txt"
       - name: Verify Debian installer
         id: deb
         shell: bash
@@ -133,14 +159,23 @@ jobs:
           [[ "$(dpkg-deb -f "$deb" Architecture)" == "$arch" ]]
           dpkg-deb --info "$deb"
           dpkg-deb --contents "$deb"
+          dpkg-deb --contents "$deb" | grep -F 'usr/lib/iris/libpdfium.so'
+          dpkg-deb --contents "$deb" | grep -F 'usr/share/doc/iris/pdfium/LICENSE'
           sudo apt-get install -y "./$deb"
-          trap 'sudo apt-get remove -y iris' EXIT
+          trap 'sudo rm -f /usr/bin/iris-pdfium-smoke; sudo apt-get remove -y iris' EXIT
           test -x /usr/bin/Iris
           test -f /usr/share/applications/iris.desktop
+          test -f /usr/share/doc/iris/pdfium/LICENSE
           cmp dist/linux/Iris.AppDir/usr/bin/Iris /usr/bin/Iris
+          cmp dist/linux/Iris.AppDir/usr/lib/iris/libpdfium.so /usr/lib/iris/libpdfium.so
+          sudo cp target/package-linux/release/examples/pdf_thumbnail_smoke /usr/bin/iris-pdfium-smoke
+          sudo chmod 0755 /usr/bin/iris-pdfium-smoke
+          /usr/bin/iris-pdfium-smoke
+          sudo rm -f /usr/bin/iris-pdfium-smoke
           sudo apt-get remove -y iris
           trap - EXIT
           test ! -e /usr/bin/Iris
+          test ! -e /usr/lib/iris/libpdfium.so
           echo "arch=$arch" >> "$GITHUB_OUTPUT"
       - name: Generate Linux checksums
         run: |

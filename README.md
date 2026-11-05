@@ -25,7 +25,7 @@ Rust と [iced](https://iced.rs) で作ったクロスプラットフォーム�
 | OS | リリース版 |
 |---|---|
 | macOS 14 以降 | 標準プレビュー機能を含む |
-| Linux（Wayland / X11） | 標準 feature でビルド。PDFium は同梱されず、PDF の実行時条件は下記を参照 |
+| Linux（Wayland / X11） | 標準 feature でビルド。配布パッケージには検証済み PDFium を同梱 |
 | Windows | `minimal` 構成。動画・PDF は無効で、RAW は ARW・CR3・DNG・NEF のみ |
 
 ソースビルドに使う Rust は `rust-toolchain.toml` で指定しています（1.97.1）。
@@ -37,7 +37,7 @@ Rust と [iced](https://iced.rs) で作ったクロスプラットフォーム�
 - macOS: `brew install ffmpeg pkg-config`
 - Ubuntu: `sudo apt-get install pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev`
 
-macOS 以外で PDF をプレビューするには、実行時に PDFium 共有ライブラリが必要です。Iris は実行ファイルの隣、作業ディレクトリ、システムのライブラリパスの順に探し、見つからない場合は PDF サムネイルを表示しません。
+macOS 以外で PDF をプレビューするには、実行時に PDFium 共有ライブラリが必要です。Iris は実行ファイルの隣、インストール先の `lib/iris`（例: `/usr/lib/iris`）、作業ディレクトリ、システムのライブラリパスの順に探し、見つからない場合は PDF サムネイルを表示しません。
 
 ## リリースのダウンロードとインストール
 
@@ -61,7 +61,7 @@ macOS 14 以降が必要です。コード署名 ID が設定されていない�
   削除する場合は `sudo apt remove iris` を実行します。`.deb` はリンクされた共有ライブラリの依存関係を宣言します。
 - `Iris-linux-appdir.tar.gz`: 展開後、`Iris.AppDir/AppRun` を実行します。これは AppDir のアーカイブであり、AppImage ではありません。ホストに必要な共有ライブラリが必要です。
 
-現在の Linux リリース成果物には PDFium が含まれません。互換 PDFium 共有ライブラリが実行ファイルの隣、作業ディレクトリ、またはシステムのライブラリパスにない場合、PDF サムネイルは表示されません。
+Linux のリリース成果物には、検証済みの PDFium 共有ライブラリ（PDFium 159.0.8138.0）とライセンスが同梱されます。AppDir では `Iris.AppDir/usr/lib/iris/libpdfium.so`、`.deb` では `/usr/lib/iris/libpdfium.so` に配置され、Iris は実行ファイルの隣、インストール先の `lib/iris`、作業ディレクトリ、システムのライブラリパスの順に探します。
 
 ### Windows
 
