@@ -6,7 +6,7 @@ use crate::chunked::{
 };
 use crate::error_handler::RetryPolicy;
 use crate::method_selector::recommended_workers_for_backend;
-use crate::verify::{should_escalate_to_strong, verify_light, verify_strong, VerifyResult};
+use crate::verify::verify_copy;
 use iris_core_domain::backend_adapter::BackendAdapter;
 use iris_core_domain::types::error::BackendError;
 use iris_core_domain::types::metadata::MetadataResult;
@@ -25,7 +25,7 @@ use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info_span, Instrument};
+use tracing::{debug, info_span, warn, Instrument};
 
 type PauseFuture = Pin<Box<dyn Future<Output = Result<(), watch::error::RecvError>> + Send>>;
 
@@ -289,18 +289,63 @@ pub async fn client_relay_copy_with_options(
     progress_tx: &watch::Sender<ProgressInfo>,
     options: CopyRelayOptions<'_>,
 ) -> Result<TransferResult, BackendError> {
+    let src_capabilities = src_backend.capabilities();
+    // Range reads need the size up front; otherwise the stat only feeds the mtime and is optional.
+    let src_metadata = match src_backend.stat(src).await {
+        Ok(metadata) => Some(metadata),
+        Err(error) if src_capabilities.can_range_read => return Err(error),
+        Err(_) => None,
+    };
+    let result = relay_copy_data(
+        src_backend,
+        src,
+        dst_backend,
+        dst,
+        progress_tx,
+        options,
+        src_metadata
+            .as_ref()
+            .filter(|_| src_capabilities.can_range_read),
+    )
+    .await?;
+    if let Some(mtime) = src_metadata.and_then(|metadata| metadata.mtime) {
+        preserve_destination_mtime(dst_backend, dst, mtime).await;
+    }
+    Ok(result)
+}
+
+/// The relay wrote a new object, which always carries the time of the write; give it the source's
+/// modification time. Destinations that cannot store one (S3, pCloud) are left as they are, and a
+/// failure only loses the timestamp, never the copied bytes, so it is logged rather than returned.
+async fn preserve_destination_mtime(
+    dst_backend: &dyn BackendAdapter,
+    dst: &ObjectRef,
+    mtime: std::time::SystemTime,
+) {
+    match dst_backend.set_mtime(dst, mtime).await {
+        Ok(()) | Err(BackendError::Unsupported { .. }) => {}
+        Err(error) => warn!(
+            dst_path_hash = %iris_core_domain::observability::path_hash(&dst.display_path),
+            "failed to preserve the source modification time: {error}"
+        ),
+    }
+}
+
+async fn relay_copy_data(
+    src_backend: &dyn BackendAdapter,
+    src: &ObjectRef,
+    dst_backend: &dyn BackendAdapter,
+    dst: &ObjectRef,
+    progress_tx: &watch::Sender<ProgressInfo>,
+    options: CopyRelayOptions<'_>,
+    range_metadata: Option<&MetadataResult>,
+) -> Result<TransferResult, BackendError> {
     let control = options.control.cloned().unwrap_or_default();
     let retry_policy = options.retry_policy.cloned().unwrap_or_default();
     let src_capabilities = src_backend.capabilities();
     let dst_capabilities = dst_backend.capabilities();
-    let range_metadata = if src_capabilities.can_range_read {
-        Some(src_backend.stat(src).await?)
-    } else {
-        None
-    };
-    let range_total_bytes = range_metadata
-        .as_ref()
-        .and_then(|metadata| (!metadata.is_dir).then_some(metadata.size).flatten());
+    let range_total_bytes =
+        range_metadata.and_then(|metadata| (!metadata.is_dir).then_some(metadata.size).flatten());
     if let (Some(context), Some(part_size), Some(total_len)) = (
         options.resumable,
         dst_backend.multipart_part_size(),
@@ -318,7 +363,7 @@ pub async fn client_relay_copy_with_options(
                 dst,
                 total_len,
                 part_size,
-                source_identity: range_metadata.as_ref().and_then(source_resume_identity),
+                source_identity: range_metadata.and_then(source_resume_identity),
                 requested_in_flight: max_in_flight,
                 job_store: Arc::clone(&context.job_store),
                 job_id: context.job_id.clone(),
@@ -360,9 +405,7 @@ pub async fn client_relay_copy_with_options(
                     Arc::clone(&context.job_store),
                     context.job_id.clone(),
                     context.entry_index,
-                    range_metadata
-                        .as_ref()
-                        .and_then(|metadata| metadata.etag.clone()),
+                    range_metadata.and_then(|metadata| metadata.etag.clone()),
                 )
             });
             copy_chunked_with_range_writes(ChunkedRangeWriteRequest {
@@ -399,9 +442,7 @@ pub async fn client_relay_copy_with_options(
                     Arc::clone(&context.job_store),
                     context.job_id.clone(),
                     context.entry_index,
-                    range_metadata
-                        .as_ref()
-                        .and_then(|metadata| metadata.etag.clone()),
+                    range_metadata.and_then(|metadata| metadata.etag.clone()),
                 )
             });
             chunk_recording = recorder
@@ -525,42 +566,24 @@ pub async fn move_via_relay_with_verify_and_control(
     .instrument(copy_span)
     .await?;
 
-    let verify_span = info_span!("transfer.verify_light");
-    let light = async { verify_light(src_backend, src, dst_backend, dst).await }
-        .instrument(verify_span)
-        .await?;
-    let src_backend_id = &src.key.backend_id.0;
-    let dst_backend_id = &dst.key.backend_id.0;
-    let must_strong = should_escalate_to_strong(
-        src_backend_id,
-        dst_backend_id,
-        &light,
-        user_requested_strong_verify,
-        high_risk_path,
-    );
-
-    match light {
-        VerifyResult::Mismatch { reason } => {
-            return Err(BackendError::Internal(Box::new(std::io::Error::other(
-                format!("verify light failed: {}", reason),
-            ))));
-        }
-        VerifyResult::Match => {}
+    let verify_span = info_span!("transfer.verify");
+    let verdict = async {
+        verify_copy(
+            src_backend,
+            src,
+            dst_backend,
+            dst,
+            user_requested_strong_verify,
+            high_risk_path,
+        )
+        .await
     }
-
-    if must_strong {
-        let strong_span = info_span!("transfer.verify_strong");
-        match async { verify_strong(src_backend, src, dst_backend, dst).await }
-            .instrument(strong_span)
-            .await?
-        {
-            VerifyResult::Match => {}
-            VerifyResult::Mismatch { reason } => {
-                return Err(BackendError::Internal(Box::new(std::io::Error::other(
-                    format!("verify strong failed: {}", reason),
-                ))));
-            }
-        }
+    .instrument(verify_span)
+    .await?;
+    if let Err(reason) = verdict {
+        return Err(BackendError::Internal(Box::new(std::io::Error::other(
+            reason,
+        ))));
     }
 
     delete_source_after_verify(src_backend, src).await?;
@@ -619,13 +642,11 @@ mod tests {
         let src_backend = LocalFsAdapter::new(
             src_root.path().to_path_buf(),
             BackendId("local-src".to_string()),
-        )
-        .expect("create src localfs backend");
+        );
         let dst_backend = LocalFsAdapter::new(
             dst_root.path().to_path_buf(),
             BackendId("local-dst".to_string()),
-        )
-        .expect("create dst localfs backend");
+        );
 
         let src_ref = make_ref("local-src", "from.txt");
         let dst_ref = make_ref("local-dst", "to.txt");
@@ -647,6 +668,108 @@ mod tests {
             .await
             .expect("read copied file");
         assert_eq!(copied, b"relay-copy-regression");
+    }
+
+    fn set_file_mtime(path: &std::path::Path, mtime: std::time::SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open for times")
+            .set_modified(mtime)
+            .expect("set mtime");
+    }
+
+    fn file_mtime(path: &std::path::Path) -> std::time::SystemTime {
+        std::fs::metadata(path)
+            .expect("metadata")
+            .modified()
+            .expect("mtime")
+    }
+
+    #[tokio::test]
+    async fn client_relay_copy_gives_new_destination_the_source_mtime() {
+        let src_root = tempdir().expect("create src tempdir");
+        let dst_root = tempdir().expect("create dst tempdir");
+        let src_file = src_root.path().join("photo.jpg");
+        fs::write(&src_file, b"jpeg bytes")
+            .await
+            .expect("write source");
+        let source_mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
+        set_file_mtime(&src_file, source_mtime);
+
+        let src_backend =
+            LocalFsAdapter::new(src_root.path().to_path_buf(), BackendId("local-src".into()));
+        let dst_backend =
+            LocalFsAdapter::new(dst_root.path().to_path_buf(), BackendId("local-dst".into()));
+        let (tx, _rx) = watch::channel(ProgressInfo {
+            bytes_completed: 0,
+            bytes_total: None,
+            files_completed: 0,
+            files_total: None,
+        });
+
+        client_relay_copy(
+            &src_backend,
+            &make_ref("local-src", "photo.jpg"),
+            &dst_backend,
+            &make_ref("local-dst", "photo.jpg"),
+            &tx,
+        )
+        .await
+        .expect("relay copy");
+
+        assert_eq!(file_mtime(&dst_root.path().join("photo.jpg")), source_mtime);
+        assert_eq!(
+            file_mtime(&src_file),
+            source_mtime,
+            "source is never touched"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_move_between_file_systems_verifies_and_deletes_source() {
+        // Cross-device moves used to fail VerifyLight: the copy carried the write time.
+        let src_root = tempdir().expect("create src tempdir");
+        let dst_root = tempdir().expect("create dst tempdir");
+        let src_file = src_root.path().join("clip.mov");
+        fs::write(&src_file, vec![7u8; 4096])
+            .await
+            .expect("write source");
+        let source_mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_400_000_000);
+        set_file_mtime(&src_file, source_mtime);
+
+        let src_backend =
+            LocalFsAdapter::new(src_root.path().to_path_buf(), BackendId("local-src".into()));
+        let dst_backend =
+            LocalFsAdapter::new(dst_root.path().to_path_buf(), BackendId("local-dst".into()));
+        let (tx, _rx) = watch::channel(ProgressInfo {
+            bytes_completed: 0,
+            bytes_total: None,
+            files_completed: 0,
+            files_total: None,
+        });
+
+        move_via_relay_with_verify_and_control(
+            &src_backend,
+            &make_ref("local-src", "clip.mov"),
+            &dst_backend,
+            &make_ref("local-dst", "clip.mov"),
+            &tx,
+            MoveRelayOptions {
+                high_risk_path: true,
+                ..MoveRelayOptions::default()
+            },
+        )
+        .await
+        .expect("relay move");
+
+        let dst_file = dst_root.path().join("clip.mov");
+        assert_eq!(
+            fs::read(&dst_file).await.expect("read dst"),
+            vec![7u8; 4096]
+        );
+        assert_eq!(file_mtime(&dst_file), source_mtime);
+        assert!(!src_file.exists(), "source is deleted after verification");
     }
 
     type MockMultipartUploads = Arc<Mutex<HashMap<String, (String, HashMap<i32, Vec<u8>>)>>>;

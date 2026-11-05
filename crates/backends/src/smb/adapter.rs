@@ -774,6 +774,30 @@ impl BackendAdapter for SmbAdapter {
         Ok(self.next_ticket(OperationKind::Copy))
     }
 
+    async fn set_mtime(
+        &self,
+        object: &ObjectRef,
+        mtime: std::time::SystemTime,
+    ) -> Result<(), BackendError> {
+        let native = self.native_session().await?;
+        let path = smb_relative_path(&object.display_path)?;
+        let result = set_file_basic_info_actor(
+            &native.actor,
+            path,
+            Smb2FileBasicInformation {
+                // Zero leaves a time unchanged; only the write time is set.
+                creation_time: 0,
+                last_access_time: 0,
+                last_write_time: system_time_to_filetime(mtime)?,
+                change_time: 0,
+                file_attributes: Smb2FileAttributes(0),
+            },
+        )
+        .await
+        .map_err(|error| smb_network_error("set modification time", error));
+        self.finish_mutation(&native, result).await
+    }
+
     async fn mkdir(&self, parent: &ObjectRef, name: &str) -> Result<ObjectRef, BackendError> {
         let native = self.native_session().await?;
         let display_path = child_display_path(&parent.display_path, name);

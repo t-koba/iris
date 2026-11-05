@@ -263,8 +263,20 @@ impl AppRuntime {
                 });
             }
 
-            self.ensure_directory_exists(&dst_resolved, destination)
+            let created = self
+                .create_directory_if_missing(&dst_resolved, destination)
                 .await?;
+            // Only a directory this copy created takes the source's time; merging into an
+            // existing directory leaves that directory's metadata to the file system.
+            let source_mtime = match (created, self.source_object_ref(source, &src_resolved)) {
+                (true, Ok(src_ref)) => src_resolved
+                    .adapter
+                    .stat(&src_ref)
+                    .await
+                    .ok()
+                    .and_then(|metadata| metadata.mtime),
+                _ => None,
+            };
 
             let mut total_bytes = 0u64;
             for child in self.list_directory_children(source, &src_resolved).await? {
@@ -284,6 +296,12 @@ impl AppRuntime {
                 total_bytes += outcome.bytes_completed;
             }
 
+            // Creating the directory and its children stamped it with the current time.
+            if let Some(mtime) = source_mtime {
+                self.preserve_directory_mtime(destination, &dst_resolved, mtime)
+                    .await;
+            }
+
             if is_move {
                 let dst_ref = self.object_ref_for_path(destination, &dst_resolved)?;
                 if src_resolved.kind == VolumeKind::Local
@@ -291,7 +309,7 @@ impl AppRuntime {
                     && !self.is_virtual_display_path(&source.display_path)
                     && !self.is_virtual_display_path(destination.to_string_lossy().as_ref())
                 {
-                    verify_directory_mirror(src_path, destination, high_risk_path)?;
+                    verify_directory_mirror(src_path, destination, high_risk_path).await?;
                 } else {
                     self.verify_directory_copy(
                         source,
@@ -420,13 +438,6 @@ impl AppRuntime {
                     });
                 }
                 MoveMethod::ClientRelayThenDelete => {
-                    let src_mtime = src_resolved
-                        .adapter
-                        .stat(&src_ref)
-                        .await
-                        .ok()
-                        .and_then(|meta| meta.mtime);
-
                     let result = move_via_relay_with_verify_and_control(
                         src_resolved.adapter.as_ref(),
                         &src_ref,
@@ -443,12 +454,6 @@ impl AppRuntime {
                     )
                     .await
                     .map_err(|error| error.to_string())?;
-
-                    if let Some(mtime) = src_mtime {
-                        if can_restore_mtime(dst_resolved.kind) {
-                            let _ = iris_backends::common::set_mtime(dst, mtime);
-                        }
-                    }
 
                     self.reconcile_cache_after_move(src, &src_resolved, dst, &dst_resolved)
                         .await;
@@ -497,13 +502,6 @@ impl AppRuntime {
                 })
             }
             CopyMethod::ClientRelayCopy => {
-                let src_mtime = src_resolved
-                    .adapter
-                    .stat(&src_ref)
-                    .await
-                    .ok()
-                    .and_then(|meta| meta.mtime);
-
                 let result = client_relay_copy_with_options(
                     src_resolved.adapter.as_ref(),
                     &src_ref,
@@ -519,12 +517,6 @@ impl AppRuntime {
                 .await
                 .map_err(|error| error.to_string())?;
 
-                if let Some(mtime) = src_mtime {
-                    if can_restore_mtime(dst_resolved.kind) {
-                        let _ = iris_backends::common::set_mtime(dst, mtime);
-                    }
-                }
-
                 record_transfer_sample(
                     &src_resolved,
                     &dst_resolved,
@@ -533,6 +525,24 @@ impl AppRuntime {
                 );
                 Ok(result)
             }
+        }
+    }
+
+    async fn preserve_directory_mtime(
+        &self,
+        destination: &Path,
+        dst_resolved: &ResolvedBackend,
+        mtime: SystemTime,
+    ) {
+        let Ok(dst_ref) = self.object_ref_for_path(destination, dst_resolved) else {
+            return;
+        };
+        match dst_resolved.adapter.set_mtime(&dst_ref, mtime).await {
+            Ok(()) | Err(BackendError::Unsupported { .. }) => {}
+            Err(error) => tracing::warn!(
+                path_hash = %iris_core_domain::observability::path_hash(&dst_ref.display_path),
+                "failed to preserve the source directory modification time: {error}"
+            ),
         }
     }
 

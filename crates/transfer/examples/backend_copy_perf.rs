@@ -322,9 +322,10 @@ fn make_backend(
 ) -> Result<Box<dyn BackendAdapter>, String> {
     let backend_id = BackendId(id.to_string());
     match kind {
-        BackendKind::Local => LocalFsAdapter::new(root.to_path_buf(), backend_id)
-            .map(|adapter| Box::new(adapter) as Box<dyn BackendAdapter>)
-            .map_err(|error| format!("failed to create LocalFS adapter: {error:?}")),
+        BackendKind::Local => Ok(Box::new(LocalFsAdapter::new(
+            root.to_path_buf(),
+            backend_id,
+        ))),
         BackendKind::Smb => Ok(Box::new(SmbAdapter::new(
             SmbConnectionConfig {
                 server: smb_server.unwrap_or_default().to_string(),

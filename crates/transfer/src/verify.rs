@@ -11,10 +11,22 @@ const VERIFY_HASH_BUFFER_SIZE: usize = 1024 * 1024;
 #[derive(Debug)]
 pub enum VerifyResult {
     Match,
-    Mismatch { reason: String },
+    /// The copies definitely differ (for example, their sizes).
+    Mismatch {
+        reason: String,
+    },
+    /// Metadata differs in a way that does not prove the content differs: many destinations
+    /// cannot keep the source mtime (S3 `LastModified` is the upload time, FAT keeps 2 s) and
+    /// ETags are backend-specific (multipart uploads change them). Only a content hash decides.
+    Inconclusive {
+        reason: String,
+    },
 }
 
-/// VerifyLight: compares size, mtime and ETag.
+/// VerifyLight: compares size, then mtime and ETag.
+///
+/// A size difference is a [`VerifyResult::Mismatch`]; mtime or ETag differences are
+/// [`VerifyResult::Inconclusive`] and must be settled by [`verify_strong`].
 pub async fn verify_light(
     src_backend: &dyn BackendAdapter,
     src: &ObjectRef,
@@ -35,7 +47,7 @@ pub async fn verify_light(
     // Only when both sides have an mtime.
     if let (Some(src_mtime), Some(dst_mtime)) = (src_meta.mtime, dst_meta.mtime) {
         if src_mtime != dst_mtime {
-            return Ok(VerifyResult::Mismatch {
+            return Ok(VerifyResult::Inconclusive {
                 reason: format!("mtime mismatch: src={:?}, dst={:?}", src_mtime, dst_mtime),
             });
         }
@@ -44,7 +56,7 @@ pub async fn verify_light(
     // Only when both sides have an ETag.
     if let (Some(ref src_etag), Some(ref dst_etag)) = (&src_meta.etag, &dst_meta.etag) {
         if src_etag != dst_etag {
-            return Ok(VerifyResult::Mismatch {
+            return Ok(VerifyResult::Inconclusive {
                 reason: format!("etag mismatch: src={}, dst={}", src_etag, dst_etag),
             });
         }
@@ -91,7 +103,7 @@ pub fn should_escalate_to_strong(
         return true;
     }
 
-    if matches!(light_result, VerifyResult::Mismatch { .. }) {
+    if !matches!(light_result, VerifyResult::Match) {
         return true;
     }
 
@@ -100,6 +112,45 @@ pub fn should_escalate_to_strong(
     }
 
     false
+}
+
+/// Runs VerifyLight and, when required or when it is inconclusive, VerifyStrong.
+///
+/// Returns `Ok(Err(reason))` when the copies differ, so callers keep the source.
+pub async fn verify_copy(
+    src_backend: &dyn BackendAdapter,
+    src: &ObjectRef,
+    dst_backend: &dyn BackendAdapter,
+    dst: &ObjectRef,
+    user_requested_strong: bool,
+    high_risk_path: bool,
+) -> Result<Result<(), String>, BackendError> {
+    let light = verify_light(src_backend, src, dst_backend, dst).await?;
+    let must_strong = should_escalate_to_strong(
+        &src.key.backend_id.0,
+        &dst.key.backend_id.0,
+        &light,
+        user_requested_strong,
+        high_risk_path,
+    );
+    match light {
+        VerifyResult::Mismatch { reason } => {
+            return Ok(Err(format!("verify light failed: {reason}")));
+        }
+        VerifyResult::Inconclusive { reason } => {
+            debug!("VerifyLight inconclusive ({reason}); escalating to VerifyStrong");
+        }
+        VerifyResult::Match => {}
+    }
+    if must_strong {
+        match verify_strong(src_backend, src, dst_backend, dst).await? {
+            VerifyResult::Match => {}
+            VerifyResult::Mismatch { reason } | VerifyResult::Inconclusive { reason } => {
+                return Ok(Err(format!("verify strong failed: {reason}")));
+            }
+        }
+    }
+    Ok(Ok(()))
 }
 
 async fn compute_hash(
@@ -297,6 +348,74 @@ mod tests {
         }
     }
 
+    fn metadata(size: u64, mtime: SystemTime, etag: &str) -> MetadataResult {
+        MetadataResult {
+            level: MetadataLevel::L1,
+            is_dir: false,
+            size: Some(size),
+            mtime: Some(mtime),
+            ctime: None,
+            content_type: None,
+            etag: Some(etag.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_light_reports_size_difference_as_mismatch() {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let src_backend = MetadataOnlyBackend {
+            metadata: metadata(123, base, "etag"),
+        };
+        let dst_backend = MetadataOnlyBackend {
+            metadata: metadata(124, base, "etag"),
+        };
+
+        let result = verify_light(&src_backend, &object_ref(), &dst_backend, &object_ref())
+            .await
+            .expect("verify_light should succeed");
+        assert!(matches!(result, VerifyResult::Mismatch { reason } if reason.contains("size")));
+    }
+
+    #[tokio::test]
+    async fn verify_light_etag_difference_is_inconclusive() {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let src_backend = MetadataOnlyBackend {
+            metadata: metadata(123, base, "single-part"),
+        };
+        let dst_backend = MetadataOnlyBackend {
+            metadata: metadata(123, base, "multipart-2"),
+        };
+
+        let result = verify_light(&src_backend, &object_ref(), &dst_backend, &object_ref())
+            .await
+            .expect("verify_light should succeed");
+        assert!(matches!(result, VerifyResult::Inconclusive { reason } if reason.contains("etag")));
+    }
+
+    #[tokio::test]
+    async fn verify_copy_settles_metadata_differences_by_content_hash() {
+        // Destinations such as S3 report the upload time instead of the source mtime.
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let src_backend = MetadataOnlyBackend {
+            metadata: metadata(0, base, "etag"),
+        };
+        let dst_backend = MetadataOnlyBackend {
+            metadata: metadata(0, base + Duration::from_secs(3600), "etag"),
+        };
+
+        let verdict = verify_copy(
+            &src_backend,
+            &object_ref(),
+            &dst_backend,
+            &object_ref(),
+            false,
+            false,
+        )
+        .await
+        .expect("verify should run");
+        assert_eq!(verdict, Ok(()));
+    }
+
     #[tokio::test]
     async fn verify_light_detects_mtime_mismatch() {
         let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -326,7 +445,9 @@ mod tests {
         let result = verify_light(&src_backend, &object_ref(), &dst_backend, &object_ref())
             .await
             .expect("verify_light should succeed");
-        assert!(matches!(result, VerifyResult::Mismatch { reason } if reason.contains("mtime")));
+        assert!(
+            matches!(result, VerifyResult::Inconclusive { reason } if reason.contains("mtime"))
+        );
     }
 
     #[test]

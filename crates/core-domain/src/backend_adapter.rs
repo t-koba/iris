@@ -169,6 +169,22 @@ pub trait BackendAdapter: Send + Sync {
 
     async fn mkdir(&self, parent: &ObjectRef, name: &str) -> Result<ObjectRef, BackendError>;
 
+    /// Gives an object that a copy just created the source's modification time.
+    ///
+    /// Creating a file or directory always stamps the current time, so copies call this for that
+    /// one value and leave every other piece of metadata alone. Implementations skip the update
+    /// when the object already has `mtime`. Backends that cannot store a modification time (S3
+    /// `LastModified` is the upload time) keep this default.
+    async fn set_mtime(
+        &self,
+        _object: &ObjectRef,
+        _mtime: std::time::SystemTime,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported {
+            operation: "set_mtime",
+        })
+    }
+
     async fn copy(
         &self,
         src: &ObjectRef,

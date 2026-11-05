@@ -44,14 +44,6 @@ pub fn open_file_for_read(path: &Path, sequential: bool) -> Result<fs::File, Bac
     Ok(fs::File::from_std(std_file))
 }
 
-pub async fn write_stream_to_file(
-    final_dst: &Path,
-    reader: Pin<Box<dyn AsyncRead + Send>>,
-    content_length: Option<u64>,
-) -> Result<(), BackendError> {
-    write_stream_to_file_with_mtime(final_dst, reader, content_length, None).await
-}
-
 pub async fn write_range_to_file(
     final_dst: &Path,
     reader: Pin<Box<dyn AsyncRead + Send>>,
@@ -114,11 +106,10 @@ pub async fn write_range_to_file(
     Ok(())
 }
 
-pub async fn write_stream_to_file_with_mtime(
+pub async fn write_stream_to_file(
     final_dst: &Path,
     reader: Pin<Box<dyn AsyncRead + Send>>,
     content_length: Option<u64>,
-    source_mtime: Option<std::time::SystemTime>,
 ) -> Result<(), BackendError> {
     // 1 MB buffers instead of the 8 KB default speed up both reads and writes.
     const IO_BUFFER_SIZE: usize = 1024 * 1024;
@@ -159,22 +150,6 @@ pub async fn write_stream_to_file_with_mtime(
         }
     }
 
-    // Preserve the source mtime.
-    if let Some(mtime) = source_mtime {
-        set_mtime(final_dst, mtime)?;
-    }
-
-    Ok(())
-}
-
-pub fn set_mtime(path: &Path, mtime: std::time::SystemTime) -> Result<(), BackendError> {
-    let file = std::fs::File::options()
-        .write(true)
-        .open(path)
-        .map_err(|e| BackendError::Internal(Box::new(e)))?;
-    let times = std::fs::FileTimes::new().set_modified(mtime);
-    file.set_times(times)
-        .map_err(|e| BackendError::Internal(Box::new(e)))?;
     Ok(())
 }
 
@@ -315,7 +290,7 @@ mod tests {
         let reader: Pin<Box<dyn AsyncRead + Send>> =
             Box::pin(std::io::Cursor::new(payload.clone()));
 
-        write_stream_to_file_with_mtime(&dst, reader, Some(1000), None)
+        write_stream_to_file(&dst, reader, Some(1000))
             .await
             .expect("write should succeed");
 
@@ -340,7 +315,7 @@ mod tests {
         let reader: Pin<Box<dyn AsyncRead + Send>> =
             Box::pin(std::io::Cursor::new(payload.clone()));
 
-        write_stream_to_file_with_mtime(&dst, reader, Some(len), None)
+        write_stream_to_file(&dst, reader, Some(len))
             .await
             .expect("write should succeed");
 
@@ -358,7 +333,7 @@ mod tests {
         let reader: Pin<Box<dyn AsyncRead + Send>> =
             Box::pin(std::io::Cursor::new(payload.clone()));
 
-        write_stream_to_file_with_mtime(&dst, reader, None, None)
+        write_stream_to_file(&dst, reader, None)
             .await
             .expect("write should succeed");
 
@@ -378,7 +353,7 @@ mod tests {
         let reader: Pin<Box<dyn AsyncRead + Send>> =
             Box::pin(std::io::Cursor::new(payload.clone()));
 
-        write_stream_to_file_with_mtime(&dst, reader, Some(len), None)
+        write_stream_to_file(&dst, reader, Some(len))
             .await
             .expect("overwrite should succeed");
 

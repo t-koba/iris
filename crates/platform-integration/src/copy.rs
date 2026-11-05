@@ -1,3 +1,4 @@
+use crate::file_times::{preserve_modified_time, preserve_modified_time_of};
 use std::path::Path;
 
 /// macOS copyfile and Windows CopyFileEx run without a progress callback here, so larger files
@@ -72,9 +73,10 @@ fn platform_copy_blocking(src: &Path, dst: &Path) -> Result<u64, PlatformCopyErr
         std::fs::create_dir_all(parent)?;
     }
 
+    // macOS copyfile/clonefile keep the source mtime; Linux and Windows stamp the copy time.
     let copied = std::fs::copy(src, dst)?;
     if let Ok(mtime) = metadata.modified() {
-        set_mtime(dst, mtime)?;
+        preserve_modified_time(dst, mtime)?;
     }
     Ok(copied)
 }
@@ -94,16 +96,11 @@ fn stream_file_copy_blocking(src: &Path, dst: &Path) -> Result<u64, PlatformCopy
     let mut src_file = std::fs::File::open(src)?;
     let mut dst_file = std::fs::File::create(dst)?;
     let copied = std::io::copy(&mut src_file, &mut dst_file)?;
+    // The new file got the current time; set the source's on the same handle before closing.
     if let Ok(mtime) = metadata.modified() {
-        set_mtime(dst, mtime)?;
+        preserve_modified_time_of(&dst_file, mtime)?;
     }
     Ok(copied)
-}
-
-fn set_mtime(path: &Path, mtime: std::time::SystemTime) -> Result<(), std::io::Error> {
-    let file = std::fs::File::options().write(true).open(path)?;
-    let times = std::fs::FileTimes::new().set_modified(mtime);
-    file.set_times(times)
 }
 
 #[cfg(test)]
@@ -118,7 +115,7 @@ mod tests {
         std::fs::write(&src, b"hello").expect("write src");
 
         let old_mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(12345);
-        set_mtime(&src, old_mtime).expect("set mtime");
+        preserve_modified_time(&src, old_mtime).expect("set mtime");
 
         let copied = platform_copy(&src, &dst).await.expect("platform copy");
         assert_eq!(copied, 5);
@@ -153,7 +150,7 @@ mod tests {
         std::fs::write(&src, &bytes).expect("write src");
 
         let old_mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(54321);
-        set_mtime(&src, old_mtime).expect("set mtime");
+        preserve_modified_time(&src, old_mtime).expect("set mtime");
 
         let copied = stream_file_copy(&src, &dst).await.expect("stream copy");
         assert_eq!(copied, bytes.len() as u64);

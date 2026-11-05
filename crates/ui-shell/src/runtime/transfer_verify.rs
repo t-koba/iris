@@ -1,19 +1,21 @@
 use super::*;
 
 impl AppRuntime {
-    pub(super) async fn ensure_directory_exists(
+    /// Creates the destination directory of a copy unless it exists; returns whether it was
+    /// created (only then does the copy own its metadata).
+    pub(super) async fn create_directory_if_missing(
         &self,
         resolved: &ResolvedBackend,
         path: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         if self.path_exists(path).await? {
-            return Ok(());
+            return Ok(false);
         }
 
         if resolved.kind == VolumeKind::Local
             && !self.is_virtual_display_path(path.to_string_lossy().as_ref())
         {
-            return ensure_directory_exists(resolved, path).await;
+            return create_local_directory_if_missing(resolved, path).await;
         }
 
         let parent = path
@@ -34,7 +36,7 @@ impl AppRuntime {
             &created.display_path,
             &created.key.stable_id,
         );
-        Ok(())
+        Ok(true)
     }
 
     pub(super) async fn verify_directory_copy(
@@ -99,7 +101,7 @@ impl AppRuntime {
     }
 }
 
-/// Runs VerifyLight and escalates to VerifyStrong when required.
+/// Runs VerifyLight and escalates to VerifyStrong when required or inconclusive.
 pub(super) async fn verify_object_copy(
     src_backend: &dyn BackendAdapter,
     src: &ObjectRef,
@@ -107,32 +109,7 @@ pub(super) async fn verify_object_copy(
     dst: &ObjectRef,
     high_risk_path: bool,
 ) -> Result<(), String> {
-    let light = iris_transfer::verify::verify_light(src_backend, src, dst_backend, dst)
+    iris_transfer::verify::verify_copy(src_backend, src, dst_backend, dst, false, high_risk_path)
         .await
-        .map_err(|error| error.to_string())?;
-    let must_strong = iris_transfer::verify::should_escalate_to_strong(
-        &src.key.backend_id.0,
-        &dst.key.backend_id.0,
-        &light,
-        false,
-        high_risk_path,
-    );
-    match light {
-        iris_transfer::verify::VerifyResult::Match => {}
-        iris_transfer::verify::VerifyResult::Mismatch { reason } => {
-            return Err(format!("verify light failed: {}", reason));
-        }
-    }
-    if must_strong {
-        match iris_transfer::verify::verify_strong(src_backend, src, dst_backend, dst)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            iris_transfer::verify::VerifyResult::Match => {}
-            iris_transfer::verify::VerifyResult::Mismatch { reason } => {
-                return Err(format!("verify strong failed: {}", reason));
-            }
-        }
-    }
-    Ok(())
+        .map_err(|error| error.to_string())?
 }

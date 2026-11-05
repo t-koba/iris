@@ -173,7 +173,7 @@ pub async fn set_file_basic_info_actor(
 ) -> Result<(), SmbConnectionError> {
     set_file_info_by_path_actor(
         connection,
-        open_file_for_write_attributes_request(path),
+        open_for_write_attributes_request(path),
         Smb2FileInfoClass::FILE_BASIC_INFORMATION,
         smb2_file_basic_information(info),
     )
@@ -202,7 +202,7 @@ fn open_file_for_read_request(path: impl Into<String>) -> Smb2CreateRequest {
     }
 }
 
-fn open_file_for_write_attributes_request(path: impl Into<String>) -> Smb2CreateRequest {
+fn open_for_write_attributes_request(path: impl Into<String>) -> Smb2CreateRequest {
     Smb2CreateRequest {
         security_flags: 0,
         requested_oplock_level: Smb2OplockLevel::None,
@@ -216,7 +216,8 @@ fn open_file_for_write_attributes_request(path: impl Into<String>) -> Smb2Create
             Smb2ShareAccess::READ.0 | Smb2ShareAccess::WRITE.0 | Smb2ShareAccess::DELETE.0,
         ),
         create_disposition: Smb2CreateDisposition::Open,
-        create_options: Smb2CreateOptions::NON_DIRECTORY_FILE,
+        // Neither DIRECTORY_FILE nor NON_DIRECTORY_FILE: times are set on files and directories.
+        create_options: Smb2CreateOptions(0),
         name: path.into(),
         create_contexts: Vec::new(),
     }
@@ -707,9 +708,12 @@ mod tests {
             assert!(create
                 .desired_access
                 .contains(Smb2DesiredAccess::FILE_WRITE_ATTRIBUTES));
-            assert!(create
+            assert!(!create
                 .create_options
                 .contains(Smb2CreateOptions::NON_DIRECTORY_FILE));
+            assert!(!create
+                .create_options
+                .contains(Smb2CreateOptions::DIRECTORY_FILE));
             let set_info =
                 Smb2SetInfoRequest::decode(&request[set_offset + SMB2_HEADER_BYTES..close_offset])
                     .expect("set info");

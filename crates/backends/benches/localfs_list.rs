@@ -65,8 +65,7 @@ fn bench_localfs_list(c: &mut Criterion) {
             .materialize(temp_dir.path())
             .expect("materialize synthetic tree");
         let backend_id = BackendId(format!("bench-localfs-{entries}"));
-        let adapter = LocalFsAdapter::new(tree.root().to_path_buf(), backend_id.clone())
-            .expect("localfs adapter");
+        let adapter = LocalFsAdapter::new(tree.root().to_path_buf(), backend_id.clone());
         let root = root_ref(&backend_id);
         let listed = runtime.block_on(list_all_pages(&adapter, &root));
         assert!(

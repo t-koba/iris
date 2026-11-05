@@ -2,7 +2,7 @@ use crate::common::{
     generate_conflict_name, open_file_for_read, write_range_to_file, write_stream_to_file,
 };
 use crate::localfs::capabilities::localfs_capabilities;
-use crate::localfs::reflink::{detect_reflink_support, try_reflink_copy};
+use crate::localfs::reflink::{platform_may_support_reflink, try_reflink_copy};
 use crate::localfs::stable_id::get_stable_id;
 use async_trait::async_trait;
 use iris_core_domain::backend_adapter::BackendAdapter;
@@ -110,22 +110,15 @@ impl LocalListCursorRegistry {
 }
 
 impl LocalFsAdapter {
-    pub fn new(root: PathBuf, backend_id: BackendId) -> Result<Self, BackendError> {
-        let can_clone = detect_reflink_support(&root).map_err(|e| {
-            BackendError::Internal(Box::new(std::io::Error::other(format!(
-                "failed to detect reflink support for '{}': {}",
-                root.display(),
-                e
-            ))))
-        })?;
-        Ok(Self {
+    pub fn new(root: PathBuf, backend_id: BackendId) -> Self {
+        Self {
             root,
             backend_id,
-            can_clone,
+            can_clone: platform_may_support_reflink(),
             network_mount: false,
             ticket_counter: AtomicU64::new(1),
             list_cursors: Mutex::new(LocalListCursorRegistry::default()),
-        })
+        }
     }
 
     pub fn nfs_mount(root: PathBuf, backend_id: BackendId) -> Self {
@@ -525,6 +518,21 @@ impl BackendAdapter for LocalFsAdapter {
         self.make_object_ref(&new_dir, Some(parent.key.stable_id.clone()))
     }
 
+    async fn set_mtime(
+        &self,
+        object: &ObjectRef,
+        mtime: std::time::SystemTime,
+    ) -> Result<(), BackendError> {
+        let path = self.resolve(object)?;
+        tokio::task::spawn_blocking(move || {
+            iris_platform_integration::file_times::preserve_modified_time(&path, mtime)
+        })
+        .await
+        .map_err(|e| BackendError::Internal(Box::new(e)))?
+        .map(|_| ())
+        .map_err(|e| BackendError::Internal(Box::new(e)))
+    }
+
     async fn copy(
         &self,
         src: &ObjectRef,
@@ -543,11 +551,14 @@ impl BackendAdapter for LocalFsAdapter {
         let final_dst = handle_conflict(&dst_path, &options.on_conflict)?;
 
         if self.can_clone {
-            match try_reflink_copy(&src_path, &final_dst) {
-                Ok(true) => return Ok(self.next_ticket(OperationKind::Copy)),
-                Ok(false) => {}
-                Err(e) if is_reflink_fallback_error(&e) => {}
-                Err(e) => return Err(BackendError::Internal(Box::new(e))),
+            let (clone_src, clone_dst) = (src_path.clone(), final_dst.clone());
+            let cloned =
+                tokio::task::spawn_blocking(move || try_reflink_copy(&clone_src, &clone_dst))
+                    .await
+                    .map_err(|e| BackendError::Internal(Box::new(e)))?
+                    .map_err(|e| BackendError::Internal(Box::new(e)))?;
+            if cloned {
+                return Ok(self.next_ticket(OperationKind::Copy));
             }
         }
 
@@ -685,13 +696,6 @@ impl BackendAdapter for LocalFsAdapter {
     }
 }
 
-fn is_reflink_fallback_error(error: &std::io::Error) -> bool {
-    matches!(
-        error.raw_os_error(),
-        Some(libc_errno::EXDEV | libc_errno::ENOTSUP | libc_errno::EPERM | libc_errno::EROFS)
-    )
-}
-
 fn parse_local_list_cursor(cursor: &ListCursor) -> Result<u64, BackendError> {
     let id = cursor
         .0
@@ -706,22 +710,6 @@ fn invalid_cursor_error(cursor: &str, reason: &str) -> BackendError {
         std::io::ErrorKind::InvalidInput,
         format!("invalid list cursor '{cursor}': {reason}"),
     )))
-}
-
-#[cfg(unix)]
-mod libc_errno {
-    pub const EXDEV: i32 = 18;
-    pub const EPERM: i32 = 1;
-    pub const ENOTSUP: i32 = 95;
-    pub const EROFS: i32 = 30;
-}
-
-#[cfg(windows)]
-mod libc_errno {
-    pub const EXDEV: i32 = 17;
-    pub const EPERM: i32 = 5;
-    pub const ENOTSUP: i32 = 50;
-    pub const EROFS: i32 = 19;
 }
 
 fn handle_conflict(
@@ -776,8 +764,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("temp dir");
         create_flat_files(temp_dir.path(), LOCAL_LIST_PAGE_SIZE + 7).await;
         let backend_id = BackendId("localfs-cursor-test".to_string());
-        let adapter =
-            LocalFsAdapter::new(temp_dir.path().to_path_buf(), backend_id.clone()).unwrap();
+        let adapter = LocalFsAdapter::new(temp_dir.path().to_path_buf(), backend_id.clone());
         let root = root_ref(&backend_id);
 
         let first_page = adapter.list_names(&root, None).await.expect("first page");
@@ -798,8 +785,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("temp dir");
         create_flat_files(temp_dir.path(), LOCAL_LIST_PAGE_SIZE + 1).await;
         let backend_id = BackendId("localfs-cursor-bound-test".to_string());
-        let adapter =
-            LocalFsAdapter::new(temp_dir.path().to_path_buf(), backend_id.clone()).unwrap();
+        let adapter = LocalFsAdapter::new(temp_dir.path().to_path_buf(), backend_id.clone());
         let root = root_ref(&backend_id);
 
         for _ in 0..(MAX_ACTIVE_LIST_CURSORS + 8) {
@@ -822,8 +808,7 @@ mod tests {
             .expect("create symlink");
 
         let backend_id = BackendId("localfs-symlink-kind-test".to_string());
-        let adapter =
-            LocalFsAdapter::new(temp_dir.path().to_path_buf(), backend_id.clone()).unwrap();
+        let adapter = LocalFsAdapter::new(temp_dir.path().to_path_buf(), backend_id.clone());
         let root = root_ref(&backend_id);
 
         let page = adapter.list_names(&root, None).await.expect("list root");

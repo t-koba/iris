@@ -235,9 +235,13 @@ fn user_facing_backend_error(error: BackendError) -> String {
     }
 }
 
-async fn ensure_directory_exists(resolved: &ResolvedBackend, path: &Path) -> Result<(), String> {
+/// Creates a local directory unless it exists; returns whether it was created.
+async fn create_local_directory_if_missing(
+    resolved: &ResolvedBackend,
+    path: &Path,
+) -> Result<bool, String> {
     if tokio::fs::metadata(path).await.is_ok() {
-        return Ok(());
+        return Ok(false);
     }
 
     let parent = path
@@ -265,7 +269,7 @@ async fn ensure_directory_exists(resolved: &ResolvedBackend, path: &Path) -> Res
         .mkdir(&parent_ref, name)
         .await
         .map_err(|error| error.to_string())?;
-    Ok(())
+    Ok(true)
 }
 
 async fn verify_and_delete_move(
@@ -300,10 +304,6 @@ async fn wait_if_paused_or_canceled(control: &TransferControl) -> Result<(), Str
     }
 
     Ok(())
-}
-
-fn can_restore_mtime(kind: VolumeKind) -> bool {
-    matches!(kind, VolumeKind::Local | VolumeKind::Smb | VolumeKind::Nfs)
 }
 
 fn resolve_destination_path(
@@ -434,22 +434,37 @@ fn persisted_task_id(job_id: &JobId, task_index: usize) -> TaskId {
     TaskId(job_id.0.saturating_mul(1_000_000) + task_index as u64 + 1)
 }
 
+/// Bytes of the regular files under `path`, for progress totals. Symlinks are not followed, so a
+/// link back to an ancestor cannot make the walk endless.
 fn path_total_bytes(path: &Path) -> Option<u64> {
-    let metadata = std::fs::metadata(path).ok()?;
-    if metadata.is_file() {
-        return Some(metadata.len());
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_dir() {
+        return Some(if metadata.is_file() {
+            metadata.len()
+        } else {
+            0
+        });
     }
 
     let mut total = 0u64;
     for entry in std::fs::read_dir(path).ok()? {
         let entry = entry.ok()?;
-        total += path_total_bytes(&entry.path())?;
+        total = total.saturating_add(path_total_bytes(&entry.path())?);
     }
     Some(total)
 }
 
-fn verify_directory_mirror(src: &Path, dst: &Path, high_risk_path: bool) -> Result<(), String> {
-    verify_path_mirror(src, dst, high_risk_path)
+/// Checks a local directory copy before its source is deleted; runs on the blocking pool because
+/// it walks both trees and may hash every file.
+async fn verify_directory_mirror(
+    src: &Path,
+    dst: &Path,
+    high_risk_path: bool,
+) -> Result<(), String> {
+    let (src, dst) = (src.to_path_buf(), dst.to_path_buf());
+    tokio::task::spawn_blocking(move || verify_path_mirror(&src, &dst, high_risk_path))
+        .await
+        .map_err(|error| format!("verify task failed: {error}"))?
 }
 
 fn verify_path_mirror(src: &Path, dst: &Path, high_risk_path: bool) -> Result<(), String> {
@@ -473,17 +488,13 @@ fn verify_path_mirror(src: &Path, dst: &Path, high_risk_path: bool) -> Result<()
             ));
         }
 
-        if let (Ok(src_mtime), Ok(dst_mtime)) = (src_meta.modified(), dst_meta.modified()) {
-            if src_mtime != dst_mtime {
-                return Err(format!(
-                    "verify failed: mtime mismatch src={} dst={}",
-                    src.display(),
-                    dst.display()
-                ));
-            }
-        }
-
-        if high_risk_path && hash_path(src)? != hash_path(dst)? {
+        // Equal mtimes are expected because copies carry the source's, but a destination may
+        // round it (FAT keeps 2 s, exFAT 10 ms), so a difference is settled by content.
+        let mtime_differs = match (src_meta.modified(), dst_meta.modified()) {
+            (Ok(src_mtime), Ok(dst_mtime)) => src_mtime != dst_mtime,
+            _ => false,
+        };
+        if (high_risk_path || mtime_differs) && hash_path(src)? != hash_path(dst)? {
             return Err(format!(
                 "verify failed: content mismatch src={} dst={}",
                 src.display(),
@@ -529,25 +540,20 @@ fn read_dir_map(path: &Path) -> Result<HashMap<String, PathBuf>, String> {
     Ok(entries)
 }
 
-fn hash_path(path: &Path) -> Result<String, String> {
+fn hash_path(path: &Path) -> Result<[u8; 32], String> {
     use sha2::{Digest, Sha256};
 
     let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 64 * 1024];
+    let mut buffer = vec![0u8; 1024 * 1024];
     loop {
-        use std::io::Read;
         let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    Ok(hasher.finalize().into())
 }
 
 fn backend_type_from_id(backend_id: &BackendId) -> String {

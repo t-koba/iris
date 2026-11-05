@@ -242,10 +242,10 @@ impl AppRuntime {
             return adapter;
         }
 
-        let adapter = Arc::new(
-            LocalFsAdapter::new(root_path.to_path_buf(), backend_id.clone())
-                .unwrap_or_else(|error| panic!("failed to create local backend: {}", error)),
-        );
+        let adapter = Arc::new(LocalFsAdapter::new(
+            root_path.to_path_buf(),
+            backend_id.clone(),
+        ));
         registry.register(backend_id.clone(), adapter.clone());
         adapter
     }

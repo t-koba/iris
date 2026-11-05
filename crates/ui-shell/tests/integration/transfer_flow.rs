@@ -43,13 +43,11 @@ async fn transfer_control_supports_pause_resume_and_cancel() {
     let src_backend = LocalFsAdapter::new(
         src_root.path().to_path_buf(),
         BackendId("local-src".to_string()),
-    )
-    .expect("create src backend");
+    );
     let dst_backend = LocalFsAdapter::new(
         dst_root.path().to_path_buf(),
         BackendId("local-dst".to_string()),
-    )
-    .expect("create dst backend");
+    );
 
     let src_ref = make_ref("local-src", "from.bin");
     let dst_ref = make_ref("local-dst", "to.bin");

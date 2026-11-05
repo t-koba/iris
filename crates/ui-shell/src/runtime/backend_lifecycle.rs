@@ -5,10 +5,10 @@ impl AppRuntime {
         let event_bus = Arc::new(EventBus::new(1024));
         let mut registry = BackendRegistry::new();
         let local_backend_id = BackendId("local".to_string());
-        let local_adapter = Arc::new(
-            LocalFsAdapter::new(default_local_root(), local_backend_id.clone())
-                .unwrap_or_else(|error| panic!("failed to create local backend: {}", error)),
-        );
+        let local_adapter = Arc::new(LocalFsAdapter::new(
+            default_local_root(),
+            local_backend_id.clone(),
+        ));
         registry.register(local_backend_id, local_adapter);
 
         let job_store_path = runtime_data_dir().join("jobs.sqlite3");
