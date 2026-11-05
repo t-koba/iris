@@ -236,11 +236,11 @@ pub fn bench_copy(c: &mut Criterion, bench_name: &str, backend_name: &str, size_
         can_range_write: false,
         can_provide_progress: true,
         can_verify_by_checksum: true,
-        ..CapabilitySet::none()
+        ..CapabilitySet::default()
     };
     let destination_caps = CapabilitySet {
         can_provide_progress: true,
-        ..CapabilitySet::none()
+        ..CapabilitySet::default()
     };
     let source = MemoryBackend::new(&format!("{backend_name}-src"), source_caps);
     let destination = MemoryBackend::new(&format!("{backend_name}-dst"), destination_caps);

@@ -340,7 +340,7 @@ mod tests {
         }
 
         fn capabilities(&self) -> CapabilitySet {
-            CapabilitySet::none()
+            CapabilitySet::default()
         }
     }
 

@@ -249,15 +249,9 @@ impl BackendAdapter for SlowReadBackend {
     fn capabilities(&self) -> CapabilitySet {
         CapabilitySet {
             can_range_read: true,
-            can_range_write: false,
-            can_direct_thumbnail: false,
-            can_rename: false,
-            can_clone: false,
-            can_server_side_copy: false,
             can_provide_progress: true,
-            can_verify_by_checksum: false,
-            can_trash: false,
             can_etag: true,
+            ..CapabilitySet::default()
         }
     }
 }

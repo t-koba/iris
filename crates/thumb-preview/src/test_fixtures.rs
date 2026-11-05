@@ -254,3 +254,161 @@ pub fn cr3_with_jpeg(jpeg: &[u8], compact: bool) -> Vec<u8> {
     let moov = moov(moov(0).len() as u32);
     [moov, invalid_sample, jpeg.to_vec()].concat()
 }
+
+/// A remote object at `path` on the mock backend.
+pub fn object(path: &str) -> iris_core_domain::types::object::ObjectRef {
+    use iris_core_domain::types::object::{BackendId, ObjectKey, ObjectRef, StableId};
+    ObjectRef {
+        key: ObjectKey {
+            backend_id: BackendId("mock".to_string()),
+            stable_id: StableId(path.to_string()),
+        },
+        parent_stable_id: None,
+        display_path: path.to_string(),
+    }
+}
+
+/// Serves `bytes` as every object, with range reads, and records the range of each read.
+pub struct MemoryBackend {
+    pub bytes: Vec<u8>,
+    pub reads: std::sync::Arc<std::sync::Mutex<Vec<Option<ByteRange>>>>,
+    pub content_type: Option<String>,
+}
+
+use iris_core_domain::backend_adapter::BackendAdapter;
+use iris_core_domain::types::capability::CapabilitySet;
+use iris_core_domain::types::error::BackendError;
+use iris_core_domain::types::list::{ListCursor, ListPage};
+use iris_core_domain::types::metadata::{MetadataLevel, MetadataResult};
+use iris_core_domain::types::object::{ObjectRef, StableId};
+use iris_core_domain::types::operation::OperationTicket;
+use iris_core_domain::types::options::{ConflictResolution, CopyOptions, DeleteMode, MoveOptions};
+use iris_core_domain::types::progress::ByteRange;
+use iris_core_domain::types::read_handle::ReadHandle;
+use iris_core_domain::types::session::BackendSession;
+use std::pin::Pin;
+use tokio::io::AsyncRead;
+
+fn unsupported<T>(operation: &'static str) -> Result<T, BackendError> {
+    Err(BackendError::Unsupported { operation })
+}
+
+#[async_trait::async_trait]
+impl BackendAdapter for MemoryBackend {
+    async fn connect(&self) -> Result<BackendSession, BackendError> {
+        unsupported("connect")
+    }
+
+    async fn list_names(
+        &self,
+        _dir: &ObjectRef,
+        _cursor: Option<ListCursor>,
+    ) -> Result<ListPage, BackendError> {
+        unsupported("list_names")
+    }
+
+    async fn stat(&self, _object: &ObjectRef) -> Result<MetadataResult, BackendError> {
+        Ok(MetadataResult {
+            level: MetadataLevel::L1,
+            is_dir: false,
+            size: Some(self.bytes.len() as u64),
+            mtime: None,
+            ctime: None,
+            content_type: self.content_type.clone(),
+            etag: None,
+        })
+    }
+
+    async fn read(
+        &self,
+        _object: &ObjectRef,
+        range: Option<ByteRange>,
+    ) -> Result<ReadHandle, BackendError> {
+        self.reads.lock().expect("lock reads").push(range.clone());
+        let len = self.bytes.len();
+        let (start, end) = match &range {
+            Some(range) => {
+                let start = (range.offset as usize).min(len);
+                let end = range
+                    .length
+                    .map_or(len, |length| start.saturating_add(length as usize).min(len));
+                (start, end)
+            }
+            None => (0, len),
+        };
+        let data = self.bytes[start..end].to_vec();
+        Ok(ReadHandle {
+            content_length: Some(data.len() as u64),
+            stream: Box::pin(std::io::Cursor::new(data)) as Pin<Box<dyn AsyncRead + Send>>,
+            content_range: range,
+        })
+    }
+
+    async fn write_object(
+        &self,
+        _dst: &ObjectRef,
+        _data: Vec<u8>,
+        _on_conflict: ConflictResolution,
+    ) -> Result<OperationTicket, BackendError> {
+        unsupported("write_object")
+    }
+
+    async fn write_from_reader(
+        &self,
+        _dst: &ObjectRef,
+        _reader: Pin<Box<dyn AsyncRead + Send>>,
+        _content_length: Option<u64>,
+        _on_conflict: ConflictResolution,
+    ) -> Result<OperationTicket, BackendError> {
+        unsupported("write_from_reader")
+    }
+
+    async fn mkdir(&self, _parent: &ObjectRef, _name: &str) -> Result<ObjectRef, BackendError> {
+        unsupported("mkdir")
+    }
+
+    async fn copy(
+        &self,
+        _src: &ObjectRef,
+        _dst: &ObjectRef,
+        _options: CopyOptions,
+    ) -> Result<OperationTicket, BackendError> {
+        unsupported("copy")
+    }
+
+    async fn move_object(
+        &self,
+        _src: &ObjectRef,
+        _dst: &ObjectRef,
+        _options: MoveOptions,
+    ) -> Result<OperationTicket, BackendError> {
+        unsupported("move_object")
+    }
+
+    async fn delete(
+        &self,
+        _object: &ObjectRef,
+        _mode: DeleteMode,
+    ) -> Result<OperationTicket, BackendError> {
+        unsupported("delete")
+    }
+
+    async fn get_metadata(
+        &self,
+        _object: &ObjectRef,
+        _level: MetadataLevel,
+    ) -> Result<MetadataResult, BackendError> {
+        unsupported("get_metadata")
+    }
+
+    async fn get_stable_id(&self, object: &ObjectRef) -> Result<StableId, BackendError> {
+        Ok(object.key.stable_id.clone())
+    }
+
+    fn capabilities(&self) -> CapabilitySet {
+        CapabilitySet {
+            can_range_read: true,
+            ..CapabilitySet::default()
+        }
+    }
+}
