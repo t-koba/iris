@@ -395,19 +395,7 @@ impl BackendAdapter for S3Adapter {
     ) -> Result<MultipartUploadSession, BackendError> {
         let requested_key = self.object_key(dst);
         let key = self.resolve_write_key(requested_key, &on_conflict).await?;
-        let response = self
-            .client()
-            .await?
-            .create_multipart_upload()
-            .bucket(&self.config.bucket)
-            .key(&key)
-            .send()
-            .await
-            .map_err(|error| self.network_error("create_multipart_upload", error))?;
-        let upload_id = response
-            .upload_id()
-            .map(str::to_string)
-            .ok_or_else(|| self.network_error("create_multipart_upload", "missing upload id"))?;
+        let upload_id = self.start_multipart_upload(&key).await?;
 
         Ok(MultipartUploadSession {
             destination: ObjectRef {
@@ -632,16 +620,6 @@ impl BackendAdapter for S3Adapter {
         }
 
         Ok(self.next_ticket(OperationKind::Delete))
-    }
-
-    async fn get_metadata(
-        &self,
-        object: &ObjectRef,
-        level: MetadataLevel,
-    ) -> Result<MetadataResult, BackendError> {
-        let mut result = self.stat(object).await?;
-        result.level = level;
-        Ok(result)
     }
 
     async fn get_stable_id(&self, object: &ObjectRef) -> Result<StableId, BackendError> {

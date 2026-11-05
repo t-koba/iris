@@ -107,14 +107,36 @@ pub(super) fn build_sample_ranges(
     ranges
 }
 
+/// Reads everything after a box header.
+fn read_box_payload(source: &impl BlockingBinaryReader, header: FileBoxHeader) -> Option<Vec<u8>> {
+    source.read_range(
+        header.data_start(),
+        (header.size - header.header_len) as usize,
+    )
+}
+
+/// Reads a full-box payload whose bytes 4..8 hold a big-endian entry count.
+/// Returns the payload and the count; `None` if the box is truncated or empty.
+fn read_counted_table(
+    source: &impl BlockingBinaryReader,
+    header: FileBoxHeader,
+) -> Option<(Vec<u8>, usize)> {
+    let bytes = read_box_payload(source, header)?;
+    if bytes.len() < 8 {
+        return None;
+    }
+    let entry_count = read_u32_be(&bytes[4..8])? as usize;
+    if entry_count == 0 {
+        return None;
+    }
+    Some((bytes, entry_count))
+}
+
 pub(super) fn parse_stsz(
     source: &impl BlockingBinaryReader,
     header: FileBoxHeader,
 ) -> Option<SampleSizeTable> {
-    let bytes = source.read_range(
-        header.data_start(),
-        (header.size - header.header_len) as usize,
-    )?;
+    let bytes = read_box_payload(source, header)?;
     if bytes.len() < 12 {
         return None;
     }
@@ -157,10 +179,7 @@ pub(super) fn parse_stz2(
     source: &impl BlockingBinaryReader,
     header: FileBoxHeader,
 ) -> Option<SampleSizeTable> {
-    let bytes = source.read_range(
-        header.data_start(),
-        (header.size - header.header_len) as usize,
-    )?;
+    let bytes = read_box_payload(source, header)?;
     parse_stz2_bytes(&bytes)
 }
 
@@ -240,17 +259,7 @@ pub(super) fn parse_chunk_offsets(
     header: FileBoxHeader,
     entry_bytes: usize,
 ) -> Option<Vec<u64>> {
-    let bytes = source.read_range(
-        header.data_start(),
-        (header.size - header.header_len) as usize,
-    )?;
-    if bytes.len() < 8 {
-        return None;
-    }
-    let entry_count = read_u32_be(&bytes[4..8])? as usize;
-    if entry_count == 0 {
-        return None;
-    }
+    let (bytes, entry_count) = read_counted_table(source, header)?;
     let required_len = 8usize.checked_add(entry_count.checked_mul(entry_bytes)?)?;
     bytes
         .get(8..required_len)?
@@ -269,17 +278,7 @@ pub(super) fn parse_stsc(
     source: &impl BlockingBinaryReader,
     header: FileBoxHeader,
 ) -> Option<Vec<SampleToChunkEntry>> {
-    let bytes = source.read_range(
-        header.data_start(),
-        (header.size - header.header_len) as usize,
-    )?;
-    if bytes.len() < 8 {
-        return None;
-    }
-    let entry_count = read_u32_be(&bytes[4..8])? as usize;
-    if entry_count == 0 {
-        return None;
-    }
+    let (bytes, entry_count) = read_counted_table(source, header)?;
     let required_len = 8usize.checked_add(entry_count.checked_mul(12)?)?;
     if bytes.len() < required_len {
         return None;

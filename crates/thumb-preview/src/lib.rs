@@ -1,3 +1,6 @@
+//! Thumbnails, previews and metadata for images, RAW files, video and PDF, from local paths or
+//! through range reads on a backend.
+
 pub mod encoded;
 pub mod image_generic;
 pub mod io;

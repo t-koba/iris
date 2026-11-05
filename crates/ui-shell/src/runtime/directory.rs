@@ -150,16 +150,19 @@ impl AppRuntime {
         self.parse_virtual_display_path(path).is_some()
     }
 
+    fn backend_display_name(&self, backend_id: &BackendId) -> String {
+        self.registered_backends
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .find(|backend| backend.backend_id == *backend_id)
+            .map(|backend| backend.display_name.clone())
+            .unwrap_or_else(|| backend_id.0.clone())
+    }
+
     pub fn format_display_path(&self, path: &str) -> String {
         if let Some((backend_id, relative_path)) = self.parse_virtual_display_path(path) {
-            let backend_name = self
-                .registered_backends
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .iter()
-                .find(|backend| backend.backend_id == backend_id)
-                .map(|backend| backend.display_name.clone())
-                .unwrap_or_else(|| backend_id.0);
+            let backend_name = self.backend_display_name(&backend_id);
             if relative_path.is_empty() {
                 backend_name
             } else {
@@ -304,14 +307,7 @@ impl AppRuntime {
 
     pub fn breadcrumbs_for_display_path(&self, path: &str) -> Vec<BreadcrumbSegment> {
         if let Some((backend_id, relative_path)) = self.parse_virtual_display_path(path) {
-            let backend_name = self
-                .registered_backends
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .iter()
-                .find(|backend| backend.backend_id == backend_id)
-                .map(|backend| backend.display_name.clone())
-                .unwrap_or_else(|| backend_id.0.clone());
+            let backend_name = self.backend_display_name(&backend_id);
             let root_path = virtual_root_path(&backend_id).to_string_lossy().to_string();
             let mut segments = vec![BreadcrumbSegment {
                 name: backend_name,

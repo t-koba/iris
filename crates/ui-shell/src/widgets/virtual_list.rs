@@ -41,6 +41,8 @@ impl<'a, Message, Theme, Renderer> VirtualList<'a, Message, Theme, Renderer>
 where
     Renderer: iced::advanced::Renderer,
 {
+    // Test-only: product code always builds the list lazily through `lazy`.
+    #[cfg(test)]
     pub fn new_keyed(
         children: impl IntoIterator<Item = Row<'a, Message, Theme, Renderer>>,
         total_height: f32,
@@ -49,6 +51,7 @@ where
         Self::eager(elements, offsets, keys, total_height)
     }
 
+    #[cfg(test)]
     fn eager(
         children: Vec<Element<'a, Message, Theme, Renderer>>,
         offsets: Vec<f32>,

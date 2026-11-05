@@ -97,12 +97,7 @@ impl S3Adapter {
         Ok(())
     }
 
-    pub(super) async fn upload_multipart_chunks(
-        &self,
-        key: &str,
-        mut chunks: Vec<Vec<u8>>,
-        mut reader: Pin<Box<dyn AsyncRead + Send>>,
-    ) -> Result<(), BackendError> {
+    pub(super) async fn start_multipart_upload(&self, key: &str) -> Result<String, BackendError> {
         let response = self
             .client()
             .await?
@@ -112,10 +107,19 @@ impl S3Adapter {
             .send()
             .await
             .map_err(|error| self.network_error("create_multipart_upload", error))?;
-        let upload_id = response
+        response
             .upload_id()
             .map(str::to_string)
-            .ok_or_else(|| self.network_error("create_multipart_upload", "missing upload id"))?;
+            .ok_or_else(|| self.network_error("create_multipart_upload", "missing upload id"))
+    }
+
+    pub(super) async fn upload_multipart_chunks(
+        &self,
+        key: &str,
+        mut chunks: Vec<Vec<u8>>,
+        mut reader: Pin<Box<dyn AsyncRead + Send>>,
+    ) -> Result<(), BackendError> {
+        let upload_id = self.start_multipart_upload(key).await?;
 
         let result = async {
             let mut parts = Vec::new();

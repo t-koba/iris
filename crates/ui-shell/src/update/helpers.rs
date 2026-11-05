@@ -528,6 +528,16 @@ fn pdf_content_snippet(path: &Path, query: &str) -> Option<String> {
     verify_content_match(&text, query, 18).map(|snippet| snippet.snippet)
 }
 
+async fn send_load_failed(
+    output: &mut iced::futures::channel::mpsc::Sender<Message>,
+    path: String,
+    error: String,
+) {
+    let _ = output
+        .send(DirectoryMessage::LoadFailed { path, error }.into())
+        .await;
+}
+
 async fn build_local_l0_entry_safe(
     entry: tokio::fs::DirEntry,
     name: String,
@@ -621,15 +631,7 @@ pub fn load_directory_progressively(path: String, show_hidden: bool) -> Task<Mes
                             return;
                         }
                         Err(error) => {
-                            let _ = output
-                                .send(
-                                    DirectoryMessage::LoadFailed {
-                                        path: path.clone(),
-                                        error: error.to_string(),
-                                    }
-                                    .into(),
-                                )
-                                .await;
+                            send_load_failed(&mut output, path.clone(), error.to_string()).await;
                             return;
                         }
                     }
@@ -639,15 +641,12 @@ pub fn load_directory_progressively(path: String, show_hidden: bool) -> Task<Mes
                 let mut rd = match tokio::fs::read_dir(&local_path).await {
                     Ok(rd) => rd,
                     Err(error) => {
-                        let _ = output
-                            .send(
-                                DirectoryMessage::LoadFailed {
-                                    path: path.clone(),
-                                    error: format!("{}: {}", local_path.display(), error),
-                                }
-                                .into(),
-                            )
-                            .await;
+                        send_load_failed(
+                            &mut output,
+                            path.clone(),
+                            format!("{}: {}", local_path.display(), error),
+                        )
+                        .await;
                         return;
                     }
                 };
@@ -661,15 +660,7 @@ pub fn load_directory_progressively(path: String, show_hidden: bool) -> Task<Mes
                     let entry = match rd.next_entry().await {
                         Ok(entry) => entry,
                         Err(error) => {
-                            let _ = output
-                                .send(
-                                    DirectoryMessage::LoadFailed {
-                                        path: path.clone(),
-                                        error: error.to_string(),
-                                    }
-                                    .into(),
-                                )
-                                .await;
+                            send_load_failed(&mut output, path.clone(), error.to_string()).await;
                             return;
                         }
                     };

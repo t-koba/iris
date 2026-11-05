@@ -341,6 +341,21 @@ pub fn dismiss_job_decisions(state: &mut AppState, job_id: &JobId) {
     });
 }
 
+/// Cancels a job in the runtime and marks it canceled in the UI state.
+pub fn cancel_job_state(state: &mut AppState, job_id: &JobId) {
+    dismiss_job_decisions(state, job_id);
+    app_runtime().cancel_job(job_id);
+    if let Some(job) = state.jobs.iter_mut().find(|job| job.id == *job_id) {
+        job.state = JobState::Canceled;
+    }
+    if let Some(pending) = &state.pending_operation {
+        if pending.job_id == *job_id {
+            state.pending_operation = None;
+            state.active_dialog = None;
+        }
+    }
+}
+
 fn spawn_apply_one_item(
     job_id: &JobId,
     task_index: usize,

@@ -441,21 +441,11 @@ mod windows_wic {
         ) -> HRESULT,
     }
 
-    // IWICFormatConverter additional method
+    // IWICFormatConverter vtable. `base` must stay the first field: COM vtables place the
+    // parent interface's entries at the start.
     #[repr(C)]
     struct IWICFormatConverterVtbl {
-        // IWICBitmapSource (8 entries)
-        query_interface:
-            unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
-        add_ref: unsafe extern "system" fn(*mut c_void) -> ULONG,
-        release: unsafe extern "system" fn(*mut c_void) -> ULONG,
-        get_size: unsafe extern "system" fn(*mut c_void, *mut UINT, *mut UINT) -> HRESULT,
-        _get_pixel_format: *const c_void,
-        _get_resolution: *const c_void,
-        _copy_palette: *const c_void,
-        copy_pixels:
-            unsafe extern "system" fn(*mut c_void, *const c_void, UINT, UINT, *mut u8) -> HRESULT,
-        // IWICFormatConverter
+        base: IWICBitmapSourceVtbl,
         initialize: unsafe extern "system" fn(
             *mut c_void, // this
             *mut c_void, // source (IWICBitmapSource)
@@ -467,20 +457,10 @@ mod windows_wic {
         ) -> HRESULT,
     }
 
-    // IWICBitmapScaler additional method
+    // IWICBitmapScaler vtable: IWICBitmapSource entries followed by its own method.
     #[repr(C)]
     struct IWICBitmapScalerVtbl {
-        query_interface:
-            unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
-        add_ref: unsafe extern "system" fn(*mut c_void) -> ULONG,
-        release: unsafe extern "system" fn(*mut c_void) -> ULONG,
-        get_size: unsafe extern "system" fn(*mut c_void, *mut UINT, *mut UINT) -> HRESULT,
-        _get_pixel_format: *const c_void,
-        _get_resolution: *const c_void,
-        _copy_palette: *const c_void,
-        copy_pixels:
-            unsafe extern "system" fn(*mut c_void, *const c_void, UINT, UINT, *mut u8) -> HRESULT,
-        // IWICBitmapScaler
+        base: IWICBitmapSourceVtbl,
         initialize: unsafe extern "system" fn(
             *mut c_void, // this
             *mut c_void, // source (IWICBitmapSource)
@@ -658,7 +638,7 @@ mod windows_wic {
             let stride = scaled_w * 4;
             let buf_size = stride * scaled_h;
             let mut pixel_data = vec![0u8; buf_size as usize];
-            let hr = (converter_vtbl.copy_pixels)(
+            let hr = (converter_vtbl.base.copy_pixels)(
                 converter.as_raw(),
                 std::ptr::null(),
                 stride,

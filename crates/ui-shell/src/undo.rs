@@ -85,14 +85,6 @@ impl UndoJournal {
         self.redo_stack.pop_back()
     }
 
-    pub fn undo_len(&self) -> usize {
-        self.undo_stack.len()
-    }
-
-    pub fn redo_len(&self) -> usize {
-        self.redo_stack.len()
-    }
-
     pub fn can_undo(&self) -> bool {
         !self.undo_stack.is_empty()
     }
@@ -113,7 +105,6 @@ mod tests {
         journal.record(test_op("b"));
         journal.record(test_op("c"));
 
-        assert_eq!(journal.undo_len(), 2);
         assert_eq!(
             journal.pop_undo().unwrap().items[0].source_path,
             PathBuf::from("c")
@@ -136,7 +127,11 @@ mod tests {
         journal.record(test_op("b"));
 
         assert!(!journal.can_redo());
-        assert_eq!(journal.undo_len(), 1);
+        assert_eq!(
+            journal.pop_undo().unwrap().items[0].source_path,
+            PathBuf::from("b")
+        );
+        assert!(journal.pop_undo().is_none());
     }
 
     #[test]
@@ -148,8 +143,8 @@ mod tests {
         let op = journal.pop_redo().unwrap();
         journal.push_undo_from_redo(op);
 
-        assert_eq!(journal.undo_len(), 1);
-        assert_eq!(journal.redo_len(), 1);
+        assert!(journal.can_undo());
+        assert!(journal.can_redo());
         assert_eq!(
             journal.pop_redo().unwrap().items[0].source_path,
             PathBuf::from("a")

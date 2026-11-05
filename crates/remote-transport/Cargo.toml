@@ -2,6 +2,7 @@
 name = "iris-remote-transport"
 version = "0.4.0"
 edition = "2021"
+description = "Direct SFTP and rsync transfers for mounted SMB/NFS shares."
 
 [dependencies]
 iris-core-domain = { workspace = true }

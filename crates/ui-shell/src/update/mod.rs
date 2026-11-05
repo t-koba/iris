@@ -1181,7 +1181,7 @@ mod tests {
 
         let _ = update(&mut state, Message::Undo);
 
-        assert_eq!(state.undo_journal.undo_len(), 1);
+        assert!(state.undo_journal.can_undo());
         assert!(matches!(
             state.active_dialog,
             Some(DialogState::RemoteUndoConfirmation { item_count: 1, .. })
@@ -1207,7 +1207,7 @@ mod tests {
 
         let _ = update(&mut state, Message::Undo);
 
-        assert_eq!(state.undo_journal.undo_len(), 1);
+        assert!(state.undo_journal.can_undo());
         assert!(state.active_dialog.is_none());
         assert_eq!(state.notifications.len(), 1);
     }
