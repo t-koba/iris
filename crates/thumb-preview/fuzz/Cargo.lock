@@ -493,6 +493,7 @@ dependencies = [
  "iris-thumb-preview",
  "libfuzzer-sys",
  "tempfile",
+ "tokio-util",
 ]
 
 [[package]]
