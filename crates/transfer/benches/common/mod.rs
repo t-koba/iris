@@ -225,12 +225,7 @@ impl BackendAdapter for MemoryBackend {
 
 pub fn bench_copy(c: &mut Criterion, bench_name: &str, backend_name: &str, size_bytes: usize) {
     let runtime = Runtime::new().expect("tokio runtime");
-    let progress = watch::channel(ProgressInfo {
-        bytes_completed: 0,
-        bytes_total: Some(size_bytes as u64),
-        files_completed: 0,
-        files_total: Some(1),
-    });
+    let progress = watch::channel(ProgressInfo::single_file(0, Some(size_bytes as u64), false));
     let source_caps = CapabilitySet {
         can_range_read: true,
         can_range_write: false,

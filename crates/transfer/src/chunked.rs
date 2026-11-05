@@ -376,15 +376,7 @@ pub(crate) async fn copy_chunked_to_multipart(
         retry,
     } = request;
     let plan = plan_chunked_transfer(total_len, part_size, requested_in_flight);
-    let _request_budget = global_concurrency_governor()
-        .acquire_in_flight(plan.max_in_flight)
-        .await
-        .ok_or_else(|| {
-            BackendError::Internal(Box::new(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "global transfer request budget closed",
-            )))
-        })?;
+    let _request_budget = request_budget(plan.max_in_flight).await?;
     if plan.ranges.len() > 10_000 {
         return Err(BackendError::Unsupported {
             operation: "multipart upload exceeds 10,000 parts",
@@ -481,12 +473,11 @@ pub(crate) async fn copy_chunked_to_multipart(
     }
 
     let mut completed_bytes = completed.values().map(|part| part.size).sum::<u64>();
-    let _ = progress_tx.send(ProgressInfo {
-        bytes_completed: completed_bytes,
-        bytes_total: Some(total_len),
-        files_completed: 0,
-        files_total: Some(1),
-    });
+    let _ = progress_tx.send(ProgressInfo::single_file(
+        completed_bytes,
+        Some(total_len),
+        false,
+    ));
 
     let mut next_to_schedule = 0usize;
     let mut in_flight = FuturesUnordered::new();
@@ -537,12 +528,11 @@ pub(crate) async fn copy_chunked_to_multipart(
         let part = result?;
         completed_bytes = completed_bytes.saturating_add(part.size);
         completed.insert(part.part_number, part);
-        let _ = progress_tx.send(ProgressInfo {
-            bytes_completed: completed_bytes,
-            bytes_total: Some(total_len),
-            files_completed: 0,
-            files_total: Some(1),
-        });
+        let _ = progress_tx.send(ProgressInfo::single_file(
+            completed_bytes,
+            Some(total_len),
+            false,
+        ));
     }
 
     let mut parts = completed.into_values().collect::<Vec<_>>();
@@ -649,15 +639,7 @@ pub(crate) async fn copy_chunked_with_range_writes(
         retry_policy,
     } = request;
     let plan = plan_chunked_transfer(total_len, CHUNKED_RANGE_CHUNK_BYTES, requested_in_flight);
-    let _request_budget = global_concurrency_governor()
-        .acquire_in_flight(plan.max_in_flight)
-        .await
-        .ok_or_else(|| {
-            BackendError::Internal(Box::new(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "global transfer request budget closed",
-            )))
-        })?;
+    let _request_budget = request_budget(plan.max_in_flight).await?;
     let retry = ChunkRetryControls {
         policy: retry_policy,
         pause_rx: pause_rx.clone(),
@@ -688,12 +670,11 @@ pub(crate) async fn copy_chunked_with_range_writes(
         .map(|range| range.length.unwrap_or(0))
         .sum::<u64>();
     if completed_bytes > 0 {
-        let _ = progress_tx.send(ProgressInfo {
-            bytes_completed: completed_bytes,
-            bytes_total: Some(total_len),
-            files_completed: 0,
-            files_total: Some(1),
-        });
+        let _ = progress_tx.send(ProgressInfo::single_file(
+            completed_bytes,
+            Some(total_len),
+            false,
+        ));
     }
 
     let mut next_to_schedule = 0usize;
@@ -745,12 +726,11 @@ pub(crate) async fn copy_chunked_with_range_writes(
                     recorder.record(&chunk.range, PersistedChunkState::Completed, None)?;
                 }
                 completed_bytes = completed_bytes.saturating_add(chunk.range.length.unwrap_or(0));
-                let _ = progress_tx.send(ProgressInfo {
-                    bytes_completed: completed_bytes,
-                    bytes_total: Some(total_len),
-                    files_completed: 0,
-                    files_total: Some(1),
-                });
+                let _ = progress_tx.send(ProgressInfo::single_file(
+                    completed_bytes,
+                    Some(total_len),
+                    false,
+                ));
             }
             Err(error) => {
                 if let Some(recorder) = &recorder {
@@ -794,15 +774,7 @@ pub(crate) async fn read_chunked_to_vec(
     let capacity = usize::try_from(total_len.min(CHUNKED_RANGE_MAX_BUFFERED_BYTES)).unwrap_or(0);
     let mut bytes = Vec::with_capacity(capacity);
     let plan = plan_chunked_transfer(total_len, CHUNKED_RANGE_CHUNK_BYTES, requested_in_flight);
-    let _request_budget = global_concurrency_governor()
-        .acquire_in_flight(plan.max_in_flight)
-        .await
-        .ok_or_else(|| {
-            BackendError::Internal(Box::new(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "global transfer request budget closed",
-            )))
-        })?;
+    let _request_budget = request_budget(plan.max_in_flight).await?;
     if let Some(recorder) = &recorder {
         recorder.record_plan(&plan)?;
     }
@@ -1065,6 +1037,19 @@ fn transfer_canceled<T>() -> Result<T, BackendError> {
         std::io::ErrorKind::Interrupted,
         "transfer canceled",
     ))))
+}
+
+/// Holds `count` slots of the process-wide budget of in-flight transfer requests.
+async fn request_budget(count: usize) -> Result<tokio::sync::OwnedSemaphorePermit, BackendError> {
+    global_concurrency_governor()
+        .acquire_in_flight(count)
+        .await
+        .ok_or_else(|| {
+            BackendError::Internal(Box::new(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "global transfer request budget closed",
+            )))
+        })
 }
 
 #[cfg(test)]

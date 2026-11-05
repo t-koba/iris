@@ -111,12 +111,8 @@ impl AppRuntime {
             .or_default()
             .clone();
 
-        let (progress_tx, mut progress_rx) = watch::channel(ProgressInfo {
-            bytes_completed: 0,
-            bytes_total: None,
-            files_completed: 0,
-            files_total: Some(1),
-        });
+        let (progress_tx, mut progress_rx) =
+            watch::channel(ProgressInfo::single_file(0, None, false));
 
         let progress_runtime = Arc::clone(&self);
         let progress_job_id = job_id.clone();
@@ -621,16 +617,11 @@ impl AppRuntime {
             .await?
             .and_then(|meta| meta.size)
             .unwrap_or(0);
-        let _ = progress_tx.send(ProgressInfo {
-            bytes_completed: total_bytes,
-            bytes_total: Some(total_bytes),
-            files_completed: 1,
-            files_total: Some(1),
-        });
         record_transfer_sample(src_resolved, dst_resolved, total_bytes, started_at);
-        Ok(TransferResult {
-            bytes_transferred: total_bytes,
-        })
+        Ok(iris_transfer::executor::finish_file(
+            progress_tx,
+            total_bytes,
+        ))
     }
 
     async fn preserve_directory_mtime(

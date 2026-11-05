@@ -164,12 +164,11 @@ impl AsyncRead for ProgressReader {
                     if delta >= interval || elapsed >= PROGRESS_NOTIFY_MIN_ELAPSED || is_eof {
                         this.bytes_last_notified = this.bytes_read;
                         this.last_notify_at = now;
-                        let _ = this.progress_tx.send(ProgressInfo {
-                            bytes_completed: this.bytes_read,
-                            bytes_total: this.bytes_total,
-                            files_completed: 0,
-                            files_total: Some(1),
-                        });
+                        let _ = this.progress_tx.send(ProgressInfo::single_file(
+                            this.bytes_read,
+                            this.bytes_total,
+                            false,
+                        ));
                     }
                 }
                 Poll::Ready(Ok(()))
@@ -378,17 +377,21 @@ async fn relay_copy_data(
                 },
             })
             .await?;
-            let _ = progress_tx.send(ProgressInfo {
-                bytes_completed: total_len,
-                bytes_total: Some(total_len),
-                files_completed: 1,
-                files_total: Some(1),
-            });
-            return Ok(TransferResult {
-                bytes_transferred: total_len,
-            });
+            return Ok(finish_file(progress_tx, total_len));
         }
     }
+    let chunked_in_flight =
+        || recommended_workers_for_backend(&src.key.backend_id.0, CHUNKED_RANGE_DEFAULT_IN_FLIGHT);
+    let new_recorder = || {
+        options.resumable.map(|context| {
+            ChunkStateRecorder::new(
+                Arc::clone(&context.job_store),
+                context.job_id.clone(),
+                context.entry_index,
+                range_metadata.and_then(|metadata| metadata.etag.clone()),
+            )
+        })
+    };
     let mut chunk_recording = None;
     let (source_reader, total_bytes): (Pin<Box<dyn AsyncRead + Send>>, Option<u64>) =
         if should_use_chunked_range_write(
@@ -398,18 +401,8 @@ async fn relay_copy_data(
         ) {
             let total_bytes =
                 range_total_bytes.expect("chunked range write copy requires known size");
-            let max_in_flight = recommended_workers_for_backend(
-                &src.key.backend_id.0,
-                CHUNKED_RANGE_DEFAULT_IN_FLIGHT,
-            );
-            let recorder = options.resumable.map(|context| {
-                ChunkStateRecorder::new(
-                    Arc::clone(&context.job_store),
-                    context.job_id.clone(),
-                    context.entry_index,
-                    range_metadata.and_then(|metadata| metadata.etag.clone()),
-                )
-            });
+            let max_in_flight = chunked_in_flight();
+            let recorder = new_recorder();
             copy_chunked_with_range_writes(ChunkedRangeWriteRequest {
                 src_backend,
                 src: src.clone(),
@@ -424,29 +417,11 @@ async fn relay_copy_data(
                 retry_policy: retry_policy.clone(),
             })
             .await?;
-            let _ = progress_tx.send(ProgressInfo {
-                bytes_completed: total_bytes,
-                bytes_total: Some(total_bytes),
-                files_completed: 1,
-                files_total: Some(1),
-            });
-            return Ok(TransferResult {
-                bytes_transferred: total_bytes,
-            });
+            return Ok(finish_file(progress_tx, total_bytes));
         } else if should_use_chunked_range(range_total_bytes, src_capabilities.can_range_read) {
             let total_bytes = range_total_bytes.expect("chunked range copy requires known size");
-            let max_in_flight = recommended_workers_for_backend(
-                &src.key.backend_id.0,
-                CHUNKED_RANGE_DEFAULT_IN_FLIGHT,
-            );
-            let recorder = options.resumable.map(|context| {
-                ChunkStateRecorder::new(
-                    Arc::clone(&context.job_store),
-                    context.job_id.clone(),
-                    context.entry_index,
-                    range_metadata.and_then(|metadata| metadata.etag.clone()),
-                )
-            });
+            let max_in_flight = chunked_in_flight();
+            let recorder = new_recorder();
             chunk_recording = recorder
                 .as_ref()
                 .map(|recorder| (recorder.clone(), total_bytes));
@@ -495,12 +470,7 @@ async fn relay_copy_data(
 
     // Batched notifications may have skipped the final value, so send it on completion.
     if let Some(total) = total_bytes {
-        let _ = progress_tx.send(ProgressInfo {
-            bytes_completed: total,
-            bytes_total: Some(total),
-            files_completed: 1,
-            files_total: Some(1),
-        });
+        let _ = progress_tx.send(ProgressInfo::single_file(total, Some(total), true));
     }
 
     debug!("client relay copy completed: {} bytes", bytes_read);
@@ -508,6 +478,14 @@ async fn relay_copy_data(
     Ok(TransferResult {
         bytes_transferred: total_bytes.unwrap_or(bytes_read),
     })
+}
+
+/// Reports a single-file transfer of `bytes` as complete.
+pub fn finish_file(progress_tx: &watch::Sender<ProgressInfo>, bytes: u64) -> TransferResult {
+    let _ = progress_tx.send(ProgressInfo::single_file(bytes, Some(bytes), true));
+    TransferResult {
+        bytes_transferred: bytes,
+    }
 }
 
 /// Only called after verification succeeded.

@@ -93,12 +93,7 @@ async fn run(args: Args) -> Result<(), String> {
                 iteration,
                 args.mode,
             )?;
-            let (tx, _rx) = watch::channel(ProgressInfo {
-                bytes_completed: 0,
-                bytes_total: None,
-                files_completed: 0,
-                files_total: Some(1),
-            });
+            let (tx, _rx) = watch::channel(ProgressInfo::single_file(0, None, false));
             let src_ref = object_ref("perf-src", relative_src)?;
             let dst_ref = object_ref("perf-dst", &relative_dst)?;
             let result = client_relay_copy(

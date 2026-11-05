@@ -12,3 +12,15 @@ pub struct ProgressInfo {
     pub files_completed: u64,
     pub files_total: Option<u64>,
 }
+
+impl ProgressInfo {
+    /// Progress of a one-file transfer; the file counts as transferred once `done`.
+    pub fn single_file(bytes_completed: u64, bytes_total: Option<u64>, done: bool) -> Self {
+        Self {
+            bytes_completed,
+            bytes_total,
+            files_completed: u64::from(done),
+            files_total: Some(1),
+        }
+    }
+}
