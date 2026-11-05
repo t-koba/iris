@@ -893,10 +893,15 @@ mod tests {
                 }
                 None => data,
             };
+            let mut len = payload.len() as u64;
             if consume_failure(&self.short_reads_remaining) {
                 payload.truncate(payload.len() / 2);
+                // Whole-stream failures retain the advertised original length. Keep the existing
+                // range-read fixture semantics for chunk retry tests.
+                if range.is_some() {
+                    len = payload.len() as u64;
+                }
             }
-            let len = payload.len() as u64;
             Ok(ReadHandle {
                 stream: Box::pin(Cursor::new(payload)),
                 content_length: Some(len),
@@ -1297,6 +1302,51 @@ mod tests {
 
         assert!(result.is_err());
         assert!(src_backend.deleted_paths().is_empty());
+    }
+
+    #[tokio::test]
+    async fn client_relay_copy_rejects_short_stream_without_full_completion_progress() {
+        let src_backend = MockBackend::new("src", false);
+        src_backend.put("from.bin", b"abcdef");
+        src_backend.short_next_reads(1);
+        let dst_root = tempdir().expect("create dst tempdir");
+        let dst_backend = LocalFsAdapter::new(
+            dst_root.path().to_path_buf(),
+            BackendId("local-dst".to_string()),
+        );
+        let (tx, rx) = watch::channel(ProgressInfo {
+            bytes_completed: 0,
+            bytes_total: None,
+            files_completed: 0,
+            files_total: None,
+        });
+
+        let error = client_relay_copy(
+            &src_backend,
+            &make_ref("src", "from.bin"),
+            &dst_backend,
+            &make_ref("local-dst", "to.bin"),
+            &tx,
+            CopyRelayOptions::default(),
+        )
+        .await
+        .expect_err("short stream must fail the relay");
+
+        let BackendError::Internal(error) = error else {
+            panic!("expected an I/O error");
+        };
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+        assert!(matches!(src_backend.read_ranges().as_slice(), [None]));
+        assert_eq!(
+            fs::read(dst_root.path().join("to.bin")).await.unwrap(),
+            b"abc"
+        );
+        let progress = rx.borrow();
+        assert_eq!(progress.files_completed, 0);
+        assert!(progress.bytes_completed < 6);
     }
 
     #[tokio::test]

@@ -118,7 +118,7 @@ pub async fn write_stream_to_file(
     // `create_file_for_write` preallocates when `content_length` is given. If the stream ends early,
     // the zeroed tail would remain and corrupt the destination, so truncate to the bytes written.
     if let Some(expected) = content_length {
-        if expected > 0 && copied != expected {
+        if copied != expected {
             let inner = writer.into_inner();
             inner
                 .set_len(copied)
@@ -128,6 +128,10 @@ pub async fn write_stream_to_file(
                 .sync_all()
                 .await
                 .map_err(|e| BackendError::Internal(Box::new(e)))?;
+            return Err(BackendError::Internal(Box::new(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("stream write copied {copied} bytes for expected {expected}"),
+            ))));
         }
     }
 
@@ -260,9 +264,9 @@ mod tests {
     use super::*;
     use tokio::io::AsyncRead;
 
-    /// Regression: a `content_length` larger than the data must not leave zero padding behind.
+    /// A short stream must fail without leaving preallocated zero padding behind.
     #[tokio::test]
-    async fn write_stream_shorter_than_content_length_truncates_trailing_zeros() {
+    async fn write_stream_shorter_than_content_length_fails_without_trailing_zeros() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dst = tmp.path().join("dst.bin");
 
@@ -271,9 +275,16 @@ mod tests {
         let reader: Pin<Box<dyn AsyncRead + Send>> =
             Box::pin(std::io::Cursor::new(payload.clone()));
 
-        write_stream_to_file(&dst, reader, Some(1000))
+        let error = write_stream_to_file(&dst, reader, Some(1000))
             .await
-            .expect("write should succeed");
+            .expect_err("short stream must fail");
+        let BackendError::Internal(error) = error else {
+            panic!("expected an I/O error");
+        };
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
 
         let meta = std::fs::metadata(&dst).expect("stat dst");
         assert_eq!(
@@ -284,6 +295,25 @@ mod tests {
 
         let readback = std::fs::read(&dst).expect("read dst");
         assert_eq!(readback, payload, "destination content must match source");
+    }
+
+    #[tokio::test]
+    async fn write_stream_with_zero_content_length_rejects_nonempty_data() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dst = tmp.path().join("dst.bin");
+        let reader = Box::pin(std::io::Cursor::new(b"extra"));
+
+        let error = write_stream_to_file(&dst, reader, Some(0))
+            .await
+            .expect_err("nonempty stream with zero content length must fail");
+        let BackendError::Internal(error) = error else {
+            panic!("expected an I/O error");
+        };
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+        assert_eq!(std::fs::read(&dst).expect("read dst"), b"extra");
     }
 
     #[tokio::test]
