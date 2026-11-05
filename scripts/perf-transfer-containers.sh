@@ -13,7 +13,7 @@ sftp_image="${IRIS_PERF_SFTP_IMAGE:-atmoz/sftp:alpine}"
 sftp_port="${IRIS_PERF_SFTP_PORT:-2222}"
 ready_timeout="${IRIS_PERF_READY_TIMEOUT_SECONDS:-60}"
 ssh_keyscan_timeout="${IRIS_PERF_SSH_KEYSCAN_TIMEOUT_SECONDS:-5}"
-smb_image="${IRIS_PERF_SAMBA_IMAGE:-dperson/samba}"
+smb_image="${IRIS_PERF_SAMBA_IMAGE:-adrianmusante/samba:4.23.10}"
 smb_port="${IRIS_PERF_SMB_PORT:-1445}"
 smb_mount="${IRIS_PERF_SMB_MOUNT:-}"
 smb_paging_files="${IRIS_PERF_SMB_PAGING_FILES:-0}"
@@ -41,7 +41,7 @@ Environment:
   IRIS_PERF_SFTP_PORT        Host SFTP port (default: 2222).
   IRIS_PERF_READY_TIMEOUT_SECONDS Readiness deadline (default: 60).
   IRIS_PERF_SSH_KEYSCAN_TIMEOUT_SECONDS Per-scan timeout (default: 5).
-  IRIS_PERF_SAMBA_IMAGE      Samba container image (default: dperson/samba).
+  IRIS_PERF_SAMBA_IMAGE      Samba container image (default: adrianmusante/samba:4.23.10).
   IRIS_PERF_SMB_PORT         Host SMB port (default: 1445).
   IRIS_PERF_SMB_MOUNT        Existing SMB mount path to benchmark. If unset,
                              macOS is auto-mounted; Linux prints mount guidance.
