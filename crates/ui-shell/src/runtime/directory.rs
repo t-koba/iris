@@ -3,6 +3,31 @@ use tokio::task::JoinSet;
 
 const STAT_OBJECT_CONCURRENCY: usize = 16;
 
+/// `/Users/me` -> `/`, `Users`, `me`; `C:\\Users` -> `C:`, `Users` (the drive and its root are
+/// one crumb).
+fn local_breadcrumbs(path: &Path) -> Vec<(String, String)> {
+    let mut segments: Vec<(String, String)> = Vec::new();
+    let mut accumulated = PathBuf::new();
+    for component in path.components() {
+        accumulated.push(component);
+        let full_path = accumulated.to_string_lossy().into_owned();
+        match component {
+            std::path::Component::Prefix(prefix) => {
+                segments.push((prefix.as_os_str().to_string_lossy().into_owned(), full_path));
+            }
+            std::path::Component::RootDir => match segments.last_mut() {
+                Some(drive) => drive.1 = full_path,
+                None => segments.push(("/".to_string(), full_path)),
+            },
+            std::path::Component::Normal(segment) => {
+                segments.push((segment.to_string_lossy().into_owned(), full_path));
+            }
+            std::path::Component::CurDir | std::path::Component::ParentDir => {}
+        }
+    }
+    segments
+}
+
 impl AppRuntime {
     pub(crate) fn cached_directory_entries(
         &self,
@@ -318,18 +343,7 @@ impl AppRuntime {
             return segments;
         }
 
-        let mut segments = Vec::new();
-        let mut accumulated = PathBuf::new();
-        for component in Path::new(path).components() {
-            accumulated.push(component);
-            let name = match component {
-                std::path::Component::RootDir => "/".to_string(),
-                std::path::Component::Normal(segment) => segment.to_string_lossy().to_string(),
-                _ => continue,
-            };
-            segments.push((name, accumulated.to_string_lossy().to_string()));
-        }
-        segments
+        local_breadcrumbs(Path::new(path))
     }
 
     pub async fn read_directory_entries(
@@ -957,6 +971,31 @@ fn stat_local_path_sync(path: &Path) -> Result<MetadataResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn local_breadcrumbs_start_at_the_root() {
+        assert_eq!(
+            local_breadcrumbs(Path::new("/Users/me")),
+            vec![
+                ("/".to_string(), "/".to_string()),
+                ("Users".to_string(), "/Users".to_string()),
+                ("me".to_string(), "/Users/me".to_string()),
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn local_breadcrumbs_start_at_the_drive() {
+        assert_eq!(
+            local_breadcrumbs(Path::new(r"C:\Users")),
+            vec![
+                ("C:".to_string(), r"C:\".to_string()),
+                ("Users".to_string(), r"C:\Users".to_string()),
+            ]
+        );
+    }
 
     #[test]
     fn stat_local_path_sync_reports_file_and_directory_kind() {
