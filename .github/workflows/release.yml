@@ -1,0 +1,160 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  IRIS_SNAPSHOT_UPDATE: "0"
+  INSTA_UPDATE: no
+  IRIS_MACOS_DEPLOYMENT_TARGET: "14.0"
+  MACOSX_DEPLOYMENT_TARGET: "14.0"
+
+jobs:
+  release-preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check tag matches crate version
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_NAME" != "v$version" || -z "$version" ]]; then
+            echo "release workflow must run from a v* tag" >&2
+            exit 1
+          fi
+          manifest_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/ui-shell/Cargo.toml | head -n 1)"
+          if [[ "$manifest_version" != "$version" ]]; then
+            echo "tag $GITHUB_REF_NAME does not match iris-ui-shell version $manifest_version" >&2
+            exit 1
+          fi
+
+  package-macos:
+    needs: release-preflight
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos-cargo
+      - name: Install system dependencies
+        run: brew install ffmpeg pkg-config
+      - name: Package macOS app
+        env:
+          IRIS_MACOS_SIGN_IDENTITY: ${{ secrets.IRIS_MACOS_SIGN_IDENTITY || '-' }}
+          IRIS_MACOS_NOTARY_PROFILE: ${{ secrets.IRIS_MACOS_NOTARY_PROFILE || '' }}
+          IRIS_MACOS_DEPLOYMENT_TARGET: ${{ env.IRIS_MACOS_DEPLOYMENT_TARGET }}
+        run: ./scripts/package-macos-app.sh
+      - name: Verify macOS artifact
+        run: |
+          test -x dist/macos/Iris.app/Contents/MacOS/Iris
+          plutil -extract CFBundleShortVersionString raw -o - dist/macos/Iris.app/Contents/Info.plist | grep -Fx "${GITHUB_REF_NAME#v}"
+          zipinfo -1 dist/macos/Iris-macos.zip | grep -Fx "Iris.app/Contents/MacOS/Iris"
+          codesign --verify --deep --strict --verbose=2 dist/macos/Iris.app
+      - name: Generate macOS checksum
+        run: |
+          cd dist/macos
+          shasum -a 256 Iris-macos.zip > Iris-macos.zip.sha256
+          shasum -a 256 -c Iris-macos.zip.sha256
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/macos/Iris-macos.zip
+            dist/macos/Iris-macos.zip.sha256
+
+  package-linux:
+    needs: release-preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-linux-cargo
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh pkg-config clang ffmpeg \
+            libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
+            libavdevice-dev libswscale-dev libswresample-dev
+      - name: Package Linux AppDir
+        run: ./scripts/package-linux-appdir.sh
+      - name: Archive Linux AppDir
+        run: tar -C dist/linux -czf dist/linux/Iris-linux-appdir.tar.gz Iris.AppDir
+      - name: Verify Linux artifact
+        run: |
+          tar -tzf dist/linux/Iris-linux-appdir.tar.gz | grep -Fx "Iris.AppDir/AppRun"
+          tar -tzf dist/linux/Iris-linux-appdir.tar.gz | grep -Fx "Iris.AppDir/usr/bin/Iris"
+          tar -tzf dist/linux/Iris-linux-appdir.tar.gz | grep -Fx "Iris.AppDir/usr/share/applications/iris.desktop"
+      - name: Generate Linux checksum
+        run: |
+          cd dist/linux
+          sha256sum Iris-linux-appdir.tar.gz > Iris-linux-appdir.tar.gz.sha256
+          sha256sum -c Iris-linux-appdir.tar.gz.sha256
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/linux/Iris-linux-appdir.tar.gz
+            dist/linux/Iris-linux-appdir.tar.gz.sha256
+
+  package-windows:
+    needs: release-preflight
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows-cargo
+      - name: Package Windows app
+        env:
+          IRIS_BUILD_VARIANT: minimal
+        shell: pwsh
+        run: ./scripts/package-windows.ps1
+      - name: Verify Windows artifact
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist/windows/Iris/Iris.exe")) { throw "dist/windows/Iris/Iris.exe missing" }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead("dist/windows/Iris-windows.zip")
+          try {
+            if (!($zip.Entries | Where-Object { $_.FullName -eq "Iris.exe" })) {
+              throw "Iris.exe missing from dist/windows/Iris-windows.zip"
+            }
+          } finally {
+            $zip.Dispose()
+          }
+      - name: Generate Windows checksum
+        shell: pwsh
+        run: |
+          Push-Location dist/windows
+          try {
+            $hash = Get-FileHash -Algorithm SHA256 Iris-windows.zip
+            "$($hash.Hash.ToLowerInvariant())  Iris-windows.zip" | Out-File -Encoding ascii Iris-windows.zip.sha256
+            $expected = (Get-Content Iris-windows.zip.sha256).Split(" ")[0]
+            $actual = (Get-FileHash -Algorithm SHA256 Iris-windows.zip).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) { throw "checksum verification failed" }
+          } finally {
+            Pop-Location
+          }
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/windows/Iris-windows.zip
+            dist/windows/Iris-windows.zip.sha256

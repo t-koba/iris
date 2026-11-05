@@ -1,0 +1,211 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  IRIS_SNAPSHOT_UPDATE: "0"
+  INSTA_UPDATE: no
+  IRIS_MACOS_DEPLOYMENT_TARGET: "14.0"
+  MACOSX_DEPLOYMENT_TARGET: "14.0"
+  IRIS_MAX_LINUX_RELEASE_BYTES: "35651584"
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.os }}-cargo
+
+      - name: Install system dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config clang ffmpeg netcat-openbsd openssh-client \
+            libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
+            libavdevice-dev libswscale-dev libswresample-dev
+
+      - name: Install system dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install ffmpeg pkg-config
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --no-deps --locked -- -D warnings
+
+      - name: Library panic-path policy
+        run: cargo clippy --workspace --lib --no-deps --locked -- -D warnings -D clippy::unwrap_used
+
+      - name: Install cargo-audit
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Dependency security audit
+        if: matrix.os == 'ubuntu-latest'
+        run: bash ./scripts/audit-dependencies.sh
+
+      - name: Install cargo-machete
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+
+      - name: Unused dependency guard
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo machete
+
+      - name: Product default release build
+        run: cargo build --release -p iris-ui-shell --locked
+
+      - name: UI virtual scroll performance acceptance
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo run --release -p iris-ui-shell --example virtual_scroll_perf --no-default-features --features minimal --locked
+
+      - name: Product binary size upper bound
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          actual=$(stat -c %s target/release/Iris)
+          echo "Iris release binary: $actual bytes (limit: $IRIS_MAX_LINUX_RELEASE_BYTES)"
+          test "$actual" -le "$IRIS_MAX_LINUX_RELEASE_BYTES"
+
+      - name: Source safety policy
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          test -z "$(rg -n '#\[allow' crates --glob '*.rs' || true)"
+          unsafe_files=$(rg -l '\bunsafe\b' crates --glob '*.rs' | rg -v '^(crates/backends/src/common.rs|crates/backends/src/localfs/reflink.rs|crates/platform-integration/src/trash.rs|crates/thumb-preview/src/image_generic.rs|crates/thumb-preview/src/pdf.rs|crates/ui-shell/src/macos_menu.rs)$' || true)
+          test -z "$unsafe_files"
+          unsafe_count=$(rg -n '\bunsafe\b' crates --glob '*.rs' | wc -l)
+          # objc2 0.6 makes selector/super safety explicit with #[unsafe(...)];
+          # the allowed-file list above still prevents the unsafe surface from spreading.
+          echo "unsafe baseline count: $unsafe_count (limit: 73)"
+          test "$unsafe_count" -le 73
+
+      - name: Minimal release build
+        run: cargo build --release -p iris-ui-shell --no-default-features --features minimal --locked
+
+      - name: Install cargo-bloat
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-bloat
+
+      - name: Minimal binary size guard
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo bloat --release -p iris-ui-shell --no-default-features --features minimal -n 20 --crates > /tmp/iris-bloat.txt
+          ! rg -i 'ffmpeg|pdfium' /tmp/iris-bloat.txt
+
+      - name: UI shell integration smoke
+        run: cargo test -p iris-ui-shell --test integration_smoke --locked
+
+      - name: Thumb preview RAW smoke
+        run: cargo test -p iris-thumb-preview --test golden --locked
+
+      - name: Native SFTP and SMB container integration
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          IRIS_PERF_BYTES: "1048576"
+          IRIS_PERF_SMALL_FILES: "8"
+          IRIS_PERF_SMALL_BYTES: "1024"
+          IRIS_PERF_SMB_PAGING_FILES: "5000"
+          IRIS_PERF_SMB_MIN_PROTOCOL: "SMB3_11"
+          IRIS_PERF_SMB_MAX_PROTOCOL: "SMB3_11"
+          IRIS_PERF_SMB_SERVER_SIGNING: "mandatory"
+          IRIS_PERF_SMB_ENCRYPTION: "required"
+        run: bash ./scripts/perf-transfer-containers.sh
+
+      - name: Native SMB 3.0 AES-CCM compatibility
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          IRIS_PERF_SKIP_SFTP: "1"
+          IRIS_PERF_BYTES: "1048576"
+          IRIS_PERF_SMALL_FILES: "1"
+          IRIS_PERF_SMALL_BYTES: "1024"
+          IRIS_PERF_SMB_PAGING_FILES: "256"
+          IRIS_PERF_SMB_MIN_PROTOCOL: "SMB3_00"
+          IRIS_PERF_SMB_MAX_PROTOCOL: "SMB3_00"
+          IRIS_PERF_SMB_SERVER_SIGNING: "mandatory"
+          IRIS_PERF_SMB_ENCRYPTION: "required"
+        run: bash ./scripts/perf-transfer-containers.sh
+
+      - name: Native SMB 2.1 signed compatibility
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          IRIS_PERF_SKIP_SFTP: "1"
+          IRIS_PERF_BYTES: "1048576"
+          IRIS_PERF_SMALL_FILES: "1"
+          IRIS_PERF_SMALL_BYTES: "1024"
+          IRIS_PERF_SMB_PAGING_FILES: "256"
+          IRIS_PERF_SMB_MIN_PROTOCOL: "SMB2_10"
+          IRIS_PERF_SMB_MAX_PROTOCOL: "SMB2_10"
+          IRIS_PERF_SMB_SERVER_SIGNING: "mandatory"
+          IRIS_PERF_SMB_ENCRYPTION: "off"
+        run: bash ./scripts/perf-transfer-containers.sh
+
+      - name: Install fuzz toolchain
+        if: matrix.os == 'ubuntu-latest'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-11
+
+      - name: Install cargo-fuzz
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Fuzz smoke
+        if: matrix.os == 'ubuntu-latest'
+        run: FUZZ_RUNS=1000 bash ./scripts/fuzz-all.sh
+
+  windows-minimal:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-cargo
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Minimal clippy
+        run: cargo clippy -p iris-ui-shell --no-default-features --features minimal --all-targets --no-deps --locked -- -D warnings
+
+      - name: Minimal release build
+        run: cargo build --release -p iris-ui-shell --no-default-features --features minimal --locked
+
+      - name: UI shell integration smoke
+        run: cargo test -p iris-ui-shell --test integration_smoke --no-default-features --features minimal --locked

@@ -1,0 +1,125 @@
+{
+  "case": "view__preview_loading",
+  "component": "preview_panel",
+  "title": "Iris — /Users/test/Pictures",
+  "theme": "Dark",
+  "state": {
+    "active_pane": 0,
+    "dual_pane_enabled": false,
+    "sidebar_visible": true,
+    "sidebar_jobs_visible": false,
+    "preview_panel_visible": true,
+    "properties_panel_visible": false,
+    "cache_encryption_policy": "自動（推奨）",
+    "preview_position": "右",
+    "properties_position": "プレビューの下",
+    "thumbnail_cache_limit_mib": 48,
+    "active_dialog": null,
+    "clipboard": null,
+    "notifications": [
+      {
+        "severity": "Info",
+        "title": "同期完了",
+        "message": "3 ファイルを転送しました。",
+        "actions": [
+          "Dismiss"
+        ]
+      },
+      {
+        "severity": "Error",
+        "title": "競合を検出",
+        "message": "同名ファイルが存在します。",
+        "actions": [
+          "Retry(JobId(77))",
+          "SkipAndContinue(JobId(77))",
+          "AbortAll(JobId(77))"
+        ]
+      }
+    ],
+    "jobs": [
+      {
+        "id": 77,
+        "state": "Running",
+        "description": "NAS にコピー",
+        "bytes_completed": 1048576,
+        "bytes_total": 4194304,
+        "files_completed": 1,
+        "files_total": 4
+      }
+    ],
+    "panes": [
+      {
+        "current_path": "/Users/test/Pictures",
+        "entry_names": [
+          "photo.jpg",
+          "album",
+          "clip.mp4"
+        ],
+        "selected_names": [
+          "photo.jpg"
+        ],
+        "focused_index": 0,
+        "history": [
+          "/Users/test",
+          "/Users/test/Pictures"
+        ],
+        "history_index": 2,
+        "view_mode": "List",
+        "sort_key": "名前",
+        "sort_order": "Ascending",
+        "error_message": null
+      },
+      {
+        "current_path": "/Users/test/Downloads",
+        "entry_names": [
+          "inbox",
+          "reference.pdf"
+        ],
+        "selected_names": [],
+        "focused_index": null,
+        "history": [
+          "/Users/test",
+          "/Users/test/Downloads"
+        ],
+        "history_index": 2,
+        "view_mode": "List",
+        "sort_key": "名前",
+        "sort_order": "Ascending",
+        "error_message": null
+      }
+    ],
+    "sidebar_groups": [
+      {
+        "name": "場所",
+        "collapsed": false,
+        "system": true,
+        "item_names": [
+          "ホーム",
+          "ピクチャ"
+        ]
+      },
+      {
+        "name": "お気に入り",
+        "collapsed": false,
+        "system": false,
+        "item_names": [
+          "Projects",
+          "Archive"
+        ]
+      },
+      {
+        "name": "リモート",
+        "collapsed": false,
+        "system": false,
+        "item_names": [
+          "NAS"
+        ]
+      }
+    ],
+    "remote_transport_count": 1,
+    "remote_transport_editing": true,
+    "preview_loading": true,
+    "preview_failed": false,
+    "preview_summary": null
+  }
+}

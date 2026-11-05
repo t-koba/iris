@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Iris
+Comment=Cross-platform file manager
+Exec=Iris
+Icon=iris
+Terminal=false
+Categories=Utility;FileManager;
+StartupNotify=true
+StartupWMClass=iris

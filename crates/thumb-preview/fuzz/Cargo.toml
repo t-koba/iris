@@ -1,0 +1,51 @@
+[package]
+name = "iris-thumb-preview-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+iris-core-domain = { path = "../../core-domain" }
+iris-thumb-preview = { path = "..", default-features = false, features = ["raw-full"] }
+tempfile = "3"
+
+[[bin]]
+name = "raw_tiff_parse"
+path = "fuzz_targets/raw_tiff_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raw_cr3_box"
+path = "fuzz_targets/raw_cr3_box.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raw_bmff"
+path = "fuzz_targets/raw_bmff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raw_x3f_parse"
+path = "fuzz_targets/raw_x3f_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "image_sniff"
+path = "fuzz_targets/image_sniff.rs"
+test = false
+doc = false
+bench = false

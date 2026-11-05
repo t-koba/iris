@@ -1,0 +1,49 @@
+[package]
+name = "iris-smb-client-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+iris-smb-client = { path = ".." }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "smb_packet_parse"
+path = "fuzz_targets/smb_packet_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "smb_negotiate_parse"
+path = "fuzz_targets/smb_negotiate_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "smb_transform_parse"
+path = "fuzz_targets/smb_transform_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "smb_ntlmssp_parse"
+path = "fuzz_targets/smb_ntlmssp_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "smb_directory_parse"
+path = "fuzz_targets/smb_directory_parse.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,143 @@
+[profile.release]
+# Fat LTO with one codegen unit, stripped symbols and abort-on-panic keep the binary small;
+# opt-level 3 rather than "z" because speed matters more than the last few kilobytes.
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+opt-level = 3
+
+[profile.dev]
+# Keep target/ small for tests and clippy while preserving line numbers in backtraces.
+debug = "line-tables-only"
+
+[workspace]
+members = [
+    "crates/core-domain",
+    "crates/platform-integration",
+    "crates/catalog",
+    "crates/jobstore",
+    "crates/auth",
+    "crates/backends",
+    "crates/path-service",
+    "crates/subscription-manager",
+    "crates/remote-transport",
+    "crates/smb-client",
+    "crates/search",
+    "crates/thumb-preview",
+    "crates/transfer",
+    "crates/ui-shell",
+]
+resolver = "2"
+
+[workspace.dependencies]
+# Async
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "io-util", "sync", "macros", "net", "process", "time"] }
+async-trait = "0.1"
+tokio-util = { version = "0.7", features = ["io"] }
+russh = { version = "0.62.4", default-features = false, features = ["flate2", "ring"] }
+russh-sftp = "2.3"
+
+# Error handling
+thiserror = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+bytes = "1"
+
+# Database
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+# Logging
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+criterion = "0.8"
+proptest = "1"
+
+# HTTP client (for cloud backends, OAuth2)
+# No default features: rustls with the ring provider and only json + query + stream.
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls"] }
+
+# OS integration
+keyring = "4"
+trash = "5"
+notify = "8"
+open = "5"
+
+# Image processing
+# Only the formats previews need. AVIF uses avif-rust, which needs no shared library.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "bmp",
+    "tiff",
+    "webp",
+    "ico",
+] }
+avif-rust = "0.0.6"
+jpeg2k = { version = "0.10.1", default-features = false, features = ["image", "openjpeg-sys"] }
+jpegxr = "0.3.1"
+jxl-oxide = { version = "0.12.6", default-features = false, features = ["image"] }
+heif-oxide = "0.1.0"
+kamadak-exif = "0.6"
+jpeg-decoder = "0.3"
+
+# PDF
+pdfium-render = "0.9"
+
+# Video
+ffmpeg-next = "8.1"
+
+# S3
+# S3 injects Smithy's Hyper 1.x client and uses ring for TLS, like reqwest and russh.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio"] }
+aws-config = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-smithy-http-client = { version = "1", default-features = false, features = ["default-client", "rustls-ring"] }
+
+# GUI
+iced = { version = "0.14", features = ["tokio", "image-without-codecs", "canvas", "advanced"] }
+
+# Crypto (for VerifyStrong)
+aes = "0.9"
+aes-gcm = { version = "0.11", features = ["zeroize"] }
+getrandom = "0.4"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+sha2 = "0.11"
+ring = "0.17"
+hmac = "0.13"
+md-5 = "0.11"
+
+# Stream utilities
+futures-util = "0.3"
+
+# Misc
+chrono = { version = "0.4", features = ["serde"] }
+mime_guess = "2"
+tempfile = "3"
+unicode-normalization = "0.1"
+flate2 = "1"
+
+# Internal crates
+iris-core-domain = { path = "crates/core-domain" }
+iris-platform-integration = { path = "crates/platform-integration" }
+iris-catalog = { path = "crates/catalog" }
+iris-jobstore = { path = "crates/jobstore" }
+iris-auth = { path = "crates/auth" }
+iris-backends = { path = "crates/backends" }
+iris-path-service = { path = "crates/path-service" }
+iris-subscription-manager = { path = "crates/subscription-manager" }
+iris-remote-transport = { path = "crates/remote-transport" }
+iris-smb-client = { path = "crates/smb-client" }
+iris-search = { path = "crates/search" }
+iris-thumb-preview = { path = "crates/thumb-preview", default-features = false }
+iris-transfer = { path = "crates/transfer" }
+
+[patch.crates-io]
+# block 0.1.6 models _NSConcreteStackBlock as an uninhabited enum, which is
+# rejected by future Rust versions. Keep the upstream API/ABI and use an
+# inhabited opaque FFI marker until metal-rs migrates away from rust-block.
+block = { path = "vendor/block" }

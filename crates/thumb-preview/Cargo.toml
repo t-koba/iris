@@ -1,0 +1,54 @@
+[package]
+name = "iris-thumb-preview"
+version = "0.4.0"
+edition = "2021"
+
+[package.metadata.cargo-machete]
+ignored = ["kamadak-exif"]
+
+[features]
+default = ["video", "pdf", "raw-full"]
+video = ["dep:ffmpeg-next"]
+pdf = ["dep:pdfium-render"]
+raw-full = []
+raw-core = []
+minimal = ["raw-core"]
+
+[dependencies]
+iris-core-domain = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+image = { workspace = true }
+avif-rust = { workspace = true }
+jpeg2k = { workspace = true }
+jpegxr = { workspace = true }
+jxl-oxide = { workspace = true }
+heif-oxide = { workspace = true }
+kamadak-exif = { workspace = true }
+jpeg-decoder = { workspace = true }
+ffmpeg-next = { workspace = true, optional = true }
+tempfile = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+flate2 = { workspace = true }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+pdfium-render = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+image = { workspace = true, features = ["avif"] }
+sha2 = { workspace = true }
+
+[[bench]]
+name = "raw_cr3_decode"
+harness = false
+
+[[bench]]
+name = "tiff_bigtiff_parse"
+harness = false
+
+[[bench]]
+name = "jpeg_thumb_extract"
+harness = false

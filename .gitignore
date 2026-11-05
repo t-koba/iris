@@ -1,0 +1,12 @@
+/target/
+/crates/*/target/
+/dist/
+*.zip
+**/.DS_Store
+
+# cargo-fuzz build artifacts are nested below crate directories.
+**/fuzz/target/
+
+# Editor and local machine state.
+.vscode/
+.claude/

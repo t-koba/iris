@@ -1,0 +1,24 @@
+[package]
+name = "iris-transfer"
+version = "0.4.0"
+edition = "2021"
+
+[dependencies]
+iris-core-domain = { workspace = true }
+iris-backends = { workspace = true }
+iris-jobstore = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[[bench]]
+name = "relay_copy"
+harness = false

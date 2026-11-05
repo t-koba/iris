@@ -1,0 +1,15 @@
+[package]
+name = "iris-catalog"
+version = "0.4.0"
+edition = "2021"
+
+[dependencies]
+iris-core-domain = { workspace = true }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tempfile = { workspace = true }
+ring = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

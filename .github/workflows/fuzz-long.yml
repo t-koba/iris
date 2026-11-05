@@ -1,0 +1,71 @@
+name: Long Fuzz
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "43 16 * * 5"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - raw_tiff_parse
+          - raw_bmff
+          - image_sniff
+          - raw_cr3_box
+          - raw_x3f_parse
+          - config_load
+          - remote_transport_mount_table
+          - segment_parse
+          - ngram_normalize
+          - filter_token_parse
+          - smb_transform_parse
+          - smb_ntlmssp_parse
+          - smb_directory_parse
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-11
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: long-fuzz-${{ matrix.target }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config clang ffmpeg \
+            libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
+            libavdevice-dev libswscale-dev libswresample-dev
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Run long fuzz target
+        run: FUZZ_MAX_TOTAL_TIME=3600 ./scripts/fuzz-target.sh "${{ matrix.target }}"
+
+      - name: Upload fuzz artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: |
+            crates/*/fuzz/artifacts/${{ matrix.target }}
+            crates/*/fuzz/corpus/${{ matrix.target }}
+          if-no-files-found: ignore

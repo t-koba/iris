@@ -1,0 +1,5 @@
+pub const LIST_ROW_HEIGHT: f32 = 34.0;
+pub const LIST_HEADER_HEIGHT: f32 = 28.0;
+pub const GRID_FOLDER_ROW_HEIGHT: f32 = 30.0;
+pub const GRID_FILE_ROW_HEIGHT: f32 = 150.0;
+pub const GRID_SECTION_SEPARATOR_HEIGHT: f32 = 10.0;

@@ -1,0 +1,21 @@
+[package]
+name = "iris-remote-transport-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+iris-remote-transport = { path = ".." }
+
+[[bin]]
+name = "remote_transport_mount_table"
+path = "fuzz_targets/remote_transport_mount_table.rs"
+test = false
+doc = false
+bench = false
