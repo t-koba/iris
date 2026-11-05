@@ -19,7 +19,7 @@ jobs:
   release-preflight:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Check tag matches crate version
         shell: bash
@@ -39,7 +39,7 @@ jobs:
     needs: release-preflight
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -66,7 +66,7 @@ jobs:
           shasum -a 256 Iris-macos.zip > Iris-macos.zip.sha256
           shasum -a 256 -c Iris-macos.zip.sha256
       - name: Upload release asset
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/macos/Iris-macos.zip
@@ -76,7 +76,7 @@ jobs:
     needs: release-preflight
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -104,7 +104,7 @@ jobs:
           sha256sum Iris-linux-appdir.tar.gz > Iris-linux-appdir.tar.gz.sha256
           sha256sum -c Iris-linux-appdir.tar.gz.sha256
       - name: Upload release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/linux/Iris-linux-appdir.tar.gz
@@ -114,7 +114,7 @@ jobs:
     needs: release-preflight
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -153,7 +153,7 @@ jobs:
             Pop-Location
           }
       - name: Upload release asset
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/windows/Iris-windows.zip
