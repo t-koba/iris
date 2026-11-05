@@ -194,13 +194,11 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
                 let runtime = app_runtime();
                 match runtime.try_rsync_batch(&items, is_move, &resolution).await {
                     Ok(Some(total_bytes)) => Ok(PendingItemResult {
-                        skipped: false,
                         bytes_completed: total_bytes,
                         files_completed: item_count as u64,
                     }),
                     // Sentinel meaning "fall back to the normal path".
                     _ => Ok(PendingItemResult {
-                        skipped: false,
                         bytes_completed: 0,
                         files_completed: 0,
                     }),
@@ -369,7 +367,6 @@ fn spawn_apply_one_item(
                 )
                 .await
                 .map(|outcome| PendingItemResult {
-                    skipped: outcome.skipped,
                     bytes_completed: outcome.bytes_completed,
                     files_completed: 1,
                 })

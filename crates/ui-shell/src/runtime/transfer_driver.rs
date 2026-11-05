@@ -226,10 +226,7 @@ impl AppRuntime {
 
             if matches!(resolution, ConflictResolution::Skip) && self.path_exists(dst_path).await? {
                 self.update_task_state(job_id, task_index, TaskState::Skipped, None);
-                return Ok(TransferItemOutcome {
-                    skipped: true,
-                    bytes_completed: 0,
-                });
+                return Ok(TransferItemOutcome { bytes_completed: 0 });
             }
 
             let final_dst = self
@@ -241,16 +238,10 @@ impl AppRuntime {
                 .await?
             {
                 SymlinkTransfer::Recreated => {
-                    return Ok(TransferItemOutcome {
-                        skipped: false,
-                        bytes_completed: 0,
-                    });
+                    return Ok(TransferItemOutcome { bytes_completed: 0 });
                 }
                 SymlinkTransfer::LinksToAncestor => {
-                    return Ok(TransferItemOutcome {
-                        skipped: true,
-                        bytes_completed: 0,
-                    });
+                    return Ok(TransferItemOutcome { bytes_completed: 0 });
                 }
                 SymlinkTransfer::NotHandled => {}
             }
@@ -272,7 +263,6 @@ impl AppRuntime {
             self.transfer_file(context, source, &final_dst, is_move, resolution)
                 .await
                 .map(|result| TransferItemOutcome {
-                    skipped: false,
                     bytes_completed: result.bytes_transferred,
                 })
         })
@@ -331,10 +321,7 @@ impl AppRuntime {
                     &resolution,
                 )
                 .await?;
-                return Ok(TransferItemOutcome {
-                    skipped: false,
-                    bytes_completed: 0,
-                });
+                return Ok(TransferItemOutcome { bytes_completed: 0 });
             }
 
             let created = self
@@ -398,7 +385,6 @@ impl AppRuntime {
             }
 
             Ok(TransferItemOutcome {
-                skipped: false,
                 bytes_completed: total_bytes,
             })
         })
@@ -783,7 +769,7 @@ mod tests {
             .expect("relative link");
 
         let destination = destination_root.path().join("prefix");
-        let outcome = tokio::time::timeout(
+        tokio::time::timeout(
             Duration::from_secs(20),
             Arc::clone(app_runtime()).apply_pending_item(
                 JobId(9_000_001),
@@ -801,7 +787,6 @@ mod tests {
         .expect("copy must not recurse through the root link")
         .expect("copy succeeds");
 
-        assert!(!outcome.skipped);
         assert_eq!(
             std::fs::read(destination.join("drive_c/app.exe")).expect("copied file"),
             b"binary"

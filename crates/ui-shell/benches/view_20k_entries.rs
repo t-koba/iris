@@ -39,7 +39,8 @@ fn pane_with_entries(current_path: &str, entries: Vec<ListEntry>) -> PaneState {
     pane.rebuild_visible_indices();
     pane.navigation_history.push(current_path.to_string());
     pane.history_index = pane.navigation_history.len();
-    pane.rebuild_breadcrumbs();
+    pane.breadcrumb_segments =
+        iris_ui_shell::state::local_breadcrumbs(std::path::Path::new(&pane.current_path));
     pane
 }
 

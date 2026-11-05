@@ -575,7 +575,6 @@ mod tests {
 
     fn item_done() -> Result<crate::messages::PendingItemResult, String> {
         Ok(crate::messages::PendingItemResult {
-            skipped: false,
             bytes_completed: 10,
             files_completed: 1,
         })

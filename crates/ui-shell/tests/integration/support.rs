@@ -504,7 +504,8 @@ fn sample_pane(current_path: &str, history: &[&str], entries: Vec<ListEntry>) ->
     pane.load_state = iris_ui_shell::state::PaneLoadState::Loaded;
     pane.navigation_history = history.iter().map(|path| (*path).to_string()).collect();
     pane.history_index = pane.navigation_history.len();
-    pane.rebuild_breadcrumbs();
+    pane.breadcrumb_segments =
+        iris_ui_shell::state::local_breadcrumbs(std::path::Path::new(&pane.current_path));
     pane
 }
 

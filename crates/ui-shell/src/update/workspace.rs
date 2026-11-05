@@ -306,7 +306,7 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                 let path = state.pane(0).current_path.clone();
                 state.pane_mut(1).current_path = path.clone();
                 state.pane_mut(1).push_to_history(path.clone());
-                refresh_breadcrumbs_for_pane(state, 1);
+                refresh_breadcrumbs(state, 1);
                 return Task::batch([
                     load_secondary_directory_task(path, state.show_hidden_files),
                     Task::done(Message::SaveLayoutConfig),
@@ -468,8 +468,8 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                 Task::none()
             };
             if restored_tabs {
-                refresh_breadcrumbs_for_pane(state, 0);
-                refresh_breadcrumbs_for_pane(state, 1);
+                refresh_breadcrumbs(state, 0);
+                refresh_breadcrumbs(state, 1);
                 let primary_path = state.pane(0).current_path.clone();
                 let secondary_path = state.pane(1).current_path.clone();
                 let primary_task = if primary_path.is_empty() {

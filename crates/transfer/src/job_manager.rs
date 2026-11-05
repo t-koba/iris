@@ -30,11 +30,12 @@ struct ManagedJob {
 }
 
 #[derive(Clone, Debug)]
-pub struct RestoredManagedJob {
+/// A job loaded from the job store after a restart.
+pub struct RestoredJob {
     pub id: JobId,
     pub description: String,
     pub state: JobState,
-    pub total_files: u64,
+    pub files_total: u64,
 }
 
 pub struct JobManager {
@@ -125,7 +126,7 @@ impl JobManager {
     pub fn restore_jobs<F>(
         &self,
         mut is_task_reachable: F,
-    ) -> Result<Vec<RestoredManagedJob>, iris_jobstore::repository::JobStoreError>
+    ) -> Result<Vec<RestoredJob>, iris_jobstore::repository::JobStoreError>
     where
         F: FnMut(&PersistedTask) -> bool,
     {
@@ -157,11 +158,11 @@ impl JobManager {
                 .insert(id.0, job);
 
             info!("restored job {}: {}", id.0, pj.description);
-            restored.push(RestoredManagedJob {
+            restored.push(RestoredJob {
                 id,
                 description: pj.description,
                 state: restored_state,
-                total_files,
+                files_total: total_files,
             });
         }
 

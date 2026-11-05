@@ -1,18 +1,10 @@
 use super::*;
 
 impl AppRuntime {
-    pub fn restore_jobs(&self) -> Vec<RestoredJob> {
+    pub fn restore_jobs(&self) -> Vec<iris_transfer::job_manager::RestoredJob> {
         self.job_manager
             .restore_jobs(|task| self.persisted_task_is_reachable(task))
             .unwrap_or_default()
-            .into_iter()
-            .map(|job| RestoredJob {
-                description: job.description,
-                id: job.id,
-                state: job.state,
-                files_total: job.total_files,
-            })
-            .collect()
     }
 
     pub fn persist_pending_job(

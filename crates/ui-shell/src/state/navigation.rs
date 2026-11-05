@@ -7,7 +7,7 @@ use iris_search::segment::IndexedKind;
 use iris_search::token::{parse_filter_tokens, ParseWarning};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -35,6 +35,32 @@ pub struct InlineRenameState {
 pub struct BreadcrumbSegment {
     pub name: String,
     pub full_path: String,
+}
+
+/// One segment per path component; a Windows drive and its root form one segment.
+pub fn local_breadcrumbs(path: &Path) -> Vec<BreadcrumbSegment> {
+    let mut segments: Vec<BreadcrumbSegment> = Vec::new();
+    let mut accumulated = PathBuf::new();
+    for component in path.components() {
+        accumulated.push(component);
+        let full_path = accumulated.to_string_lossy().into_owned();
+        let name = match component {
+            std::path::Component::Prefix(prefix) => {
+                prefix.as_os_str().to_string_lossy().into_owned()
+            }
+            std::path::Component::RootDir => match segments.last_mut() {
+                Some(drive) => {
+                    drive.full_path = full_path;
+                    continue;
+                }
+                None => "/".to_string(),
+            },
+            std::path::Component::Normal(segment) => segment.to_string_lossy().into_owned(),
+            std::path::Component::CurDir | std::path::Component::ParentDir => continue,
+        };
+        segments.push(BreadcrumbSegment { name, full_path });
+    }
+    segments
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -257,27 +283,6 @@ impl PaneState {
         } else {
             false
         }
-    }
-
-    pub fn rebuild_breadcrumbs(&mut self) {
-        let path = PathBuf::from(&self.current_path);
-        let mut segments = Vec::new();
-        let mut accumulated = PathBuf::new();
-
-        for component in path.components() {
-            accumulated.push(component);
-            let name = match component {
-                std::path::Component::RootDir => "/".to_string(),
-                std::path::Component::Normal(segment) => segment.to_string_lossy().to_string(),
-                _ => continue,
-            };
-            segments.push(BreadcrumbSegment {
-                name,
-                full_path: accumulated.to_string_lossy().to_string(),
-            });
-        }
-
-        self.breadcrumb_segments = segments;
     }
 
     pub fn push_to_history(&mut self, path: String) {

@@ -27,7 +27,9 @@ pub use layout::{
     SortKey, SortOrder, ViewMode,
 };
 pub(crate) use navigation::list_entry_kind;
-pub use navigation::{BreadcrumbSegment, EntryIndex, PaneLoadState, PaneState, PathSuggestion};
+pub use navigation::{
+    local_breadcrumbs, BreadcrumbSegment, EntryIndex, PaneLoadState, PaneState, PathSuggestion,
+};
 pub use settings::{
     normalize_notification_timeout_secs, notification_timeout_input_from_secs,
     parse_notification_timeout_input_secs, parse_smb_port_input, CacheEncryptionPolicy,

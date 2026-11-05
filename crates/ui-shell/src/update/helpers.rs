@@ -93,27 +93,15 @@ pub fn navigate_to_path(state: &mut AppState, path: String) -> Task<Message> {
     state.pane_mut(0).load_state = PaneLoadState::LoadingInitial;
     state.pane_mut(0).scroll_y = 0.0;
     state.pane_mut(0).push_to_history(canonical.clone());
-    refresh_breadcrumbs(state);
+    refresh_breadcrumbs(state, 0);
 
     load_directory_progressively(canonical, state.show_hidden_files)
 }
 
-pub fn refresh_breadcrumbs(state: &mut AppState) {
-    let current_path = state.pane(0).current_path.clone();
-    state.pane_mut(0).breadcrumb_segments = app_runtime()
-        .breadcrumbs_for_display_path(&current_path)
-        .into_iter()
-        .map(|(name, full_path)| crate::state::BreadcrumbSegment { name, full_path })
-        .collect();
-}
-
-pub fn refresh_breadcrumbs_for_pane(state: &mut AppState, pane_idx: usize) {
+pub fn refresh_breadcrumbs(state: &mut AppState, pane_idx: usize) {
     let current_path = state.pane(pane_idx).current_path.clone();
-    state.pane_mut(pane_idx).breadcrumb_segments = app_runtime()
-        .breadcrumbs_for_display_path(&current_path)
-        .into_iter()
-        .map(|(name, full_path)| crate::state::BreadcrumbSegment { name, full_path })
-        .collect();
+    state.pane_mut(pane_idx).breadcrumb_segments =
+        app_runtime().breadcrumbs_for_display_path(&current_path);
 }
 
 pub async fn read_directory(path: String, show_hidden: bool) -> Result<Vec<ListEntry>, String> {

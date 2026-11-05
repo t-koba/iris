@@ -35,10 +35,6 @@ pub struct WalkResult {
     pub stats: WalkStats,
 }
 
-pub fn walk_local(root: &Path, options: &WalkOptions) -> std::io::Result<WalkResult> {
-    walk_local_with_cancel(root, options, || false)
-}
-
 pub fn walk_local_with_cancel<C>(
     root: &Path,
     options: &WalkOptions,
@@ -163,7 +159,8 @@ mod tests {
         fs::write(dir.path().join("a.jpg"), b"jpg").expect("jpg");
         fs::write(dir.path().join("nested/c.mp4"), b"video").expect("video");
 
-        let result = walk_local(dir.path(), &WalkOptions::default()).expect("walk");
+        let result =
+            walk_local_with_cancel(dir.path(), &WalkOptions::default(), || false).expect("walk");
         let names = result
             .records
             .iter()
@@ -190,7 +187,8 @@ mod tests {
                 .expect("modern image");
         }
 
-        let result = walk_local(dir.path(), &WalkOptions::default()).expect("walk");
+        let result =
+            walk_local_with_cancel(dir.path(), &WalkOptions::default(), || false).expect("walk");
         assert_eq!(result.records.len(), 5);
         assert!(result
             .records
@@ -205,13 +203,14 @@ mod tests {
         fs::write(dir.path().join(".secret.pdf"), b"hidden").expect("hidden");
         fs::write(dir.path().join("nested/c.pdf"), b"nested").expect("nested file");
 
-        let result = walk_local(
+        let result = walk_local_with_cancel(
             dir.path(),
             &WalkOptions {
                 recursive: false,
                 include_hidden: false,
                 max_entries: None,
             },
+            || false,
         )
         .expect("walk");
 
@@ -233,12 +232,13 @@ mod tests {
         fs::write(dir.path().join("a.txt"), b"a").expect("a");
         fs::write(dir.path().join("b.txt"), b"b").expect("b");
 
-        let result = walk_local(
+        let result = walk_local_with_cancel(
             dir.path(),
             &WalkOptions {
                 max_entries: Some(1),
                 ..Default::default()
             },
+            || false,
         )
         .expect("walk");
 
@@ -290,7 +290,8 @@ mod tests {
         fs::write(outside.path().join("outside.pdf"), b"outside").expect("outside");
         symlink(outside.path(), dir.path().join("outside-link")).expect("symlink");
 
-        let result = walk_local(dir.path(), &WalkOptions::default()).expect("walk");
+        let result =
+            walk_local_with_cancel(dir.path(), &WalkOptions::default(), || false).expect("walk");
 
         assert!(result.records.is_empty());
         assert_eq!(result.stats.skipped_symlinks, 1);

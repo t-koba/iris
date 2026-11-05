@@ -1,7 +1,7 @@
 use crate::messages::{Message, TabMessage};
 use crate::state::{AppState, TabDragState};
 use crate::update::helpers::{
-    load_directory_progressively, load_secondary_directory_task, refresh_breadcrumbs_for_pane,
+    load_directory_progressively, load_secondary_directory_task, refresh_breadcrumbs,
 };
 use crate::update::preview::refresh_preview_for_selection;
 use iced::Task;
@@ -123,7 +123,7 @@ pub fn finish_tab_drag(state: &mut AppState) -> Task<Message> {
 }
 
 fn reload_active_tab(state: &mut AppState, pane: usize) -> Task<Message> {
-    refresh_breadcrumbs_for_pane(state, pane);
+    refresh_breadcrumbs(state, pane);
     let preview_task = if state.active_pane == pane {
         refresh_preview_for_selection(state)
     } else {

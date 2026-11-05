@@ -10,7 +10,7 @@ pub fn handle(state: &mut AppState, message: NavigationMessage) -> Task<Message>
                     state.pane_mut(0).current_path = path.clone();
                     reset_directory_state(state);
                     state.pane_mut(0).scroll_y = 0.0;
-                    refresh_breadcrumbs(state);
+                    refresh_breadcrumbs(state, 0);
                     return load_directory_progressively(path, state.show_hidden_files);
                 }
                 return Task::done(Message::Pane(1, PaneMessage::NavigateToPath(path)));
@@ -23,7 +23,7 @@ pub fn handle(state: &mut AppState, message: NavigationMessage) -> Task<Message>
                     state.pane_mut(0).current_path = path.clone();
                     reset_directory_state(state);
                     state.pane_mut(0).scroll_y = 0.0;
-                    refresh_breadcrumbs(state);
+                    refresh_breadcrumbs(state, 0);
                     return load_directory_progressively(path, state.show_hidden_files);
                 }
                 return Task::done(Message::Pane(1, PaneMessage::NavigateToPath(path)));

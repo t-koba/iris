@@ -23,7 +23,7 @@ pub fn init() -> (AppState, Task<Message>) {
     state.sidebar_visible = true;
     state.sidebar_groups = init_sidebar_groups();
     state.pane_mut(0).push_to_history(path_str.clone());
-    refresh_breadcrumbs(&mut state);
+    refresh_breadcrumbs(&mut state, 0);
 
     let dir_task = load_directory_progressively(path_str, state.show_hidden_files);
     let config_task = Task::perform(crate::config::load_config(), Message::LayoutConfigLoaded);

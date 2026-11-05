@@ -80,16 +80,7 @@ use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
-pub struct RestoredJob {
-    pub id: JobId,
-    pub description: String,
-    pub state: JobState,
-    pub files_total: u64,
-}
-
-#[derive(Clone, Debug)]
 pub struct TransferItemOutcome {
-    pub skipped: bool,
     pub bytes_completed: u64,
 }
 

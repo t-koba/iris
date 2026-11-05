@@ -4,7 +4,7 @@ pub use pane::{EntryMetadataUpdate, PaneMessage};
 
 use crate::config::{LayoutConfig, LocaleChoice, ThemeChoice};
 use crate::input::dnd::DndTarget;
-use crate::runtime::{ConflictMetadata, RestoredJob};
+use crate::runtime::ConflictMetadata;
 use crate::state::{
     BatchRenameMode, CacheEncryptionPolicy, CloudProvider, NetworkProtocol, PreviewData,
     PreviewPosition, ResizeTarget, SettingsSection, SidebarItem, ThumbnailCacheKey,
@@ -17,6 +17,7 @@ use iris_core_domain::types::list::ListEntry;
 use iris_core_domain::types::progress::ProgressInfo;
 use iris_core_domain::types::transfer::{JobId, JobState};
 use iris_platform_integration::mount::MountedVolume;
+use iris_transfer::job_manager::RestoredJob;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -28,7 +29,6 @@ pub struct ThumbnailData {
 /// Completion of one pending file operation item.
 #[derive(Debug, Clone)]
 pub struct PendingItemResult {
-    pub skipped: bool,
     pub bytes_completed: u64,
     /// Usually 1; an rsync batch reports every file it transferred.
     pub files_completed: u64,
