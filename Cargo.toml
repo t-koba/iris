@@ -1,6 +1,7 @@
 [profile.release]
-# Fat LTO with one codegen unit, stripped symbols and abort-on-panic keep the binary small;
-# opt-level 3 rather than "z" because speed matters more than the last few kilobytes.
+# Fat LTO, one codegen unit, stripped symbols and abort-on-panic keep the binary small.
+# The default release profile uses opt-level 3; Linux packaging overrides it to `s` for
+# the size budget and runs the virtual-scroll acceptance with that same profile.
 lto = "fat"
 codegen-units = 1
 strip = "symbols"

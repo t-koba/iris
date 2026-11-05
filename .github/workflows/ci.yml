@@ -79,11 +79,20 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo machete
 
-      - name: Product default release build
+      - name: Product default release build (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: s
+        run: cargo build --release -p iris-ui-shell --locked
+
+      - name: Product default release build (macOS)
+        if: matrix.os == 'macos-latest'
         run: cargo build --release -p iris-ui-shell --locked
 
       - name: UI virtual scroll performance acceptance
         if: matrix.os == 'ubuntu-latest'
+        env:
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: s
         run: cargo run --release -p iris-ui-shell --example virtual_scroll_perf --no-default-features --features minimal --locked
 
       - name: Product binary size upper bound

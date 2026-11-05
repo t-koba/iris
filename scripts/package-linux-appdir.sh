@@ -14,6 +14,8 @@ cd "$repo_root"
 build_args=(cargo build --locked --release -p iris-ui-shell --bin "$binary_name")
 case "$build_variant" in
     product)
+        # Match the Linux CI profile used to satisfy the release binary size budget.
+        export CARGO_PROFILE_RELEASE_OPT_LEVEL=s
         # Debian packaging requires dpkg-dev (dpkg-shlibdeps) and binutils.
         for tool in dpkg dpkg-deb dpkg-shlibdeps; do
             command -v "$tool" >/dev/null
