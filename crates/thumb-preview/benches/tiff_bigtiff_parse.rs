@@ -1,23 +1,31 @@
-#[path = "common/mod.rs"]
-mod support;
+use iris_thumb_preview::test_fixtures as fixtures;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 
 fn bench_tiff_bigtiff_parse(c: &mut Criterion) {
-    let jpeg = support::encoded_test_jpeg(320, 200);
-    let tiff = support::structured_tiff_with_embedded_jpeg(96, &jpeg);
-    let bigtiff = support::bigtiff_with_embedded_jpeg(96, &jpeg);
-    let tiff_path = support::unique_temp_path("dng");
-    let bigtiff_path = support::unique_temp_path("nef");
-    support::write_fixture(&tiff_path, &tiff);
-    support::write_fixture(&bigtiff_path, &bigtiff);
+    let jpeg = fixtures::jpeg(320, 200);
+    let tiff = fixtures::tiff_with_jpeg(96, &jpeg);
+    let bigtiff = fixtures::bigtiff_with_jpeg(96, &jpeg);
+    let tiff_path = fixtures::temp_path("dng");
+    let bigtiff_path = fixtures::temp_path("nef");
+    std::fs::write(&tiff_path, &tiff).expect("write fixture");
+    std::fs::write(&bigtiff_path, &bigtiff).expect("write fixture");
 
     let mut group = c.benchmark_group("tiff_bigtiff_parse");
     group.bench_function("tiff", |b| {
-        b.iter(|| support::bench_extract_raw_thumbnail(&tiff_path, 256));
+        b.iter(|| {
+            std::hint::black_box(iris_thumb_preview::raw::extract_raw_thumbnail(
+                &tiff_path, 256,
+            ))
+        });
     });
     group.bench_function("bigtiff", |b| {
-        b.iter(|| support::bench_extract_raw_thumbnail(&bigtiff_path, 256));
+        b.iter(|| {
+            std::hint::black_box(iris_thumb_preview::raw::extract_raw_thumbnail(
+                &bigtiff_path,
+                256,
+            ))
+        });
     });
     group.finish();
 

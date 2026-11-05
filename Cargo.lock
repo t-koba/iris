@@ -3552,6 +3552,7 @@ dependencies = [
  "heif-oxide",
  "image",
  "iris-core-domain",
+ "iris-thumb-preview",
  "jpeg-decoder",
  "jpeg2k",
  "jpegxr",

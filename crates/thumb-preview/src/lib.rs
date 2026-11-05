@@ -10,4 +10,6 @@ pub mod pipeline;
 mod pipeline_memory;
 pub mod raw;
 pub mod scheduler;
+#[cfg(any(test, feature = "test-fixtures"))]
+pub mod test_fixtures;
 pub mod video;

@@ -13,6 +13,7 @@ pdf = ["dep:pdfium-render"]
 raw-full = []
 raw-core = []
 minimal = ["raw-core"]
+test-fixtures = []
 
 [dependencies]
 iris-core-domain = { workspace = true }
@@ -37,6 +38,7 @@ flate2 = { workspace = true }
 pdfium-render = { workspace = true, optional = true }
 
 [dev-dependencies]
+iris-thumb-preview = { path = ".", features = ["test-fixtures"] }
 criterion = { workspace = true }
 image = { workspace = true, features = ["avif"] }
 
