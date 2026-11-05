@@ -144,11 +144,8 @@ fn build_batch_rename_preview(
             let new_name = generator.new_name(item, position);
             let mut status = None;
             let mut blocking = false;
-            if new_name.trim().is_empty() {
-                status = Some(tr("batch-rename-error-empty-name"));
-                blocking = true;
-            } else if new_name.contains('/') || new_name.contains('\\') {
-                status = Some(tr("batch-rename-error-path-separator"));
+            if let Some(error) = crate::format::file_name_error(&new_name) {
+                status = Some(error);
                 blocking = true;
             } else if new_name == item.original_name {
                 status = Some(tr("batch-rename-status-unchanged"));
@@ -605,6 +602,10 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
             return Task::batch(tasks);
         }
         Message::PerformCreateFolder(name) => {
+            if crate::format::file_name_error(&name).is_some() {
+                // The dialog shows the problem and keeps Create disabled.
+                return Task::none();
+            }
             let current_path = state.active_pane().current_path.clone();
             let created_path = PathBuf::from(&current_path).join(&name);
             state.active_dialog = None;

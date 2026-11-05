@@ -1,4 +1,3 @@
-use crate::i18n::tr;
 use crate::messages::{Message, PaneMessage};
 use crate::runtime::app_runtime;
 use crate::state::{AppState, PaneLoadState, PaneState, PathSuggestion, SortOrder, ViewMode};
@@ -772,14 +771,7 @@ pub fn handle_pane_message(
             if new_name == rename.original_name {
                 return Task::none();
             }
-            let validation_error = if new_name.trim().is_empty() {
-                Some(tr("rename-empty-error"))
-            } else if new_name.contains('/') || new_name.contains('\\') {
-                Some(tr("rename-invalid-name-error"))
-            } else {
-                None
-            };
-            if let Some(message) = validation_error {
+            if let Some(message) = crate::format::file_name_error(&new_name) {
                 rename.error_message = Some(message);
                 let pane = state.pane_mut(pane_idx);
                 pane.inline_rename = Some(rename);

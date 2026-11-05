@@ -99,15 +99,23 @@ pub fn view_create_folder_dialog(input_value: &str) -> Element<'_, Message> {
     content = content.push(text(tr("create-folder-title")).size(16));
     content = content.push(iced::widget::rule::horizontal(1));
     content = content.push(text(tr("create-folder-name-label")).size(12));
+    let name_error = (!input_value.is_empty())
+        .then(|| crate::format::file_name_error(input_value))
+        .flatten();
+    let create_enabled = !input_value.is_empty() && name_error.is_none();
+    let create_message =
+        create_enabled.then(|| Message::PerformCreateFolder(input_value.to_string()));
     content = content.push(
         text_input(&tr("create-folder-placeholder"), input_value)
             .on_input(|value| DialogMessage::InputChanged(value).into())
-            .on_submit(Message::PerformCreateFolder(input_value.to_string()))
+            .on_submit_maybe(create_message.clone())
             .padding(8)
             .size(13),
     );
+    if let Some(error) = name_error {
+        content = content.push(text(error).size(11).style(text::danger));
+    }
 
-    let create_enabled = !input_value.is_empty();
     let buttons = row![
         iced::widget::space::horizontal(),
         button(text(tr("common-cancel")).size(12))
@@ -115,9 +123,7 @@ pub fn view_create_folder_dialog(input_value: &str) -> Element<'_, Message> {
             .padding(8)
             .style(button::secondary),
         button(text(tr("common-create")).size(12))
-            .on_press_maybe(
-                create_enabled.then_some(Message::PerformCreateFolder(input_value.to_string()))
-            )
+            .on_press_maybe(create_message)
             .padding(8),
     ]
     .spacing(8);

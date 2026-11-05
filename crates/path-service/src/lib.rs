@@ -5,7 +5,8 @@ pub mod url;
 
 pub use display::{join_display_path, parent_relative_display_path};
 pub use normalize::{
-    expand_home_path, normalize_local_path, normalize_relative_display_path, sanitize_file_name,
+    expand_home_path, file_name_problem, normalize_local_path, normalize_relative_display_path,
+    sanitize_file_name, FileNameProblem,
 };
 pub use platform::{is_boot_volume_path, same_filesystem};
 pub use url::{

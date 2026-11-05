@@ -48,6 +48,38 @@ pub fn expand_home_path(path: &str) -> Option<String> {
     })
 }
 
+/// Why a name typed by the user cannot name a file or folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileNameProblem {
+    Empty,
+    /// `/` or `\` would address another folder.
+    PathSeparator,
+    /// `.` and `..` name the folder itself and its parent.
+    Reserved,
+    /// Control characters anywhere; on Windows also `<>:"|?*` and a trailing dot or space.
+    InvalidCharacter,
+}
+
+/// Checks a single file or folder name (not a path) before it is created or renamed to.
+pub fn file_name_problem(name: &str) -> Option<FileNameProblem> {
+    if name.trim().is_empty() {
+        return Some(FileNameProblem::Empty);
+    }
+    if name.contains(['/', '\\']) {
+        return Some(FileNameProblem::PathSeparator);
+    }
+    if name == "." || name == ".." {
+        return Some(FileNameProblem::Reserved);
+    }
+    if name.chars().any(char::is_control)
+        || (cfg!(windows)
+            && (name.contains(['<', '>', ':', '"', '|', '?', '*']) || name.ends_with(['.', ' '])))
+    {
+        return Some(FileNameProblem::InvalidCharacter);
+    }
+    None
+}
+
 pub fn sanitize_file_name(name: &str) -> String {
     let sanitized = name
         .chars()
@@ -61,5 +93,36 @@ pub fn sanitize_file_name(name: &str) -> String {
         "download".to_string()
     } else {
         sanitized
+    }
+}
+
+#[cfg(test)]
+mod file_name_tests {
+    use super::*;
+
+    #[test]
+    fn file_name_problem_rejects_names_that_address_other_files() {
+        assert_eq!(file_name_problem("  "), Some(FileNameProblem::Empty));
+        assert_eq!(
+            file_name_problem("a/b"),
+            Some(FileNameProblem::PathSeparator)
+        );
+        assert_eq!(
+            file_name_problem("a\\b"),
+            Some(FileNameProblem::PathSeparator)
+        );
+        assert_eq!(file_name_problem(".."), Some(FileNameProblem::Reserved));
+        assert_eq!(file_name_problem("."), Some(FileNameProblem::Reserved));
+        assert_eq!(
+            file_name_problem("a\0b"),
+            Some(FileNameProblem::InvalidCharacter)
+        );
+        assert_eq!(
+            file_name_problem("line\nbreak"),
+            Some(FileNameProblem::InvalidCharacter)
+        );
+        assert_eq!(file_name_problem(".hidden"), None);
+        assert_eq!(file_name_problem("...and more"), None);
+        assert_eq!(file_name_problem("Café 2024"), None);
     }
 }

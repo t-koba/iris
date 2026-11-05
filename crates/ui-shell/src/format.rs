@@ -32,3 +32,16 @@ pub fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
         None => input.to_string(),
     }
 }
+
+/// The message for a name that cannot be used for a file or folder, if any.
+pub fn file_name_error(name: &str) -> Option<String> {
+    use iris_path_service::FileNameProblem;
+
+    let key = match iris_path_service::file_name_problem(name)? {
+        FileNameProblem::Empty => "rename-empty-error",
+        FileNameProblem::PathSeparator => "rename-invalid-name-error",
+        FileNameProblem::Reserved => "rename-reserved-name-error",
+        FileNameProblem::InvalidCharacter => "rename-invalid-character-error",
+    };
+    Some(crate::i18n::tr(key))
+}

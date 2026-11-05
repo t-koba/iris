@@ -545,6 +545,55 @@ mod tests {
     }
 
     #[test]
+    fn inline_rename_rejects_parent_directory_name() {
+        let mut state = AppState::default();
+        state
+            .pane_mut(0)
+            .replace_entries(vec![test_list_entry("/tmp/old.txt", "old.txt")]);
+
+        let _ = update(&mut state, Message::Rename(0));
+        let _ = update(
+            &mut state,
+            Message::Pane(
+                0,
+                PaneMessage::InlineRenameInputChanged {
+                    index: 0,
+                    value: "..".to_string(),
+                },
+            ),
+        );
+        let _ = update(
+            &mut state,
+            Message::Pane(0, PaneMessage::CommitInlineRename(0)),
+        );
+
+        let rename = state
+            .pane(0)
+            .inline_rename
+            .as_ref()
+            .expect("inline rename remains open");
+        assert_eq!(
+            rename.error_message.as_deref(),
+            Some(tr("rename-reserved-name-error").as_str())
+        );
+    }
+
+    #[test]
+    fn create_folder_with_invalid_name_keeps_the_dialog_open() {
+        let mut state = AppState::default();
+        state.active_dialog = Some(DialogState::CreateFolder {
+            input_value: "a/b".to_string(),
+        });
+
+        let _ = update(&mut state, Message::PerformCreateFolder("a/b".to_string()));
+
+        assert!(matches!(
+            state.active_dialog,
+            Some(DialogState::CreateFolder { .. })
+        ));
+    }
+
+    #[test]
     fn escape_cancels_inline_rename_before_selection_clear() {
         let mut state = AppState::default();
         state
