@@ -51,6 +51,7 @@ Environment:
   IRIS_PERF_SMB_MAX_PROTOCOL Samba server maximum protocol (for example SMB3_00).
   IRIS_PERF_SMB_SERVER_SIGNING Samba server signing policy (for example mandatory).
   IRIS_PERF_SMB_ENCRYPTION   Samba encryption policy (off or required).
+  IRIS_PERF_SMB_LOG_LEVEL    Samba log level (default: 1 auth:5 auth_audit:5).
   IRIS_PERF_KEEP_CONTAINERS=1 Keep containers and generated payloads.
 USAGE
 }
