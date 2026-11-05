@@ -22,7 +22,75 @@ struct TransferDirectoryRequest<'a> {
     resolution: ConflictResolution,
 }
 
+enum SymlinkTransfer {
+    /// Not a local symlink, or the destination cannot hold one: copy what it points to.
+    NotHandled,
+    /// The link itself was recreated at the destination.
+    Recreated,
+    /// Following it would copy an ancestor of itself, recursing without end.
+    LinksToAncestor,
+}
+
 impl AppRuntime {
+    /// Copies keep symlinks as symlinks where the destination can hold them, as `cp -a` and
+    /// Finder do. Following them would duplicate the target, and a link to an ancestor (Wine's
+    /// `dosdevices/z: -> /`) would copy the whole disk. Renames are left to the move path, which
+    /// moves the link itself.
+    async fn transfer_local_symlink(
+        &self,
+        source: &ObjectRef,
+        destination: &Path,
+        is_move: bool,
+    ) -> Result<SymlinkTransfer, String> {
+        if self.is_virtual_display_path(&source.display_path) {
+            return Ok(SymlinkTransfer::NotHandled);
+        }
+        let src_path = PathBuf::from(&source.display_path);
+        let is_symlink = tokio::fs::symlink_metadata(&src_path)
+            .await
+            .is_ok_and(|metadata| metadata.file_type().is_symlink());
+        if !is_symlink {
+            return Ok(SymlinkTransfer::NotHandled);
+        }
+        let src_resolved = self.resolve_backend(&src_path);
+        let dst_resolved = self.resolve_backend(destination);
+        if is_move && self.same_backend(&src_path, &src_resolved, destination, &dst_resolved) {
+            return Ok(SymlinkTransfer::NotHandled);
+        }
+
+        if !self.is_virtual_display_path(destination.to_string_lossy().as_ref()) {
+            let (link, dst) = (src_path.clone(), destination.to_path_buf());
+            let recreated = tokio::task::spawn_blocking(move || recreate_symlink(&link, &dst))
+                .await
+                .map_err(|error| error.to_string())?;
+            match recreated {
+                Ok(()) => {
+                    if is_move {
+                        remove_symlink(&src_path)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                    }
+                    return Ok(SymlinkTransfer::Recreated);
+                }
+                Err(error) => tracing::debug!(
+                    "destination cannot hold a symlink ({error}); copying its target instead"
+                ),
+            }
+        }
+
+        let target = tokio::fs::canonicalize(&src_path).await;
+        let parent = match src_path.parent() {
+            Some(parent) => tokio::fs::canonicalize(parent).await,
+            None => return Ok(SymlinkTransfer::NotHandled),
+        };
+        if let (Ok(target), Ok(parent)) = (target, parent) {
+            if parent.starts_with(&target) {
+                return Ok(SymlinkTransfer::LinksToAncestor);
+            }
+        }
+        Ok(SymlinkTransfer::NotHandled)
+    }
+
     pub async fn apply_pending_item(
         self: Arc<Self>,
         job_id: JobId,
@@ -172,6 +240,25 @@ impl AppRuntime {
             let final_dst = self
                 .resolve_destination_path_async(dst_path, &resolution)
                 .await?;
+
+            match self
+                .transfer_local_symlink(source, &final_dst, is_move)
+                .await?
+            {
+                SymlinkTransfer::Recreated => {
+                    return Ok(TransferItemOutcome {
+                        skipped: false,
+                        bytes_completed: 0,
+                    });
+                }
+                SymlinkTransfer::LinksToAncestor => {
+                    return Ok(TransferItemOutcome {
+                        skipped: true,
+                        bytes_completed: 0,
+                    });
+                }
+                SymlinkTransfer::NotHandled => {}
+            }
 
             if self.is_directory_object(source).await? {
                 return self
@@ -596,5 +683,135 @@ fn record_transfer_sample(
             elapsed,
             bytes_transferred,
         );
+    }
+}
+
+/// Creates at `dst` a symlink with the same target as `link`. An existing file or link at `dst`
+/// is replaced (the conflict was already resolved as overwrite); a directory is not.
+fn recreate_symlink(link: &Path, dst: &Path) -> std::io::Result<()> {
+    let target = std::fs::read_link(link)?;
+    if let Ok(existing) = std::fs::symlink_metadata(dst) {
+        if existing.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "a directory already exists at the destination",
+            ));
+        }
+        std::fs::remove_file(dst)?;
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&target, dst)
+    }
+    #[cfg(windows)]
+    {
+        // Windows needs to know the kind; creating links needs Developer Mode or elevation.
+        if std::fs::metadata(link).is_ok_and(|metadata| metadata.is_dir()) {
+            std::os::windows::fs::symlink_dir(&target, dst)
+        } else {
+            std::os::windows::fs::symlink_file(&target, dst)
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, dst);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "symlinks are unsupported on this platform",
+        ))
+    }
+}
+
+/// Removes the link, never what it points to (Windows directory links need `remove_dir`).
+async fn remove_symlink(path: &Path) -> std::io::Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Err(error) if cfg!(windows) => tokio::fs::remove_dir(path).await.map_err(|_| error),
+        result => result,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn local_ref(path: &Path) -> ObjectRef {
+        ObjectRef {
+            key: ObjectKey {
+                backend_id: BackendId("local".to_string()),
+                stable_id: StableId(path.to_string_lossy().into_owned()),
+            },
+            parent_stable_id: None,
+            display_path: path.to_string_lossy().into_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn copying_a_folder_keeps_symlinks_and_does_not_follow_a_link_to_an_ancestor() {
+        let source_root = tempfile::tempdir().expect("source tempdir");
+        let destination_root = tempfile::tempdir().expect("destination tempdir");
+        let prefix = source_root.path().join("prefix");
+        std::fs::create_dir_all(prefix.join("drive_c")).expect("create tree");
+        std::fs::write(prefix.join("drive_c/app.exe"), b"binary").expect("write file");
+        std::fs::create_dir(prefix.join("dosdevices")).expect("create dosdevices");
+        // Wine maps a drive letter to the file system root; following it copies the whole disk.
+        std::os::unix::fs::symlink("/", prefix.join("dosdevices/z:")).expect("link to root");
+        std::os::unix::fs::symlink("../drive_c", prefix.join("dosdevices/c:"))
+            .expect("relative link");
+
+        let destination = destination_root.path().join("prefix");
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(20),
+            Arc::clone(app_runtime()).apply_pending_item(
+                JobId(9_000_001),
+                0,
+                PendingFileItem {
+                    source: local_ref(&prefix),
+                    destination_path: destination.to_string_lossy().into_owned(),
+                },
+                false,
+                ConflictResolution::Fail,
+                0,
+            ),
+        )
+        .await
+        .expect("copy must not recurse through the root link")
+        .expect("copy succeeds");
+
+        assert!(!outcome.skipped);
+        assert_eq!(
+            std::fs::read(destination.join("drive_c/app.exe")).expect("copied file"),
+            b"binary"
+        );
+        assert_eq!(
+            std::fs::read_link(destination.join("dosdevices/z:")).expect("root link"),
+            Path::new("/")
+        );
+        assert_eq!(
+            std::fs::read_link(destination.join("dosdevices/c:")).expect("relative link"),
+            Path::new("../drive_c")
+        );
+    }
+
+    #[test]
+    fn recreating_a_symlink_replaces_a_file_but_never_a_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink("target.txt", &link).expect("create link");
+
+        let over_file = temp.path().join("over-file");
+        std::fs::write(&over_file, b"old").expect("write file");
+        recreate_symlink(&link, &over_file).expect("replace file");
+        assert_eq!(
+            std::fs::read_link(&over_file).expect("read link"),
+            Path::new("target.txt")
+        );
+
+        let over_dir = temp.path().join("over-dir");
+        std::fs::create_dir(&over_dir).expect("create dir");
+        assert!(recreate_symlink(&link, &over_dir).is_err());
+        assert!(over_dir.is_dir());
     }
 }

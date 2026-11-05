@@ -623,18 +623,23 @@ impl BackendAdapter for LocalFsAdapter {
                     .map_err(|e| BackendError::Internal(Box::new(e)))?;
             }
             DeleteMode::Permanent => {
-                let metadata = fs::metadata(&path)
+                // `symlink_metadata`: a link (even a dangling one) is removed itself, never the
+                // directory it points to.
+                let metadata = fs::symlink_metadata(&path)
                     .await
                     .map_err(|e| BackendError::Internal(Box::new(e)))?;
-                if metadata.is_dir() {
-                    fs::remove_dir_all(&path)
-                        .await
-                        .map_err(|e| BackendError::Internal(Box::new(e)))?;
+                let result = if metadata.is_dir() {
+                    fs::remove_dir_all(&path).await
                 } else {
-                    fs::remove_file(&path)
-                        .await
-                        .map_err(|e| BackendError::Internal(Box::new(e)))?;
-                }
+                    match fs::remove_file(&path).await {
+                        // Windows removes directory links and junctions with `remove_dir`.
+                        Err(error) if cfg!(windows) && metadata.file_type().is_symlink() => {
+                            fs::remove_dir(&path).await.map_err(|_| error)
+                        }
+                        result => result,
+                    }
+                };
+                result.map_err(|e| BackendError::Internal(Box::new(e)))?;
             }
         }
 
@@ -832,5 +837,38 @@ mod tests {
             .expect("stat symlink");
         assert!(metadata.is_dir);
         assert_eq!(metadata.size, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn permanent_delete_removes_links_but_never_their_targets() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let target_dir = temp_dir.path().join("target-dir");
+        std::fs::create_dir(&target_dir).expect("create target dir");
+        std::fs::write(target_dir.join("keep.txt"), b"keep").expect("write kept file");
+        std::os::unix::fs::symlink("target-dir", temp_dir.path().join("dir-link"))
+            .expect("dir link");
+        std::os::unix::fs::symlink("missing", temp_dir.path().join("dangling"))
+            .expect("dangling link");
+
+        let backend_id = BackendId("localfs-delete-link-test".to_string());
+        let adapter = LocalFsAdapter::new(temp_dir.path().to_path_buf(), backend_id.clone());
+        for name in ["dir-link", "dangling"] {
+            let object = ObjectRef {
+                key: ObjectKey {
+                    backend_id: backend_id.clone(),
+                    stable_id: StableId(name.to_string()),
+                },
+                parent_stable_id: None,
+                display_path: name.to_string(),
+            };
+            adapter
+                .delete(&object, DeleteMode::Permanent)
+                .await
+                .unwrap_or_else(|error| panic!("delete {name}: {error}"));
+            assert!(std::fs::symlink_metadata(temp_dir.path().join(name)).is_err());
+        }
+
+        assert!(target_dir.join("keep.txt").exists());
     }
 }

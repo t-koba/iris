@@ -468,6 +468,23 @@ async fn verify_directory_mirror(
 }
 
 fn verify_path_mirror(src: &Path, dst: &Path, high_risk_path: bool) -> Result<(), String> {
+    // A recreated link must point where the original pointed; its target is not part of the copy.
+    let is_link = |path: &Path| {
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    };
+    if is_link(src) && is_link(dst) {
+        let src_target = std::fs::read_link(src).map_err(|error| error.to_string())?;
+        let dst_target = std::fs::read_link(dst).map_err(|error| error.to_string())?;
+        if src_target != dst_target {
+            return Err(format!(
+                "verify failed: link target mismatch src={} dst={}",
+                src.display(),
+                dst.display()
+            ));
+        }
+        return Ok(());
+    }
+
     let src_meta = std::fs::metadata(src).map_err(|error| error.to_string())?;
     let dst_meta = std::fs::metadata(dst).map_err(|error| error.to_string())?;
 
