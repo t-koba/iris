@@ -146,6 +146,8 @@ pub struct LayoutConfig {
     pub tabs: Vec<PaneTabConfig>,
     pub remote_transport_mappings: Vec<RemoteTransportMapping>,
     pub remote_transport_secret_warnings: Vec<RemoteTransportSecretWarning>,
+    /// Files that could not be read and were set aside, so their settings are back to defaults.
+    pub quarantined_files: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -189,6 +191,7 @@ impl Default for LayoutConfig {
             tabs: Vec::new(),
             remote_transport_mappings: Vec::new(),
             remote_transport_secret_warnings: Vec::new(),
+            quarantined_files: Vec::new(),
         }
     }
 }

@@ -89,6 +89,7 @@ pub(super) fn layout_config_snapshot(state: &AppState) -> LayoutConfig {
             .collect(),
         remote_transport_mappings: state.remote_transport_mappings.clone(),
         remote_transport_secret_warnings: Vec::new(),
+        quarantined_files: Vec::new(),
     }
 }
 
@@ -442,6 +443,16 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
             }
             state.remote_transport_mappings = config.remote_transport_mappings;
             app_runtime().set_remote_transport_mappings(state.remote_transport_mappings.clone());
+            if !config.quarantined_files.is_empty() {
+                let mut args = FluentArgs::new();
+                args.set("files", config.quarantined_files.join(", "));
+                state.add_notification(
+                    NotificationSeverity::Warning,
+                    tr("notification-config-reset-title"),
+                    crate::i18n::tr_args("notification-config-reset-body", Some(&args)),
+                    vec![crate::state::NotificationAction::Dismiss],
+                );
+            }
             for warning in config.remote_transport_secret_warnings {
                 let mut args = FluentArgs::new();
                 args.set("host", warning.host);
@@ -604,6 +615,22 @@ mod layout_reload_tests {
             Message::LayoutConfigLoaded(config_with_tab("/other-window")),
         );
         assert_eq!(state.pane(0).current_path, "/browsing");
+    }
+
+    #[test]
+    fn reset_settings_files_are_reported_once() {
+        let mut state = AppState::default();
+
+        let _ = update(
+            &mut state,
+            Message::LayoutConfigLoaded(LayoutConfig {
+                quarantined_files: vec!["settings.json".to_string()],
+                ..LayoutConfig::default()
+            }),
+        );
+
+        assert_eq!(state.notifications.len(), 1);
+        assert!(state.notifications[0].message.contains("settings.json"));
     }
 
     #[test]

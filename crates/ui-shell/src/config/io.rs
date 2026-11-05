@@ -28,9 +28,11 @@ fn file_path(file_name: &str) -> Option<PathBuf> {
 /// Returns defaults when the files do not exist.
 #[tracing::instrument(name = "config.load", skip_all)]
 pub async fn load_config() -> LayoutConfig {
-    let settings = load_segment::<SettingsFile>(SETTINGS_FILE_NAME).await;
-    let layout = load_segment::<LayoutFile>(LAYOUT_FILE_NAME).await;
-    let connections = load_segment::<ConnectionsFile>(CONNECTIONS_FILE_NAME).await;
+    let mut quarantined_files = Vec::new();
+    let settings = load_segment::<SettingsFile>(SETTINGS_FILE_NAME, &mut quarantined_files).await;
+    let layout = load_segment::<LayoutFile>(LAYOUT_FILE_NAME, &mut quarantined_files).await;
+    let connections =
+        load_segment::<ConnectionsFile>(CONNECTIONS_FILE_NAME, &mut quarantined_files).await;
     let notification_timeout_secs = settings.normalized_notification_timeout_secs();
     let (remote_transport_mappings, remote_transport_secret_warnings) =
         load_remote_transport_mappings(connections.remote_transport_mappings).await;
@@ -67,6 +69,7 @@ pub async fn load_config() -> LayoutConfig {
         tabs: layout.tabs,
         remote_transport_mappings,
         remote_transport_secret_warnings,
+        quarantined_files,
     }
 }
 
@@ -175,7 +178,9 @@ pub(crate) fn apply_ssh_secret_load_result(
     }
 }
 
-async fn load_segment<T>(file_name: &str) -> T
+/// Reads one config file; a file that cannot be used is set aside, named in `quarantined`, and
+/// replaced by defaults.
+async fn load_segment<T>(file_name: &str, quarantined: &mut Vec<String>) -> T
 where
     T: Default + for<'de> Deserialize<'de> + Serialize,
 {
@@ -206,26 +211,19 @@ where
         }
     };
 
-    let value = match serde_json::from_str::<serde_json::Value>(&content) {
-        Ok(value) => value,
-        Err(error) => {
-            quarantine_config_file(&path, &format!("invalid-json-{error}")).await;
-            return T::default();
-        }
+    let reason = match serde_json::from_str::<serde_json::Value>(&content) {
+        Err(error) => format!("invalid-json-{error}"),
+        Ok(value) => match schema_version_quarantine_reason(&value) {
+            Err(reason) => reason,
+            Ok(()) => match serde_json::from_value(value) {
+                Ok(config) => return config,
+                Err(error) => format!("invalid-shape-{error}"),
+            },
+        },
     };
-
-    if let Err(reason) = schema_version_quarantine_reason(&value) {
-        quarantine_config_file(&path, &reason).await;
-        return T::default();
-    }
-
-    match serde_json::from_value(value) {
-        Ok(config) => config,
-        Err(error) => {
-            quarantine_config_file(&path, &format!("invalid-shape-{error}")).await;
-            T::default()
-        }
-    }
+    quarantine_config_file(&path, &reason).await;
+    quarantined.push(file_name.to_string());
+    T::default()
 }
 
 pub(super) fn schema_version_quarantine_reason(value: &serde_json::Value) -> Result<(), String> {
