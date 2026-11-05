@@ -1,3 +1,6 @@
+#[cfg(target_os = "macos")]
+mod macos_ffi;
+
 pub mod encoded;
 pub mod image_generic;
 pub mod io;

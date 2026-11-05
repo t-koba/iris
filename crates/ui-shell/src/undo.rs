@@ -89,6 +89,11 @@ impl UndoJournal {
         !self.undo_stack.is_empty()
     }
 
+    #[cfg(test)]
+    pub(crate) fn undo_len(&self) -> usize {
+        self.undo_stack.len()
+    }
+
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
     }

@@ -795,7 +795,10 @@ fn view_main_layout(state: &AppState) -> Element<'_, Message> {
                         |_: &Theme| container::Style::default()
                     }),
             )
-            .push(resize_handle::pane_divider_handle(is_resizing_divider))
+            .push(resize_handle::resize_handle(
+                ResizeTarget::PaneDivider,
+                is_resizing_divider,
+            ))
             .push(
                 container(view_pane_content(state, 1))
                     .width(Length::FillPortion(right_ratio))
@@ -836,7 +839,7 @@ fn view_main_layout(state: &AppState) -> Element<'_, Message> {
                 .width(Length::Fixed(resolved.sidebar_width))
                 .height(Length::Fill),
         );
-        layout = layout.push(resize_handle::vertical_resize_handle(
+        layout = layout.push(resize_handle::resize_handle(
             ResizeTarget::Sidebar,
             is_resizing_sidebar,
         ));
@@ -864,7 +867,7 @@ fn view_main_layout(state: &AppState) -> Element<'_, Message> {
                     .width(Length::Fixed(resolved.right_panel_width))
                     .height(Length::Fill),
             );
-            layout = layout.push(resize_handle::vertical_resize_handle(
+            layout = layout.push(resize_handle::resize_handle(
                 ResizeTarget::RightPanel,
                 is_resizing_right,
             ));
@@ -886,7 +889,7 @@ fn view_main_layout(state: &AppState) -> Element<'_, Message> {
                                 .height(Length::Fixed(preview_panel_height))
                                 .width(Length::Fill),
                         )
-                        .push(resize_handle::horizontal_resize_handle(
+                        .push(resize_handle::resize_handle(
                             ResizeTarget::PreviewPanel,
                             is_resizing_preview,
                         ))
@@ -899,7 +902,7 @@ fn view_main_layout(state: &AppState) -> Element<'_, Message> {
                                 .height(Length::Fixed(preview_panel_height))
                                 .width(Length::Fill),
                         )
-                        .push(resize_handle::horizontal_resize_handle(
+                        .push(resize_handle::resize_handle(
                             ResizeTarget::PreviewPanel,
                             is_resizing_preview,
                         ))
@@ -914,7 +917,7 @@ fn view_main_layout(state: &AppState) -> Element<'_, Message> {
                     .height(Length::Fill);
                 Column::new()
                     .push(main_area)
-                    .push(resize_handle::horizontal_resize_handle(
+                    .push(resize_handle::resize_handle(
                         ResizeTarget::PreviewPanel,
                         is_resizing_preview,
                     ))
@@ -927,7 +930,7 @@ fn view_main_layout(state: &AppState) -> Element<'_, Message> {
             } else {
                 Column::new()
                     .push(body_area)
-                    .push(resize_handle::horizontal_resize_handle(
+                    .push(resize_handle::resize_handle(
                         ResizeTarget::PreviewPanel,
                         is_resizing_preview,
                     ))
@@ -964,7 +967,7 @@ fn view_main_layout(state: &AppState) -> Element<'_, Message> {
             );
 
             if show_right_panel {
-                layout = layout.push(resize_handle::vertical_resize_handle(
+                layout = layout.push(resize_handle::resize_handle(
                     ResizeTarget::RightPanel,
                     is_resizing_right,
                 ));
