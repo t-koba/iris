@@ -11,7 +11,6 @@ use iris_core_domain::types::options::{ConflictResolution, CopyOptions, DeleteMo
 use iris_core_domain::types::progress::{ByteRange, ProgressInfo};
 use iris_core_domain::types::read_handle::ReadHandle;
 use iris_core_domain::types::session::BackendSession;
-use iris_core_domain::types::thumbnail::{ThumbnailHint, ThumbnailResult};
 use iris_transfer::executor::{client_relay_copy_with_options, CopyRelayOptions, TransferControl};
 use std::pin::Pin;
 use tempfile::tempdir;
@@ -224,16 +223,6 @@ impl BackendAdapter for SlowReadBackend {
         Ok(OperationTicket {
             id: TicketId(99),
             kind: OperationKind::Delete,
-        })
-    }
-
-    async fn get_thumbnail(
-        &self,
-        _object: &ObjectRef,
-        _hint: ThumbnailHint,
-    ) -> Result<ThumbnailResult, BackendError> {
-        Err(BackendError::Unsupported {
-            operation: "get_thumbnail",
         })
     }
 

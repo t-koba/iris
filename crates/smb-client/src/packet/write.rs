@@ -1,8 +1,8 @@
 use crate::packet::create::Smb2FileId;
 use crate::packet::header::SMB2_HEADER_BYTES;
 use crate::wire::{
-    check_fixed_body, checked_body_tail_slice, checked_slice, checked_u16_len, checked_u32_len,
-    le_u16, le_u32, le_u64, push_u16, push_u32, push_u64, response_body,
+    check_fixed_body, checked_body_tail_slice, checked_packet_tail_slice, checked_u16_len,
+    checked_u32_len, le_u16, le_u32, le_u64, push_u16, push_u32, push_u64, response_body,
 };
 use crate::SmbClientError;
 
@@ -161,22 +161,6 @@ impl Smb2WriteResponse {
             channel_info,
         })
     }
-}
-
-fn checked_packet_tail_slice(
-    packet: &[u8],
-    offset: usize,
-    length: usize,
-    min_offset: usize,
-) -> Result<&[u8], SmbClientError> {
-    if offset < min_offset {
-        return Err(SmbClientError::BufferRangeOutOfBounds {
-            offset,
-            length,
-            available: packet.len(),
-        });
-    }
-    checked_slice(packet, offset, length)
 }
 
 #[cfg(test)]

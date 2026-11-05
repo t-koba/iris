@@ -2,7 +2,6 @@ use crate::schema;
 use iris_core_domain::types::transfer::{JobId, JobState, TaskId, TaskKind, TaskState};
 use rusqlite::Connection;
 use std::path::Path;
-use std::time::Duration;
 use tracing::debug;
 
 #[derive(Debug, thiserror::Error)]
@@ -73,6 +72,9 @@ pub struct PersistedMultipartUpload {
     pub part_size: u64,
 }
 
+/// The job store is small; 16 MB of mmap is enough.
+const JOBSTORE_MMAP_BYTES: u64 = 16 * 1024 * 1024;
+
 /// SQLite job store; lets jobs be restored after an app restart.
 pub struct JobStoreRepository {
     conn: Connection,
@@ -80,17 +82,15 @@ pub struct JobStoreRepository {
 
 impl JobStoreRepository {
     pub fn open(db_path: &Path) -> Result<Self, JobStoreError> {
-        let conn = Connection::open(db_path)?;
-        configure_connection(&conn, true)?;
-        schema::initialize_schema(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: schema::open(Some(db_path), JOBSTORE_MMAP_BYTES)?,
+        })
     }
 
     pub fn open_in_memory() -> Result<Self, JobStoreError> {
-        let conn = Connection::open_in_memory()?;
-        configure_connection(&conn, false)?;
-        schema::initialize_schema(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: schema::open(None, JOBSTORE_MMAP_BYTES)?,
+        })
     }
 
     /// Finished (completed or canceled) jobs cannot be resumed, so saving one deletes it.
@@ -434,31 +434,6 @@ impl JobStoreRepository {
         }
         Ok(tasks)
     }
-}
-
-fn configure_connection(conn: &Connection, use_wal: bool) -> Result<(), rusqlite::Error> {
-    if use_wal {
-        // The job store is small; a 16 MB mmap is enough and keeps virtual memory low.
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
-             PRAGMA busy_timeout=5000;
-             PRAGMA temp_store=MEMORY;
-             PRAGMA cache_size=-8192;
-             PRAGMA mmap_size=16777216;
-             PRAGMA foreign_keys=ON;",
-        )?;
-    } else {
-        conn.execute_batch(
-            "PRAGMA temp_store=MEMORY;
-             PRAGMA busy_timeout=5000;
-             PRAGMA cache_size=-2048;
-             PRAGMA foreign_keys=ON;",
-        )?;
-    }
-
-    conn.busy_timeout(Duration::from_secs(5))?;
-    Ok(())
 }
 
 fn job_state_to_str(state: &JobState) -> &'static str {

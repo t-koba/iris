@@ -19,7 +19,6 @@ use iris_core_domain::types::options::{ConflictResolution, CopyOptions, DeleteMo
 use iris_core_domain::types::progress::ByteRange;
 use iris_core_domain::types::read_handle::ReadHandle;
 use iris_core_domain::types::session::BackendSession;
-use iris_core_domain::types::thumbnail::{ThumbnailHint, ThumbnailResult};
 use multipart::{MULTIPART_CHUNK_BYTES, SINGLE_PART_UPLOAD_MAX_BYTES};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -662,16 +661,6 @@ impl BackendAdapter for S3Adapter {
         }
 
         Ok(self.next_ticket(OperationKind::Delete))
-    }
-
-    async fn get_thumbnail(
-        &self,
-        _object: &ObjectRef,
-        _hint: ThumbnailHint,
-    ) -> Result<ThumbnailResult, BackendError> {
-        Err(BackendError::Unsupported {
-            operation: "get_thumbnail",
-        })
     }
 
     async fn get_metadata(

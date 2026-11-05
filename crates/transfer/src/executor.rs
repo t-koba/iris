@@ -607,7 +607,7 @@ mod tests {
     use iris_core_domain::types::progress::ByteRange;
     use iris_core_domain::types::read_handle::ReadHandle;
     use iris_core_domain::types::session::BackendSession;
-    use iris_core_domain::types::thumbnail::{ThumbnailHint, ThumbnailResult};
+
     use iris_core_domain::types::transfer::{JobState, TaskId, TaskKind, TaskState};
     use iris_jobstore::repository::{
         PersistedChunkState, PersistedChunkStateRow, PersistedJob, PersistedTask,
@@ -1244,16 +1244,6 @@ mod tests {
             Ok(OperationTicket {
                 id: TicketId(2),
                 kind: OperationKind::Delete,
-            })
-        }
-
-        async fn get_thumbnail(
-            &self,
-            _object: &ObjectRef,
-            _hint: ThumbnailHint,
-        ) -> Result<ThumbnailResult, BackendError> {
-            Err(BackendError::Unsupported {
-                operation: "get_thumbnail",
             })
         }
 

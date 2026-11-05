@@ -214,16 +214,6 @@ impl BackendAdapter for MockReadBackend {
         })
     }
 
-    async fn get_thumbnail(
-        &self,
-        _object: &ObjectRef,
-        _hint: ThumbnailHint,
-    ) -> Result<ThumbnailResult, BackendError> {
-        Err(BackendError::Unsupported {
-            operation: "get_thumbnail",
-        })
-    }
-
     async fn get_metadata(
         &self,
         _object: &ObjectRef,
@@ -387,16 +377,6 @@ impl BackendAdapter for MockRangeRawBackend {
     ) -> Result<OperationTicket, BackendError> {
         Err(BackendError::Unsupported {
             operation: "delete",
-        })
-    }
-
-    async fn get_thumbnail(
-        &self,
-        _object: &ObjectRef,
-        _hint: ThumbnailHint,
-    ) -> Result<ThumbnailResult, BackendError> {
-        Err(BackendError::Unsupported {
-            operation: "get_thumbnail",
         })
     }
 

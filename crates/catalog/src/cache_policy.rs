@@ -161,8 +161,7 @@ mod tests {
 
     #[test]
     fn evict_thumbnail_bytes_removes_files_and_rows() {
-        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
-        schema::initialize_schema(&conn).expect("initialize schema");
+        let conn = schema::open(None, 0).expect("open in-memory sqlite");
 
         let dir = tempdir().expect("create tempdir");
         let file_path = dir.path().join("thumb.jpg");

@@ -192,7 +192,7 @@ mod tests {
     use iris_core_domain::types::progress::ByteRange;
     use iris_core_domain::types::read_handle::ReadHandle;
     use iris_core_domain::types::session::BackendSession;
-    use iris_core_domain::types::thumbnail::{ThumbnailHint, ThumbnailResult};
+
     use std::pin::Pin;
     use std::time::{Duration, SystemTime};
     use tokio::io::AsyncRead;
@@ -296,16 +296,6 @@ mod tests {
             Ok(OperationTicket {
                 id: TicketId(1),
                 kind: OperationKind::Delete,
-            })
-        }
-
-        async fn get_thumbnail(
-            &self,
-            _object: &ObjectRef,
-            _hint: ThumbnailHint,
-        ) -> Result<ThumbnailResult, BackendError> {
-            Err(BackendError::Unsupported {
-                operation: "get_thumbnail",
             })
         }
 

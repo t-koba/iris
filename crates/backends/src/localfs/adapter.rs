@@ -14,7 +14,6 @@ use iris_core_domain::types::options::{ConflictResolution, CopyOptions, DeleteMo
 use iris_core_domain::types::progress::ByteRange;
 use iris_core_domain::types::read_handle::ReadHandle;
 use iris_core_domain::types::session::BackendSession;
-use iris_core_domain::types::thumbnail::{ThumbnailHint, ThumbnailResult};
 use iris_platform_integration::copy::{platform_copy, stream_file_copy};
 use iris_platform_integration::path::{ensure_within, unique_sibling_path};
 use std::collections::HashMap;
@@ -642,17 +641,6 @@ impl BackendAdapter for LocalFsAdapter {
         }
 
         Ok(self.next_ticket(OperationKind::Delete))
-    }
-
-    async fn get_thumbnail(
-        &self,
-        _object: &ObjectRef,
-        _hint: ThumbnailHint,
-    ) -> Result<ThumbnailResult, BackendError> {
-        // Thumbnails are produced by thumb-preview; local files have no direct thumbnail API.
-        Err(BackendError::Unsupported {
-            operation: "get_thumbnail",
-        })
     }
 
     async fn get_metadata(

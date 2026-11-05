@@ -13,7 +13,6 @@ use iris_core_domain::types::options::{ConflictResolution, CopyOptions, DeleteMo
 use iris_core_domain::types::progress::ByteRange;
 use iris_core_domain::types::read_handle::ReadHandle;
 use iris_core_domain::types::session::BackendSession;
-use iris_core_domain::types::thumbnail::{ThumbnailHint, ThumbnailResult};
 use iris_smb_client::{
     close, copy_file_chunks, create_directory, delete, list_directory_once, open_file_and_read,
     open_file_for_read, open_file_for_write, read_file_ranges_pipelined, rename, set_basic_info,
@@ -857,17 +856,6 @@ impl BackendAdapter for SmbAdapter {
             }
         }
         Ok(self.next_ticket(OperationKind::Delete))
-    }
-
-    async fn get_thumbnail(
-        &self,
-        _object: &ObjectRef,
-        _hint: ThumbnailHint,
-    ) -> Result<ThumbnailResult, BackendError> {
-        // No thumbnail API is assumed; range reads plus embedded preview extraction are used instead.
-        Err(BackendError::Unsupported {
-            operation: "get_thumbnail",
-        })
     }
 
     async fn get_metadata(

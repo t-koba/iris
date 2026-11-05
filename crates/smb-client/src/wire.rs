@@ -36,6 +36,23 @@ pub(crate) fn checked_slice(
         })
 }
 
+/// `offset` counts from the start of `packet` and must be at least `min_offset`.
+pub(crate) fn checked_packet_tail_slice(
+    packet: &[u8],
+    offset: usize,
+    length: usize,
+    min_offset: usize,
+) -> Result<&[u8], SmbClientError> {
+    if offset < min_offset {
+        return Err(SmbClientError::BufferRangeOutOfBounds {
+            offset,
+            length,
+            available: packet.len(),
+        });
+    }
+    checked_slice(packet, offset, length)
+}
+
 /// `absolute_offset` counts from the start of the SMB2 header and must not point into the fixed part.
 pub(crate) fn checked_body_tail_slice(
     body: &[u8],
