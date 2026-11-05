@@ -98,74 +98,22 @@ impl PaneState {
         self.selection_anchor_path = self.entry_display_path(index);
     }
 
-    pub fn focus_next(&mut self) {
+    /// Moves focus `delta` visible entries (one row is `items_per_row`), stopping at the ends.
+    /// Without focus, the first entry gets it.
+    pub fn move_focus_by(&mut self, delta: isize) {
         let visible = self.visible_indices();
-        if visible.is_empty() {
+        let Some(&first) = visible.first() else {
             return;
-        }
-
-        self.focused_index = Some(
-            match self
-                .focused_index
-                .and_then(|index| self.visible_position(index))
-            {
-                Some(position) if position + 1 < visible.len() => visible[position + 1],
-                Some(_) => *visible.last().expect("visible is not empty"),
-                None => visible[0],
-            },
-        );
-    }
-
-    pub fn focus_previous(&mut self) {
-        let visible = self.visible_indices();
-        if visible.is_empty() {
-            return;
-        }
-
-        self.focused_index = Some(
-            match self
-                .focused_index
-                .and_then(|index| self.visible_position(index))
-            {
-                Some(position) if position > 0 => visible[position - 1],
-                Some(_) | None => visible[0],
-            },
-        );
-    }
-
-    pub fn focus_next_row(&mut self, items_per_row: usize) {
-        let visible = self.visible_indices();
-        if visible.is_empty() {
-            return;
-        }
-
+        };
         self.focused_index = Some(
             match self
                 .focused_index
                 .and_then(|index| self.visible_position(index))
             {
                 Some(position) => {
-                    let next = position + items_per_row;
-                    visible[next.min(visible.len() - 1)]
+                    visible[position.saturating_add_signed(delta).min(visible.len() - 1)]
                 }
-                None => visible[0],
-            },
-        );
-    }
-
-    pub fn focus_previous_row(&mut self, items_per_row: usize) {
-        let visible = self.visible_indices();
-        if visible.is_empty() {
-            return;
-        }
-
-        self.focused_index = Some(
-            match self
-                .focused_index
-                .and_then(|index| self.visible_position(index))
-            {
-                Some(position) if position >= items_per_row => visible[position - items_per_row],
-                Some(_) | None => visible[0],
+                None => first,
             },
         );
     }
@@ -176,31 +124,24 @@ impl PaneState {
         }
     }
 
-    pub fn selected_object_refs(&self) -> Vec<ObjectRef> {
+    /// Selected entries in list order.
+    fn selected_entries(&self) -> impl Iterator<Item = &iris_core_domain::types::list::ListEntry> {
         let mut indices: Vec<EntryIndex> = self.selected_indices.iter().copied().collect();
         indices.sort_unstable();
-
         indices
             .into_iter()
-            .filter_map(|index| {
-                self.entries
-                    .get(entry_offset(index))
-                    .map(|entry| entry.object_ref.clone())
-            })
+            .filter_map(|index| self.entries.get(entry_offset(index)))
+    }
+
+    pub fn selected_object_refs(&self) -> Vec<ObjectRef> {
+        self.selected_entries()
+            .map(|entry| entry.object_ref.clone())
             .collect()
     }
 
     pub fn selected_names(&self) -> Vec<String> {
-        let mut indices: Vec<EntryIndex> = self.selected_indices.iter().copied().collect();
-        indices.sort_unstable();
-
-        indices
-            .into_iter()
-            .filter_map(|index| {
-                self.entries
-                    .get(entry_offset(index))
-                    .map(|entry| entry.name.clone())
-            })
+        self.selected_entries()
+            .map(|entry| entry.name.clone())
             .collect()
     }
 }

@@ -783,9 +783,9 @@ mod tests {
         assert_eq!(pane.selected_indices, [0, 2].into_iter().collect());
         assert_eq!(pane.focused_index, Some(0));
 
-        pane.focus_next();
+        pane.move_focus_by(1);
         assert_eq!(pane.focused_index, Some(2));
-        pane.focus_previous();
+        pane.move_focus_by(-1);
         assert_eq!(pane.focused_index, Some(0));
     }
 

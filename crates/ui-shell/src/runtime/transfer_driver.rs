@@ -310,9 +310,8 @@ impl AppRuntime {
             let dst_resolved = self.resolve_backend(destination);
             let same_backend =
                 self.same_backend(src_path, &src_resolved, destination, &dst_resolved);
-            let high_risk_path = src_resolved.kind != VolumeKind::Local
-                || dst_resolved.kind != VolumeKind::Local
-                || src_path.parent() != destination.parent();
+            let high_risk_path =
+                is_high_risk_path(&src_resolved, &dst_resolved, src_path, destination);
 
             if is_move
                 && same_backend
@@ -327,22 +326,15 @@ impl AppRuntime {
             {
                 let src_ref = self.source_object_ref(source, &src_resolved)?;
                 let dst_ref = self.object_ref_for_path(destination, &dst_resolved)?;
-                src_resolved
-                    .adapter
-                    .move_object(
-                        &src_ref,
-                        &dst_ref,
-                        MoveOptions {
-                            on_conflict: resolution.clone(),
-                        },
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?;
-                self.rebind_cached_display_path_prefix(
-                    &src_resolved.backend_id,
+                self.rename_move(
+                    &src_resolved,
+                    &src_ref,
+                    &dst_ref,
                     &source.display_path,
-                    &destination.to_string_lossy(),
-                );
+                    destination,
+                    &resolution,
+                )
+                .await?;
                 return Ok(TransferItemOutcome {
                     skipped: false,
                     bytes_completed: 0,
@@ -434,9 +426,7 @@ impl AppRuntime {
         let src_ref = self.source_object_ref(src, &src_resolved)?;
         let dst_ref = self.object_ref_for_path(dst, &dst_resolved)?;
         let same_backend = self.same_backend(src_path, &src_resolved, dst, &dst_resolved);
-        let high_risk_path = src_resolved.kind != VolumeKind::Local
-            || dst_resolved.kind != VolumeKind::Local
-            || src_path.parent() != dst.parent();
+        let high_risk_path = is_high_risk_path(&src_resolved, &dst_resolved, src_path, dst);
         let started_at = std::time::Instant::now();
         let resumable = context
             .record_chunk_state
@@ -453,37 +443,24 @@ impl AppRuntime {
                 same_backend,
             ) {
                 MoveMethod::RenameMove => {
-                    src_resolved
-                        .adapter
-                        .move_object(
-                            &src_ref,
-                            &dst_ref,
-                            MoveOptions {
-                                on_conflict: resolution.clone(),
-                            },
-                        )
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    self.rebind_cached_display_path_prefix(
-                        &src_resolved.backend_id,
+                    self.rename_move(
+                        &src_resolved,
+                        &src_ref,
+                        &dst_ref,
                         &src.display_path,
-                        &dst.to_string_lossy(),
-                    );
-                    let total_bytes = self
-                        .stat_path(dst.to_string_lossy().as_ref())
-                        .await?
-                        .and_then(|meta| meta.size)
-                        .unwrap_or(0);
-                    let _ = progress_tx.send(ProgressInfo {
-                        bytes_completed: total_bytes,
-                        bytes_total: Some(total_bytes),
-                        files_completed: 1,
-                        files_total: Some(1),
-                    });
-                    record_transfer_sample(&src_resolved, &dst_resolved, total_bytes, started_at);
-                    return Ok(TransferResult {
-                        bytes_transferred: total_bytes,
-                    });
+                        dst,
+                        &resolution,
+                    )
+                    .await?;
+                    return self
+                        .finish_server_side_transfer(
+                            dst,
+                            progress_tx,
+                            &src_resolved,
+                            &dst_resolved,
+                            started_at,
+                        )
+                        .await;
                 }
                 MoveMethod::ServerSideCopyThenDelete => {
                     src_resolved
@@ -507,21 +484,15 @@ impl AppRuntime {
                     .await?;
                     self.reconcile_cache_after_move(src, &src_resolved, dst, &dst_resolved)
                         .await;
-                    let total_bytes = self
-                        .stat_path(dst.to_string_lossy().as_ref())
-                        .await?
-                        .and_then(|meta| meta.size)
-                        .unwrap_or(0);
-                    let _ = progress_tx.send(ProgressInfo {
-                        bytes_completed: total_bytes,
-                        bytes_total: Some(total_bytes),
-                        files_completed: 1,
-                        files_total: Some(1),
-                    });
-                    record_transfer_sample(&src_resolved, &dst_resolved, total_bytes, started_at);
-                    return Ok(TransferResult {
-                        bytes_transferred: total_bytes,
-                    });
+                    return self
+                        .finish_server_side_transfer(
+                            dst,
+                            progress_tx,
+                            &src_resolved,
+                            &dst_resolved,
+                            started_at,
+                        )
+                        .await;
                 }
                 MoveMethod::ClientRelayThenDelete => {
                     let result = move_via_relay_with_verify_and_control(
@@ -571,21 +542,14 @@ impl AppRuntime {
                     )
                     .await
                     .map_err(|error| error.to_string())?;
-                let total_bytes = self
-                    .stat_path(dst.to_string_lossy().as_ref())
-                    .await?
-                    .and_then(|meta| meta.size)
-                    .unwrap_or(0);
-                let _ = progress_tx.send(ProgressInfo {
-                    bytes_completed: total_bytes,
-                    bytes_total: Some(total_bytes),
-                    files_completed: 1,
-                    files_total: Some(1),
-                });
-                record_transfer_sample(&src_resolved, &dst_resolved, total_bytes, started_at);
-                Ok(TransferResult {
-                    bytes_transferred: total_bytes,
-                })
+                self.finish_server_side_transfer(
+                    dst,
+                    progress_tx,
+                    &src_resolved,
+                    &dst_resolved,
+                    started_at,
+                )
+                .await
             }
             CopyMethod::ClientRelayCopy => {
                 let result = client_relay_copy_with_options(
@@ -612,6 +576,61 @@ impl AppRuntime {
                 Ok(result)
             }
         }
+    }
+
+    /// Moves within one backend by renaming, keeping cached listings under the new path.
+    async fn rename_move(
+        &self,
+        src_resolved: &ResolvedBackend,
+        src_ref: &ObjectRef,
+        dst_ref: &ObjectRef,
+        src_display_path: &str,
+        dst: &Path,
+        resolution: &ConflictResolution,
+    ) -> Result<(), String> {
+        src_resolved
+            .adapter
+            .move_object(
+                src_ref,
+                dst_ref,
+                MoveOptions {
+                    on_conflict: resolution.clone(),
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        self.rebind_cached_display_path_prefix(
+            &src_resolved.backend_id,
+            src_display_path,
+            &dst.to_string_lossy(),
+        );
+        Ok(())
+    }
+
+    /// Reports a transfer done by the storage service: the size comes from the destination.
+    async fn finish_server_side_transfer(
+        &self,
+        dst: &Path,
+        progress_tx: &watch::Sender<ProgressInfo>,
+        src_resolved: &ResolvedBackend,
+        dst_resolved: &ResolvedBackend,
+        started_at: std::time::Instant,
+    ) -> Result<TransferResult, String> {
+        let total_bytes = self
+            .stat_path(dst.to_string_lossy().as_ref())
+            .await?
+            .and_then(|meta| meta.size)
+            .unwrap_or(0);
+        let _ = progress_tx.send(ProgressInfo {
+            bytes_completed: total_bytes,
+            bytes_total: Some(total_bytes),
+            files_completed: 1,
+            files_total: Some(1),
+        });
+        record_transfer_sample(src_resolved, dst_resolved, total_bytes, started_at);
+        Ok(TransferResult {
+            bytes_transferred: total_bytes,
+        })
     }
 
     async fn preserve_directory_mtime(
@@ -661,6 +680,18 @@ impl AppRuntime {
 
         Ok(())
     }
+}
+
+/// Remote ends or a different parent folder call for verification before the source goes.
+fn is_high_risk_path(
+    src_resolved: &ResolvedBackend,
+    dst_resolved: &ResolvedBackend,
+    src: &Path,
+    dst: &Path,
+) -> bool {
+    src_resolved.kind != VolumeKind::Local
+        || dst_resolved.kind != VolumeKind::Local
+        || src.parent() != dst.parent()
 }
 
 fn record_transfer_sample(

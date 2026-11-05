@@ -237,21 +237,23 @@ pub fn handle_pane_message(
             return refresh_preview_and_reveal(state, pane_idx);
         }
 
-        PaneMessage::FocusNext => return move_focus(state, pane_idx, |pane| pane.focus_next()),
+        PaneMessage::FocusNext => return move_focus(state, pane_idx, |pane| pane.move_focus_by(1)),
 
         PaneMessage::FocusPrevious => {
-            return move_focus(state, pane_idx, |pane| pane.focus_previous());
+            return move_focus(state, pane_idx, |pane| pane.move_focus_by(-1));
         }
 
         PaneMessage::FocusNextRow => {
             let items_per_row = grid_items_per_row_for_pane(state, pane_idx);
-            return move_focus(state, pane_idx, |pane| pane.focus_next_row(items_per_row));
+            return move_focus(state, pane_idx, |pane| {
+                pane.move_focus_by(items_per_row as isize)
+            });
         }
 
         PaneMessage::FocusPreviousRow => {
             let items_per_row = grid_items_per_row_for_pane(state, pane_idx);
             return move_focus(state, pane_idx, |pane| {
-                pane.focus_previous_row(items_per_row)
+                pane.move_focus_by(-(items_per_row as isize))
             });
         }
 

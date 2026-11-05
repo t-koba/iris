@@ -1,4 +1,5 @@
 use super::*;
+use iris_backends::localfs::adapter::metadata_result;
 
 impl AppRuntime {
     pub async fn open_object(&self, object: &ObjectRef) -> Result<(), String> {
@@ -134,21 +135,7 @@ impl AppRuntime {
             return match tokio::fs::metadata(path).await {
                 Ok(metadata) => {
                     self.clear_negative_path(&resolved.backend_id, &display_path);
-                    Ok(Some(MetadataResult {
-                        level: MetadataLevel::L1,
-                        is_dir: metadata.is_dir(),
-                        size: if metadata.is_file() {
-                            Some(metadata.len())
-                        } else {
-                            None
-                        },
-                        mtime: metadata.modified().ok(),
-                        ctime: metadata.created().ok(),
-                        content_type: mime_guess::from_path(path)
-                            .first()
-                            .map(|mime| mime.to_string()),
-                        etag: None,
-                    }))
+                    Ok(Some(metadata_result(path, &metadata, MetadataLevel::L1)))
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     self.remember_negative_path(

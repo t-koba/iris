@@ -31,6 +31,25 @@ const LOCAL_LIST_CURSOR_PREFIX: &str = "localfs:";
 const MAX_ACTIVE_LIST_CURSORS: usize = 64;
 const LIST_CURSOR_TTL: Duration = Duration::from_secs(30);
 
+/// Metadata of a local file or directory; the content type is guessed from the name.
+pub fn metadata_result(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    level: MetadataLevel,
+) -> MetadataResult {
+    MetadataResult {
+        level,
+        is_dir: metadata.is_dir(),
+        size: metadata.is_file().then_some(metadata.len()),
+        mtime: metadata.modified().ok(),
+        ctime: metadata.created().ok(),
+        content_type: mime_guess::from_path(path)
+            .first()
+            .map(|mime| mime.to_string()),
+        etag: None,
+    }
+}
+
 /// Local file system adapter, also used for network mounts such as NFS.
 pub struct LocalFsAdapter {
     root: PathBuf,
@@ -364,19 +383,7 @@ impl BackendAdapter for LocalFsAdapter {
         let metadata = fs::metadata(&path)
             .await
             .map_err(|e| BackendError::Internal(Box::new(e)))?;
-
-        let is_dir = metadata.is_dir();
-        let content_type = mime_guess::from_path(&path).first().map(|m| m.to_string());
-
-        Ok(MetadataResult {
-            level: MetadataLevel::L1,
-            is_dir,
-            size: if is_dir { None } else { Some(metadata.len()) },
-            mtime: metadata.modified().ok(),
-            ctime: metadata.created().ok(),
-            content_type,
-            etag: None,
-        })
+        Ok(metadata_result(&path, &metadata, MetadataLevel::L1))
     }
 
     async fn read(
@@ -652,20 +659,8 @@ impl BackendAdapter for LocalFsAdapter {
         let metadata = fs::metadata(&path)
             .await
             .map_err(|e| BackendError::Internal(Box::new(e)))?;
-
-        let is_dir = metadata.is_dir();
-        let content_type = mime_guess::from_path(&path).first().map(|m| m.to_string());
-
         // Beyond L1 only the content type is guessed; EXIF and the like come from thumb-preview.
-        Ok(MetadataResult {
-            level,
-            is_dir,
-            size: if is_dir { None } else { Some(metadata.len()) },
-            mtime: metadata.modified().ok(),
-            ctime: metadata.created().ok(),
-            content_type,
-            etag: None,
-        })
+        Ok(metadata_result(&path, &metadata, level))
     }
 
     async fn get_stable_id(&self, object: &ObjectRef) -> Result<StableId, BackendError> {

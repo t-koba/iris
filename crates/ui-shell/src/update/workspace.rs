@@ -126,7 +126,7 @@ fn select_next_quick_look_item(state: &mut AppState) -> Task<Message> {
     if !state.quick_look_open {
         return Task::none();
     }
-    state.active_pane_mut().focus_next();
+    state.active_pane_mut().move_focus_by(1);
     state.active_pane_mut().select_focused();
     refresh_preview_for_selection(state)
 }
@@ -135,7 +135,7 @@ fn select_previous_quick_look_item(state: &mut AppState) -> Task<Message> {
     if !state.quick_look_open {
         return Task::none();
     }
-    state.active_pane_mut().focus_previous();
+    state.active_pane_mut().move_focus_by(-1);
     state.active_pane_mut().select_focused();
     refresh_preview_for_selection(state)
 }

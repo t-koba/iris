@@ -1,4 +1,5 @@
 use super::*;
+use iris_backends::localfs::adapter::metadata_result;
 use tokio::task::JoinSet;
 
 const STAT_OBJECT_CONCURRENCY: usize = 16;
@@ -469,21 +470,7 @@ impl AppRuntime {
             let metadata = tokio::fs::metadata(path)
                 .await
                 .map_err(|error| error.to_string())?;
-            return Ok(MetadataResult {
-                level: MetadataLevel::L1,
-                is_dir: metadata.is_dir(),
-                size: if metadata.is_file() {
-                    Some(metadata.len())
-                } else {
-                    None
-                },
-                mtime: metadata.modified().ok(),
-                ctime: metadata.created().ok(),
-                content_type: mime_guess::from_path(path)
-                    .first()
-                    .map(|mime| mime.to_string()),
-                etag: None,
-            });
+            return Ok(metadata_result(path, &metadata, MetadataLevel::L1));
         }
 
         let source = self.source_object_ref(object, &resolved)?;
@@ -951,21 +938,7 @@ impl AppRuntime {
 
 fn stat_local_path_sync(path: &Path) -> Result<MetadataResult, String> {
     let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
-    Ok(MetadataResult {
-        level: MetadataLevel::L1,
-        is_dir: metadata.is_dir(),
-        size: if metadata.is_file() {
-            Some(metadata.len())
-        } else {
-            None
-        },
-        mtime: metadata.modified().ok(),
-        ctime: metadata.created().ok(),
-        content_type: mime_guess::from_path(path)
-            .first()
-            .map(|mime| mime.to_string()),
-        etag: None,
-    })
+    Ok(metadata_result(path, &metadata, MetadataLevel::L1))
 }
 
 #[cfg(test)]
