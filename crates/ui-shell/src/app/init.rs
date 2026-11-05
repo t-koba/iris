@@ -8,10 +8,16 @@ use std::path::PathBuf;
 
 pub fn init() -> (AppState, Task<Message>) {
     let _ = app_runtime();
-    let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-    let path_str = home.to_string_lossy().to_string();
+    let launch_path = launch_directory_from_args();
+    let path_str = launch_path.clone().unwrap_or_else(|| {
+        dirs_next::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/"))
+            .to_string_lossy()
+            .to_string()
+    });
 
     let mut state = AppState::default();
+    state.launched_with_path = launch_path.is_some();
     state.pane_mut(0).current_path = path_str.clone();
     state.pane_mut(0).load_state = PaneLoadState::LoadingInitial;
     state.sidebar_visible = true;
@@ -47,6 +53,16 @@ pub fn init() -> (AppState, Task<Message>) {
             system_theme_task,
         ]),
     )
+}
+
+/// The folder given on the command line; "Open in New Window" starts Iris this way.
+fn launch_directory_from_args() -> Option<String> {
+    std::env::args_os()
+        .skip(1)
+        .map(PathBuf::from)
+        .find(|path| path.is_dir())
+        .and_then(|path| path.canonicalize().ok())
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 fn init_sidebar_groups() -> Vec<SidebarGroup> {

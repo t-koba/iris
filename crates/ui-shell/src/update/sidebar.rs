@@ -232,8 +232,15 @@ pub fn handle(state: &mut AppState, message: SidebarMessage) -> Task<Message> {
             state.sidebar_drop_target = None;
         }
         SidebarMessage::OpenInNewWindow(path) => {
-            if let Ok(exe) = std::env::current_exe() {
-                let _ = std::process::Command::new(exe).arg(&path).spawn();
+            let spawned = std::env::current_exe()
+                .and_then(|exe| std::process::Command::new(exe).arg(&path).spawn());
+            if let Err(error) = spawned {
+                state.add_notification(
+                    crate::state::NotificationSeverity::Error,
+                    crate::i18n::tr("notification-open-new-window-failed-title"),
+                    error.to_string(),
+                    vec![crate::state::NotificationAction::Dismiss],
+                );
             }
         }
     }

@@ -376,6 +376,7 @@ undo-operation-rename = rename
 undo-operation-create-folder = folder creation
 undo-operation-trash-delete = trash delete
 notification-eject-failed-title = Could not eject the volume
+notification-open-new-window-failed-title = Could not open a new window
 notification-open-help-failed-title = Could not open help
 notification-remote-undo-disabled-title = Remote undo is disabled
 notification-remote-undo-disabled-body = Enable remote copy undo in Remote Transfer settings before deleting copied remote items.

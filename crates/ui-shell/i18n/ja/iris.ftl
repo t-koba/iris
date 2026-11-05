@@ -372,6 +372,7 @@ undo-operation-rename = 名前変更
 undo-operation-create-folder = フォルダ作成
 undo-operation-trash-delete = ゴミ箱への削除
 notification-eject-failed-title = ボリュームを取り出せませんでした
+notification-open-new-window-failed-title = 新しいウィンドウを開けませんでした
 notification-open-help-failed-title = ヘルプを開けませんでした
 notification-remote-undo-disabled-title = リモートの取り消しは無効です
 notification-remote-undo-disabled-body = コピー済みのリモート項目を削除するには、リモート転送設定でリモートコピーの取り消しを有効にしてください。

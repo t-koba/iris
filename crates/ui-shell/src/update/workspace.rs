@@ -1,12 +1,13 @@
 use super::*;
 use fluent_bundle::FluentArgs;
 
-fn restore_window_task(config: &LayoutConfig) -> Task<Message> {
+fn restore_window_task(config: &LayoutConfig, restore_position: bool) -> Task<Message> {
     let width = config.window_width.clamp(640.0, 7680.0);
     let height = config.window_height.clamp(480.0, 4320.0);
     let position = config
         .window_x
         .zip(config.window_y)
+        .filter(|_| restore_position)
         .filter(|(x, y)| x.is_finite() && y.is_finite())
         .map(|(x, y)| iced::Point::new(x.clamp(-20_000.0, 20_000.0), y.clamp(-20_000.0, 20_000.0)));
 
@@ -383,7 +384,15 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
             return save_layout_config_now(state);
         }
         Message::LayoutConfigLoaded(config) => {
-            let window_task = restore_window_task(&config);
+            let first_load = !state.layout_restored;
+            state.layout_restored = true;
+            // A window opened for a folder starts there and lets the OS place it, instead of
+            // covering the first window with the saved position and tabs.
+            let window_task = if first_load {
+                restore_window_task(&config, !state.launched_with_path)
+            } else {
+                Task::none()
+            };
             state.sidebar_width = config.sidebar_width;
             state.right_panel_width = config.right_panel_width;
             state.preview_panel_height = config.preview_panel_height;
@@ -414,7 +423,8 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
             crate::i18n::initialize(state.locale.as_deref());
             trim_thumbnail_cache_to_limits(state);
             app_runtime().set_cache_encryption_policy(config.cache_encryption_policy);
-            let restored_tabs = state.restore_pane_tabs(&config.tabs);
+            let restored_tabs =
+                first_load && !state.launched_with_path && state.restore_pane_tabs(&config.tabs);
             {
                 let primary = state.pane_mut(0);
                 primary.list_columns = config.list_columns.clone();
@@ -555,6 +565,57 @@ fn legacy_sidebar_group_kind(
         Some(SidebarGroupKind::Cloud)
     } else {
         Some(SidebarGroupKind::Custom)
+    }
+}
+
+#[cfg(test)]
+mod layout_reload_tests {
+    use super::*;
+    use crate::config::PaneTabConfig;
+
+    fn config_with_tab(path: &str) -> LayoutConfig {
+        LayoutConfig {
+            tabs: vec![PaneTabConfig {
+                pane: 0,
+                path: path.to_string(),
+                active: true,
+            }],
+            ..LayoutConfig::default()
+        }
+    }
+
+    #[test]
+    fn only_the_first_layout_load_restores_tabs() {
+        let mut state = AppState::default();
+        state.pane_mut(0).current_path = "/start".to_string();
+
+        let _ = update(
+            &mut state,
+            Message::LayoutConfigLoaded(config_with_tab("/saved")),
+        );
+        assert_eq!(state.pane(0).current_path, "/saved");
+
+        state.pane_mut(0).current_path = "/browsing".to_string();
+        // Another window saved its layout and the file watcher reloaded it.
+        let _ = update(
+            &mut state,
+            Message::LayoutConfigLoaded(config_with_tab("/other-window")),
+        );
+        assert_eq!(state.pane(0).current_path, "/browsing");
+    }
+
+    #[test]
+    fn a_window_opened_for_a_folder_keeps_it() {
+        let mut state = AppState::default();
+        state.launched_with_path = true;
+        state.pane_mut(0).current_path = "/requested".to_string();
+
+        let _ = update(
+            &mut state,
+            Message::LayoutConfigLoaded(config_with_tab("/saved")),
+        );
+
+        assert_eq!(state.pane(0).current_path, "/requested");
     }
 }
 

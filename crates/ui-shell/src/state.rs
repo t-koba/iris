@@ -139,6 +139,11 @@ pub struct AppState {
     pub mouse_position: Option<iced::Point>,
     pub last_config_save: Option<Instant>,
     pub config_save_generation: u64,
+    /// Set by the first layout load; later loads (the file changed on disk, for instance by
+    /// another Iris window) keep this window's tabs and position.
+    pub layout_restored: bool,
+    /// Started for a folder given on the command line ("Open in New Window").
+    pub launched_with_path: bool,
     pub preview_position: PreviewPosition,
 
     pub dual_pane_enabled: bool,
@@ -236,6 +241,8 @@ impl Default for AppState {
             mouse_position: None,
             last_config_save: None,
             config_save_generation: 0,
+            layout_restored: false,
+            launched_with_path: false,
             preview_position: PreviewPosition::Right,
             dual_pane_enabled: false,
             pane_split_ratio: 0.5,
