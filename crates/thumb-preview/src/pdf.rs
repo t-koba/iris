@@ -255,22 +255,55 @@ mod platform {
     use super::*;
     use pdfium_render::prelude::*;
     use std::io::Cursor;
+    use std::sync::OnceLock;
+
+    /// Binds pdfium once per process.
+    ///
+    /// `Pdfium::default()` panics when the shared library is missing, and the release profile
+    /// aborts on panic, so binding goes through the fallible API. pdfium is optional at run time:
+    /// without it PDFs simply get no thumbnail. The library next to the executable wins (packaged
+    /// builds), then the working directory, then the system search path.
+    fn pdfium() -> Option<&'static Pdfium> {
+        static PDFIUM: OnceLock<Option<Pdfium>> = OnceLock::new();
+        PDFIUM
+            .get_or_init(|| {
+                let local_candidates = std::env::current_exe()
+                    .ok()
+                    .and_then(|exe| exe.parent().map(Path::to_path_buf))
+                    .into_iter()
+                    .chain(std::env::current_dir().ok())
+                    .map(|dir| Pdfium::pdfium_platform_library_name_at_path(&dir));
+                let bindings = local_candidates
+                    .filter(|candidate| candidate.is_file())
+                    .find_map(|candidate| Pdfium::bind_to_library(candidate).ok())
+                    .map(Ok)
+                    .unwrap_or_else(Pdfium::bind_to_system_library);
+                match bindings {
+                    Ok(bindings) => Some(Pdfium::new(bindings)),
+                    Err(error) => {
+                        tracing::info!(
+                            "pdfium is unavailable; PDF thumbnails are disabled: {error}"
+                        );
+                        None
+                    }
+                }
+            })
+            .as_ref()
+    }
 
     pub fn render_first_page(file_path: &Path, max_dimension: u32) -> Option<ThumbnailResult> {
-        let pdfium = Pdfium::default();
-        let document = pdfium.load_pdf_from_file(file_path, None).ok()?;
+        let document = pdfium()?.load_pdf_from_file(file_path, None).ok()?;
         let page = document.pages().get(0).ok()?;
 
         let width = page.width().value;
         let height = page.height().value;
+        if !(width.is_finite() && height.is_finite()) || width <= 0.0 || height <= 0.0 {
+            return None;
+        }
 
-        let scale = if width > height {
-            max_dimension as f32 / width
-        } else {
-            max_dimension as f32 / height
-        };
-        let render_width = (width * scale) as i32;
-        let render_height = (height * scale) as i32;
+        let scale = max_dimension.max(1) as f32 / width.max(height);
+        let render_width = ((width * scale).round() as i32).max(1);
+        let render_height = ((height * scale).round() as i32).max(1);
 
         let bitmap = page
             .render_with_config(
@@ -280,9 +313,10 @@ mod platform {
             )
             .ok()?;
 
-        let dynamic = bitmap.as_image();
+        // JPEG has no alpha channel; the image crate refuses to encode RGBA as JPEG.
+        let rgb = image::DynamicImage::ImageRgb8(bitmap.as_image().ok()?.into_rgb8());
         let mut buf = Cursor::new(Vec::new());
-        dynamic.write_to(&mut buf, image::ImageFormat::Jpeg).ok()?;
+        rgb.write_to(&mut buf, image::ImageFormat::Jpeg).ok()?;
 
         debug!(
             "rendered PDF first page {}x{} from {:?} via pdfium",
@@ -292,15 +326,14 @@ mod platform {
         Some(ThumbnailResult {
             data: buf.into_inner(),
             format: ImageFormat::Jpeg,
-            width: render_width as u32,
-            height: render_height as u32,
+            width: rgb.width(),
+            height: rgb.height(),
             source: ThumbnailSource::FullDecode,
         })
     }
 
     pub fn page_count(file_path: &Path) -> Option<u32> {
-        let pdfium = Pdfium::default();
-        let document = pdfium.load_pdf_from_file(file_path, None).ok()?;
-        Some(document.pages().len() as u32)
+        let document = pdfium()?.load_pdf_from_file(file_path, None).ok()?;
+        u32::try_from(document.pages().len()).ok()
     }
 }

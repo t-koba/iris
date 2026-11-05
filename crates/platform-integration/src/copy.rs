@@ -1,5 +1,8 @@
 use std::path::Path;
 
+/// macOS copyfile and Windows CopyFileEx run without a progress callback here, so larger files
+/// take the progressed streaming path instead.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const UNPROGRESSED_COPY_LIMIT: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]

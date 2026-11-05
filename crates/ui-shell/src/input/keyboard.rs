@@ -558,13 +558,11 @@ impl KeyCombo {
             }
             match token.to_ascii_lowercase().as_str() {
                 "cmdorctrl" | "command" | "cmd" => command = true,
+                // Ctrl is its own modifier on macOS and the command modifier elsewhere.
                 "ctrl" | "control" => {
-                    #[cfg(target_os = "macos")]
-                    {
+                    if cfg!(target_os = "macos") {
                         control = true;
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    {
+                    } else {
                         command = true;
                     }
                 }

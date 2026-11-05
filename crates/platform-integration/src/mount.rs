@@ -550,7 +550,7 @@ fn list_mounted_volumes_linux() -> Result<Vec<MountedVolume>, PlatformError> {
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_else(|| mount_path.to_string_lossy().to_string()),
-            ejectable: mount_path != PathBuf::from("/"),
+            ejectable: mount_path != Path::new("/"),
             kind: linux_volume_kind(fs_type),
             mount_path,
         });

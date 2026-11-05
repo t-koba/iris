@@ -77,12 +77,11 @@ pub fn start_pending_file_operation_with_undo_action(
 
 /// Files transferred concurrently, so one file's I/O wait overlaps another's reads and writes.
 const DEFAULT_MAX_CONCURRENT_TRANSFERS: usize = 4;
-#[cfg(target_os = "macos")]
+/// SMB transfers run one at a time on macOS.
 const MAX_CONCURRENT_SMB_TRANSFERS: usize = 1;
 
 fn max_concurrent_transfers_for_items(items: &[PendingFileItem]) -> usize {
-    #[cfg(target_os = "macos")]
-    {
+    if cfg!(target_os = "macos") {
         let runtime = app_runtime();
         let uses_smb = items.iter().any(|item| {
             let src_backend = runtime.backend_id_for_path(Path::new(&item.source.display_path));
