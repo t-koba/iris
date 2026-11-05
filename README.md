@@ -35,14 +35,22 @@ Rust と [iced](https://iced.rs) で作ったクロスプラットフォーム�
 - **FFmpeg の開発用ライブラリと `pkg-config`**（動画サムネイル用）
   - macOS: `brew install ffmpeg pkg-config`
   - Ubuntu: `sudo apt-get install pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev`
-- **pdfium の共有ライブラリ**（macOS 以外で PDF をプレビューする場合のみ。実行時に読み込みます）
+- **pdfium の共有ライブラリ**（macOS 以外で PDF をプレビューする場合のみ。実行時に読み込みます）。
+  実行ファイルと同じフォルダ、作業ディレクトリ、システムのライブラリパスの順に探し、
+  見つからなければ PDF のサムネイルだけを省きます
 
 ## ビルドと実行
 
-アセットを相対パスで読み込むため、ワークスペースのルートで実行してください。
+フォントやアイコンは実行ファイルに埋め込まれています。
 
 ```bash
 cargo run -p iris-ui-shell
+```
+
+フォルダを引数に渡すと、そのフォルダを開いた新しいウィンドウで起動します（「新しいウィンドウで開く」もこの方法です）。
+
+```bash
+cargo run -p iris-ui-shell -- ~/Pictures
 ```
 
 リリースビルドの実行ファイルは `target/release/Iris` に出力されます。
