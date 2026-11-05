@@ -452,28 +452,10 @@ fn apply_media_metadata_to_record(record: &mut SegmentRecord, media: &MediaMetad
     record.height = media.height;
     record.capture_secs = media.capture_naive_secs;
     record.capture_offset_min = media.capture_offset_min;
-    record.camera = camera_label(media);
+    record.camera = media.camera_label();
     record.lens = media.lens_model.clone();
     record.gps_lat = media.gps_lat.map(|value| value as f32);
     record.gps_lon = media.gps_lon.map(|value| value as f32);
-}
-
-fn camera_label(media: &MediaMetadata) -> Option<String> {
-    match (
-        media.camera_make.as_ref().filter(|value| !value.is_empty()),
-        media
-            .camera_model
-            .as_ref()
-            .filter(|value| !value.is_empty()),
-    ) {
-        (Some(make), Some(model)) if model.to_lowercase().starts_with(&make.to_lowercase()) => {
-            Some(model.clone())
-        }
-        (Some(make), Some(model)) => Some(format!("{} {}", make, model)),
-        (Some(make), None) => Some(make.clone()),
-        (None, Some(model)) => Some(model.clone()),
-        (None, None) => None,
-    }
 }
 
 async fn list_entries_for_paths_with_annotations(
@@ -562,45 +544,32 @@ async fn build_local_list_entry_safe(
             app_runtime().cache_list_entry_metadata(&object_ref, size, mtime, None);
 
             ListEntry {
-                object_ref,
-                sort_name_key: ListEntry::sort_name_key_for(&name),
-                sort_extension_key: ListEntry::sort_extension_key_for(&name),
-                name,
-                is_dir,
                 metadata_level: MetadataLevel::L1,
                 size,
                 mtime,
                 ctime,
                 is_symlink,
                 symlink_target,
-                is_inaccessible: false,
-                annotation: None,
+                ..ListEntry::new(object_ref, name, is_dir)
             }
         }
         Err(_) => {
             // Metadata could not be read (e.g. permission denied).
             let stable_id = StableId(display_path.clone());
             ListEntry {
-                object_ref: ObjectRef {
-                    key: ObjectKey {
-                        backend_id: backend_id.clone(),
-                        stable_id,
-                    },
-                    parent_stable_id: Some(parent_stable_id.clone()),
-                    display_path,
-                },
-                sort_name_key: ListEntry::sort_name_key_for(&name),
-                sort_extension_key: ListEntry::sort_extension_key_for(&name),
-                name,
-                is_dir: false,
-                metadata_level: MetadataLevel::L0,
-                size: None,
-                mtime: None,
-                ctime: None,
-                is_symlink: false,
-                symlink_target: None,
                 is_inaccessible: true,
-                annotation: None,
+                ..ListEntry::new(
+                    ObjectRef {
+                        key: ObjectKey {
+                            backend_id: backend_id.clone(),
+                            stable_id,
+                        },
+                        parent_stable_id: Some(parent_stable_id.clone()),
+                        display_path,
+                    },
+                    name,
+                    false,
+                )
             }
         }
     }
@@ -618,26 +587,19 @@ async fn build_local_l0_entry_safe(
         Ok(file_type) => file_type,
         Err(_) => {
             return ListEntry {
-                object_ref: ObjectRef {
-                    key: ObjectKey {
-                        backend_id: backend_id.clone(),
-                        stable_id: StableId(display_path.clone()),
-                    },
-                    parent_stable_id: Some(parent_stable_id.clone()),
-                    display_path,
-                },
-                sort_name_key: ListEntry::sort_name_key_for(&name),
-                sort_extension_key: ListEntry::sort_extension_key_for(&name),
-                name,
-                is_dir: false,
-                metadata_level: MetadataLevel::L0,
-                size: None,
-                mtime: None,
-                ctime: None,
-                is_symlink: false,
-                symlink_target: None,
                 is_inaccessible: true,
-                annotation: None,
+                ..ListEntry::new(
+                    ObjectRef {
+                        key: ObjectKey {
+                            backend_id: backend_id.clone(),
+                            stable_id: StableId(display_path.clone()),
+                        },
+                        parent_stable_id: Some(parent_stable_id.clone()),
+                        display_path,
+                    },
+                    name,
+                    false,
+                )
             };
         }
     };
@@ -646,26 +608,19 @@ async fn build_local_l0_entry_safe(
     let is_dir = file_type.is_dir();
 
     ListEntry {
-        object_ref: ObjectRef {
-            key: ObjectKey {
-                backend_id: backend_id.clone(),
-                stable_id: StableId(display_path.clone()),
-            },
-            parent_stable_id: Some(parent_stable_id.clone()),
-            display_path,
-        },
-        sort_name_key: ListEntry::sort_name_key_for(&name),
-        sort_extension_key: ListEntry::sort_extension_key_for(&name),
-        name,
-        is_dir,
-        metadata_level: MetadataLevel::L0,
-        size: None,
-        mtime: None,
-        ctime: None,
         is_symlink,
-        symlink_target: None,
-        is_inaccessible: false,
-        annotation: None,
+        ..ListEntry::new(
+            ObjectRef {
+                key: ObjectKey {
+                    backend_id: backend_id.clone(),
+                    stable_id: StableId(display_path.clone()),
+                },
+                parent_stable_id: Some(parent_stable_id.clone()),
+                display_path,
+            },
+            name,
+            is_dir,
+        )
     }
 }
 

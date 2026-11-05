@@ -27,19 +27,11 @@ fn list_entry(backend_id: &str, index: usize) -> ListEntry {
     };
     let display_path = format!("/bench/{name}");
     ListEntry {
-        object_ref: object_ref(backend_id, &display_path),
-        sort_name_key: ListEntry::sort_name_key_for(&name),
-        sort_extension_key: ListEntry::sort_extension_key_for(&name),
-        name,
-        is_dir,
         metadata_level: MetadataLevel::L1,
         size: (!is_dir).then_some(512 + index as u64 * 37),
         mtime: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + index as u64)),
         ctime: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_690_000_000 + index as u64)),
-        is_symlink: false,
-        symlink_target: None,
-        is_inaccessible: false,
-        annotation: None,
+        ..ListEntry::new(object_ref(backend_id, &display_path), name, is_dir)
     }
 }
 

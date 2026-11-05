@@ -250,9 +250,8 @@ fn dispatch(state: &mut AppState, message: Message) -> Task<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iris_core_domain::types::list::ListEntry;
-    use iris_core_domain::types::metadata::MetadataLevel;
-    use iris_core_domain::types::object::{BackendId, ObjectKey, ObjectRef, StableId};
+    use crate::test_support::local_entry;
+
     use iris_core_domain::types::transfer::JobId;
     use std::path::PathBuf;
 
@@ -264,7 +263,7 @@ mod tests {
         let mut state = AppState::default();
         {
             let pane = state.pane_mut(1);
-            pane.entries = vec![test_list_entry("/tmp/alpha.txt", "alpha.txt")];
+            pane.entries = vec![local_entry("/tmp/alpha.txt", false)];
             pane.set_filter_query("alpha".to_string());
             pane.select_single(0);
             pane.selection_anchor_path = Some("/tmp/alpha.txt".to_string());
@@ -309,7 +308,7 @@ mod tests {
     fn unchanged_directory_poll_marks_full_load_complete() {
         let mut state = AppState::default();
         let path = state.pane(0).current_path.clone();
-        let entries = vec![test_list_entry("/tmp/alpha.txt", "alpha.txt")];
+        let entries = vec![local_entry("/tmp/alpha.txt", false)];
         {
             let pane = state.pane_mut(0);
             pane.entries = entries.clone();
@@ -352,7 +351,7 @@ mod tests {
             &mut state,
             DirectoryMessage::Polled {
                 path: "/tmp/old".to_string(),
-                entries: vec![test_list_entry("/tmp/old/alpha.txt", "alpha.txt")],
+                entries: vec![local_entry("/tmp/old/alpha.txt", false)],
             }
             .into(),
         );
@@ -369,8 +368,8 @@ mod tests {
             let pane = state.pane_mut(0);
             pane.current_path = path.clone();
             pane.replace_entries(vec![
-                test_list_entry("/tmp/current/alpha.txt", "alpha.txt"),
-                test_list_entry("/tmp/current/bravo.txt", "bravo.txt"),
+                local_entry("/tmp/current/alpha.txt", false),
+                local_entry("/tmp/current/bravo.txt", false),
             ]);
             pane.select_single(1);
         }
@@ -380,8 +379,8 @@ mod tests {
             DirectoryMessage::Polled {
                 path,
                 entries: vec![
-                    test_list_entry("/tmp/current/bravo.txt", "bravo.txt"),
-                    test_list_entry("/tmp/current/charlie.txt", "charlie.txt"),
+                    local_entry("/tmp/current/bravo.txt", false),
+                    local_entry("/tmp/current/charlie.txt", false),
                 ],
             }
             .into(),
@@ -407,7 +406,7 @@ mod tests {
                 1,
                 PaneMessage::DirectoryLoaded {
                     path: "/tmp/old".to_string(),
-                    entries: vec![test_list_entry("/tmp/old/alpha.txt", "alpha.txt")],
+                    entries: vec![local_entry("/tmp/old/alpha.txt", false)],
                 },
             ),
         );
@@ -428,7 +427,7 @@ mod tests {
                 0,
                 PaneMessage::DirectoryHeadLoaded {
                     path: path.clone(),
-                    entries: vec![test_list_entry("/tmp/current/beta.txt", "beta.txt")],
+                    entries: vec![local_entry("/tmp/current/beta.txt", false)],
                 },
             ),
         );
@@ -438,7 +437,7 @@ mod tests {
                 0,
                 PaneMessage::DirectoryBatchLoaded {
                     path,
-                    entries: vec![test_list_entry("/tmp/current/alpha.txt", "alpha.txt")],
+                    entries: vec![local_entry("/tmp/current/alpha.txt", false)],
                     done: true,
                 },
             ),
@@ -467,7 +466,7 @@ mod tests {
                 0,
                 PaneMessage::DirectoryBatchLoaded {
                     path: "/tmp/old".to_string(),
-                    entries: vec![test_list_entry("/tmp/old/alpha.txt", "alpha.txt")],
+                    entries: vec![local_entry("/tmp/old/alpha.txt", false)],
                     done: true,
                 },
             ),
@@ -480,7 +479,7 @@ mod tests {
     #[test]
     fn thumbnail_completion_clears_inflight_backend_metadata() {
         let mut state = AppState::default();
-        let entry = test_list_entry("/tmp/photo.jpg", "photo.jpg");
+        let entry = local_entry("/tmp/photo.jpg", false);
         let key = ThumbnailCacheKey::from_entry(&entry);
         state.thumbnail_inflight.insert(key.clone());
         state
@@ -498,7 +497,7 @@ mod tests {
         let mut state = AppState::default();
         state
             .pane_mut(0)
-            .replace_entries(vec![test_list_entry("/tmp/old.txt", "old.txt")]);
+            .replace_entries(vec![local_entry("/tmp/old.txt", false)]);
 
         let _ = update(&mut state, Message::Rename(0));
 
@@ -517,7 +516,7 @@ mod tests {
         let mut state = AppState::default();
         state
             .pane_mut(0)
-            .replace_entries(vec![test_list_entry("/tmp/old.txt", "old.txt")]);
+            .replace_entries(vec![local_entry("/tmp/old.txt", false)]);
 
         let _ = update(&mut state, Message::Rename(0));
         let _ = update(
@@ -548,7 +547,7 @@ mod tests {
         let job_id = JobId(8_000_000 + item_count as u64);
         let items = (0..item_count)
             .map(|index| PendingFileItem {
-                source: test_list_entry(&format!("/src/{index}"), &index.to_string()).object_ref,
+                source: local_entry(&format!("/src/{index}"), false).object_ref,
                 destination_path: format!("/dst/{index}"),
             })
             .collect();
@@ -669,7 +668,7 @@ mod tests {
         }
         let _ = process_pending_operation(&mut state);
         state.active_dialog = Some(DialogState::Conflict {
-            source: test_list_entry("/src/0", "0").object_ref,
+            source: local_entry("/src/0", false).object_ref,
             destination_path: "/dst/0".to_string(),
             source_size: 1,
             destination_size: 2,
@@ -733,7 +732,7 @@ mod tests {
         let mut state = AppState::default();
         state
             .pane_mut(0)
-            .replace_entries(vec![test_list_entry("/tmp/old.txt", "old.txt")]);
+            .replace_entries(vec![local_entry("/tmp/old.txt", false)]);
 
         let _ = update(&mut state, Message::Rename(0));
         let _ = update(
@@ -782,7 +781,7 @@ mod tests {
         let mut state = AppState::default();
         state
             .pane_mut(0)
-            .replace_entries(vec![test_list_entry("/tmp/old.txt", "old.txt")]);
+            .replace_entries(vec![local_entry("/tmp/old.txt", false)]);
         let _ = update(&mut state, Message::Rename(0));
 
         let _ = update(
@@ -828,8 +827,8 @@ mod tests {
         {
             let pane = state.pane_mut(0);
             pane.entries = vec![
-                test_list_entry("/tmp/photo.jpg", "photo.jpg"),
-                test_list_entry("/tmp/report.pdf", "report.pdf"),
+                local_entry("/tmp/photo.jpg", false),
+                local_entry("/tmp/report.pdf", false),
             ];
             pane.set_filter_query("photo".to_string());
         }
@@ -1285,7 +1284,7 @@ mod tests {
                 0,
                 PaneMessage::RecursiveFilterBatch {
                     run_id: stale,
-                    entries: vec![test_list_entry("/tmp/stale.txt", "stale.txt")],
+                    entries: vec![local_entry("/tmp/stale.txt", false)],
                     scanned: 1,
                     matched: 1,
                     done: true,
@@ -1302,7 +1301,7 @@ mod tests {
                 0,
                 PaneMessage::RecursiveFilterBatch {
                     run_id,
-                    entries: vec![test_list_entry("/tmp/live.txt", "live.txt")],
+                    entries: vec![local_entry("/tmp/live.txt", false)],
                     scanned: 2,
                     matched: 1,
                     done: true,
@@ -1325,7 +1324,7 @@ mod tests {
         state.preview_panel_visible = true;
         state.active_pane = 0;
         let (run_id, _) = state.pane_mut(0).begin_recursive_filter();
-        let hit = test_list_entry("/tmp/root/nested/report.pdf", "report.pdf");
+        let hit = local_entry("/tmp/root/nested/report.pdf", false);
         let expected_ref = hit.object_ref.clone();
 
         let _ = update(
@@ -1364,7 +1363,7 @@ mod tests {
         state.active_pane = 0;
         {
             let pane = state.pane_mut(0);
-            pane.entries = vec![test_list_entry("/tmp/report.pdf", "report.pdf")];
+            pane.entries = vec![local_entry("/tmp/report.pdf", false)];
             pane.sort_entries();
             pane.select_single(0);
         }
@@ -1401,8 +1400,8 @@ mod tests {
         {
             let pane = state.pane_mut(0);
             pane.entries = vec![
-                test_list_entry("/tmp/alpha.txt", "alpha.txt"),
-                test_list_entry("/tmp/bravo.txt", "bravo.txt"),
+                local_entry("/tmp/alpha.txt", false),
+                local_entry("/tmp/bravo.txt", false),
             ];
             pane.sort_entries();
             pane.select_single(0);
@@ -1509,9 +1508,9 @@ mod tests {
             pane.current_path = "/tmp".to_string();
             pane.path_editing = true;
             pane.entries = vec![
-                test_dir_entry("/tmp/iris-alpha", "iris-alpha"),
-                test_dir_entry("/tmp/iris-beta", "iris-beta"),
-                test_list_entry("/tmp/iris-note.txt", "iris-note.txt"),
+                local_entry("/tmp/iris-alpha", true),
+                local_entry("/tmp/iris-beta", true),
+                local_entry("/tmp/iris-note.txt", false),
             ];
         }
 
@@ -1539,8 +1538,8 @@ mod tests {
             pane.current_path = "/tmp".to_string();
             pane.path_editing = true;
             pane.entries = vec![
-                test_dir_entry("/tmp/iris-alpha", "iris-alpha"),
-                test_dir_entry("/tmp/iris-beta", "iris-beta"),
+                local_entry("/tmp/iris-alpha", true),
+                local_entry("/tmp/iris-beta", true),
             ];
         }
         let _ = update(
@@ -1579,8 +1578,8 @@ mod tests {
         {
             let pane = state.pane_mut(0);
             pane.entries = vec![
-                test_list_entry("/tmp/alpha.txt", "alpha.txt"),
-                test_list_entry("/tmp/beta.txt", "beta.txt"),
+                local_entry("/tmp/alpha.txt", false),
+                local_entry("/tmp/beta.txt", false),
             ];
         }
 
@@ -1605,8 +1604,8 @@ mod tests {
         {
             let pane = state.pane_mut(0);
             pane.entries = vec![
-                test_list_entry("/tmp/alpha.txt", "alpha.txt"),
-                test_list_entry("/tmp/beta.txt", "beta.txt"),
+                local_entry("/tmp/alpha.txt", false),
+                local_entry("/tmp/beta.txt", false),
             ];
         }
         let _ = update(
@@ -1755,9 +1754,9 @@ mod tests {
         {
             let pane = state.pane_mut(0);
             pane.entries = vec![
-                test_list_entry("/left/alpha.txt", "alpha.txt"),
-                test_list_entry("/left/bravo.txt", "bravo.txt"),
-                test_list_entry("/left/charlie.txt", "charlie.txt"),
+                local_entry("/left/alpha.txt", false),
+                local_entry("/left/bravo.txt", false),
+                local_entry("/left/charlie.txt", false),
             ];
             pane.sort_entries();
             pane.select_single(2);
@@ -1765,9 +1764,9 @@ mod tests {
         {
             let pane = state.pane_mut(1);
             pane.entries = vec![
-                test_list_entry("/right/alpha.txt", "alpha.txt"),
-                test_list_entry("/right/bravo.txt", "bravo.txt"),
-                test_list_entry("/right/charlie.txt", "charlie.txt"),
+                local_entry("/right/alpha.txt", false),
+                local_entry("/right/bravo.txt", false),
+                local_entry("/right/charlie.txt", false),
             ];
             pane.sort_entries();
             pane.select_single(0);
@@ -2083,36 +2082,5 @@ mod tests {
 
         assert!(state.pane(0).filter_map_tiles_loading.contains(&tile));
         assert!(!state.pane(0).filter_map_tiles_failed.contains_key(&tile));
-    }
-
-    fn test_list_entry(path: &str, name: &str) -> ListEntry {
-        ListEntry {
-            object_ref: ObjectRef {
-                key: ObjectKey {
-                    backend_id: BackendId("local".to_string()),
-                    stable_id: StableId(path.to_string()),
-                },
-                parent_stable_id: None,
-                display_path: path.to_string(),
-            },
-            sort_name_key: ListEntry::sort_name_key_for(name),
-            sort_extension_key: ListEntry::sort_extension_key_for(name),
-            name: name.to_string(),
-            is_dir: false,
-            metadata_level: MetadataLevel::L1,
-            size: None,
-            mtime: None,
-            ctime: None,
-            is_symlink: false,
-            symlink_target: None,
-            is_inaccessible: false,
-            annotation: None,
-        }
-    }
-
-    fn test_dir_entry(path: &str, name: &str) -> ListEntry {
-        let mut entry = test_list_entry(path, name);
-        entry.is_dir = true;
-        entry
     }
 }

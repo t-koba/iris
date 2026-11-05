@@ -291,8 +291,8 @@ pub fn prune_thumbnail_cache(state: &mut AppState) {
 mod tests {
     use super::*;
     use iced::widget::image as iced_image;
-    use iris_core_domain::types::metadata::MetadataLevel;
-    use iris_core_domain::types::object::{BackendId, ObjectKey, ObjectRef, StableId};
+
+    use iris_core_domain::types::object::{BackendId, ObjectKey, StableId};
     use std::time::{Duration, SystemTime};
 
     fn thumbnail(memory_len: usize) -> ThumbnailData {
@@ -311,32 +311,10 @@ mod tests {
     }
 
     fn entry(path: &str, size: u64) -> ListEntry {
-        let name = std::path::Path::new(path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(path)
-            .to_string();
         ListEntry {
-            object_ref: ObjectRef {
-                key: ObjectKey {
-                    backend_id: BackendId("local".to_string()),
-                    stable_id: StableId(path.to_string()),
-                },
-                parent_stable_id: None,
-                display_path: path.to_string(),
-            },
-            sort_name_key: ListEntry::sort_name_key_for(&name),
-            sort_extension_key: ListEntry::sort_extension_key_for(&name),
-            name,
-            is_dir: false,
-            metadata_level: MetadataLevel::L1,
             size: Some(size),
             mtime: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(size)),
-            ctime: None,
-            is_symlink: false,
-            symlink_target: None,
-            is_inaccessible: false,
-            annotation: None,
+            ..crate::test_support::local_entry(path, false)
         }
     }
 

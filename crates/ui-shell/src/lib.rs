@@ -11,6 +11,8 @@ pub mod observability;
 pub mod remote_transport;
 pub mod runtime;
 pub mod state;
+#[cfg(test)]
+mod test_support;
 pub mod undo;
 pub mod update;
 pub mod views;
