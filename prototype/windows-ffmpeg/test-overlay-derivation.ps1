@@ -46,8 +46,13 @@ vcpkg_from_git(
 )
 '@
 $replacedPatch = Set-PrototypeFfmpegDependencyPatch $patchPort '0004-dependencies.patch' '0004-dependencies-pinned.patch'
-if ($replacedPatch.Portfile -notmatch '(?m)^        "0004-dependencies-pinned\.patch" # retained explanation$') { throw 'adapted PATCHES entry/order/comment was not preserved' }
-foreach ($badPatch in @($patchPort.Replace('0004-dependencies.patch', 'other.patch'), $patchPort.Replace('last.patch', '0004-dependencies-pinned.patch'))) {
+if ($replacedPatch.Portfile -notmatch '(?m)^        "0004-dependencies-pinned\.patch" # retained explanation$') { throw 'quoted adapted PATCHES entry/order/comment was not preserved' }
+$unquotedPatchPort = $patchPort.Replace('"0004-dependencies.patch" # retained explanation', '0004-dependencies.patch # retained explanation')
+$replacedUnquotedPatch = Set-PrototypeFfmpegDependencyPatch $unquotedPatchPort '0004-dependencies.patch' '0004-dependencies-pinned.patch'
+if ($replacedUnquotedPatch.Portfile -notmatch '(?m)^        0004-dependencies-pinned\.patch # retained explanation$') { throw 'unquoted adapted PATCHES entry/order/comment was not preserved' }
+$duplicateQuotedOverlay = $patchPort.Replace('last.patch', '"0004-dependencies-pinned.patch"')
+$duplicateUnquotedOverlay = $unquotedPatchPort.Replace('last.patch', '0004-dependencies-pinned.patch')
+foreach ($badPatch in @($patchPort.Replace('0004-dependencies.patch', 'other.patch'), $duplicateQuotedOverlay, $duplicateUnquotedOverlay)) {
     $rejected = $false
     try { Set-PrototypeFfmpegDependencyPatch $badPatch '0004-dependencies.patch' '0004-dependencies-pinned.patch' | Out-Null } catch { $rejected = $true }
     if (!$rejected) { throw 'accepted missing/duplicate dependency patch entry' }
