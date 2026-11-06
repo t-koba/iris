@@ -25,6 +25,8 @@ futures-util = { workspace = true }
 bytes = { workspace = true }
 
 [dev-dependencies]
+# The SDK transport traits let S3 tests inject responses without network access.
+aws-smithy-runtime-api = { version = "1", features = ["client"] }
 iris-smb-client = { workspace = true, features = ["test-support"] }
 criterion = { workspace = true }
 proptest = { workspace = true }

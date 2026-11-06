@@ -4,6 +4,8 @@ use aws_sdk_s3::Client as S3Client;
 
 mod client_builder;
 mod multipart;
+#[cfg(test)]
+mod tests;
 
 use iris_core_domain::backend_adapter::BackendAdapter;
 use iris_core_domain::types::capability::CapabilitySet;
@@ -93,7 +95,14 @@ impl S3Adapter {
 
         match res {
             Ok(_) => Ok(true),
-            Err(_) => Ok(false),
+            Err(error)
+                if error
+                    .as_service_error()
+                    .is_some_and(|error| error.is_not_found()) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(self.network_error("head_object", error)),
         }
     }
 
@@ -102,12 +111,10 @@ impl S3Adapter {
         requested_key: String,
         on_conflict: &ConflictResolution,
     ) -> Result<String, BackendError> {
-        if !self.object_exists(&requested_key).await? {
-            return Ok(requested_key);
-        }
-
         match on_conflict {
+            // Overwrite does not depend on an existence check.
             ConflictResolution::Overwrite => Ok(requested_key),
+            _ if !self.object_exists(&requested_key).await? => Ok(requested_key),
             ConflictResolution::Rename => {
                 let (base, ext) = split_key_extension(&requested_key);
                 let mut counter = 1u32;
