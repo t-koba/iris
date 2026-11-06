@@ -144,23 +144,27 @@ pub struct NtlmV2AuthenticateRequest<'a> {
 
 impl NtlmsspAuthenticate {
     pub fn encode(&self) -> Result<Vec<u8>, SmbClientError> {
+        self.encode_with_lm_challenge_response(true)
+    }
+
+    fn encode_with_lm_challenge_response(
+        &self,
+        include_lm_challenge_response: bool,
+    ) -> Result<Vec<u8>, SmbClientError> {
         let domain = encode_utf16le(&self.domain);
         let user = encode_utf16le(&self.user);
         let workstation = encode_utf16le(&self.workstation);
-        let lm = &self.ntlm_v2.lm_challenge_response;
+        let lm: &[u8] = if include_lm_challenge_response {
+            &self.ntlm_v2.lm_challenge_response
+        } else {
+            &[]
+        };
         let nt = &self.ntlm_v2.nt_challenge_response;
         let session_key = &self.encrypted_random_session_key;
 
         let mut fields = Vec::with_capacity(6);
         let mut payload_offset = AUTHENTICATE_FIXED_BYTES;
-        for payload in [
-            lm.as_slice(),
-            nt.as_slice(),
-            &domain,
-            &user,
-            &workstation,
-            session_key,
-        ] {
+        for payload in [lm, nt.as_slice(), &domain, &user, &workstation, session_key] {
             let offset = payload_offset;
             payload_offset = checked_add(payload_offset, payload.len())?;
             fields.push(SecurityBufferField {
@@ -255,7 +259,9 @@ pub fn ntlm_v2_authenticate_message(
         version: NTLM_VERSION,
         mic: [0; 16],
     };
-    let zero_mic_message = authenticate.encode()?;
+    let include_lm_challenge_response = challenge.target_info.is_empty();
+    let zero_mic_message =
+        authenticate.encode_with_lm_challenge_response(include_lm_challenge_response)?;
     let mut mic_input = Vec::with_capacity(
         negotiate_message.len() + challenge.raw_message.len() + zero_mic_message.len(),
     );
@@ -264,7 +270,7 @@ pub fn ntlm_v2_authenticate_message(
     mic_input.extend_from_slice(&zero_mic_message);
     authenticate.mic = hmac_md5(&exported_session_key, &mic_input)?;
     Ok(NtlmsspAuthenticateResult {
-        message: authenticate.encode()?,
+        message: authenticate.encode_with_lm_challenge_response(include_lm_challenge_response)?,
         exported_session_key,
     })
 }
@@ -547,6 +553,38 @@ mod tests {
     }
 
     #[test]
+    fn ntlm_v2_authenticate_message_sends_lm_response_without_target_info() {
+        let challenge = NtlmsspChallenge {
+            target_name: encode_utf16le("Domain"),
+            flags: default_negotiate_flags(),
+            server_challenge: hex_array_8("0123456789abcdef"),
+            target_info: Vec::new(),
+            raw_message: challenge_message(&encode_utf16le("Domain"), &[]),
+        };
+        let result = ntlm_v2_authenticate_message(NtlmV2AuthenticateRequest {
+            user: "User",
+            domain: "Domain",
+            password: "Password",
+            workstation: "WORKSTATION",
+            challenge: &challenge,
+            timestamp: 0x0123_4567_89ab_cdef,
+            client_challenge: hex_array_8("ffffff0011223344"),
+            negotiate_message: b"negotiate",
+            target_name: "cifs/server",
+        })
+        .expect("authenticate");
+
+        assert_eq!(
+            security_buffer_slice(&result.message, 12)
+                .expect("lm")
+                .len(),
+            24
+        );
+        assert_eq!(le_u16(&result.message, 12), 24);
+        assert_eq!(le_u16(&result.message, 14), 24);
+    }
+
+    #[test]
     fn ntlm_v2_authenticate_message_uses_challenge_and_identity() {
         let challenge = NtlmsspChallenge {
             target_name: encode_utf16le("Domain"),
@@ -574,8 +612,10 @@ mod tests {
             security_buffer_slice(&result.message, 12)
                 .expect("lm")
                 .len(),
-            24
+            0
         );
+        assert_eq!(le_u16(&result.message, 12), 0);
+        assert_eq!(le_u16(&result.message, 14), 0);
         assert!(
             security_buffer_slice(&result.message, 20)
                 .expect("nt")
