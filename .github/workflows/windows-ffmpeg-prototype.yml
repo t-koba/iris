@@ -64,6 +64,10 @@ jobs:
         shell: pwsh
         run: ./prototype/windows-ffmpeg/test-installed-smoke-lifecycle.ps1
 
+      - name: Check pinned FFmpeg dependency adaptation (offline, no native build)
+        shell: pwsh
+        run: python ./prototype/windows-ffmpeg/test-ffmpeg-dependency-patch.py
+
       - name: Check source bundle requirements (offline, no native build)
         shell: pwsh
         run: python ./prototype/windows-ffmpeg/test-source-bundle.py

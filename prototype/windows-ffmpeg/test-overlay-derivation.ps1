@@ -33,6 +33,26 @@ foreach ($inputPort in @($portLf, $quotedPort, $portCrLf)) {
     $expected = $expected -replace '(?m)^    SHA512 [a-f0-9]+\r?\n', ''
     if ($result.Portfile -cne $expected) { throw 'rewrite modified unrelated config/patch text or used invalid fetch parameters' }
 }
+$patchPort = @'
+vcpkg_from_git(
+    OUT_SOURCE_PATH SOURCE_PATH
+    URL https://git.ffmpeg.org/ffmpeg.git
+    REF db8537d8cc7962bd3d07254d6ceff21d888817d4
+    HEAD_REF master
+    PATCHES
+        first.patch
+        "0004-dependencies.patch" # retained explanation
+        last.patch
+)
+'@
+$replacedPatch = Set-PrototypeFfmpegDependencyPatch $patchPort '0004-dependencies.patch' '0004-dependencies-pinned.patch'
+if ($replacedPatch.Portfile -notmatch '(?m)^        "0004-dependencies-pinned\.patch" # retained explanation$') { throw 'adapted PATCHES entry/order/comment was not preserved' }
+foreach ($badPatch in @($patchPort.Replace('0004-dependencies.patch', 'other.patch'), $patchPort.Replace('last.patch', '0004-dependencies-pinned.patch'))) {
+    $rejected = $false
+    try { Set-PrototypeFfmpegDependencyPatch $badPatch '0004-dependencies.patch' '0004-dependencies-pinned.patch' | Out-Null } catch { $rejected = $true }
+    if (!$rejected) { throw 'accepted missing/duplicate dependency patch entry' }
+}
+
 foreach ($bad in @($port.Replace('REPO ffmpeg/ffmpeg', 'URL bogus'), $port.Replace('z-first.patch', '../escape.patch'), $port.Replace('HEAD_REF master', 'UNKNOWN argument'), ($port + "`nvcpkg_from_git(`n)`n"))) {
     $rejected = $false
     try { ConvertTo-PrototypeFfmpegPort $bad $helper $repo $commit | Out-Null } catch { $rejected = $true }
@@ -50,5 +70,6 @@ foreach ($script in @($build, $stage, $smoke)) {
     if ($script -notmatch '\$env:VCPKGRS_TRIPLET = \$effectiveTriplet' -or $script -notmatch 'VCPKG_INSTALLED_DIR must equal VCPKG_ROOT/installed') { throw 'Rust discovery root/triplet regression' }
 }
 if ($build -notmatch '\$installedDir = Join-Path \$vcpkgRoot "installed"' -or $stage -notmatch '\$installedDir = Join-Path \(Resolve-Path \$env:VCPKG_ROOT\)\.Path "installed"' -or $smoke -notmatch '\$installedDirEnv = Join-Path \$vcpkgRoot "installed"') { throw 'Rust discovery must use VCPKG_ROOT/installed' }
-if ($build -notmatch '(?s)foreach \(\$name in \$derived.Patches\).*git apply --check.*git apply --whitespace=nowarn \$patchPath') { throw 'patch validation is not sequential in declared order' }
+if ($build -notmatch '(?s)foreach \(\$name in \$derived.Patches\).*ffmpeg-dependency-patch.py.*adapt.*git apply --check --whitespace=nowarn \$adaptedPatchPath') { throw 'pinned dependency patch adaptation/application is not ordered and guarded' }
+if ($build -notmatch 'git apply --check --whitespace=nowarn \$patchPath' -or $build -notmatch 'Set-PrototypeFfmpegDependencyPatch') { throw 'baseline patch sequence or fail-closed overlay replacement is missing' }
 Write-Host 'prototype overlay/discovery regressions passed (no native build)'

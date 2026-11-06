@@ -53,3 +53,33 @@ function ConvertTo-PrototypeFfmpegPort {
         Patches = $patches
     }
 }
+
+# Replace exactly one PATCHES entry with its pinned-source adaptation. This is
+# deliberately separate from source-ref rewriting so callers can prove the
+# baseline order and the one authorized replacement.
+function Set-PrototypeFfmpegDependencyPatch {
+    param([string]$Portfile, [string]$BaselinePatch, [string]$OverlayPatch)
+
+    foreach ($name in @($BaselinePatch, $OverlayPatch)) {
+        if ($name -notmatch '^[A-Za-z0-9_-][A-Za-z0-9_.-]*\.patch$') {
+            throw 'invalid dependency patch filename'
+        }
+    }
+    if ($BaselinePatch -ceq $OverlayPatch) { throw 'dependency patch replacement must use a distinct filename' }
+    $fetches = [regex]::Matches($Portfile, '(?ms)^vcpkg_from_(?:github|git)\(.*?\bPATCHES\s*\n.*?^\)')
+    if ($fetches.Count -ne 1) { throw 'expected exactly one FFmpeg PATCHES block for replacement' }
+    $pattern = '(?m)^(?<indent>[ \t]*)(?<quote>"?)' + [regex]::Escape($BaselinePatch) + '(?(quote)")(?<suffix>[ \t]*(?:#.*)?)$'
+    $matches = [regex]::Matches($fetches[0].Value, $pattern)
+    if ($matches.Count -ne 1) { throw "expected exactly one $BaselinePatch entry in PATCHES" }
+    $overlayPattern = '(?m)^[ \t]*(?<quote>"?)' + [regex]::Escape($OverlayPatch) + '(?(quote)")(?:[ \t]*(?:#.*)?)$'
+    if ([regex]::IsMatch($fetches[0].Value, $overlayPattern)) { throw "PATCHES already contains $OverlayPatch" }
+    $evaluator = [System.Text.RegularExpressions.MatchEvaluator]{
+        param($match)
+        return $match.Groups['indent'].Value + $match.Groups['quote'].Value + $OverlayPatch + $match.Groups['quote'].Value + $match.Groups['suffix'].Value
+    }
+    $lineRegex = [regex]::new($pattern, [System.Text.RegularExpressions.RegexOptions]::Multiline)
+    $rewrittenFetch = $lineRegex.Replace($fetches[0].Value, $evaluator, 1)
+    if ($rewrittenFetch -ceq $fetches[0].Value) { throw 'dependency PATCHES entry was not replaced' }
+    $rewritten = $Portfile.Substring(0, $fetches[0].Index) + $rewrittenFetch + $Portfile.Substring($fetches[0].Index + $fetches[0].Length)
+    return [pscustomobject]@{ Portfile = $rewritten }
+}

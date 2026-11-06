@@ -60,14 +60,17 @@ behavior, or licensing conclusions, and it never publishes.
    `ffmpeg` tool feature), and the custom dynamic triplet; logs observed
    MSVC/SDK/tool versions (only OS build and VS major are currently asserted);
    verifies `VCPKG_ROOT` HEAD == baseline; clones and verifies the exact
-   FFmpeg commit; checks and applies the retained patches sequentially in
-   portfile order to the clean source checkout, with per-patch evidence in `ffmpeg-source.json` (any failure stops the
-   run, no 9.0.2 fallback); derives a test-only overlay from the baseline
-   port (copies `ports/ffmpeg`, rewrites to
+   FFmpeg commit; processes patches sequentially in declared portfile order.
+   The pinned vcpkg `0004-dependencies.patch` digest is checked, its configure
+   adaptation requires exact source contexts, and its generated replacement
+   must apply after prior patches; any drift stops the run, with no 9.0.2
+   fallback. Per-patch evidence is recorded in `ffmpeg-source.json`. It derives
+   a test-only overlay from the baseline port (rewrites to
    `vcpkg_from_git(URL https://git.ffmpeg.org/ffmpeg.git REF
    db8537d8cc7962bd3d07254d6ceff21d888817d4)`, validates the pinned helper
-   signature and generated parameters, removes the archive hash, retains the baseline MSVC
-   `PATCHES`, marks the overlay `version-string` as the pinned commit);
+   signature and generated parameters, removes the archive hash, replaces only
+   the `0004` PATCHES entry with `0004-dependencies-pinned.patch`, and marks
+   the overlay `version-string` as the pinned commit);
    then runs `vcpkg install` with the prototype manifest, `--overlay-ports`
    (generated), `--overlay-triplets triplets/`,
    `--triplet x64-windows-prototype-dynamic`, and `--no-binarycaching`.
@@ -146,27 +149,35 @@ installing FFmpeg. It contains:
   uncompressed `git archive` of the exact upstream commit tree, with a fixed
   prefix and tar permissions. It reads the commit, not the patched worktree.
 - `baseline/ports/ffmpeg/`: every tracked file from the exact pinned vcpkg
-  baseline, including its original portfile, manifest and retained patches;
+  baseline, including the original portfile, manifest and patches;
   `baseline/scripts/cmake/vcpkg_from_git.cmake` identifies the fetch helper.
   These are Git blob bytes, not potentially CRLF-converted checkout copies.
 - `overlay/ffmpeg/`: the actual generated port, manifest and patch/config
-  files used for the prototype. Retained patches must match the baseline
-  except for checkout line endings; both byte forms are hashed separately.
+  files used for the prototype. The ordered baseline patch series is retained;
+  only `0004-dependencies.patch` is replaced in the overlay by
+  `0004-dependencies-pinned.patch`. The adapter first checks the pinned
+  baseline patch digest, then requires every expected pinned-FFmpeg `configure`
+  context exactly once before generating a configure-only patch. It preserves
+  the newer MSVC zlib probe and applies the dependency/link changes from the
+  baseline patch. Missing, duplicate or changed contexts fail before install;
+  there is no fallback to FFmpeg 9.0.2.
 - `build-inputs/`: pins, vcpkg manifest/configuration, custom dynamic triplet,
-  source/overlay/build/toolchain scripts, workflow and this recipe. The
-  sibling `ffmpeg-build.json`, `ffmpeg-buildconf.txt` and `toolchain.json`
-  evidence records the observed build/tools; runner/tool minor versions are
-  not yet reproducibly pinned.
+  source/overlay/build/toolchain scripts, the adapter and its offline
+  regression tests, workflow and this recipe. The sibling `ffmpeg-build.json`,
+  `ffmpeg-buildconf.txt` and `toolchain.json` evidence records the observed
+  build/tools; runner/tool minor versions are not yet reproducibly pinned.
 
 `MANIFEST.json` records SHA-256 and byte count for every included input, the
-source/baseline commits, and the original PATCHES text (comments included)
-plus its ordered file list. No timestamps or absolute local paths enter this
-manifest. The successful build record binds its hash and byte count. Staging
-requires that identity and verifies all required files, patches and hashes
-before and after copying to app `doc/ffmpeg-source-bundle/`. The prototype
-installer recursively includes that directory; the evidence artifact retains
-both the generated bundle and the staged app-doc copy. Missing or altered
-material fails staging instead of silently omitting source.
+source/baseline commits, and separate baseline/overlay PATCHES blocks with
+comments and exact order. It binds the one authorized patch replacement to the
+pinned baseline patch digest; verifies the untouched overlay patches against
+their Git-blob copies (normalizing checkout line endings only); and requires
+the adapted patch to change `configure` alone and retain the expected dependency
+changes. Staging verifies all required files, patches and hashes before and
+after copying to app `doc/ffmpeg-source-bundle/`. The prototype installer
+recursively includes that directory; the evidence artifact retains both the
+generated bundle and the staged app-doc copy. Missing or altered material
+fails staging instead of silently omitting source.
 
 This is FFmpeg source material and the prototype recipe, **not complete source
 for other dependencies**, vcpkg tooling or SDKs. It makes no licensing/legal
@@ -176,29 +187,29 @@ require evidence from the Windows prototype run.
 
 ## Non-goals
 
-- No change to `release.yml`, packaging scripts, product features, release
-  artifacts, or installer behavior.
+- No change to `release.yml`, production packaging scripts, product features,
+  release artifacts, or installer behavior.
 - No security or licensing conclusion. Records emitted here are evidence
   inputs only.
 - No network fallback: unknown or incompatible runtime code fails instead
   of substituting another build.
 
-## Focused offline check
+## Focused offline checks
 
-Run `pwsh -File prototype/windows-ffmpeg/test-overlay-derivation.ps1` to test
-quoted/unquoted baseline REPO rewriting, parameter rejection, unchanged config,
-patch order, and discovery wiring without downloading or building native code.
-Run `pwsh -File prototype/windows-ffmpeg/test-installed-smoke-lifecycle.ps1`
-for bounded install/smoke/uninstall/cleanup fault-injection checks. Run
-`python prototype/windows-ffmpeg/test-source-bundle.py` for offline source
-bundle and hash-verification fixtures. The workflow runs all three before
-native gates. Fixtures are not upstream provenance: the build gate reads the
-actual pinned port/helper and bundle inputs, then fails closed on unsupported
-shapes or hash drift. These local checks do not establish a Windows build or
-installed previews.
+- `pwsh -File prototype/windows-ffmpeg/test-overlay-derivation.ps1` checks
+  baseline port rewriting, parameter rejection, patch order and the single
+  dependency-patch replacement without downloading or building native code.
+- `pwsh -File prototype/windows-ffmpeg/test-installed-smoke-lifecycle.ps1`
+  checks bounded install/smoke/uninstall/cleanup fault handling.
+- `python prototype/windows-ffmpeg/test-ffmpeg-dependency-patch.py` checks the
+  pinned configure-context adaptation, CRLF/LF patch applicability, and
+  fail-closed source drift using an offline fixture.
+- `python prototype/windows-ffmpeg/test-source-bundle.py` checks deterministic
+  source bundles, patch order/replacement, blob/hash integrity, missing or
+  corrupted material and package/evidence wiring using synthetic local Git
+  repositories. The fixtures are not upstream provenance and do not build
+  Windows code.
 
-Run `python prototype/windows-ffmpeg/test-source-bundle.py` for bounded offline
-archive determinism, pristine-tree, ordered-patch/comment, missing/corrupted
-material and package/evidence wiring guards. It uses a synthetic local Git
-repository, not upstream provenance, and does not build Windows code. Python 3
-and Git are required for source-bundle generation and verification.
+These checks do not establish a Windows build or installed previews. The
+workflow runs the offline checks before native gates; its evidence artifacts
+are required to review any Windows-native result.

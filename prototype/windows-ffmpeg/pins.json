@@ -3,11 +3,16 @@
   "ffmpeg": {
     "repository": "https://git.ffmpeg.org/ffmpeg.git",
     "commit": "db8537d8cc7962bd3d07254d6ceff21d888817d4",
-    "note": "Exact later commit under investigation. The pinned vcpkg FFmpeg port is for 9.0.2; do not claim its patches apply here."
+    "note": "Exact later commit under investigation. The pinned vcpkg FFmpeg port targets 9.0.2; only its hash-pinned 0004 dependency patch is adapted for this source, using exact configure contexts."
   },
   "vcpkg": {
     "repository": "https://github.com/microsoft/vcpkg",
-    "baseline": "b8dfe957ec8b5c0ef5c4b31eea594b8486af744f"
+    "baseline": "b8dfe957ec8b5c0ef5c4b31eea594b8486af744f",
+    "ffmpeg_dependency_patch": {
+      "name": "0004-dependencies.patch",
+      "sha256": "ae9b5c757ac7a3b35ca48184836d1362d1ff507ce26e197c22326c39e4cd8f3c",
+      "overlay_name": "0004-dependencies-pinned.patch"
+    }
   },
   "pdfium": {
     "release": "chromium/8138",
