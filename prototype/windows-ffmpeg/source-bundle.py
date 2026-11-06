@@ -61,9 +61,10 @@ def create(source, vcpkg, overlay, dest):
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
-    # git archive reads the commit tree, never the patched checkout. Pin tar
-    # permissions too: bytes depend on the pinned commit, not local umask/time.
-    subprocess.run(["git", "-C", str(source), "-c", "tar.umask=0022", "archive",
+    # git archive reads committed bytes, not the patched checkout. Disable
+    # autocrlf and pin tar permissions so bytes ignore checkout settings/umask.
+    subprocess.run(["git", "-C", str(source), "-c", "core.autocrlf=false",
+                    "-c", "tar.umask=0022", "archive",
                     "--format=tar", f"--prefix=ffmpeg-{COMMIT}/",
                     "-o", str(dest / ARCHIVE), COMMIT], check=True)
     # Read exact baseline blobs, not checkout line endings or untracked files.

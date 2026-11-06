@@ -29,6 +29,8 @@ class BundleTests(unittest.TestCase):
             def git(*args):
                 return bundle.git(repo, *args)
             git("init", "-q")
+            # Exercise Git's Windows-style line-ending setting on every host.
+            git("config", "core.autocrlf", "true")
             for name, data in {
                 "upstream.c": b"pristine source\n",
                 "ports/ffmpeg/portfile.cmake": PORT,
@@ -42,6 +44,7 @@ class BundleTests(unittest.TestCase):
             git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                 "commit", "-qm", "Fixture")
             commit = git("rev-parse", "HEAD").decode().strip()
+            committed_source = git("show", f"{commit}:upstream.c")
             overlay = root / "overlay"
             shutil.copytree(repo / "ports/ffmpeg", overlay)
             # A patched checkout must not leak into the pristine archive.
@@ -53,7 +56,7 @@ class BundleTests(unittest.TestCase):
                 expected = bundle.record(first / "MANIFEST.json")
                 self.assertEqual(expected, bundle.record(second / "MANIFEST.json"))
                 with tarfile.open(first / bundle.ARCHIVE) as archive:
-                    self.assertEqual(archive.extractfile(f"ffmpeg-{commit}/upstream.c").read(), b"pristine source\n")
+                    self.assertEqual(archive.extractfile(f"ffmpeg-{commit}/upstream.c").read(), committed_source)
                     self.assertEqual(archive.pax_headers["comment"], commit)
                 staged = root / "app-doc/ffmpeg-source-bundle"
                 bundle.stage(first, staged, expected)
