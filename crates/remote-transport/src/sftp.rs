@@ -43,9 +43,10 @@ pub struct SftpTransferEntry {
 /// Overwrite-oriented batch transfer. Files are staged individually, not as one
 /// atomic directory transaction. Remote replacement requires the server's
 /// advertised OpenSSH POSIX-rename extension; standard SFTP rename is used only
-/// without replacement. Uploads preserve existing regular-file rwx bits, not
-/// ownership, ACLs or privilege bits; symlink/non-regular targets are rejected.
-/// Lost publication replies have an uncertain outcome.
+/// without replacement. Upload stages stay owner-only during payload writes and
+/// through close; final permissions are restored before publication. Existing
+/// regular-file rwx bits are preserved, not ownership, ACLs or privilege bits;
+/// symlink/non-regular targets are rejected. Lost publication replies are uncertain.
 #[derive(Clone, Debug)]
 pub struct SftpTransferPlan {
     pub mapping: RemoteTransportMapping,
@@ -140,7 +141,46 @@ struct RemoteStagingFile {
 }
 
 impl RemoteStagingFile {
+    // Use the owned handle until CLOSE, then the staging path. No uid/gid or
+    // non-portable ACL attributes are copied. These are observed POSIX modes,
+    // not protection against concurrent third-party metadata/path changes.
+    async fn mode(&self) -> Result<u32, String> {
+        let reply = match &self.handle {
+            Some(handle) => self.session.fstat(handle).await,
+            None => self.session.lstat(&self.path).await,
+        }
+        .map_err(|error| format!("failed to verify SFTP staging mode: {error}"))?;
+        reply
+            .attrs
+            .permissions
+            .map(|mode| mode & 0o7777)
+            .ok_or_else(|| "server did not report SFTP staging mode".into())
+    }
+
+    async fn set_mode(&self, mode: u32) -> Result<(), String> {
+        if self.mode().await? == mode {
+            return Ok(());
+        }
+        let mut attrs = FileAttributes::empty();
+        attrs.permissions = Some(mode);
+        match &self.handle {
+            Some(handle) => self.session.fsetstat(handle, attrs).await,
+            None => self.session.setstat(&self.path, attrs).await,
+        }
+        .map_err(|error| format!("failed to establish SFTP staging mode: {error}"))?;
+        if self.mode().await? != mode {
+            return Err("server did not establish the required SFTP staging mode".into());
+        }
+        Ok(())
+    }
+
     async fn cleanup(&mut self, error: String) -> Result<(), String> {
+        // Final-mode restoration may have succeeded even if its reply or the
+        // subsequent verification/publication failed. Re-private best-effort
+        // before removal so failed cleanup need not leave readable payload.
+        let mut attrs = FileAttributes::empty();
+        attrs.permissions = Some(0o600);
+        let _ = self.session.setstat(&self.path, attrs).await;
         let cleanup = self.session.remove(self.path.clone()).await;
         self.owned = false;
         match cleanup {
@@ -168,6 +208,9 @@ impl Drop for RemoteStagingFile {
                 if let Some(handle) = handle {
                     let _ = session.close(handle).await;
                 }
+                let mut attrs = FileAttributes::empty();
+                attrs.permissions = Some(0o600);
+                let _ = session.setstat(&path, attrs).await;
                 let _ = session.remove(path).await;
             });
         }
@@ -1003,43 +1046,6 @@ async fn upload_mode(session: &SftpTransferSession, path: &str) -> Result<Option
     }
 }
 
-// OPEN can apply a server umask or ignore attributes. Check the owned handle,
-// correct the mode if needed, and verify rather than trusting SETSTAT success.
-// Do this before payload writes and again before publication. No uid/gid or
-// non-portable ACL attributes are sent. SFTP has no compare-and-rename primitive:
-// this preserves the observed mode, not concurrent third-party metadata edits.
-async fn preserve_upload_mode(
-    session: &SftpTransferSession,
-    handle: &str,
-    mode: u32,
-) -> Result<(), String> {
-    let observed = session
-        .fstat(handle)
-        .await
-        .map_err(|error| format!("failed to verify SFTP staging mode: {error}"))?
-        .attrs
-        .permissions;
-    if observed.is_some_and(|observed| observed & 0o7777 == mode) {
-        return Ok(());
-    }
-    let mut attrs = FileAttributes::empty();
-    attrs.permissions = Some(mode);
-    session
-        .fsetstat(handle, attrs)
-        .await
-        .map_err(|error| format!("failed to preserve SFTP staging mode: {error}"))?;
-    let observed = session
-        .fstat(handle)
-        .await
-        .map_err(|error| format!("failed to verify SFTP staging mode: {error}"))?
-        .attrs
-        .permissions;
-    if !observed.is_some_and(|observed| observed & 0o7777 == mode) {
-        return Err("server did not establish the required SFTP staging mode".into());
-    }
-    Ok(())
-}
-
 async fn pipelined_upload(
     session: Arc<SftpTransferSession>,
     local_path: &Path,
@@ -1063,7 +1069,10 @@ async fn pipelined_upload(
     }
     let mode = upload_mode(&session, remote_path).await?;
     let mut attrs = FileAttributes::empty();
-    attrs.permissions = mode;
+    // New files need the ordinary server-created mode captured from the empty
+    // stage. Existing targets can request private creation immediately. OPEN
+    // attributes are not trusted: privacy is verified before any payload.
+    attrs.permissions = mode.map(|_| 0o600);
     let mut random = [0; 16];
     getrandom::fill(&mut random)
         .map_err(|error| format!("failed to name SFTP staging file: {error}"))?;
@@ -1093,9 +1102,11 @@ async fn pipelined_upload(
     };
 
     let transfer_result = async {
-        if let Some(mode) = mode {
-            preserve_upload_mode(&session, &handle, mode).await?;
-        }
+        let final_mode = match mode {
+            Some(mode) => mode,
+            None => staging.mode().await? & 0o777,
+        };
+        staging.set_mode(0o600).await?;
         let mut writes = JoinSet::new();
         let mut next_offset = 0u64;
         let mut reached_eof = false;
@@ -1144,25 +1155,29 @@ async fn pipelined_upload(
                 }
             }
         }
-        if let Some(mode) = mode {
-            preserve_upload_mode(&session, &handle, mode).await?;
+        if staging.mode().await? != 0o600 {
+            return Err("SFTP staging mode changed during payload writes".into());
         }
-        Ok(())
+        Ok(final_mode)
     }
     .await;
 
-    let result = close_raw_file(
+    let close_result = close_raw_file(
         &session,
         handle,
-        transfer_result,
+        transfer_result.as_ref().map(|_| ()).map_err(Clone::clone),
         &format!("SFTP staging file {}", staging.path),
     )
     .await;
     staging.handle = None;
-    let result = match result {
-        Ok(()) => session.publish(&staging.path, remote_path).await,
-        Err(error) => Err(error),
-    };
+    let result = async {
+        close_result?;
+        // Only a successful CLOSE permits broadening the private stage. Restore
+        // and verify the final mode on the path, then immediately publish.
+        staging.set_mode(transfer_result?).await?;
+        session.publish(&staging.path, remote_path).await
+    }
+    .await;
     match result {
         Ok(()) => {
             staging.owned = false;
@@ -1571,6 +1586,9 @@ mod tests {
         fail_fsetstat: bool,
         ignore_fsetstat: bool,
         mode_changes: usize,
+        final_mode_fault: Option<&'static str>,
+        path_mode_changes: Vec<u32>,
+        closed_modes: Vec<Option<u32>>,
         lstatted: Vec<String>,
         written_modes: Vec<Option<u32>>,
         broaden_mode_on_write: bool,
@@ -1726,14 +1744,14 @@ mod tests {
             let data = files.get(&path).ok_or(StatusCode::NoSuchFile)?;
             let mut attrs = FileAttributes::empty();
             attrs.size = Some(data.len() as u64);
-            attrs.permissions = self
-                .faults
-                .lock()
-                .unwrap()
-                .modes
-                .get(&path)
-                .copied()
-                .unwrap_or(Some(0o100644));
+            let faults = self.faults.lock().unwrap();
+            if faults.final_mode_fault == Some("verify")
+                && path.contains(".iris-sftp-")
+                && faults.path_mode_changes.iter().any(|mode| *mode != 0o600)
+            {
+                return Err(StatusCode::Failure.into());
+            }
+            attrs.permissions = faults.modes.get(&path).copied().unwrap_or(Some(0o100644));
             Ok(Attrs { id, attrs })
         }
 
@@ -1775,6 +1793,39 @@ mod tests {
             assert_eq!(mode & !0o777, 0, "no privilege or type bits copied");
             if !faults.ignore_fsetstat {
                 faults.modes.insert(handle, Some(0o100000 | mode));
+            }
+            Ok(memory_ok(id))
+        }
+
+        async fn setstat(
+            &mut self,
+            id: u32,
+            path: String,
+            attrs: FileAttributes,
+        ) -> Result<Status, Self::Error> {
+            if !self.files.lock().await.contains_key(&path) {
+                return Err(StatusCode::NoSuchFile.into());
+            }
+            let mut faults = self.faults.lock().unwrap();
+            assert!(attrs.uid.is_none() && attrs.gid.is_none());
+            let mode = attrs.permissions.expect("permissions-only SETSTAT");
+            assert_eq!(mode & !0o777, 0, "no privilege or type bits copied");
+            assert!(faults.closes > 0, "path chmod must follow CLOSE");
+            faults.path_mode_changes.push(mode);
+            let fault = if mode == 0o600 {
+                None // best-effort re-private must still work after restoration fails
+            } else {
+                faults.final_mode_fault
+            };
+            if fault == Some("denied") {
+                return Err(StatusCode::PermissionDenied.into());
+            }
+            if fault != Some("ignored") {
+                let applied = if fault == Some("wrong") { 0o666 } else { mode };
+                faults.modes.insert(path, Some(0o100000 | applied));
+            }
+            if fault == Some("lost-reply") {
+                return Err(StatusCode::Failure.into());
             }
             Ok(memory_ok(id))
         }
@@ -1868,8 +1919,10 @@ mod tests {
             })
         }
 
-        async fn close(&mut self, id: u32, _handle: String) -> Result<Status, Self::Error> {
+        async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
             let mut faults = self.faults.lock().unwrap();
+            let mode = faults.modes.get(&handle).copied().flatten();
+            faults.closed_modes.push(mode);
             faults.closes += 1;
             if faults.fail_close_at == Some(faults.closes) {
                 faults.fail_close_at = None;
@@ -2351,10 +2404,13 @@ mod tests {
     async fn uploads_preserve_rwx_without_privilege_bits_and_keep_new_file_defaults() {
         // OPEN may ignore attributes or narrow them with the server's umask.
         for (existing, ignore_open_mode, umask) in [
+            (Some(0o644), false, 0),
+            (Some(0o644), true, 0),
             (Some(0o600), false, 0),
             (Some(0o600), true, 0),
             (Some(0o7751), false, 0o077),
             (Some(0), false, 0),
+            (None, false, 0),
             (None, false, 0o027),
         ] {
             let server = MemorySftpServer::default();
@@ -2378,25 +2434,36 @@ mod tests {
             let (session, server) = memory_sftp_with_server(server).await;
             let temp = tempfile::tempdir().unwrap();
             let local = temp.path().join("source");
-            tokio::fs::write(&local, b"replacement").await.unwrap();
-            pipelined_upload(session, &local, "/destination", 1)
+            let payload = vec![42; SFTP_PIPELINE_CHUNK_BYTES * 3 + 17];
+            tokio::fs::write(&local, &payload).await.unwrap();
+            pipelined_upload(session, &local, "/destination", 3)
                 .await
                 .unwrap();
             let files = server.files.lock().await;
             assert_eq!(files.len(), 1, "no staging files left");
-            assert_eq!(files["/destination"], b"replacement");
+            assert_eq!(files["/destination"], payload);
             let faults = server.faults.lock().unwrap();
             let expected = existing.map_or(0o644 & !umask, |mode| mode & 0o777);
             assert_eq!(faults.modes["/destination"], Some(0o100000 | expected));
             assert_eq!(
                 faults.written_modes,
-                [Some(0o100000 | expected)],
-                "mode is safe before payload writes"
+                vec![Some(0o100600); 4],
+                "every payload write must observe private staging"
             );
-            assert_eq!(faults.lstatted, ["/destination"]);
+            assert_eq!(faults.closed_modes, [Some(0o100600)]);
+            assert_eq!(faults.lstatted[0], "/destination");
             assert_eq!(
                 faults.mode_changes,
-                usize::from(ignore_open_mode || existing == Some(0o7751))
+                usize::from(ignore_open_mode || existing.is_none())
+            );
+            assert_eq!(
+                faults.path_mode_changes,
+                if expected == 0o600 {
+                    vec![]
+                } else {
+                    vec![expected]
+                },
+                "final permissions restored only after successful CLOSE"
             );
         }
     }
@@ -2453,51 +2520,153 @@ mod tests {
 
     #[tokio::test]
     async fn upload_mode_failures_retain_destination_and_clean_owned_staging() {
-        for failure in [
-            "fstat",
-            "no-mode",
-            "chmod-denied",
-            "chmod-ignored",
-            "mode-changed-during-write",
-        ] {
-            let server = MemorySftpServer::default();
-            server
-                .files
-                .lock()
-                .await
-                .insert("/destination".into(), b"keep".to_vec());
-            {
-                let mut faults = server.faults.lock().unwrap();
-                faults.modes.insert("/destination".into(), Some(0o100600));
-                faults.fail_fstat = failure == "fstat";
-                faults.omit_fstat_mode = failure == "no-mode";
-                faults.ignore_open_mode = failure.starts_with("chmod-");
-                faults.fail_fsetstat = failure == "chmod-denied";
-                faults.ignore_fsetstat =
-                    failure == "chmod-ignored" || failure == "mode-changed-during-write";
-                faults.broaden_mode_on_write = failure == "mode-changed-during-write";
+        for existing in [false, true] {
+            for failure in [
+                "fstat",
+                "no-mode",
+                "chmod-denied",
+                "chmod-ignored",
+                "mode-changed-during-write",
+            ] {
+                let server = MemorySftpServer::default();
+                if existing {
+                    server
+                        .files
+                        .lock()
+                        .await
+                        .insert("/destination".into(), b"keep".to_vec());
+                }
+                {
+                    let mut faults = server.faults.lock().unwrap();
+                    if existing {
+                        faults.modes.insert("/destination".into(), Some(0o100644));
+                    }
+                    faults.fail_fstat = failure == "fstat";
+                    faults.omit_fstat_mode = failure == "no-mode";
+                    faults.ignore_open_mode = failure.starts_with("chmod-");
+                    faults.fail_fsetstat = failure == "chmod-denied";
+                    faults.ignore_fsetstat = failure == "chmod-ignored";
+                    faults.broaden_mode_on_write = failure == "mode-changed-during-write";
+                }
+                let (session, server) = memory_sftp_with_server(server).await;
+                let temp = tempfile::tempdir().unwrap();
+                let local = temp.path().join("source");
+                tokio::fs::write(&local, b"replacement").await.unwrap();
+                let error = pipelined_upload(session, &local, "/destination", 1)
+                    .await
+                    .unwrap_err();
+                assert!(error.contains("staging mode"), "{failure}: {error}");
+                let files = server.files.lock().await;
+                assert_eq!(
+                    files.len(),
+                    usize::from(existing),
+                    "{failure}: owned staging removed"
+                );
+                if existing {
+                    assert_eq!(files["/destination"], b"keep");
+                }
+                let faults = server.faults.lock().unwrap();
+                if existing {
+                    assert_eq!(faults.modes["/destination"], Some(0o100644));
+                }
+                assert_eq!(faults.closes, 1);
+                assert_eq!(faults.removed, faults.opened);
+                assert_eq!(faults.removed.len(), 1);
+                assert!(faults.published.is_empty());
+                assert_eq!(
+                    faults.written_modes.len(),
+                    usize::from(failure == "mode-changed-during-write")
+                );
             }
-            let (session, server) = memory_sftp_with_server(server).await;
-            let temp = tempfile::tempdir().unwrap();
-            let local = temp.path().join("source");
-            tokio::fs::write(&local, b"replacement").await.unwrap();
-            let error = pipelined_upload(session, &local, "/destination", 1)
-                .await
-                .unwrap_err();
-            assert!(error.contains("staging mode"), "{failure}: {error}");
-            let files = server.files.lock().await;
-            assert_eq!(files.len(), 1, "{failure}: owned staging removed");
-            assert_eq!(files["/destination"], b"keep");
-            let faults = server.faults.lock().unwrap();
-            assert_eq!(faults.modes["/destination"], Some(0o100600));
-            assert_eq!(faults.closes, 1);
-            assert_eq!(faults.removed, faults.opened);
-            assert_eq!(faults.removed.len(), 1);
-            assert!(faults.published.is_empty());
-            assert_eq!(
-                faults.written_modes.len(),
-                usize::from(failure == "mode-changed-during-write")
-            );
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_final_mode_and_close_failures_never_publish_and_reprivate_before_cleanup() {
+        for existing in [false, true] {
+            for failure in [
+                "denied",
+                "ignored",
+                "wrong",
+                "lost-reply",
+                "lost-reply-cleanup",
+                "verify",
+                "close",
+            ] {
+                let server = MemorySftpServer::default();
+                if existing {
+                    server
+                        .files
+                        .lock()
+                        .await
+                        .insert("/destination".into(), b"keep".to_vec());
+                    server
+                        .faults
+                        .lock()
+                        .unwrap()
+                        .modes
+                        .insert("/destination".into(), Some(0o100644));
+                }
+                {
+                    let mut faults = server.faults.lock().unwrap();
+                    faults.final_mode_fault = Some(if failure == "lost-reply-cleanup" {
+                        "lost-reply"
+                    } else {
+                        failure
+                    });
+                    faults.fail_remove = failure == "lost-reply-cleanup";
+                    faults.fail_close_at = (failure == "close").then_some(1);
+                }
+                let (session, server) = memory_sftp_with_server(server).await;
+                let temp = tempfile::tempdir().unwrap();
+                let local = temp.path().join("source");
+                tokio::fs::write(&local, b"replacement").await.unwrap();
+                let error = pipelined_upload(session, &local, "/destination", 1)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    error.contains(if failure == "close" {
+                        "failed to close"
+                    } else {
+                        "staging mode"
+                    }),
+                    "{failure}: {error}"
+                );
+                let files = server.files.lock().await;
+                assert_eq!(
+                    files.len(),
+                    usize::from(existing) + usize::from(failure == "lost-reply-cleanup"),
+                    "{failure}: only owned staging can remain"
+                );
+                if existing {
+                    assert_eq!(files["/destination"], b"keep");
+                }
+                let faults = server.faults.lock().unwrap();
+                assert_eq!(faults.written_modes, [Some(0o100600)]);
+                assert_eq!(faults.closed_modes, [Some(0o100600)]);
+                assert!(faults.published.is_empty());
+                assert_eq!(faults.removed, faults.opened);
+                assert_eq!(faults.removed.len(), 1);
+                if failure == "lost-reply-cleanup" {
+                    assert!(error.contains("failed to clean SFTP staging file"));
+                    assert_eq!(
+                        faults.modes[&faults.opened[0]],
+                        Some(0o100600),
+                        "failed cleanup leaves re-privatized staging"
+                    );
+                }
+                assert_eq!(
+                    faults.path_mode_changes,
+                    if failure == "close" {
+                        vec![0o600]
+                    } else {
+                        vec![0o644, 0o600]
+                    }
+                );
+                if existing {
+                    assert_eq!(faults.modes["/destination"], Some(0o100644));
+                }
+            }
         }
     }
 
@@ -2542,6 +2711,7 @@ mod tests {
                         "{error}"
                     );
                     assert_eq!(files.len(), 2, "unreachable staging cleanup is reported");
+                    assert_eq!(faults.modes[&faults.opened[0]], Some(0o100600));
                 } else {
                     assert_eq!(files.len(), 1);
                     assert!(
