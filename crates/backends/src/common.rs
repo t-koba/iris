@@ -227,50 +227,103 @@ pub fn rename_no_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// filesystems must implement the primitive correctly; this is not a
 /// guarantee of atomicity or crash recovery on arbitrary NFS servers.
 #[cfg(windows)]
-pub fn rename_no_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
+fn windows_verbatim_path(path: &Path, units: &[u16]) -> Option<Vec<u16>> {
+    use std::path::{Component, Prefix};
 
-    fn to_verbatim_wide(path: &Path) -> std::io::Result<Vec<u16>> {
-        use std::path::{Component, Prefix};
+    let prefix = match path.components().next()? {
+        Component::Prefix(prefix) => prefix,
+        _ => return None,
+    };
+    let (mut verbatim, suffix) = match prefix.kind() {
+        Prefix::Disk(_) => (r"\\?\".encode_utf16().collect::<Vec<_>>(), units),
+        Prefix::UNC(_, _) if units.len() >= 2 => {
+            (r"\\?\UNC\".encode_utf16().collect::<Vec<_>>(), &units[2..])
+        }
+        _ => return None,
+    };
+    verbatim.extend(suffix.iter().map(|&unit| {
+        if unit == b'/' as u16 {
+            b'\\' as u16
+        } else {
+            unit
+        }
+    }));
+    Some(verbatim)
+}
 
-        // Match std filesystem path handling for long paths; MoveFileExW otherwise
-        // applies the legacy MAX_PATH limit when the caller supplied a long path.
-        let path = std::path::absolute(path)?;
-        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
-        if wide.contains(&0) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "NUL in path",
-            ));
-        }
-        if wide.len() >= 260 {
-            if path
-                .components()
-                .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
-            {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "long Windows paths with dot segments are unsupported",
-                ));
-            }
-            if let Some(Component::Prefix(prefix)) = path.components().next() {
-                match prefix.kind() {
-                    Prefix::Disk(_) => {
-                        wide.splice(..0, r"\\?\".encode_utf16());
-                    }
-                    Prefix::UNC(_, _) => {
-                        wide.splice(..2, r"\\?\UNC\".encode_utf16());
-                    }
-                    _ => {}
-                }
-            }
-        }
-        wide.push(0);
-        Ok(wide)
+#[cfg(windows)]
+fn windows_has_dot_segments(units: &[u16]) -> bool {
+    const DOT: u16 = b'.' as u16;
+    units
+        .split(|unit| *unit == b'\\' as u16 || *unit == b'/' as u16)
+        .any(|component| {
+            (component.len() == 1 && component[0] == DOT)
+                || (component.len() == 2 && component[0] == DOT && component[1] == DOT)
+        })
+}
+
+#[cfg(windows)]
+fn windows_path_to_wide(path: &Path) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    const MAX_PATH: usize = 260;
+
+    let input: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if input.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "NUL in path",
+        ));
     }
 
-    let from = to_verbatim_wide(src)?;
-    let to = to_verbatim_wide(dst)?;
+    // Prefix long absolute paths before GetFullPathNameW can apply MAX_PATH.
+    let absolute_input = if path.is_absolute() && input.len() >= MAX_PATH {
+        if windows_has_dot_segments(&input) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "long Windows paths with dot segments are unsupported",
+            ));
+        }
+        windows_verbatim_path(path, &input)
+            .map(|units| std::path::PathBuf::from(std::ffi::OsString::from_wide(&units)))
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+
+    let path = std::path::absolute(absolute_input)?;
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "NUL in absolute path",
+        ));
+    }
+    if wide.len() >= MAX_PATH {
+        if windows_has_dot_segments(&wide) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "long Windows paths with dot segments are unsupported",
+            ));
+        }
+        if let Some(verbatim) = windows_verbatim_path(&path, &wide) {
+            wide = verbatim;
+        }
+    }
+    if wide.len() >= 32_767 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Windows path exceeds the extended-length limit",
+        ));
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
+#[cfg(windows)]
+pub fn rename_no_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let from = windows_path_to_wide(src)?;
+    let to = windows_path_to_wide(dst)?;
     let ok = unsafe {
         windows_sys::Win32::Storage::FileSystem::MoveFileExW(from.as_ptr(), to.as_ptr(), 0)
     };
@@ -578,5 +631,58 @@ mod tests {
         rename_no_replace(&src, &dst).expect("absent destination");
         assert!(!src.exists());
         assert_eq!(std::fs::read(&dst).expect("installed"), b"source");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn no_replace_rejects_embedded_nul_before_mutating_a_truncated_path() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let src = temp.path().join("source");
+        let truncated_dst = temp.path().join("dst");
+        std::fs::write(&src, b"source").expect("source");
+        let mut invalid_name: Vec<u16> = "dst".encode_utf16().collect();
+        invalid_name.push(0);
+        invalid_name.extend("suffix".encode_utf16());
+        let invalid_dst = temp
+            .path()
+            .join(std::ffi::OsString::from_wide(&invalid_name));
+
+        let error = rename_no_replace(&src, &invalid_dst).expect_err("NUL path must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(src.exists());
+        assert!(!truncated_dst.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn long_absolute_disk_and_unc_paths_get_verbatim_prefixes() {
+        let long_disk = std::path::PathBuf::from("C:/")
+            .join("a".repeat(180))
+            .join("b".repeat(100));
+        let disk = windows_path_to_wide(&long_disk).expect("long disk path");
+        let disk_path = String::from_utf16(&disk[..disk.len() - 1]).expect("disk UTF-16");
+        assert!(disk_path.starts_with(r"\\?\C:\"));
+        assert!(!disk_path.contains('/'));
+        assert_eq!(disk.last(), Some(&0));
+
+        let long_unc = std::path::PathBuf::from("//server/share")
+            .join("a".repeat(180))
+            .join("b".repeat(100));
+        let unc = windows_path_to_wide(&long_unc).expect("long UNC path");
+        let unc_path = String::from_utf16(&unc[..unc.len() - 1]).expect("UNC UTF-16");
+        assert!(unc_path.starts_with(r"\\?\UNC\server\share\"));
+        assert!(!unc_path.contains('/'));
+        assert_eq!(unc.last(), Some(&0));
+
+        let long_dot_segment =
+            std::path::PathBuf::from(format!("C:/{}/../{}", "a".repeat(180), "b".repeat(100)));
+        assert_eq!(
+            windows_path_to_wide(&long_dot_segment)
+                .expect_err("long dot segments must fail closed")
+                .kind(),
+            std::io::ErrorKind::Unsupported
+        );
     }
 }
