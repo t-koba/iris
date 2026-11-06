@@ -42,7 +42,8 @@ jobs:
     runs-on: windows-2022
     env:
       CARGO_TERM_COLOR: always
-      # Isolated checkout: Rust and vcpkg both use its installed/ tree.
+      # Keep a stable value that the MSVC setup action cannot overwrite.
+      IRIS_PROTOTYPE_VCPKG_ROOT: ${{ github.workspace }}/.vcpkg-prototype
       VCPKG_ROOT: ${{ github.workspace }}/.vcpkg-prototype
       VCPKG_INSTALLED_DIR: ${{ github.workspace }}/.vcpkg-prototype/installed
       VCPKG_TARGET_TRIPLET: x64-windows-prototype-dynamic
@@ -82,13 +83,14 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if ([string]::IsNullOrWhiteSpace($env:VCPKG_ROOT)) { throw "VCPKG_ROOT is not set" }
-          if (!(Test-Path -LiteralPath $env:VCPKG_ROOT -PathType Container)) { throw "VCPKG_ROOT missing: $env:VCPKG_ROOT" }
-          $bootstrap = Join-Path $env:VCPKG_ROOT "bootstrap-vcpkg.bat"
+          $root = $env:IRIS_PROTOTYPE_VCPKG_ROOT
+          if ([string]::IsNullOrWhiteSpace($root)) { throw "IRIS_PROTOTYPE_VCPKG_ROOT is not set" }
+          if (!(Test-Path -LiteralPath $root -PathType Container)) { throw "pinned vcpkg checkout missing: $root" }
+          $bootstrap = Join-Path $root "bootstrap-vcpkg.bat"
           if (!(Test-Path -LiteralPath $bootstrap -PathType Leaf)) { throw "bootstrap-vcpkg.bat missing: $bootstrap" }
           & $bootstrap
           if ($LASTEXITCODE -ne 0) { throw "pinned vcpkg bootstrap failed: $LASTEXITCODE" }
-          $exe = Join-Path $env:VCPKG_ROOT "vcpkg.exe"
+          $exe = Join-Path $root "vcpkg.exe"
           if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw "vcpkg.exe missing after bootstrap: $exe" }
           & $exe --version
           if ($LASTEXITCODE -ne 0) { throw "vcpkg --version failed" }
@@ -98,6 +100,18 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+
+      # The MSVC action exposes Visual Studio's bundled vcpkg by setting
+      # VCPKG_ROOT. Restore the separately pinned checkout for all subsequent
+      # assertion, vcpkg-rs, and native-build steps.
+      - name: Restore isolated vcpkg root after MSVC setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = $env:IRIS_PROTOTYPE_VCPKG_ROOT
+          if ([string]::IsNullOrWhiteSpace($root)) { throw "IRIS_PROTOTYPE_VCPKG_ROOT is not set" }
+          if (!(Test-Path -LiteralPath $root -PathType Container)) { throw "pinned vcpkg checkout missing: $root" }
+          "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
 
       - uses: dtolnay/rust-toolchain@master
         with:
