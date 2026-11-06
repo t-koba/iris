@@ -179,6 +179,7 @@ jobs:
           IRIS_PERF_SMB_MAX_PROTOCOL: "SMB3_11"
           IRIS_PERF_SMB_SERVER_SIGNING: "mandatory"
           IRIS_PERF_SMB_ENCRYPTION: "required"
+          IRIS_PERF_SMB_AUTH_AUDIT_LEVEL: "3"
         run: bash ./scripts/perf-transfer-containers.sh
 
       - name: Native SMB 3.0 AES-CCM compatibility

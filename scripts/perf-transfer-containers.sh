@@ -24,6 +24,11 @@ smb_max_protocol="${IRIS_PERF_SMB_MAX_PROTOCOL:-}"
 smb_server_signing="${IRIS_PERF_SMB_SERVER_SIGNING:-}"
 smb_encryption="${IRIS_PERF_SMB_ENCRYPTION:-}"
 smb_log_level="${IRIS_PERF_SMB_LOG_LEVEL:-2}"
+smb_auth_audit_level="${IRIS_PERF_SMB_AUTH_AUDIT_LEVEL:-}"
+smb_log_config="$smb_log_level"
+if [[ -n "$smb_auth_audit_level" ]]; then
+  smb_log_config+=" auth_audit:$smb_auth_audit_level"
+fi
 if ! read -r smb_debug_level _ <<<"$smb_log_level"; then
   smb_debug_level=""
 fi
@@ -56,6 +61,8 @@ Environment:
   IRIS_PERF_SMB_ENCRYPTION   Samba encryption policy (off or required).
   IRIS_PERF_SMB_LOG_LEVEL    Samba log level (default: 2);
                              numeric prefix must be 0-10 and sets smbd's base level.
+  IRIS_PERF_SMB_AUTH_AUDIT_LEVEL
+                             Optional auth_audit class level (0-10; unset by default).
   IRIS_PERF_KEEP_CONTAINERS=1 Keep containers and generated payloads.
 USAGE
 }
@@ -210,7 +217,7 @@ start_samba() {
     samba_args+=(-g "smb encrypt = $smb_encryption")
   fi
   samba_args+=(-g "workgroup = WORKGROUP")
-  samba_args+=(-g "log level = $smb_log_level")
+  samba_args+=(-g "log level = $smb_log_config")
   docker "${samba_args[@]}" >/dev/null
   wait_for_port 127.0.0.1 "$smb_port" "Samba container"
 }
@@ -365,6 +372,10 @@ validate_timeout IRIS_PERF_READY_TIMEOUT_SECONDS "$ready_timeout"
 validate_timeout IRIS_PERF_SSH_KEYSCAN_TIMEOUT_SECONDS "$ssh_keyscan_timeout"
 if [[ "$skip_smb" != "1" && ! "$smb_debug_level" =~ ^(10|[0-9])$ ]]; then
   echo "IRIS_PERF_SMB_LOG_LEVEL must start with an integer from 0 to 10" >&2
+  exit 2
+fi
+if [[ "$skip_smb" != "1" && -n "$smb_auth_audit_level" && ! "$smb_auth_audit_level" =~ ^(10|[0-9])$ ]]; then
+  echo "IRIS_PERF_SMB_AUTH_AUDIT_LEVEL must be an integer from 0 to 10" >&2
   exit 2
 fi
 

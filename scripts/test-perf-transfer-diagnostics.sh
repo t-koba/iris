@@ -11,6 +11,11 @@ cat >"$test_root/bin/docker" <<'MOCK'
 set -euo pipefail
 case "${1:-} ${2:-}" in
   'container inspect') [[ "$3" == *samba* ]] ;;
+  'run '* )
+    if [[ -n "${IRIS_PERF_TEST_DOCKER_ARGS:-}" ]]; then
+      printf '<%s>\n' "$@" >>"$IRIS_PERF_TEST_DOCKER_ARGS"
+    fi
+    ;;
   'exec '* )
     if [[ "$3 $4" == 'sh -c' ]]; then
       # Execute the actual reporter command against the fixture directory.
@@ -25,14 +30,18 @@ printf '#!/usr/bin/env bash\nexit 1\n' >"$test_root/bin/cargo"
 chmod +x "$test_root/bin"/*
 
 report_logs() {
+  local auth_audit_level="${1:-}"
   local status=0
+  : >"$test_root/docker-args"
   PATH="$test_root/bin:$PATH" \
+    IRIS_PERF_TEST_DOCKER_ARGS="$test_root/docker-args" \
     IRIS_PERF_TEST_LOG_DIR="$test_root/logs" \
     IRIS_PERF_WORK_ROOT="$test_root/work" \
     IRIS_PERF_KEEP_CONTAINERS=0 \
     IRIS_PERF_SKIP_SFTP=1 \
     IRIS_PERF_SKIP_SMB=0 \
     IRIS_PERF_SMB_LOG_LEVEL=2 \
+    IRIS_PERF_SMB_AUTH_AUDIT_LEVEL="$auth_audit_level" \
     IRIS_PERF_BYTES=1 \
     IRIS_PERF_SMALL_FILES=1 \
     IRIS_PERF_SMALL_BYTES=1 \
@@ -51,12 +60,18 @@ assert_absent() {
 
 printf 'peer diagnostic\n' >"$test_root/logs/log.172.17.0.1"
 printf 'nmbd diagnostic\n' >"$test_root/logs/log.nmbd"
-printf 'smbd iris diagnostic\n' >"$test_root/logs/log.smbd"
+printf 'smbd iris diagnostic\nAuth: user [iris] with [NTLMv2] status [NT_STATUS_LOGON_FAILURE]\n' >"$test_root/logs/log.smbd"
 report_logs
+grep -Fxq '<log level = 2>' "$test_root/docker-args"
+! grep -Fq 'auth_audit' "$test_root/docker-args"
 grep -Fq 'smbd [redacted] diagnostic' "$test_root/report"
+grep -Fq 'NTLMv2] status [NT_STATUS_LOGON_FAILURE]' "$test_root/report"
 grep -Fq 'peer diagnostic' "$test_root/report"
 assert_absent 'nmbd diagnostic'
 assert_absent 'iris'
+
+report_logs 3
+grep -Fxq '<log level = 2 auth_audit:3>' "$test_root/docker-args"
 [[ "$(grep -c '^--- ' "$test_root/report")" == 2 ]]
 [[ "$(sed -n '2p' "$test_root/report")" == *'/log.smbd ---' ]]
 
@@ -91,4 +106,4 @@ printf 'smbd iris diagnostic\n' >"$test_root/logs/log.smbd"
 report_logs
 [[ "$(grep -c '^--- ' "$test_root/report")" == 1 ]]
 grep -Fq 'smbd [redacted] diagnostic' "$test_root/report"
-printf 'Samba diagnostics prioritize smbd, redact credentials, and retain 4096/8192-byte bounds\n'
+printf 'Samba diagnostics configure auth_audit selectively, prioritize smbd, redact credentials, and retain 4096/8192-byte bounds\n'
