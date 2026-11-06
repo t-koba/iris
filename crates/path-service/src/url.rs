@@ -1,5 +1,18 @@
 use std::collections::HashMap;
 
+pub const DEFAULT_PCLOUD_API_BASE: &str = "https://api.pcloud.com";
+const EUROPE_PCLOUD_API_BASE: &str = "https://eapi.pcloud.com";
+const INVALID_PCLOUD_API_BASE: &str = "pCloud API base must be the HTTPS US or Europe API origin";
+
+/// Accepts only pCloud's documented US and Europe HTTPS API origins.
+pub fn canonical_pcloud_api_base(api_base: &str) -> Result<&'static str, &'static str> {
+    match api_base.to_ascii_lowercase().as_str() {
+        "https://api.pcloud.com" | "https://api.pcloud.com/" => Ok(DEFAULT_PCLOUD_API_BASE),
+        "https://eapi.pcloud.com" | "https://eapi.pcloud.com/" => Ok(EUROPE_PCLOUD_API_BASE),
+        _ => Err(INVALID_PCLOUD_API_BASE),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PCloudTokenResponse {
     pub access_token: String,
@@ -62,6 +75,7 @@ pub fn parse_pcloud_callback(callback_url: &str) -> Result<PCloudTokenResponse, 
     } else {
         format!("https://{}", hostname.trim_end_matches('/'))
     };
+    let api_base = canonical_pcloud_api_base(&api_base)?.to_string();
 
     Ok(PCloudTokenResponse {
         access_token,
@@ -107,7 +121,10 @@ pub fn percent_decode(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_pcloud_callback, percent_decode, short_config_hash, url_encode_component};
+    use super::{
+        canonical_pcloud_api_base, parse_pcloud_callback, percent_decode, short_config_hash,
+        url_encode_component,
+    };
 
     #[test]
     fn parse_pcloud_callback_fragment_extracts_token_uid_and_host() {
@@ -118,6 +135,46 @@ mod tests {
         assert_eq!(parsed.access_token, "token123");
         assert_eq!(parsed.account_id, "42");
         assert_eq!(parsed.api_base, "https://eapi.pcloud.com");
+    }
+
+    #[test]
+    fn pcloud_api_base_rejects_untrusted_origin_variants() {
+        assert_eq!(
+            canonical_pcloud_api_base("HTTPS://API.PCLOUD.COM/"),
+            Ok("https://api.pcloud.com")
+        );
+        assert_eq!(
+            canonical_pcloud_api_base("https://eapi.pcloud.com"),
+            Ok("https://eapi.pcloud.com")
+        );
+        for untrusted in [
+            "http://api.pcloud.com",
+            "https://api.pcloud.com.evil.test",
+            "https://user@api.pcloud.com",
+            "https://api.pcloud.com:443",
+            "https://api.pcloud.com/path",
+            "https://api.pcloud.com?next=evil",
+            "https://api.pcloud.com#fragment",
+            "https://attacker.test",
+        ] {
+            assert!(
+                canonical_pcloud_api_base(untrusted).is_err(),
+                "accepted untrusted API base: {untrusted}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_pcloud_callback_rejects_untrusted_api_origins() {
+        let error = parse_pcloud_callback(
+            "http://127.0.0.1/callback#access_token=synthetic&uid=1&hostname=https%3A%2F%2Fattacker.test",
+        )
+        .expect_err("untrusted callback origin must be rejected");
+
+        assert_eq!(
+            error,
+            "pCloud API base must be the HTTPS US or Europe API origin"
+        );
     }
 
     #[test]

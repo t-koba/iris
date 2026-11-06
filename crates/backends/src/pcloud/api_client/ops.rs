@@ -400,7 +400,7 @@ mod tests {
     async fn malformed_json_response_redacts_url_and_keeps_endpoint_context() {
         let body = b"not-json".to_vec();
         let (api_base, server) = response_server(body.clone(), body.len()).await;
-        let api = PCloudApiClient::with_base_url(TOKEN.to_owned(), api_base);
+        let api = PCloudApiClient::with_test_base_url(TOKEN.to_owned(), api_base);
 
         let error = api
             .list_folder(0)
@@ -418,7 +418,7 @@ mod tests {
     async fn thumbnail_body_error_redacts_url_and_keeps_endpoint_context() {
         let body = b"x".to_vec();
         let (api_base, server) = response_server(body.clone(), body.len() + 10).await;
-        let api = PCloudApiClient::with_base_url(TOKEN.to_owned(), api_base);
+        let api = PCloudApiClient::with_test_base_url(TOKEN.to_owned(), api_base);
 
         let error = api
             .get_thumb(1, 64, 64)

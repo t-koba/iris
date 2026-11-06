@@ -48,9 +48,23 @@ impl PCloudAdapter {
         }
     }
 
-    pub fn new_with_base(access_token: String, backend_id: BackendId, api_base: String) -> Self {
+    pub fn new_with_base(
+        access_token: String,
+        backend_id: BackendId,
+        api_base: String,
+    ) -> Result<Self, &'static str> {
+        Ok(Self {
+            api: OnceCell::from(PCloudApiClient::with_base_url(access_token, api_base)?),
+            backend_id,
+            ticket_counter: AtomicU64::new(1),
+            stored_credentials: None,
+        })
+    }
+
+    #[cfg(test)]
+    fn new_with_test_base(access_token: String, backend_id: BackendId, api_base: String) -> Self {
         Self {
-            api: OnceCell::from(PCloudApiClient::with_base_url(access_token, api_base)),
+            api: OnceCell::from(PCloudApiClient::with_test_base_url(access_token, api_base)),
             backend_id,
             ticket_counter: AtomicU64::new(1),
             stored_credentials: None,
@@ -61,8 +75,9 @@ impl PCloudAdapter {
         backend_id: BackendId,
         account_id: String,
         api_base: String,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, &'static str> {
+        let api_base = PCloudApiClient::canonical_api_base(&api_base)?.to_string();
+        Ok(Self {
             api: OnceCell::new(),
             backend_id,
             ticket_counter: AtomicU64::new(1),
@@ -70,7 +85,7 @@ impl PCloudAdapter {
                 account_id,
                 api_base,
             }),
-        }
+        })
     }
 
     async fn api(&self) -> Result<&PCloudApiClient, BackendError> {
@@ -94,10 +109,8 @@ impl PCloudAdapter {
                         is_token_expired: false,
                     })
                 })?;
-                Ok(PCloudApiClient::with_base_url(
-                    token.access_token,
-                    credentials.api_base.clone(),
-                ))
+                PCloudApiClient::with_base_url(token.access_token, credentials.api_base.clone())
+                    .map_err(|message| BackendError::Internal(Box::new(io::Error::other(message))))
             })
             .await
     }
@@ -606,9 +619,27 @@ mod tests {
             BackendId("pcloud:test".into()),
             "account".into(),
             "https://api.pcloud.com".into(),
-        );
+        )
+        .expect("approved origin");
 
         assert!(adapter.api.get().is_none());
+    }
+
+    #[test]
+    fn stored_credential_adapter_rejects_untrusted_origins_before_loading_tokens() {
+        let error = match PCloudAdapter::new_with_stored_credentials(
+            BackendId("pcloud:test".into()),
+            "account".into(),
+            "https://attacker.test".into(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("untrusted origin must be rejected"),
+        };
+
+        assert_eq!(
+            error,
+            "pCloud API base must be the HTTPS US or Europe API origin"
+        );
     }
 
     #[tokio::test]
@@ -655,7 +686,7 @@ mod tests {
         });
 
         let backend_id = BackendId("pcloud:test".into());
-        let adapter = PCloudAdapter::new_with_base(
+        let adapter = PCloudAdapter::new_with_test_base(
             "token".into(),
             backend_id.clone(),
             format!("http://{address}"),

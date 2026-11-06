@@ -250,6 +250,9 @@ impl AppRuntime {
         callback_url: String,
     ) -> Result<CloudSidebarLocation, String> {
         let token_response = parse_pcloud_callback(&callback_url)?;
+        let api_base = PCloudApiClient::canonical_api_base(&token_response.api_base)
+            .map_err(str::to_owned)?
+            .to_string();
         let backend_id = BackendId(format!("pcloud:{}", token_response.account_id));
         let token = TokenSet {
             access_token: token_response.access_token.clone(),
@@ -262,7 +265,7 @@ impl AppRuntime {
             backend_id: backend_id.0,
             display_name,
             account_id: token_response.account_id,
-            api_base: token_response.api_base,
+            api_base,
         };
         let location = self.register_cloud_account(config.clone(), true).await?;
         self.save_or_replace_cloud_account(config)?;
@@ -422,17 +425,23 @@ impl AppRuntime {
                     let token = CredentialManager::new()
                         .load_token(&backend_id.0, &account_id)
                         .map_err(|error| error.to_string())?;
-                    Arc::new(PCloudAdapter::new_with_base(
-                        token.access_token,
-                        backend_id.clone(),
-                        api_base,
-                    ))
+                    Arc::new(
+                        PCloudAdapter::new_with_base(
+                            token.access_token,
+                            backend_id.clone(),
+                            api_base,
+                        )
+                        .map_err(str::to_owned)?,
+                    )
                 } else {
-                    Arc::new(PCloudAdapter::new_with_stored_credentials(
-                        backend_id.clone(),
-                        account_id,
-                        api_base,
-                    ))
+                    Arc::new(
+                        PCloudAdapter::new_with_stored_credentials(
+                            backend_id.clone(),
+                            account_id,
+                            api_base,
+                        )
+                        .map_err(str::to_owned)?,
+                    )
                 };
                 if verify_connection {
                     adapter.connect().await.map_err(|error| error.to_string())?;

@@ -22,6 +22,7 @@ use iris_auth::token::TokenSet;
 use iris_backends::localfs::adapter::LocalFsAdapter;
 use iris_backends::localfs::stable_id::get_stable_id as get_local_stable_id;
 use iris_backends::pcloud::adapter::PCloudAdapter;
+use iris_backends::pcloud::api_client::PCloudApiClient;
 use iris_backends::registry::BackendRegistry;
 use iris_backends::s3::adapter::{
     S3Adapter, S3Config, S3_CUSTOM_ENDPOINT_CONDITIONAL_WRITES_UNCONFIRMED,

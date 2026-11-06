@@ -1,11 +1,10 @@
+use iris_path_service::{canonical_pcloud_api_base, DEFAULT_PCLOUD_API_BASE};
 use reqwest::Client;
 use serde::Deserialize;
 use std::time::Duration;
 
 mod auth;
 mod ops;
-
-const PCLOUD_API_BASE: &str = "https://api.pcloud.com";
 
 /// Common envelope of pCloud API responses.
 #[derive(Debug, Deserialize)]
@@ -51,15 +50,12 @@ fn build_http_client() -> Client {
 }
 
 impl PCloudApiClient {
-    pub fn new(access_token: String) -> Self {
-        Self {
-            http: build_http_client(),
-            access_token,
-            api_base: PCLOUD_API_BASE.to_string(),
-        }
+    /// Canonicalizes an API base using the shared pCloud origin policy.
+    pub fn canonical_api_base(api_base: &str) -> Result<&'static str, &'static str> {
+        canonical_pcloud_api_base(api_base)
     }
 
-    pub fn with_base_url(access_token: String, api_base: String) -> Self {
+    fn build(access_token: String, api_base: String) -> Self {
         Self {
             http: build_http_client(),
             access_token,
@@ -67,7 +63,59 @@ impl PCloudApiClient {
         }
     }
 
+    pub fn new(access_token: String) -> Self {
+        Self::build(access_token, DEFAULT_PCLOUD_API_BASE.to_string())
+    }
+
+    /// Builds a client only for the supported pCloud HTTPS API origins.
+    pub fn with_base_url(access_token: String, api_base: String) -> Result<Self, &'static str> {
+        let api_base = Self::canonical_api_base(&api_base)?.to_string();
+        Ok(Self::build(access_token, api_base))
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_test_base_url(access_token: String, api_base: String) -> Self {
+        Self::build(access_token, api_base)
+    }
+
     pub fn http_client(&self) -> Client {
         self.http.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PCloudApiClient;
+
+    #[test]
+    fn api_base_accepts_only_the_two_documented_https_origins() {
+        assert_eq!(
+            PCloudApiClient::canonical_api_base("https://api.pcloud.com"),
+            Ok("https://api.pcloud.com")
+        );
+        assert_eq!(
+            PCloudApiClient::canonical_api_base("https://eapi.pcloud.com/"),
+            Ok("https://eapi.pcloud.com")
+        );
+        assert!(PCloudApiClient::with_base_url(
+            "synthetic-token".to_owned(),
+            "https://attacker.test".to_owned()
+        )
+        .is_err());
+        for untrusted in [
+            "http://api.pcloud.com",
+            "https://api.pcloud.com.evil.test",
+            "https://user@api.pcloud.com",
+            "https://api.pcloud.com:443",
+            "https://api.pcloud.com/path",
+            "https://api.pcloud.com?next=evil",
+            "https://api.pcloud.com#fragment",
+            "https://attacker.test",
+        ] {
+            assert!(
+                PCloudApiClient::canonical_api_base(untrusted).is_err(),
+                "accepted untrusted API base: {untrusted}"
+            );
+        }
     }
 }

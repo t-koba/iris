@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 iris-core-domain = { workspace = true }
+iris-path-service = { workspace = true }
 iris-platform-integration = { workspace = true }
 iris-auth = { workspace = true }
 iris-smb-client = { workspace = true }

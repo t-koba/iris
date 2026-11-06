@@ -12,6 +12,6 @@ pub use normalize::{
 };
 pub use platform::{is_boot_volume_path, same_filesystem};
 pub use url::{
-    parse_pcloud_callback, percent_decode, short_config_hash, url_encode_component,
-    PCloudTokenResponse,
+    canonical_pcloud_api_base, parse_pcloud_callback, percent_decode, short_config_hash,
+    url_encode_component, PCloudTokenResponse, DEFAULT_PCLOUD_API_BASE,
 };

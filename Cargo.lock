@@ -3414,6 +3414,7 @@ dependencies = [
  "futures-util",
  "iris-auth",
  "iris-core-domain",
+ "iris-path-service",
  "iris-platform-integration",
  "iris-smb-client",
  "mime_guess",
