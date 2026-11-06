@@ -209,6 +209,7 @@ start_samba() {
   if [[ -n "$smb_encryption" ]]; then
     samba_args+=(-g "smb encrypt = $smb_encryption")
   fi
+  samba_args+=(-g "workgroup = WORKGROUP")
   samba_args+=(-g "log level = $smb_log_level")
   docker "${samba_args[@]}" >/dev/null
   wait_for_port 127.0.0.1 "$smb_port" "Samba container"

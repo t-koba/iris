@@ -29,7 +29,8 @@ async fn run() -> Result<(), String> {
             port,
             share_name,
             username: Some(username),
-            domain: None,
+            // The standalone Samba fixture is explicitly configured for WORKGROUP.
+            domain: Some("WORKGROUP".to_string()),
             password: Some(password),
             workstation: Some("IRIS-CI".to_string()),
             allow_guest: false,
