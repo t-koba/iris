@@ -448,8 +448,11 @@ class Workflow(unittest.TestCase):
                                             ("push", "refs/heads/main", False),
                                             ("push", "refs/tags/v0.4.0", True)):
             self.assertEqual(actual_event == event and ref.startswith(prefix), expected)
-        self.assertIn("  workflow_dispatch:\n    inputs:\n      source_ref:", self.source)
-        self.assertIn("ref: ${{ inputs.source_ref || github.sha }}", self.jobs["release-preflight"])
+        self.assertIn("  workflow_dispatch:\n  push:", self.source)
+        self.assertNotIn("source_ref", self.source)
+        self.assertNotIn("inputs.", self.source)
+        self.assertIn("ref: ${{ github.sha }}", self.jobs["release-preflight"])
+        self.assertIn('echo "sha=$(git rev-parse HEAD)"', self.jobs["release-preflight"])
         self.assertIn("pattern: release-*", self.jobs["publish"])
         for platform in ("macos", "linux", "windows"):
             job = self.jobs["package-" + platform]
