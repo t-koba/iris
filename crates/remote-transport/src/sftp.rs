@@ -88,6 +88,20 @@ struct RemoteDirCreateCache {
     attempted: HashSet<String>,
 }
 
+// Only entry boundaries are retryable: an in-flight transfer or source deletion
+// may have committed remotely even when its acknowledgement was lost.
+#[derive(Default)]
+struct SftpPlanProgress {
+    completed: usize,
+    entry_started: bool,
+}
+
+impl SftpPlanProgress {
+    fn can_retry(&self, reused: bool, error: &str) -> bool {
+        reused && !self.entry_started && sftp_error_is_connection_failure(error)
+    }
+}
+
 struct SftpConnectionLease {
     key: SftpPoolKey,
     connected: Option<ConnectedSftp>,
@@ -142,16 +156,18 @@ pub async fn execute_sftp_plan(plan: &SftpTransferPlan) -> Result<(), String> {
 
     let mut lease = SftpConnectionLease::checkout(&plan.mapping).await?;
     let pipeline_depth = normalize_pipeline_depth(plan.pipeline_depth);
+    let mut progress = SftpPlanProgress::default();
     let mut result = execute_sftp_entries(
         plan,
         lease.session(),
         lease.transfer_session(),
         pipeline_depth,
+        &mut progress,
     )
     .await;
     if result
         .as_ref()
-        .is_err_and(|error| lease.reused && sftp_error_is_connection_failure(error))
+        .is_err_and(|error| progress.can_retry(lease.reused, error))
     {
         lease.close().await;
         lease = SftpConnectionLease::fresh(&plan.mapping).await?;
@@ -160,6 +176,7 @@ pub async fn execute_sftp_plan(plan: &SftpTransferPlan) -> Result<(), String> {
             lease.session(),
             lease.transfer_session(),
             pipeline_depth,
+            &mut progress,
         )
         .await;
     }
@@ -434,9 +451,17 @@ async fn execute_sftp_entries(
     session: &SftpSession,
     transfer_session: Arc<RawSftpSession>,
     pipeline_depth: usize,
+    progress: &mut SftpPlanProgress,
 ) -> Result<(), String> {
     let mut remote_dirs = RemoteDirCreateCache::default();
-    for entry in &plan.entries {
+    for entry in &plan.entries[progress.completed..] {
+        // Probe before any entry side effects, so a stale pooled connection can
+        // reconnect at a known boundary without replaying earlier move entries.
+        session
+            .canonicalize(".")
+            .await
+            .map_err(|error| format!("SFTP entry readiness check failed: {error}"))?;
+        progress.entry_started = true;
         match plan.direction {
             SftpTransferDirection::Upload => {
                 if entry.is_dir {
@@ -489,6 +514,8 @@ async fn execute_sftp_entries(
                 }
             }
         }
+        progress.completed += 1;
+        progress.entry_started = false;
     }
     Ok(())
 }
@@ -857,6 +884,21 @@ async fn pipelined_upload(
     remote_path: &str,
     pipeline_depth: usize,
 ) -> Result<(), String> {
+    let mut local_file = tokio::fs::File::open(local_path).await.map_err(|error| {
+        format!(
+            "failed to open local file {}: {error}",
+            local_path.display()
+        )
+    })?;
+    let metadata = local_file.metadata().await.map_err(|error| {
+        format!(
+            "failed to stat local file {}: {error}",
+            local_path.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(format!("not a local file: {}", local_path.display()));
+    }
     let handle = session
         .open(
             remote_path.to_string(),
@@ -868,12 +910,6 @@ async fn pipelined_upload(
         .handle;
 
     let transfer_result = async {
-        let mut local_file = tokio::fs::File::open(local_path).await.map_err(|error| {
-            format!(
-                "failed to open local file {}: {error}",
-                local_path.display()
-            )
-        })?;
         let mut writes = JoinSet::new();
         let mut next_offset = 0u64;
         let mut reached_eof = false;
@@ -1250,7 +1286,8 @@ fn join_remote_path(base: &str, segment: &str) -> String {
 mod tests {
     use super::*;
     use crate::RemoteTransportKind;
-    use russh_sftp::protocol::{Data, Handle, Status};
+    use russh_sftp::protocol::{Data, File, Handle, Name, Status};
+    use russh_sftp::server::StatusReply;
     use tokio::sync::Mutex as TokioMutex;
 
     #[test]
@@ -1258,16 +1295,40 @@ mod tests {
         assert_eq!(DEFAULT_KEY_CANDIDATES, ["id_ed25519", "id_ecdsa"]);
     }
 
+    #[derive(Default)]
+    struct MemoryFaults {
+        probes: usize,
+        fail_probe_at: Option<usize>,
+        fail_close_once: Option<String>,
+        opened: Vec<String>,
+    }
+
     #[derive(Clone, Default)]
     struct MemorySftpServer {
         files: Arc<TokioMutex<HashMap<String, Vec<u8>>>>,
+        faults: Arc<Mutex<MemoryFaults>>,
     }
 
     impl russh_sftp::server::Handler for MemorySftpServer {
-        type Error = StatusCode;
+        type Error = StatusReply;
 
         fn unimplemented(&self) -> Self::Error {
-            StatusCode::OpUnsupported
+            StatusCode::OpUnsupported.into()
+        }
+
+        async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
+            let mut faults = self.faults.lock().unwrap();
+            faults.probes += 1;
+            if faults.fail_probe_at == Some(faults.probes) {
+                faults.fail_probe_at = None;
+                return Err(
+                    StatusCode::Failure.with_message("connection reset (injected before entry)")
+                );
+            }
+            Ok(Name {
+                id,
+                files: vec![File::new(path, FileAttributes::empty())],
+            })
         }
 
         async fn open(
@@ -1277,11 +1338,12 @@ mod tests {
             flags: OpenFlags,
             _attrs: FileAttributes,
         ) -> Result<Handle, Self::Error> {
+            self.faults.lock().unwrap().opened.push(filename.clone());
             let mut files = self.files.lock().await;
             if flags.contains(OpenFlags::TRUNCATE) {
                 files.insert(filename.clone(), Vec::new());
             } else if !files.contains_key(&filename) && !flags.contains(OpenFlags::CREATE) {
-                return Err(StatusCode::NoSuchFile);
+                return Err(StatusCode::NoSuchFile.into());
             } else {
                 files.entry(filename.clone()).or_default();
             }
@@ -1291,7 +1353,14 @@ mod tests {
             })
         }
 
-        async fn close(&mut self, id: u32, _handle: String) -> Result<Status, Self::Error> {
+        async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
+            let mut faults = self.faults.lock().unwrap();
+            if faults.fail_close_once.as_deref() == Some(&handle) {
+                faults.fail_close_once = None;
+                return Err(
+                    StatusCode::Failure.with_message("connection reset (injected after close)")
+                );
+            }
             Ok(Status {
                 id,
                 status_code: StatusCode::Ok,
@@ -1311,7 +1380,7 @@ mod tests {
             let file = files.get(&handle).ok_or(StatusCode::NoSuchFile)?;
             let start = offset as usize;
             if start >= file.len() {
-                return Err(StatusCode::Eof);
+                return Err(StatusCode::Eof.into());
             }
             let short_read_limit = 31_337usize;
             let end = start
@@ -1355,6 +1424,14 @@ mod tests {
         let session = RawSftpSession::new(client);
         session.init().await.expect("initialize memory SFTP");
         (Arc::new(session), handler)
+    }
+
+    async fn memory_control_session(server: &MemorySftpServer) -> SftpSession {
+        let (client, stream) = tokio::io::duplex(4 * 1024 * 1024);
+        russh_sftp::server::run(stream, server.clone()).await;
+        SftpSession::new(client)
+            .await
+            .expect("memory control session")
     }
 
     fn mapping_with_auth(auth: SshAuthKind) -> RemoteTransportMapping {
@@ -1486,6 +1563,122 @@ mod tests {
             .contains(&iris_core_domain::observability::stable_hash(
                 mapping.ssh_password.as_bytes()
             )));
+    }
+
+    #[tokio::test]
+    async fn pooled_move_never_replays_committed_entries() {
+        // Exercise the same progress/reused-lease gate as execute_sftp_plan with
+        // in-memory SFTP sessions, including a replacement session on safe retry.
+        for ambiguous in [false, true] {
+            let (transfer, server) = memory_sftp_session().await;
+            let control = memory_control_session(&server).await;
+            let temp = tempfile::tempdir().expect("tempdir");
+            let entries = ["first", "second"].map(|name| SftpTransferEntry {
+                local_path: temp.path().join(name),
+                remote_path: format!("/{name}"),
+                is_dir: false,
+            });
+            for entry in &entries {
+                tokio::fs::write(&entry.local_path, entry.remote_path.as_bytes())
+                    .await
+                    .expect("write move source");
+            }
+            {
+                let mut faults = server.faults.lock().unwrap();
+                if ambiguous {
+                    // The second payload is committed but its close reply is lost.
+                    faults.fail_close_once = Some("/second".into());
+                } else {
+                    faults.fail_probe_at = Some(2);
+                }
+            }
+            let plan = SftpTransferPlan {
+                mapping: mapping_with_auth(SshAuthKind::Password),
+                direction: SftpTransferDirection::Upload,
+                delete_sources: true,
+                pipeline_depth: DEFAULT_SFTP_PIPELINE_DEPTH,
+                entries: entries.to_vec(),
+            };
+            let mut progress = SftpPlanProgress::default();
+            let error = execute_sftp_entries(
+                &plan,
+                &control,
+                Arc::clone(&transfer),
+                plan.pipeline_depth,
+                &mut progress,
+            )
+            .await
+            .expect_err("injected connection failure");
+            assert!(sftp_error_is_connection_failure(&error), "{error}");
+            assert_eq!(progress.completed, 1);
+            assert!(!entries[0].local_path.exists(), "first move source removed");
+            assert!(entries[1].local_path.exists(), "uncertain source retained");
+            assert_eq!(progress.can_retry(true, &error), !ambiguous);
+            assert!(
+                !progress.can_retry(false, &error),
+                "fresh leases are not retried"
+            );
+            if progress.can_retry(true, &error) {
+                control.close().await.expect("close stale control");
+                transfer.close_session().expect("close stale transfer");
+                let control = memory_control_session(&server).await;
+                let (client, stream) = tokio::io::duplex(4 * 1024 * 1024);
+                russh_sftp::server::run(stream, server.clone()).await;
+                let transfer = Arc::new(RawSftpSession::new(client));
+                transfer.init().await.expect("replacement transfer session");
+                execute_sftp_entries(
+                    &plan,
+                    &control,
+                    Arc::clone(&transfer),
+                    plan.pipeline_depth,
+                    &mut progress,
+                )
+                .await
+                .expect("retry remaining entry");
+                assert_eq!(progress.completed, 2);
+                assert!(!entries[1].local_path.exists());
+                control.close().await.expect("close replacement control");
+                transfer
+                    .close_session()
+                    .expect("close replacement transfer");
+            } else {
+                control.close().await.expect("close failed control");
+                transfer.close_session().expect("close failed transfer");
+            }
+            assert_eq!(server.files.lock().await.get("/first").unwrap(), b"/first");
+            assert_eq!(
+                server.files.lock().await.get("/second").unwrap(),
+                b"/second"
+            );
+            assert_eq!(server.faults.lock().unwrap().opened, ["/first", "/second"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_validates_source_before_opening_remote_destination() {
+        let (session, server) = memory_sftp_session().await;
+        server
+            .files
+            .lock()
+            .await
+            .insert("/existing".into(), b"keep me".to_vec());
+        let temp = tempfile::tempdir().expect("tempdir");
+        for source in [temp.path().join("missing"), temp.path().to_path_buf()] {
+            pipelined_upload(
+                Arc::clone(&session),
+                &source,
+                "/existing",
+                DEFAULT_SFTP_PIPELINE_DEPTH,
+            )
+            .await
+            .expect_err("missing or non-file source");
+            assert_eq!(
+                server.files.lock().await.get("/existing").unwrap(),
+                b"keep me"
+            );
+            assert!(server.faults.lock().unwrap().opened.is_empty());
+        }
+        session.close_session().expect("close memory SFTP");
     }
 
     #[tokio::test]
