@@ -12,7 +12,7 @@ const NTLMSSP_SIGNATURE: &[u8; 8] = b"NTLMSSP\0";
 const NEGOTIATE_MESSAGE_TYPE: u32 = 1;
 const CHALLENGE_MESSAGE_TYPE: u32 = 2;
 const AUTHENTICATE_MESSAGE_TYPE: u32 = 3;
-const NEGOTIATE_FIXED_BYTES: usize = 32;
+const NEGOTIATE_FIXED_BYTES: usize = 40;
 const CHALLENGE_FIXED_BYTES: usize = 48;
 const AUTHENTICATE_FIXED_BYTES: usize = 88;
 const AUTHENTICATE_MIC_OFFSET: usize = 72;
@@ -57,28 +57,23 @@ impl BitOr for NtlmsspNegotiateFlags {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NtlmsspNegotiate {
     pub flags: NtlmsspNegotiateFlags,
-    pub domain: String,
-    pub workstation: String,
 }
 
 impl NtlmsspNegotiate {
     pub fn encode(&self) -> Result<Vec<u8>, SmbClientError> {
-        let domain = encode_utf16le(&self.domain);
-        let workstation = encode_utf16le(&self.workstation);
-        let mut payload_offset = NEGOTIATE_FIXED_BYTES;
-        let domain_offset = payload_offset;
-        payload_offset = checked_add(payload_offset, domain.len())?;
-        let workstation_offset = payload_offset;
-        payload_offset = checked_add(payload_offset, workstation.len())?;
-
-        let mut bytes = Vec::with_capacity(payload_offset);
+        let version = if self.flags.contains(NtlmsspNegotiateFlags::VERSION) {
+            NTLM_VERSION
+        } else {
+            [0; 8]
+        };
+        let mut bytes = Vec::with_capacity(NEGOTIATE_FIXED_BYTES);
         bytes.extend_from_slice(NTLMSSP_SIGNATURE);
         push_u32(&mut bytes, NEGOTIATE_MESSAGE_TYPE);
         push_u32(&mut bytes, self.flags.0);
-        push_security_buffer(&mut bytes, domain.len(), domain_offset)?;
-        push_security_buffer(&mut bytes, workstation.len(), workstation_offset)?;
-        bytes.extend_from_slice(&domain);
-        bytes.extend_from_slice(&workstation);
+        // Domain and workstation are carried in AUTHENTICATE_MESSAGE, not this default token.
+        push_security_buffer(&mut bytes, 0, NEGOTIATE_FIXED_BYTES)?;
+        push_security_buffer(&mut bytes, 0, NEGOTIATE_FIXED_BYTES)?;
+        bytes.extend_from_slice(&version);
         Ok(bytes)
     }
 }
@@ -422,8 +417,6 @@ mod tests {
     fn negotiate_message_encodes_flags_and_security_buffers() {
         let message = NtlmsspNegotiate {
             flags: default_negotiate_flags(),
-            domain: "DOMAIN".into(),
-            workstation: "WORKSTATION".into(),
         };
 
         let encoded = message.encode().expect("encode");
@@ -431,14 +424,23 @@ mod tests {
         assert_eq!(&encoded[..8], NTLMSSP_SIGNATURE);
         assert_eq!(le_u32(&encoded, 8), NEGOTIATE_MESSAGE_TYPE);
         assert_eq!(le_u32(&encoded, 12), default_negotiate_flags().0);
-        assert_eq!(
-            security_buffer_slice(&encoded, 16).expect("domain"),
-            encode_utf16le("DOMAIN")
-        );
-        assert_eq!(
-            security_buffer_slice(&encoded, 24).expect("workstation"),
-            encode_utf16le("WORKSTATION")
-        );
+        assert_eq!(encoded.len(), NEGOTIATE_FIXED_BYTES);
+        assert_eq!(le_u16(&encoded, 16), 0);
+        assert_eq!(le_u16(&encoded, 18), 0);
+        assert_eq!(le_u32(&encoded, 20), NEGOTIATE_FIXED_BYTES as u32);
+        assert_eq!(le_u16(&encoded, 24), 0);
+        assert_eq!(le_u16(&encoded, 26), 0);
+        assert_eq!(le_u32(&encoded, 28), NEGOTIATE_FIXED_BYTES as u32);
+        assert_eq!(&encoded[32..40], &NTLM_VERSION);
+
+        let flags_without_version =
+            NtlmsspNegotiateFlags(default_negotiate_flags().0 & !NtlmsspNegotiateFlags::VERSION.0);
+        let without_version = NtlmsspNegotiate {
+            flags: flags_without_version,
+        }
+        .encode()
+        .expect("encode without version");
+        assert_eq!(&without_version[32..40], &[0; 8]);
     }
 
     #[test]

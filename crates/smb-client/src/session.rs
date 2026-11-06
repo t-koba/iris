@@ -83,8 +83,6 @@ pub async fn authenticate_ntlm_v2(
 ) -> Result<NtlmV2Session, SmbSessionError> {
     let negotiate = NtlmsspNegotiate {
         flags: default_negotiate_flags(),
-        domain: setup.domain.clone(),
-        workstation: setup.workstation.clone(),
     }
     .encode()?;
     let security_buffer = spnego_initial_context_token_ntlm(&negotiate)?;
@@ -578,8 +576,6 @@ mod tests {
     fn expected_session_base_key() -> [u8; 16] {
         let negotiate = NtlmsspNegotiate {
             flags: default_negotiate_flags(),
-            domain: "Domain".into(),
-            workstation: "WORKSTATION".into(),
         }
         .encode()
         .expect("negotiate");
