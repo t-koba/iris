@@ -21,7 +21,8 @@ spec.loader.exec_module(module)
 
 def audit(**overrides):
     settings = dict(max_report_bytes=2097152, max_command_bytes=32768,
-                    max_native_files=256, command_seconds=5)
+                    max_native_files=256, command_seconds=5, platform="linux",
+                    max_metadata_bytes=8388608, max_cargo_packages=1024)
     settings.update(overrides)
     return module.Audit(argparse.Namespace(**settings))
 
@@ -52,6 +53,221 @@ class Reports(unittest.TestCase):
                 report = audit()
                 report.add("path", text=r"C:\Users\private\binary")
                 self.assertNotIn("private", json.dumps(report.records))
+
+    def test_cargo_root_target_features_and_dependency_contexts(self):
+        def metadata(minimal):
+            # Metadata catalog; resolve features intentionally overstate the product
+            # (workspace-wide unification) to prove the graph uses tree features.
+            names = ["iris-ui-shell", "common", "video", "build-tool", "macro", "helper",
+                     "git-dep", "dev-only", "unrelated-workspace", "other-target"]
+            packages = [dict(id=name, name=name, version="1.2.3",
+                             source=(None if name == "iris-ui-shell" else
+                                     "git+https://example.invalid/dependency#abc" if name == "git-dep" else
+                                     "registry+https://example.invalid/index"),
+                             manifest_path=str(ROOT / "crates/ui-shell/Cargo.toml") if name == "iris-ui-shell" else f"/cache/{name}/Cargo.toml",
+                             license=None if name == "iris-ui-shell" else "MIT OR Apache-2.0",
+                             license_file=None if name != "common" else "/cache/common/LICENSE",
+                             targets=[dict(kind=["proc-macro" if name == "macro" else "lib"])])
+                        for name in names]
+            def dep(name, kind=None):
+                return dict(pkg=name, name=name.replace("-", "_"),
+                            dep_kinds=[dict(kind=kind, target=None)])
+            # Metadata can retain inactive target declarations for the same package edge.
+            common = dict(pkg="common", name="common", dep_kinds=[
+                dict(kind=None, target=None),
+                dict(kind=None, target='cfg(target_family = "wasm")'),
+                dict(kind="build", target=None),
+                dict(kind="build", target="cfg(windows)"),
+            ])
+            root_deps = [common, dep("macro"), dep("git-dep"), dep("dev-only", "dev"),
+                         dict(pkg="other-target", name="other",
+                              dep_kinds=[dict(kind=None, target='cfg(target_arch = "wasm32")')])]
+            root_deps.append(dep("build-tool", "build"))
+            if not minimal:
+                root_deps.append(dep("video"))
+            nodes = [dict(id=name, features=(["minimal", "leaked"] if minimal else ["default", "video", "leaked"])
+                          if name == "iris-ui-shell" else ["leaked"] if name in ("common", "video") else [],
+                          deps=root_deps if name == "iris-ui-shell" else
+                          [dep("helper")] if name in ("macro", "build-tool") else [])
+                     for name in names]
+            return dict(packages=packages, resolve=dict(root=None, nodes=nodes),
+                        workspace_members=["iris-ui-shell", "unrelated-workspace"])
+
+        def tree_text(minimal):
+            lines = ["iris-ui-shell v1.2.3 (/workspace/crates/ui-shell)|" + ("minimal" if minimal else "default,video"),
+                     "|-- common v1.2.3|",
+                     "|-- macro v1.2.3 (proc-macro)|",
+                     "|   `-- helper v1.2.3|",
+                     "|-- git-dep v1.2.3 (https://example.invalid/dependency#abc)|",
+                     "[build-dependencies]",
+                     "|-- common v1.2.3| (*)",
+                     "`-- build-tool v1.2.3|",
+                     "    `-- helper v1.2.3| (*)"]
+            if not minimal:
+                lines.insert(2, "|-- video v1.2.3|")
+            return "\n".join(lines) + "\n"
+
+        for platform, host in (("linux", "x86_64-unknown-linux-gnu"),
+                               ("macos", "aarch64-apple-darwin"),
+                               ("windows", "x86_64-pc-windows-msvc")):
+            with self.subTest(platform=platform):
+                report = audit(platform=platform)
+                minimal = platform == "windows"
+                with patch.object(report, "cargo_metadata", return_value=metadata(minimal)) as meta_cmd, \
+                     patch.object(report, "cargo_tree", return_value=tree_text(minimal)) as tree_cmd:
+                    report.cargo_graph(f"rustc version\nhost: {host}\n")
+                meta_argv = meta_cmd.call_args.args[0]
+                expected_meta = ["cargo", "metadata", "--format-version", "1", "--locked", "--offline",
+                            "--filter-platform", host, "--manifest-path", "crates/ui-shell/Cargo.toml"]
+                self.assertEqual(meta_argv, expected_meta + (["--no-default-features", "--features", "minimal"] if minimal else []))
+                tree_argv = tree_cmd.call_args.args[0]
+                expected_tree = ["cargo", "tree", "-p", "iris-ui-shell", "--target", host,
+                                 "--offline", "--locked", "--prefix", "indent", "--charset", "ascii",
+                                 "--format", "{p}|{f}", "-e", "normal,build"]
+                self.assertEqual(tree_argv, expected_tree + (["--no-default-features", "--features", "minimal"] if minimal else []))
+                graph = report.records[-1]
+                self.assertEqual(graph["status"], "captured")
+                self.assertEqual(graph["root"], "iris-ui-shell")
+                selected = {p["id"]: p for p in graph["packages"]}
+                self.assertEqual(set(selected), {"iris-ui-shell", "common", "build-tool", "macro", "helper", "git-dep"}
+                                 | (set() if minimal else {"video"}))
+                # Tree features win; workspace-wide leaked features are absent.
+                self.assertEqual(selected["iris-ui-shell"]["features"], ["minimal"] if minimal else ["default", "video"])
+                self.assertEqual(selected["common"]["features"], [])
+                for pkg in selected.values():
+                    self.assertNotIn("leaked", pkg["features"])
+                self.assertEqual(selected["macro"]["contexts"], ["proc-macro"])
+                self.assertEqual(selected["helper"]["contexts"], ["build"])
+                self.assertEqual(selected["build-tool"]["contexts"], ["build"])
+                self.assertEqual(selected["common"]["contexts"], ["build", "runtime"])
+                self.assertEqual(selected["git-dep"]["source"], "git+https://example.invalid/dependency#abc")
+                self.assertEqual(selected["common"]["license"], "MIT OR Apache-2.0")
+                self.assertEqual(selected["common"]["license_file"], "/cache/common/LICENSE")
+                self.assertEqual(selected["iris-ui-shell"]["missing_metadata"], ["license", "license_file"])
+                self.assertIsNone(selected["iris-ui-shell"]["source"])
+                self.assertTrue(any(e["dependency_kind"] == "build" for e in graph["edges"]))
+                self.assertTrue(any(e["proc_macro"] for e in graph["edges"]))
+                common_edges = [e for e in graph["edges"] if e["destination"] == "common"]
+                self.assertEqual(len(common_edges), 1)
+                self.assertEqual(common_edges[0]["dependency_kind"], "ambiguous")
+                self.assertEqual(common_edges[0]["dependency_kinds"], ["build", "normal"])
+                self.assertNotIn("target", common_edges[0])
+                self.assertTrue(all(e["source"] in selected and e["destination"] in selected for e in graph["edges"]))
+                # Dev-only, unrelated workspace and other-target nodes never enter the product closure.
+                self.assertNotIn("dev-only", selected)
+                self.assertNotIn("unrelated-workspace", selected)
+                self.assertNotIn("other-target", selected)
+
+        report = audit(max_cargo_packages=2)
+        with patch.object(report, "cargo_metadata", return_value=metadata(False)), \
+             patch.object(report, "cargo_tree", return_value=tree_text(False)):
+            report.cargo_graph("host: test-host\n")
+        graph = report.records[-1]
+        self.assertEqual(graph["status"], "partial")
+        self.assertTrue(graph["truncated"])
+        self.assertEqual(len(graph["packages"]), 2)
+        self.assertTrue(all(e["destination"] in {p["id"] for p in graph["packages"]} for e in graph["edges"]))
+        report = audit(max_report_bytes=1024)
+        with patch.object(report, "cargo_metadata", return_value=metadata(False)), \
+             patch.object(report, "cargo_tree", return_value=tree_text(False)):
+            report.cargo_graph("host: test-host\n")
+        self.assertEqual(report.records[-1]["status"], "absent")
+        self.assertTrue(report.records[-1]["truncated"])
+        self.assertIn("report byte budget", report.records[-1]["reason"])
+        for rustc, response in (("", metadata(False)), ("host: test-host\n", {})):
+            report = audit()
+            with patch.object(report, "cargo_metadata", return_value=response), \
+                 patch.object(report, "cargo_tree", return_value=tree_text(False)):
+                report.cargo_graph(rustc)
+            self.assertEqual(report.records[-1]["status"], "absent")
+
+    def test_tree_features_win_over_workspace_wide_metadata_leak(self):
+        # Exact shortfall from the checkout: metadata unifies image/avif,
+        # tokio/test-util and iris-thumb-preview/test-fixtures from dev/bench
+        # members, while the product tree has none of them.
+        packages = [
+            dict(id="iris-ui-shell", name="iris-ui-shell", version="0.4.0", source=None,
+                 manifest_path=str(ROOT / "crates/ui-shell/Cargo.toml"), license=None, license_file=None,
+                 targets=[dict(kind=["lib"])]),
+            dict(id="image", name="image", version="0.25.10", source="registry+https://example.invalid/index",
+                 manifest_path="/cache/image/Cargo.toml", license="MIT OR Apache-2.0", license_file=None,
+                 targets=[dict(kind=["lib"])]),
+            dict(id="tokio", name="tokio", version="1.54.1", source="registry+https://example.invalid/index",
+                 manifest_path="/cache/tokio/Cargo.toml", license="MIT", license_file=None,
+                 targets=[dict(kind=["lib"])]),
+            dict(id="iris-thumb-preview", name="iris-thumb-preview", version="0.4.0", source=None,
+                 manifest_path=str(ROOT / "crates/thumb-preview/Cargo.toml"), license=None, license_file=None,
+                 targets=[dict(kind=["lib"])]),
+        ]
+        def dep(name):
+            return dict(pkg=name, name=name.replace("-", "_"), dep_kinds=[dict(kind=None, target=None)])
+        nodes = [
+            dict(id="iris-ui-shell", features=["default", "video", "leaked"],
+                 deps=[dep("image"), dep("tokio"), dep("iris-thumb-preview")]),
+            dict(id="image", features=["avif", "bmp", "gif"], deps=[]),
+            dict(id="tokio", features=["test-util", "rt"], deps=[]),
+            dict(id="iris-thumb-preview", features=["test-fixtures", "video"], deps=[]),
+        ]
+        leaked = dict(packages=packages, resolve=dict(root=None, nodes=nodes), workspace_members=["iris-ui-shell"])
+        tree = ("iris-ui-shell v0.4.0 (/workspace/crates/ui-shell)|default,video\n"
+                "|-- image v0.25.10|bmp,gif\n"
+                "|-- tokio v1.54.1|rt\n"
+                "`-- iris-thumb-preview v0.4.0 (/workspace/crates/thumb-preview)|video\n")
+        report = audit(platform="linux")
+        with patch.object(report, "cargo_metadata", return_value=leaked), \
+             patch.object(report, "cargo_tree", return_value=tree):
+            report.cargo_graph("host: x86_64-unknown-linux-gnu\n")
+        graph = report.records[-1]
+        self.assertEqual(graph["status"], "captured")
+        selected = {p["id"]: p for p in graph["packages"]}
+        self.assertEqual(set(selected), {"iris-ui-shell", "image", "tokio", "iris-thumb-preview"})
+        self.assertEqual(selected["image"]["features"], ["bmp", "gif"])
+        self.assertNotIn("avif", selected["image"]["features"])
+        self.assertEqual(selected["tokio"]["features"], ["rt"])
+        self.assertNotIn("test-util", selected["tokio"]["features"])
+        self.assertEqual(selected["iris-thumb-preview"]["features"], ["video"])
+        self.assertNotIn("test-fixtures", selected["iris-thumb-preview"]["features"])
+        self.assertEqual(selected["iris-ui-shell"]["features"], ["default", "video"])
+
+    def test_workspace_home_paths_are_normalized_without_actions_env(self):
+        # Outside GitHub Actions GITHUB_WORKSPACE/RUNNER_TEMP are absent, but
+        # HOME is still set. The report must still hide the local workspace.
+        workspace = str(Path(__file__).resolve().parent.parent)
+        home = os.environ.get("HOME") or str(Path.home())
+        with patch.dict(os.environ, clear=False):
+            os.environ.pop("GITHUB_WORKSPACE", None)
+            os.environ.pop("RUNNER_TEMP", None)
+            self.assertNotIn("GITHUB_WORKSPACE", os.environ)
+            report = audit()
+            report.add("evidence", path=workspace + "/crates/ui-shell/Cargo.toml",
+                       home_path=home + "/.cargo/registry/cache",
+                       package_id="path+file://" + workspace + "/crates/ui-shell#iris-ui-shell@0.4.0")
+            dumped = json.dumps(report.records)
+            self.assertNotIn(workspace, dumped)
+            if home and home != "/":
+                self.assertNotIn(home, dumped)
+            self.assertIn("$WORKSPACE", dumped)
+            self.assertIn("$HOME", dumped)
+        win_workspace = r"C:\Users\runner\work\iris\iris"
+        with patch.dict(os.environ, {"GITHUB_WORKSPACE": win_workspace}, clear=False):
+            report = audit()
+            report.add("evidence", package_id="path+file:///C:/Users/runner/work/iris/iris/crates/ui-shell#iris-ui-shell@0.4.0")
+            self.assertNotIn("runner", json.dumps(report.records))
+
+    def test_metadata_bytes_failure_and_timeout_are_not_partial_json(self):
+        report = audit(max_metadata_bytes=128, command_seconds=1)
+        self.assertEqual(report.cargo_metadata([sys.executable, "-c", "print('{}')"]), {})
+        for script in ("print('x'*129)", "import sys; sys.stderr.write('x'*129)",
+                       "print('{}'); raise SystemExit(1)", "print('not-json')",
+                       "import time; time.sleep(2)"):
+            with self.subTest(script=script), self.assertRaises(ValueError):
+                report.cargo_metadata([sys.executable, "-c", script])
+        with self.assertRaises(ValueError):
+            report.cargo_metadata(["iris-nonexistent-cargo"])
+        commands = [r for r in report.records if r["kind"] == "cargo-metadata-command"]
+        self.assertTrue(any(r["truncated"] for r in commands))
+        self.assertTrue(any(r["status"] == "TimeoutExpired" for r in commands))
+        self.assertTrue(all(r["stdout_bytes"] <= 128 for r in commands))
 
     def test_linux_closure_package_and_exact_ffmpeg_probe(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -254,7 +470,8 @@ class Workflow(unittest.TestCase):
         self.assertEqual(self.source.count("GH_TOKEN:"), 1)
         self.assertNotIn("IRIS_PDFIUM_ATTESTATION_VERIFIED", self.source)
         self.assertNotIn("pdfium_attestation_verified", self.source)
-        self.assertIn("vars.IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES", self.source)
+        for limit in ("MAX_REPORT_BYTES", "MAX_METADATA_BYTES", "MAX_CARGO_PACKAGES"):
+            self.assertIn("vars.IRIS_RELEASE_AUDIT_" + limit, self.source)
 
     def test_failed_pdfium_verification_cannot_be_written_as_verified(self):
         fetch = (ROOT / "scripts/fetch-pdfium-runtime.sh").read_text()

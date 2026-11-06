@@ -181,16 +181,41 @@ read-only GitHub token も渡さないため、手動 run は PDFium の固定�
   利用可能なら LLVM / Visual Studio ツールによる PE imports を記録します。
   FFmpeg/PDFium は選択されず、動画・PDF preview 対応を主張しません。
 
+各 OS の report は `rustc --version --verbose` の host を使い、
+`cargo tree -p iris-ui-shell --target <host> --offline --locked --prefix indent --charset ascii --format '{p}|{f}' -e normal,build`
+を実行します（macOS/Linux は defaults、Windows は `--no-default-features --features minimal`）。
+product graph、有効 features、target filtering 後の normal/build edges はこの package-rooted tree が正とし、
+`cargo metadata --format-version 1 --locked --offline --filter-platform <host> --manifest-path crates/ui-shell/Cargo.toml`
+（同じ variant flags）は package/license カタログにのみ使います。Cargo tree の build group から edge kind を読み、
+metadata の未評価 target predicates は graph に載せません。
+`cargo metadata` 単体は workspace 全体を解決するため per-node features が水増しされる
+（dev/bench 由来の image/avif、tokio/test-util、iris-thumb-preview/test-fixtures 等）ので、
+resolve の features は記録しません。`iris-ui-shell` を起点とする normal/build closure だけを記録し、
+dev-only・未到達の workspace package・他 target の依存は含めません。package ID/source/version、
+tree の有効 features、宣言された license/license-file（未指定は null と `missing_metadata`）、
+依存 edges を保持します。`dependency_kind` は normal/build/ambiguous（同一 package edge が両方に出た場合）を区別し、
+分類を `dependency_kinds` に残します。`proc_macro` は依存先の proc-macro target を表し、
+package の `contexts` は runtime/build/proc-macro を区別します。build tool・proc-macro の
+normal 依存も build-time として伝播します。同じ package が複数 context に現れることがあります。
+これは Cargo tree/metadata の宣言情報であり、license 式の互換性判定、Iris の license の推定、
+native code の網羅性の保証ではありません。path source は null（`source_kind=path`）です。
+
 `python scripts/test-release-audit.py` は軽量・offline の回帰検証です。
 レポートは `python scripts/release-audit.py <macos|linux|windows> --output <file>` でも生成できます。
 既定値は `IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES=2097152`、
-`IRIS_RELEASE_AUDIT_MAX_COMMAND_BYTES=32768`、`IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES=256`、
+`IRIS_RELEASE_AUDIT_MAX_COMMAND_BYTES=32768`、`IRIS_RELEASE_AUDIT_MAX_METADATA_BYTES=8388608`、
+`IRIS_RELEASE_AUDIT_MAX_CARGO_PACKAGES=1024`、`IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES=256`、
 `IRIS_RELEASE_AUDIT_COMMAND_SECONDS=30` です。workflow 実行では同名の GitHub repository variables
 で調整でき、個別実行では `--max-report-bytes`、`--max-command-bytes`、
-`--max-native-files`、`--command-seconds` で上書きできます。すべて正の整数で、report budget は
+`--max-metadata-bytes`、`--max-cargo-packages`、`--max-native-files`、`--command-seconds` で上書きできます。すべて正の整数で、report budget は
 JSON metadata を保持できる大きさが必要です。抜粋には元ファイル全体の hash と
 `truncated`、容量不足には `omitted_records` が付き、欠落は承認と解釈できません。
+cargo metadata/tree の stdout/stderr はそれぞれ metadata byte limit で制限し、超過時は producer を停止します。
+cargo command 失敗・timeout・byte 超過・不正 JSON/tree 形式は graph `status=absent`、package 上限は `status=partial` と
+`truncated=true` です。graph 全体が残り report budget に入らなければ、代わりに欠落理由を記録します
+（その記録も入らない場合は `omitted_records`）。report 全体の 2 MiB 既定上限は変わりません。
 環境変数一覧や credential は取得せず、runner の workspace/home/temp paths は置換します。
+GitHub Actions 外でも workspace root と home は `$WORKSPACE`/`$HOME` に置換し、絶対 path を残しません。
 Iris 自体のライセンス、静的リンクされた全 native code、未解決・dlopen-only 依存、vendor の
 patch 適用状況やライセンス互換性をこのレポートだけで保証するものではありません。
 

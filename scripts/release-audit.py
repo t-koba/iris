@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 
 
 class Audit:
@@ -21,10 +22,51 @@ class Audit:
 
     def clean(self, text):
         # Never dump the environment, credentials, signing settings or personal paths.
+        # Outside GitHub Actions the workspace/home env vars are absent, so also
+        # normalize the local workspace root and home directory unconditionally.
+        # Windows reports may embed the same path as `C:\\work\\repo` and as
+        # `file:///C:/work/repo`; both slash styles and file-URL forms are
+        # normalized so no workspace/home path leaks outside Actions.
+        bases = []
         for key, replacement in (("GITHUB_WORKSPACE", "$WORKSPACE"),
                                  ("RUNNER_TEMP", "$TEMP"), ("HOME", "$HOME"),
                                  ("USERPROFILE", "$HOME")):
             value = os.environ.get(key)
+            if value:
+                bases.append((value, replacement))
+        try:
+            workspace = str(Path(__file__).resolve().parent.parent)
+            if workspace:
+                bases.append((workspace, "$WORKSPACE"))
+        except Exception:
+            pass
+        try:
+            cwd = str(Path.cwd().resolve())
+            if cwd:
+                bases.append((cwd, "$WORKSPACE"))
+        except Exception:
+            pass
+        try:
+            home = str(Path.home())
+            if home:
+                bases.append((home, "$HOME"))
+        except Exception:
+            pass
+        expanded = set()
+        for value, replacement in bases:
+            if not value:
+                continue
+            expanded.add((value, replacement))
+            forward = value.replace("\\", "/")
+            backward = value.replace("/", "\\")
+            if forward != value:
+                expanded.add((forward, replacement))
+            if backward != value:
+                expanded.add((backward, replacement))
+            if forward:
+                expanded.add(("file://" + forward, replacement))
+                expanded.add(("file:///" + forward.lstrip("/"), replacement))
+        for value, replacement in sorted(expanded, key=lambda item: -len(item[0])):
             if value:
                 text = text.replace(value, replacement)
         return text
@@ -45,6 +87,8 @@ class Audit:
         else:
             self.records.append(record)
             self.used += size
+            return True
+        return False
 
     @staticmethod
     def sha256_file(path):
@@ -121,6 +165,240 @@ class Audit:
         self.add("command", argv=list(argv), status=status, text=text,
                  truncated=length > self.args.max_command_bytes)
         return text if status == 0 else ""
+
+    def _bounded_cargo(self, argv, record_kind):
+        # Drain both pipes concurrently, retaining at most the configured bytes each.
+        # An overrun kills the producer rather than filling RAM or a temporary file.
+        # The same metadata byte limit bounds both the catalog and the tree output.
+        limit = self.args.max_metadata_bytes
+        chunks = [b"", b""]
+        truncated = [False, False]
+        try:
+            with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+                def read(index, stream):
+                    chunks[index] = stream.read(limit + 1)
+                    truncated[index] = len(chunks[index]) > limit
+                    chunks[index] = chunks[index][:limit]
+                    if truncated[index]:
+                        process.kill()
+                    stream.close()
+
+                readers = [threading.Thread(target=read, args=(i, stream))
+                           for i, stream in enumerate((process.stdout, process.stderr))]
+                for reader in readers:
+                    reader.start()
+                try:
+                    status = process.wait(timeout=self.args.command_seconds)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                    status = "TimeoutExpired"
+                for reader in readers:
+                    reader.join()
+        except OSError as error:
+            status = type(error).__name__
+        self.add(record_kind, argv=argv, status=status,
+                 truncated=any(truncated), stdout_bytes=len(chunks[0]),
+                 stderr=chunks[1][:self.args.max_command_bytes].decode("utf-8", "replace"),
+                 stderr_truncated=truncated[1] or len(chunks[1]) > self.args.max_command_bytes)
+        if status != 0 or any(truncated):
+            raise ValueError(record_kind + " failed, timed out or exceeded its byte limit")
+        return chunks[0]
+
+    def cargo_metadata(self, argv):
+        return json.loads(self._bounded_cargo(argv, "cargo-metadata-command"))
+
+    def cargo_tree(self, argv):
+        return self._bounded_cargo(argv, "cargo-tree-command").decode("utf-8", "replace")
+
+    def cargo_graph(self, rustc):
+        # Product graph and enabled features come from a package-rooted
+        # `cargo tree -p iris-ui-shell --target <host>` run. `cargo metadata`
+        # is only the package/license catalog.
+        # `cargo metadata` alone resolves the whole workspace, so its per-node
+        # feature lists overstate the packaged product (workspace-wide
+        # unification leaks dev/bench features such as image/avif,
+        # tokio/test-util or iris-thumb-preview/test-fixtures). Its
+        # `resolve.nodes[*].deps[*].dep_kinds` also keeps every target
+        # declaration, so those predicates are never expanded or serialized.
+        flags = (["--no-default-features", "--features", "minimal"]
+                 if self.args.platform == "windows" else [])
+        context = dict(variant="minimal" if flags else "product", cargo_flags=flags,
+                       target=None, root=None, truncated=False)
+        try:
+            hosts = re.findall(r"^host: (\S+)$", rustc, re.M)
+            if len(hosts) != 1:
+                raise ValueError("rustc host is absent or ambiguous")
+            context["target"] = hosts[0]
+            # Relative manifest path keeps the recorded argv free of absolute
+            # local paths; the tree invocation needs no manifest path at all.
+            manifest = Path("crates/ui-shell/Cargo.toml")
+            metadata_argv = ["cargo", "metadata", "--format-version", "1", "--locked", "--offline",
+                    "--filter-platform", hosts[0], "--manifest-path", str(manifest), *flags]
+            tree_argv = ["cargo", "tree", "-p", "iris-ui-shell", "--target", hosts[0],
+                    "--offline", "--locked", "--prefix", "indent", "--charset", "ascii",
+                    "--format", "{p}|{f}", "-e", "normal,build", *flags]
+            metadata = self.cargo_metadata(metadata_argv)
+            tree_text = self.cargo_tree(tree_argv)
+            packages = {p["id"]: p for p in metadata["packages"]}
+            by_key = {}
+            for pid, pkg in packages.items():
+                key = (pkg["name"], pkg["version"], pkg.get("source") is None)
+                by_key.setdefault(key, []).append(pid)
+            order = []
+            tree_features = {}
+            raw_edges = []
+            stack = []
+            stack_build = []
+            seen = set()
+            root = None
+            for raw_line in tree_text.splitlines():
+                if not raw_line.strip():
+                    continue
+                match = re.match(r"^((?:\|   |    )*(?:\|-- |\`-- )?)(.*)$", raw_line)
+                if not match:
+                    raise ValueError("unexpected cargo tree line")
+                prefix, content = match.group(1), match.group(2)
+                if content == "[build-dependencies]":
+                    if len(prefix) % 4 != 0:
+                        raise ValueError("unexpected build header indent")
+                    parent_depth = len(prefix) // 4
+                    if parent_depth >= len(stack):
+                        raise ValueError("build header without parent")
+                    if prefix.endswith("|-- ") or prefix.endswith("`-- "):
+                        raise ValueError("unexpected build header branch")
+                    if stack_build[parent_depth]:
+                        raise ValueError("duplicate build header")
+                    stack_build[parent_depth] = True
+                    continue
+                if content.startswith("[") and content.endswith("]"):
+                    raise ValueError("unexpected cargo tree header")
+                if len(prefix) % 4 != 0:
+                    raise ValueError("unexpected cargo tree indent")
+                depth = len(prefix) // 4
+                if depth == 0:
+                    if prefix != "":
+                        raise ValueError("unexpected tree root prefix")
+                elif not (prefix.endswith("|-- ") or prefix.endswith("`-- ")):
+                    raise ValueError("unexpected cargo tree branch")
+                rest = content
+                if rest.endswith(" (*)"):
+                    rest = rest[:-4]
+                if "|" not in rest:
+                    raise ValueError("unexpected cargo tree format")
+                p_raw, f_raw = rest.split("|", 1)
+                p_raw = p_raw.strip()
+                f_raw = f_raw.strip()
+                parts = p_raw.split()
+                if len(parts) < 2:
+                    raise ValueError("unexpected package display")
+                name = parts[0]
+                version_token = parts[1]
+                version = version_token[1:] if version_token.startswith("v") else version_token
+                hint = re.sub(r"\s+\(proc-macro\)$", "", p_raw)
+                source_match = re.search(r"\((.+)\)$", hint)
+                location = source_match.group(1) if source_match else ""
+                is_path = (location.startswith(("/", "\\", "file://", "./", "../")) or
+                           bool(re.match(r"^[A-Za-z]:[\\/]", location)))
+                candidates = by_key.get((name, version, is_path))
+                if candidates is None:
+                    raise ValueError(f"tree package {name} {version} not in catalog")
+                if len(candidates) != 1:
+                    raise ValueError(f"ambiguous catalog entry for {name} {version}")
+                pid = candidates[0]
+                feats = [f.strip() for f in f_raw.split(",") if f.strip()] if f_raw else []
+                if pid not in seen:
+                    seen.add(pid)
+                    order.append(pid)
+                    tree_features[pid] = feats
+                if depth == 0:
+                    if stack:
+                        raise ValueError("multiple tree roots")
+                    stack = [pid]
+                    stack_build = [False]
+                    root = pid
+                    context["root"] = root
+                else:
+                    if depth > len(stack):
+                        raise ValueError("tree depth gap")
+                    parent = stack[depth - 1]
+                    kind = "build" if stack_build[depth - 1] else "normal"
+                    raw_edges.append((parent, pid, kind))
+                    stack = stack[:depth] + [pid]
+                    stack_build = stack_build[:depth] + [False]
+            if root is None:
+                raise ValueError("empty cargo tree")
+            if packages[root]["name"] != "iris-ui-shell":
+                raise ValueError("tree root is not iris-ui-shell")
+            # Bound the rooted closure; tree order is depth-first first occurrence.
+            selected = set()
+            for pid in order:
+                if len(selected) >= self.args.max_cargo_packages:
+                    break
+                selected.add(pid)
+            context["truncated"] = len(seen) > len(selected)
+            # The tree already applied target filtering and excluded dev-only
+            # and unrelated packages via -p and -e. One record per package
+            # relationship; the kind comes from the tree's build groups, never
+            # from unfiltered metadata target predicates. A package edge in
+            # both groups preserves both kinds and contexts.
+            edge_kinds = {}
+            for src, dst, kind in raw_edges:
+                if src not in selected or dst not in selected:
+                    continue
+                edge_kinds.setdefault((src, dst), set()).add(kind)
+            edges = []
+            for (src, dst), kinds in edge_kinds.items():
+                proc_macro = any("proc-macro" in t.get("kind", []) for t in packages[dst].get("targets", []))
+                name = packages[dst].get("name", "").replace("-", "_")
+                dependency_kinds = sorted(kinds)
+                dependency_kind = dependency_kinds[0] if len(dependency_kinds) == 1 else "ambiguous"
+                edges.append(dict(source=src, destination=dst, name=name,
+                                  dependency_kind=dependency_kind, dependency_kinds=dependency_kinds,
+                                  proc_macro=proc_macro))
+            # A normal dependency of a build tool is still build-time, not runtime.
+            contexts = {identity: set() for identity in selected}
+            contexts[root].add("runtime")
+            outgoing = {identity: [] for identity in selected}
+            for edge in edges:
+                outgoing[edge["source"]].append(edge)
+            pending = [(root, "runtime")]
+            for identity, usage in pending:
+                for edge in outgoing[identity]:
+                    roles = ({"proc-macro"} if edge["proc_macro"] else set())
+                    if not edge["proc_macro"]:
+                        if "normal" in edge["dependency_kinds"]:
+                            roles.add("runtime" if usage == "runtime" else "build")
+                        if "build" in edge["dependency_kinds"]:
+                            roles.add("build")
+                    dest = edge["destination"]
+                    for role in roles:
+                        if role not in contexts[dest]:
+                            contexts[dest].add(role)
+                            pending.append((dest, role))
+            projected = []
+            for pid in order:
+                if pid not in selected:
+                    continue
+                package = packages[pid]
+                projected.append(dict(
+                    id=pid, name=package["name"], version=package["version"],
+                    source=package.get("source"),
+                    source_kind="path" if package.get("source") is None else "registry-or-git",
+                    features=tree_features[pid], contexts=sorted(contexts[pid]),
+                    target_kinds=sorted({k for t in package["targets"] for k in t.get("kind", [])}),
+                    license=package.get("license"), license_file=package.get("license_file"),
+                    missing_metadata=[k for k in ("license", "license_file") if not package.get(k)]))
+            if self.add("cargo-graph", **context, status="partial" if context["truncated"] else "captured",
+                        packages=projected, edges=edges,
+                        note="Cargo tree features for the selected target/variant and declared license metadata only; path source is not a registry. Edges are tree package relationships once each; dependency_kinds retains normal/build group membership and dependency_kind is ambiguous when both apply. Unfiltered metadata target predicates are never serialized. Dev-only and unreachable packages are excluded via -p and -e. Runtime/build contexts propagate through normal dependencies, preserving both for dual-kind edges; proc-macro dependencies run at build time. No legal conclusion or native-code closure is inferred."):
+                return
+            context["truncated"] = True
+            reason = "rooted graph omitted: serialized report byte budget exceeded"
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            reason = "cargo metadata/tree absent or invalid: " + str(error)
+        self.add("cargo-graph", **context, status="absent", reason=reason,
+                 packages=[], edges=[])
 
     def file(self, path, text=False):
         path = Path(path)
@@ -311,12 +589,17 @@ def main():
                         default=os.environ.get("IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES", "2097152"))
     parser.add_argument("--max-command-bytes", type=int,
                         default=os.environ.get("IRIS_RELEASE_AUDIT_MAX_COMMAND_BYTES", "32768"))
+    parser.add_argument("--max-metadata-bytes", type=int,
+                        default=os.environ.get("IRIS_RELEASE_AUDIT_MAX_METADATA_BYTES", "8388608"))
+    parser.add_argument("--max-cargo-packages", type=int,
+                        default=os.environ.get("IRIS_RELEASE_AUDIT_MAX_CARGO_PACKAGES", "1024"))
     parser.add_argument("--max-native-files", type=int,
                         default=os.environ.get("IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES", "256"))
     parser.add_argument("--command-seconds", type=int,
                         default=os.environ.get("IRIS_RELEASE_AUDIT_COMMAND_SECONDS", "30"))
     args = parser.parse_args()
-    if min(args.max_report_bytes, args.max_command_bytes, args.max_native_files, args.command_seconds) < 1:
+    if min(args.max_report_bytes, args.max_command_bytes, args.max_native_files, args.command_seconds,
+           args.max_metadata_bytes, args.max_cargo_packages) < 1:
         parser.error("all bounds must be positive")
     limits = vars(args).copy()
     del limits["output"]
@@ -327,7 +610,8 @@ def main():
     audit = Audit(args)
     audit.add("scope", platform=args.platform, note="Evidence inventory only; missing/truncated/ambiguous evidence is NOT approval. No Iris project license or compatibility is asserted. Runtime identity is never inferred from ffmpeg-next or a standalone ffmpeg executable.")
     audit.command("git", "rev-parse", "HEAD")
-    audit.command("rustc", "--version", "--verbose")
+    rustc = audit.command("rustc", "--version", "--verbose")
+    audit.cargo_graph(rustc)
     audit.file("Cargo.lock")
     audit.file("Cargo.toml", text=True)
     audit.file("crates/ui-shell/Cargo.toml", text=True)
