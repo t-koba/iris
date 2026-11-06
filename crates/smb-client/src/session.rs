@@ -63,7 +63,7 @@ pub enum SmbSessionError {
 }
 
 pub async fn authenticate_guest(connection: &SmbConnectionActor) -> Result<u64, SmbSessionError> {
-    let exchange = send_session_setup(connection, Vec::new(), 0, false, None).await?;
+    let exchange = send_session_setup(connection, Vec::new(), false, None).await?;
     if !exchange.response.status().is_success() {
         return Err(SmbSessionError::UnexpectedStatus {
             step: "guest",
@@ -88,7 +88,7 @@ pub async fn authenticate_ntlm_v2(
     }
     .encode()?;
     let security_buffer = spnego_initial_context_token_ntlm(&negotiate)?;
-    let first = send_session_setup(connection, security_buffer, 0, true, None).await?;
+    let first = send_session_setup(connection, security_buffer, true, None).await?;
     if first.response.status() != SmbNtStatus::MORE_PROCESSING_REQUIRED {
         return Err(SmbSessionError::UnexpectedStatus {
             step: "challenge",
@@ -117,7 +117,6 @@ pub async fn authenticate_ntlm_v2(
     let second = send_session_setup(
         connection,
         authenticate_security,
-        first.response.header.session_id,
         true,
         setup
             .security
@@ -168,7 +167,6 @@ struct SessionSetupExchange {
 async fn send_session_setup(
     connection: &SmbConnectionActor,
     security_buffer: Vec<u8>,
-    previous_session_id: u64,
     signing_required: bool,
     signing: Option<(Vec<u8>, Smb2Dialect)>,
 ) -> Result<SessionSetupExchange, SmbSessionError> {
@@ -181,7 +179,8 @@ async fn send_session_setup(
         },
         capabilities: 0,
         channel: 0,
-        previous_session_id,
+        // This is a new authentication; the continuation session ID belongs in the SMB2 header.
+        previous_session_id: 0,
         security_buffer,
     };
     let response = connection
@@ -409,7 +408,7 @@ mod tests {
             assert!(second_body
                 .security_mode
                 .contains(Smb2SessionSetupSecurityMode::SIGNING_REQUIRED));
-            assert_eq!(second_body.previous_session_id, session_id);
+            assert_eq!(second_body.previous_session_id, 0);
             let authenticate = decode_neg_token_resp(&second_body.security_buffer)
                 .expect("authenticate spnego")
                 .response_token
