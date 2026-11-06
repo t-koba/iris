@@ -164,6 +164,10 @@ jobs:
       - name: SFTP readiness deadline regression
         run: bash ./scripts/test-perf-transfer-readiness.sh
 
+      - name: Samba failure log selection regression
+        if: matrix.os == 'ubuntu-latest'
+        run: bash ./scripts/test-perf-transfer-diagnostics.sh
+
       - name: Native SFTP and SMB container integration
         if: matrix.os == 'ubuntu-latest'
         env:

@@ -325,8 +325,10 @@ report_container() {
     docker exec "$name" smbcontrol smbd debuglevel 2>&1 \
       | sed 's/iris/[redacted]/g' | tail -c 2048 >&2 || true
     echo "Samba log files (last 4096 bytes each; combined output capped at 8192 bytes):" >&2
-    docker exec "$name" sh -c 'found=0; count=0; for file in /var/log/samba/log.*; do
+    docker exec "$name" sh -c 'found=0; count=0; for file in /var/log/samba/log.smbd /var/log/samba/log.*; do
       [ -f "$file" ] || continue
+      # The explicit primary log may also appear in the glob; report it only once.
+      if [ "$file" = /var/log/samba/log.smbd ] && [ "$found" -eq 1 ]; then continue; fi
       [ "$count" -lt 2 ] || break
       found=1
       count=$((count + 1))
