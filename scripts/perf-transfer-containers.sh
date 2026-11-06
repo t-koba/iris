@@ -23,7 +23,10 @@ smb_min_protocol="${IRIS_PERF_SMB_MIN_PROTOCOL:-}"
 smb_max_protocol="${IRIS_PERF_SMB_MAX_PROTOCOL:-}"
 smb_server_signing="${IRIS_PERF_SMB_SERVER_SIGNING:-}"
 smb_encryption="${IRIS_PERF_SMB_ENCRYPTION:-}"
-smb_log_level="${IRIS_PERF_SMB_LOG_LEVEL:-1 auth:5 auth_audit:5}"
+smb_log_level="${IRIS_PERF_SMB_LOG_LEVEL:-2}"
+if ! read -r smb_debug_level _ <<<"$smb_log_level"; then
+  smb_debug_level=""
+fi
 
 usage() {
   cat <<'USAGE'
@@ -51,7 +54,8 @@ Environment:
   IRIS_PERF_SMB_MAX_PROTOCOL Samba server maximum protocol (for example SMB3_00).
   IRIS_PERF_SMB_SERVER_SIGNING Samba server signing policy (for example mandatory).
   IRIS_PERF_SMB_ENCRYPTION   Samba encryption policy (off or required).
-  IRIS_PERF_SMB_LOG_LEVEL    Samba log level (default: 1 auth:5 auth_audit:5).
+  IRIS_PERF_SMB_LOG_LEVEL    Samba log level (default: 2);
+                             numeric prefix must be 0-10 and sets smbd's base level.
   IRIS_PERF_KEEP_CONTAINERS=1 Keep containers and generated payloads.
 USAGE
 }
@@ -187,6 +191,7 @@ start_samba() {
     run -d
     --name "$smb_container"
     -p "$smb_port:445"
+    -e "SAMBA_LOG_LEVEL=$smb_debug_level"
     -v "$work_root/samba-share:/mount"
     "$smb_image"
     -u "iris;iris"
@@ -284,20 +289,51 @@ run_smb_benchmarks() {
   )
 }
 
+report_samba_setting() {
+  local section="$1"
+  local parameter="$2"
+  local value
+  if value=$(docker exec "$smb_container" testparm -s \
+      --section-name="$section" --parameter-name="$parameter" 2>/dev/null); then
+    value=$(printf '%s\n' "$value" | tail -n 1 | sed 's/iris/[redacted]/g' | tail -c 512)
+    [[ -n "$value" ]] || value="<empty>"
+  else
+    value="<unavailable>"
+  fi
+  printf '  [%s] %s=%s\n' "$section" "$parameter" "$value" >&2
+}
+
 report_container() {
   local name="$1"
   if ! docker container inspect "$name" >/dev/null 2>&1; then
     return 0
   fi
-  docker inspect --format 'container={{.Name}} state={{.State.Status}} exit_code={{.State.ExitCode}} error={{.State.Error}}' "$name" >&2 || true
-  docker logs --tail 20 "$name" 2>&1 | sed 's/iris/[redacted]/g' | tail -c 8192 >&2 || true
+  docker inspect --format 'container={{.Name}} state={{.State.Status}} exit_code={{.State.ExitCode}} error={{.State.Error}}' "$name" 2>&1 \
+    | sed 's/iris/[redacted]/g' | tail -c 2048 >&2 || true
+  docker logs --tail 100 "$name" 2>&1 | sed 's/iris/[redacted]/g' | tail -c 8192 >&2 || true
   if [[ "$name" == "$smb_container" ]]; then
+    echo "Samba effective configuration (allowlisted settings):" >&2
+    report_samba_setting global 'log level'
+    report_samba_setting global 'log file'
+    report_samba_setting global 'server min protocol'
+    report_samba_setting global 'server max protocol'
+    report_samba_setting global 'server signing'
+    report_samba_setting global 'smb encrypt'
+    report_samba_setting global 'map to guest'
+    report_samba_setting bench 'guest ok'
+    echo "Samba runtime debug levels:" >&2
+    docker exec "$name" smbcontrol smbd debuglevel 2>&1 \
+      | sed 's/iris/[redacted]/g' | tail -c 2048 >&2 || true
     echo "Samba log files (last 4096 bytes each; combined output capped at 8192 bytes):" >&2
-    docker exec "$name" sh -c 'for file in /var/log/samba/log.*; do
+    docker exec "$name" sh -c 'found=0; count=0; for file in /var/log/samba/log.*; do
       [ -f "$file" ] || continue
+      [ "$count" -lt 2 ] || break
+      found=1
+      count=$((count + 1))
       printf "\n--- %s ---\n" "$file"
       tail -c 4096 "$file"
-    done' 2>&1 | sed 's/iris/[redacted]/g' | tail -c 8192 >&2 || true
+    done; [ "$found" -eq 1 ] || echo "no matching /var/log/samba/log.* files found"' \
+      2>&1 | sed 's/iris/[redacted]/g' | tail -c 8192 >&2 || true
   fi
 }
 
@@ -324,6 +360,10 @@ cleanup() {
 
 validate_timeout IRIS_PERF_READY_TIMEOUT_SECONDS "$ready_timeout"
 validate_timeout IRIS_PERF_SSH_KEYSCAN_TIMEOUT_SECONDS "$ssh_keyscan_timeout"
+if [[ "$skip_smb" != "1" && ! "$smb_debug_level" =~ ^(10|[0-9])$ ]]; then
+  echo "IRIS_PERF_SMB_LOG_LEVEL must start with an integer from 0 to 10" >&2
+  exit 2
+fi
 
 require_cmd docker
 require_cmd nc
