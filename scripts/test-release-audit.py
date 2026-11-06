@@ -58,7 +58,7 @@ class Reports(unittest.TestCase):
         def metadata(minimal):
             # Metadata catalog; resolve features intentionally overstate the product
             # (workspace-wide unification) to prove the graph uses tree features.
-            names = ["iris-ui-shell", "common", "video", "build-tool", "macro", "helper",
+            names = ["iris-ui-shell", "common", "common-child", "video", "build-tool", "macro", "helper",
                      "git-dep", "dev-only", "unrelated-workspace", "other-target"]
             packages = [dict(id=name, name=name, version="1.2.3",
                              source=(None if name == "iris-ui-shell" else
@@ -88,6 +88,7 @@ class Reports(unittest.TestCase):
             nodes = [dict(id=name, features=(["minimal", "leaked"] if minimal else ["default", "video", "leaked"])
                           if name == "iris-ui-shell" else ["leaked"] if name in ("common", "video") else [],
                           deps=root_deps if name == "iris-ui-shell" else
+                          [dep("common-child")] if name == "common" else
                           [dep("helper")] if name in ("macro", "build-tool") else [])
                      for name in names]
             return dict(packages=packages, resolve=dict(root=None, nodes=nodes),
@@ -96,6 +97,7 @@ class Reports(unittest.TestCase):
         def tree_text(minimal):
             lines = ["iris-ui-shell v1.2.3 (/workspace/crates/ui-shell)|" + ("minimal" if minimal else "default,video"),
                      "|-- common v1.2.3|",
+                     "|   `-- common-child v1.2.3|",
                      "|-- macro v1.2.3 (proc-macro)|",
                      "|   `-- helper v1.2.3|",
                      "|-- git-dep v1.2.3 (https://example.invalid/dependency#abc)|",
@@ -104,7 +106,7 @@ class Reports(unittest.TestCase):
                      "`-- build-tool v1.2.3|",
                      "    `-- helper v1.2.3| (*)"]
             if not minimal:
-                lines.insert(2, "|-- video v1.2.3|")
+                lines.insert(1, "|-- video v1.2.3|")
             return "\n".join(lines) + "\n"
 
         for platform, host in (("linux", "x86_64-unknown-linux-gnu"),
@@ -129,7 +131,7 @@ class Reports(unittest.TestCase):
                 self.assertEqual(graph["status"], "captured")
                 self.assertEqual(graph["root"], "iris-ui-shell")
                 selected = {p["id"]: p for p in graph["packages"]}
-                self.assertEqual(set(selected), {"iris-ui-shell", "common", "build-tool", "macro", "helper", "git-dep"}
+                self.assertEqual(set(selected), {"iris-ui-shell", "common", "common-child", "build-tool", "macro", "helper", "git-dep"}
                                  | (set() if minimal else {"video"}))
                 # Tree features win; workspace-wide leaked features are absent.
                 self.assertEqual(selected["iris-ui-shell"]["features"], ["minimal"] if minimal else ["default", "video"])
@@ -140,6 +142,7 @@ class Reports(unittest.TestCase):
                 self.assertEqual(selected["helper"]["contexts"], ["build"])
                 self.assertEqual(selected["build-tool"]["contexts"], ["build"])
                 self.assertEqual(selected["common"]["contexts"], ["build", "runtime"])
+                self.assertEqual(selected["common-child"]["contexts"], ["build", "runtime"])
                 self.assertEqual(selected["git-dep"]["source"], "git+https://example.invalid/dependency#abc")
                 self.assertEqual(selected["common"]["license"], "MIT OR Apache-2.0")
                 self.assertEqual(selected["common"]["license_file"], "/cache/common/LICENSE")
