@@ -70,6 +70,8 @@ pub struct PersistedMultipartUpload {
     pub upload_id: String,
     pub total_len: u64,
     pub part_size: u64,
+    /// A rejected completion may only be aborted, never recovered as a successful copy.
+    pub cleanup_pending: bool,
 }
 
 /// The job store is small; 16 MB of mmap is enough.
@@ -334,15 +336,16 @@ impl JobStoreRepository {
     ) -> Result<(), JobStoreError> {
         self.conn.execute(
             "INSERT INTO persisted_multipart_uploads
-                (job_id, entry_index, destination_backend, destination_path, source_identity, upload_id, total_len, part_size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                (job_id, entry_index, destination_backend, destination_path, source_identity, upload_id, total_len, part_size, cleanup_pending)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT (job_id, entry_index) DO UPDATE SET
                 destination_backend = excluded.destination_backend,
                 destination_path = excluded.destination_path,
                 source_identity = excluded.source_identity,
                 upload_id = excluded.upload_id,
                 total_len = excluded.total_len,
-                part_size = excluded.part_size",
+                part_size = excluded.part_size,
+                cleanup_pending = excluded.cleanup_pending",
             rusqlite::params![
                 upload.job_id.0 as i64,
                 upload.entry_index as i64,
@@ -352,6 +355,7 @@ impl JobStoreRepository {
                 upload.upload_id,
                 upload.total_len as i64,
                 upload.part_size as i64,
+                upload.cleanup_pending,
             ],
         )?;
         Ok(())
@@ -363,7 +367,7 @@ impl JobStoreRepository {
         entry_index: u64,
     ) -> Result<Option<PersistedMultipartUpload>, JobStoreError> {
         let result = self.conn.query_row(
-            "SELECT destination_backend, destination_path, source_identity, upload_id, total_len, part_size
+            "SELECT destination_backend, destination_path, source_identity, upload_id, total_len, part_size, cleanup_pending
              FROM persisted_multipart_uploads WHERE job_id = ?1 AND entry_index = ?2",
             rusqlite::params![job_id.0 as i64, entry_index as i64],
             |row| {
@@ -376,6 +380,7 @@ impl JobStoreRepository {
                     upload_id: row.get(3)?,
                     total_len: row.get::<_, i64>(4)? as u64,
                     part_size: row.get::<_, i64>(5)? as u64,
+                    cleanup_pending: row.get(6)?,
                 })
             },
         );
@@ -663,9 +668,11 @@ mod tests {
 
     #[test]
     fn test_multipart_upload_round_trip_and_cleanup() {
-        let repo = JobStoreRepository::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.sqlite3");
+        let repo = JobStoreRepository::open(&path).unwrap();
         repo.save_job(&make_test_job()).unwrap();
-        let upload = PersistedMultipartUpload {
+        let mut upload = PersistedMultipartUpload {
             job_id: JobId(1),
             entry_index: 3,
             destination_backend: "s3:archive".into(),
@@ -674,8 +681,24 @@ mod tests {
             upload_id: "upload-17".into(),
             total_len: 33,
             part_size: 16,
+            cleanup_pending: false,
         };
         repo.save_multipart_upload(&upload).unwrap();
+        // Recreate the previous schema with a live upload. Opening must migrate
+        // in place rather than rebuilding and orphaning the remote session.
+        repo.conn
+            .execute_batch("ALTER TABLE persisted_multipart_uploads DROP COLUMN cleanup_pending;")
+            .unwrap();
+        drop(repo);
+        let repo = JobStoreRepository::open(&path).unwrap();
+        assert_eq!(
+            repo.load_multipart_upload(&JobId(1), 3).unwrap(),
+            Some(upload.clone())
+        );
+        upload.cleanup_pending = true;
+        repo.save_multipart_upload(&upload).unwrap();
+        drop(repo);
+        let repo = JobStoreRepository::open(&path).unwrap();
         assert_eq!(
             repo.load_multipart_upload(&JobId(1), 3).unwrap(),
             Some(upload)

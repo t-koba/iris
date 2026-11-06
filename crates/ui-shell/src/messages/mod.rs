@@ -126,6 +126,7 @@ pub enum ConnectionMessage {
     CloudS3BucketChanged(String),
     CloudS3RegionChanged(String),
     CloudS3EndpointChanged(String),
+    CloudS3ConditionalWritesConfirmed(bool),
     CloudS3PrefixChanged(String),
     CloudPCloudClientIdChanged(String),
     CloudPCloudRedirectUrlChanged(String),

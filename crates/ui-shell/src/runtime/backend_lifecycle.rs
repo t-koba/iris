@@ -200,6 +200,7 @@ impl AppRuntime {
         bucket: String,
         region: String,
         endpoint_url: Option<String>,
+        custom_endpoint_conditional_writes_confirmed: bool,
         prefix: Option<String>,
     ) -> Result<CloudSidebarLocation, String> {
         let backend_id = BackendId(format!(
@@ -217,6 +218,7 @@ impl AppRuntime {
             bucket,
             region,
             endpoint_url,
+            custom_endpoint_conditional_writes_confirmed,
             prefix,
         };
         let location = self.register_cloud_account(config.clone(), true).await?;
@@ -384,6 +386,7 @@ impl AppRuntime {
                 bucket,
                 region,
                 endpoint_url,
+                custom_endpoint_conditional_writes_confirmed,
                 prefix,
             } => {
                 let backend_id = BackendId(backend_id);
@@ -392,6 +395,7 @@ impl AppRuntime {
                         bucket,
                         prefix: prefix.clone(),
                         endpoint_url: endpoint_url.clone(),
+                        custom_endpoint_conditional_writes_confirmed,
                         region,
                     },
                     backend_id.clone(),

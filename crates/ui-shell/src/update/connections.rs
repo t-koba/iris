@@ -69,6 +69,13 @@ pub fn handle(state: &mut AppState, message: ConnectionMessage) -> Task<Message>
             cloud_s3_endpoint_changed(state, value);
             Task::none()
         }
+        ConnectionMessage::CloudS3ConditionalWritesConfirmed(value) => {
+            if let Some(form) = active_cloud_form_mut(&mut state.active_dialog) {
+                form.s3_conditional_writes_confirmed = value;
+                form.error_message = None;
+            }
+            Task::none()
+        }
         ConnectionMessage::CloudS3PrefixChanged(value) => {
             cloud_s3_prefix_changed(state, value);
             Task::none()
@@ -330,6 +337,7 @@ pub fn cloud_s3_region_changed(state: &mut AppState, value: String) {
 pub fn cloud_s3_endpoint_changed(state: &mut AppState, value: String) {
     if let Some(form) = active_cloud_form_mut(&mut state.active_dialog) {
         form.s3_endpoint_url = value;
+        form.s3_conditional_writes_confirmed = false;
         form.error_message = None;
     }
 }
@@ -485,6 +493,7 @@ pub fn perform_connect_cloud(state: &mut AppState) -> Task<Message> {
         let s3_bucket = form.s3_bucket.clone();
         let s3_region = form.s3_region.clone();
         let s3_endpoint_url = form.s3_endpoint_url.clone();
+        let s3_conditional_writes_confirmed = form.s3_conditional_writes_confirmed;
         let s3_prefix = form.s3_prefix.clone();
         let pcloud_callback_url = form.pcloud_callback_url.clone();
         return Task::perform(
@@ -496,6 +505,7 @@ pub fn perform_connect_cloud(state: &mut AppState) -> Task<Message> {
                             s3_bucket,
                             s3_region,
                             (!s3_endpoint_url.is_empty()).then_some(s3_endpoint_url),
+                            s3_conditional_writes_confirmed,
                             (!s3_prefix.is_empty()).then_some(s3_prefix),
                         )
                         .await
@@ -679,6 +689,34 @@ fn cloud_sidebar_item(location: CloudSidebarLocation) -> SidebarItem {
 mod tests {
     use super::*;
     use crate::state::PaneLoadState;
+
+    #[test]
+    fn s3_endpoint_edits_require_fresh_confirmation() {
+        let mut state = AppState::default();
+        state.active_dialog = Some(DialogState::ConnectCloud {
+            form: CloudConnectFormState::default(),
+        });
+        assert!(
+            !active_cloud_form_mut(&mut state.active_dialog)
+                .unwrap()
+                .s3_conditional_writes_confirmed
+        );
+        let _ = handle(
+            &mut state,
+            ConnectionMessage::CloudS3ConditionalWritesConfirmed(true),
+        );
+        assert!(
+            active_cloud_form_mut(&mut state.active_dialog)
+                .unwrap()
+                .s3_conditional_writes_confirmed
+        );
+        cloud_s3_endpoint_changed(&mut state, "https://other.test".into());
+        assert!(
+            !active_cloud_form_mut(&mut state.active_dialog)
+                .unwrap()
+                .s3_conditional_writes_confirmed
+        );
+    }
 
     fn home() -> String {
         dirs_next::home_dir()

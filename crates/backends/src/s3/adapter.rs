@@ -30,11 +30,17 @@ use tokio::sync::OnceCell;
 
 const LIST_OBJECTS_PAGE_SIZE: i32 = 1_000;
 
+pub const S3_CUSTOM_ENDPOINT_CONDITIONAL_WRITES_UNCONFIRMED: &str =
+    "s3_custom_endpoint_conditional_writes_unconfirmed";
+
 #[derive(Clone, Debug)]
 pub struct S3Config {
     pub bucket: String,
     pub prefix: Option<String>,
     pub endpoint_url: Option<String>,
+    /// User confirmation of all required conditional-write semantics for a custom endpoint.
+    /// Defaults to false in saved connections; ignored for the default AWS endpoint.
+    pub custom_endpoint_conditional_writes_confirmed: bool,
     pub region: String,
 }
 
@@ -45,8 +51,9 @@ pub struct S3Config {
 /// PutObject, CopyObject, and CompleteMultipartUpload. AWS documents these
 /// conditional writes (including 412/409 conflicts):
 /// <https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html>.
-/// Arbitrary configured custom endpoints are unverified; an endpoint that ignores
-/// the header cannot provide the no-overwrite guarantee. HEAD only selects a key;
+/// Iris does not test custom providers. Custom endpoints are disabled for these
+/// writes until the user explicitly confirms support for all three operations;
+/// an endpoint that ignores the header cannot provide the no-overwrite guarantee. HEAD only selects a key;
 /// the conditional final write protects against concurrent creators.
 pub struct S3Adapter {
     config: S3Config,
@@ -114,11 +121,27 @@ impl S3Adapter {
         }
     }
 
+    fn require_conditional_writes(
+        &self,
+        on_conflict: &ConflictResolution,
+    ) -> Result<(), BackendError> {
+        if !matches!(on_conflict, ConflictResolution::Overwrite)
+            && self.config.endpoint_url.is_some()
+            && !self.config.custom_endpoint_conditional_writes_confirmed
+        {
+            return Err(BackendError::Unsupported {
+                operation: S3_CUSTOM_ENDPOINT_CONDITIONAL_WRITES_UNCONFIRMED,
+            });
+        }
+        Ok(())
+    }
+
     async fn resolve_write_key(
         &self,
         requested_key: String,
         on_conflict: &ConflictResolution,
     ) -> Result<String, BackendError> {
+        self.require_conditional_writes(on_conflict)?;
         match on_conflict {
             // Overwrite does not depend on an existence check.
             ConflictResolution::Overwrite => Ok(requested_key),
@@ -495,7 +518,18 @@ impl BackendAdapter for S3Adapter {
                 .set_part_number_marker(marker)
                 .send()
                 .await
-                .map_err(|error| self.network_error("list_parts", error))?;
+                .map_err(|error| {
+                    if error
+                        .as_service_error()
+                        .is_some_and(|service| service.meta().code() == Some("NoSuchUpload"))
+                    {
+                        BackendError::NotFound {
+                            object: session.destination.clone(),
+                        }
+                    } else {
+                        self.network_error("list_parts", error)
+                    }
+                })?;
             for part in response.parts() {
                 let (Some(part_number), Some(etag), Some(size)) =
                     (part.part_number(), part.e_tag(), part.size())
@@ -583,16 +617,31 @@ impl BackendAdapter for S3Adapter {
         &self,
         session: &MultipartUploadSession,
     ) -> Result<(), BackendError> {
-        self.client()
+        let result = self
+            .client()
             .await?
             .abort_multipart_upload()
             .bucket(&self.config.bucket)
             .key(&session.destination.display_path)
             .upload_id(&session.upload_id)
             .send()
-            .await
-            .map_err(|error| self.network_error("abort_multipart_upload", error))?;
-        Ok(())
+            .await;
+        match result {
+            Ok(_) => Ok(()),
+            // Retrying cleanup after a crash that happened after a successful
+            // remote abort but before the local tombstone removal must not
+            // retain the record forever. Only the definitive already-absent
+            // upload error is idempotent success; every other service,
+            // permission, or transport failure stays retryable.
+            Err(error)
+                if error
+                    .as_service_error()
+                    .is_some_and(|service| service.is_no_such_upload()) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(self.network_error("abort_multipart_upload", error)),
+        }
     }
 
     async fn mkdir(&self, parent: &ObjectRef, name: &str) -> Result<ObjectRef, BackendError> {

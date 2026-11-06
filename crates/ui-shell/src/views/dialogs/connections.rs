@@ -333,6 +333,15 @@ fn build_cloud_connect_fields<'a>(
                     .size(10)
                     .style(theme::muted_text_style),
             );
+            if !form.s3_endpoint_url.is_empty() {
+                content = content.push(
+                    checkbox(form.s3_conditional_writes_confirmed)
+                        .label(tr("connections-s3-conditional-writes-confirm"))
+                        .on_toggle(|value| {
+                            ConnectionMessage::CloudS3ConditionalWritesConfirmed(value).into()
+                        }),
+                );
+            }
             content = content.push(labeled(
                 tr("connections-s3-prefix-label"),
                 110.0,

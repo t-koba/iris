@@ -769,6 +769,11 @@ mod tests {
         multipart_competing_data: Option<Vec<u8>>,
         multipart_abort_calls: Arc<AtomicU32>,
         multipart_abort_failures_remaining: Arc<AtomicU32>,
+        multipart_list_failures_remaining: Arc<AtomicU32>,
+        multipart_complete_failures_remaining: Arc<AtomicU32>,
+        multipart_interrupt_after_abort: Arc<AtomicU32>,
+        multipart_interrupt_after_completion: bool,
+        multipart_interrupted: tokio::sync::Notify,
         corrupt_writes: bool,
     }
 
@@ -790,6 +795,11 @@ mod tests {
                 multipart_competing_data: None,
                 multipart_abort_calls: Arc::new(AtomicU32::new(0)),
                 multipart_abort_failures_remaining: Arc::new(AtomicU32::new(0)),
+                multipart_list_failures_remaining: Arc::new(AtomicU32::new(0)),
+                multipart_complete_failures_remaining: Arc::new(AtomicU32::new(0)),
+                multipart_interrupt_after_abort: Arc::new(AtomicU32::new(0)),
+                multipart_interrupt_after_completion: false,
+                multipart_interrupted: tokio::sync::Notify::new(),
                 corrupt_writes,
             }
         }
@@ -841,6 +851,16 @@ mod tests {
 
         fn fail_next_aborts(&self, count: u32) {
             self.multipart_abort_failures_remaining
+                .store(count, Ordering::Relaxed);
+        }
+
+        fn fail_next_lists(&self, count: u32) {
+            self.multipart_list_failures_remaining
+                .store(count, Ordering::Relaxed);
+        }
+
+        fn fail_next_completes(&self, count: u32) {
+            self.multipart_complete_failures_remaining
                 .store(count, Ordering::Relaxed);
         }
 
@@ -1082,16 +1102,19 @@ mod tests {
             &self,
             session: &MultipartUploadSession,
         ) -> Result<Vec<MultipartPart>, BackendError> {
+            if consume_failure(&self.multipart_list_failures_remaining) {
+                return Err(injected_network_error("multipart list"));
+            }
             let uploads = self
                 .multipart_uploads
                 .lock()
                 .expect("multipart uploads lock");
-            let (_, parts) = uploads.get(&session.upload_id).ok_or_else(|| {
-                BackendError::Internal(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "multipart upload not found",
-                )))
-            })?;
+            let (_, parts) =
+                uploads
+                    .get(&session.upload_id)
+                    .ok_or_else(|| BackendError::NotFound {
+                        object: session.destination.clone(),
+                    })?;
             let mut result = parts
                 .iter()
                 .map(|(part_number, data)| MultipartPart {
@@ -1151,11 +1174,15 @@ mod tests {
             parts: Vec<MultipartPart>,
             on_conflict: ConflictResolution,
         ) -> Result<OperationTicket, BackendError> {
+            if consume_failure(&self.multipart_complete_failures_remaining) {
+                return Err(injected_network_error("multipart complete"));
+            }
             let (_, uploaded) = self
                 .multipart_uploads
                 .lock()
                 .expect("multipart uploads lock")
-                .remove(&session.upload_id)
+                .get(&session.upload_id)
+                .cloned()
                 .ok_or_else(|| {
                     BackendError::Internal(Box::new(std::io::Error::new(
                         std::io::ErrorKind::NotFound,
@@ -1186,6 +1213,14 @@ mod tests {
                 .lock()
                 .expect("files lock")
                 .insert(session.destination.display_path.clone(), data);
+            self.multipart_uploads
+                .lock()
+                .unwrap()
+                .remove(&session.upload_id);
+            if self.multipart_interrupt_after_completion {
+                self.multipart_interrupted.notify_one();
+                std::future::pending::<()>().await;
+            }
             Ok(OperationTicket {
                 id: TicketId(1),
                 kind: OperationKind::Copy,
@@ -1200,10 +1235,24 @@ mod tests {
             if consume_failure(&self.multipart_abort_failures_remaining) {
                 return Err(injected_network_error("multipart abort"));
             }
-            self.multipart_uploads
+            let existed = self
+                .multipart_uploads
                 .lock()
                 .expect("multipart uploads lock")
-                .remove(&session.upload_id);
+                .remove(&session.upload_id)
+                .is_some();
+            if !existed {
+                // Faithful to the real S3 NoSuchUpload on a repeated abort
+                // after a crash between remote success and local removal.
+                // Only this definitive absent error is idempotent success.
+                return Err(BackendError::NotFound {
+                    object: session.destination.clone(),
+                });
+            }
+            if consume_failure(&self.multipart_interrupt_after_abort) {
+                self.multipart_interrupted.notify_one();
+                std::future::pending::<()>().await;
+            }
             Ok(())
         }
 
@@ -1600,18 +1649,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multipart_completion_conflict_rejects_same_size_concurrent_object() {
-        // Competing data has the same length as our upload, so a size match
-        // cannot establish that the destination holds our bytes.
-        // Successful abort drops the persisted session.
-        {
+    async fn multipart_completion_recovery_never_confuses_conflict_cleanup_with_success() {
+        // Exercise normal cleanup, retryable abort failure, and a crash after
+        // remote abort but before local removal. Also retain lost-response recovery
+        // for an upload whose completion was not known to have conflicted.
+        for scenario in [
+            "abort",
+            "abort failure",
+            "interrupted abort",
+            "lost completion",
+        ] {
             let src_backend = MockBackend::new("s3:source", false);
             let mut dst_backend = MockBackend::new("s3-multipart:destination", false);
-            src_backend.put("source.bin", b"abc");
-            dst_backend.multipart_competing_data = Some(b"xyz".to_vec());
+            let total_len = crate::chunked::CHUNKED_RANGE_MIN_BYTES;
+            src_backend.put("source.bin", &vec![1; total_len as usize]);
+            if scenario == "lost completion" {
+                dst_backend.multipart_interrupt_after_completion = true;
+            } else {
+                dst_backend.multipart_competing_data = Some(vec![2; total_len as usize]);
+            }
+            if scenario == "abort failure" {
+                dst_backend.fail_next_aborts(1);
+            } else if scenario == "interrupted abort" {
+                dst_backend
+                    .multipart_interrupt_after_abort
+                    .store(1, Ordering::Relaxed);
+            }
+            let src = make_ref("s3:source", "source.bin");
             let dst = make_ref("s3-multipart:destination", "destination.bin");
             let dir = tempdir().unwrap();
-            let store = Arc::new(JobStore::open(&dir.path().join("jobs.sqlite3")).unwrap());
+            let path = dir.path().join("jobs.sqlite3");
+            let store = Arc::new(JobStore::open(&path).unwrap());
             let job_id = JobId(44);
             store
                 .save_job(&PersistedJob {
@@ -1619,91 +1687,345 @@ mod tests {
                     state: JobState::Running,
                     created_at: "2026-07-10T00:00:00Z".into(),
                     updated_at: "2026-07-10T00:00:00Z".into(),
-                    description: "conditional completion".into(),
+                    description: "conditional completion recovery".into(),
                     tasks: Vec::new(),
                 })
                 .unwrap();
-            let (tx, _rx) = watch::channel(ProgressInfo::single_file(0, Some(3), false));
-            let (_pause_tx, pause_rx) = watch::channel(false);
-            let result = copy_chunked_to_multipart(MultipartCopyRequest {
-                src_backend: &src_backend,
-                src: make_ref("s3:source", "source.bin"),
-                dst_backend: &dst_backend,
-                dst: &dst,
-                total_len: 3,
-                part_size: 2,
-                source_identity: Some("source-etag".into()),
-                requested_in_flight: 1,
+            let (tx, _rx) = watch::channel(ProgressInfo::single_file(0, Some(total_len), false));
+            {
+                let context = ResumableTransferContext {
+                    job_store: Arc::clone(&store),
+                    job_id: job_id.clone(),
+                    entry_index: 0,
+                };
+                let transfer = move_via_relay_with_verify_and_control(
+                    &src_backend,
+                    &src,
+                    &dst_backend,
+                    &dst,
+                    &tx,
+                    MoveRelayOptions {
+                        resumable: Some(&context),
+                        ..MoveRelayOptions::default()
+                    },
+                );
+                tokio::pin!(transfer);
+                if matches!(scenario, "interrupted abort" | "lost completion") {
+                    tokio::select! {
+                        result = &mut transfer => panic!("expected interruption, got {result:?}"),
+                        () = dst_backend.multipart_interrupted.notified() => {},
+                    }
+                    // Dropping the future models exit after the remote side effect,
+                    // before the local record can be removed.
+                } else {
+                    assert!(matches!(transfer.await, Err(BackendError::Conflict { .. })));
+                }
+            }
+            assert!(src_backend.deleted_paths().is_empty());
+            assert!(
+                dst_backend.multipart_uploads.lock().unwrap().is_empty()
+                    || scenario == "abort failure"
+            );
+            drop(store);
+            let store = Arc::new(JobStore::open(&path).unwrap());
+            let record = store.load_multipart_upload(&job_id, 0).unwrap();
+            if scenario == "abort" {
+                assert!(record.is_none());
+                continue;
+            }
+            assert_eq!(
+                record.unwrap().cleanup_pending,
+                scenario != "lost completion"
+            );
+            let context = ResumableTransferContext {
                 job_store: Arc::clone(&store),
                 job_id: job_id.clone(),
                 entry_index: 0,
-                progress_tx: &tx,
-                retry: ChunkRetryControls {
-                    policy: RetryPolicy::default(),
-                    pause_rx,
-                    cancel_token: CancellationToken::new(),
+            };
+            let result = move_via_relay_with_verify_and_control(
+                &src_backend,
+                &src,
+                &dst_backend,
+                &dst,
+                &tx,
+                MoveRelayOptions {
+                    resumable: Some(&context),
+                    ..MoveRelayOptions::default()
                 },
-            })
+            )
             .await;
-            assert!(matches!(result, Err(BackendError::Conflict { .. })));
-            assert_eq!(dst_backend.get("destination.bin"), Some(b"xyz".to_vec()));
-            assert_eq!(dst_backend.abort_call_count(), 1);
-            assert!(
-                store.load_multipart_upload(&job_id, 0).unwrap().is_none(),
-                "successful abort must drop the persisted session"
-            );
+            if scenario == "lost completion" {
+                result.expect("unrejected completion still recovers after a lost response");
+                assert_eq!(src_backend.deleted_paths(), vec!["source.bin"]);
+                assert_eq!(
+                    dst_backend.get("destination.bin"),
+                    Some(vec![1; total_len as usize])
+                );
+            } else {
+                assert!(matches!(result, Err(BackendError::Conflict { .. })));
+                assert!(
+                    src_backend.deleted_paths().is_empty(),
+                    "conflict must not reach source deletion"
+                );
+                assert_eq!(
+                    src_backend.get("source.bin"),
+                    Some(vec![1; total_len as usize])
+                );
+                assert_eq!(
+                    dst_backend.get("destination.bin"),
+                    Some(vec![2; total_len as usize])
+                );
+                assert_eq!(dst_backend.abort_call_count(), 2);
+            }
+            assert_eq!(dst_backend.created_multipart_uploads(), 1);
+            assert!(store.load_multipart_upload(&job_id, 0).unwrap().is_none());
+            assert!(dst_backend.multipart_uploads.lock().unwrap().is_empty());
         }
-        // Failed abort still drops the unsafe local session so a later
-        // resume cannot infer success from a same-size competing object.
-        {
+    }
+
+    #[tokio::test]
+    async fn multipart_list_error_verifies_content_before_recovery() {
+        use iris_jobstore::repository::PersistedMultipartUpload;
+        async fn setup_list_store(
+            dst_bytes: &[u8],
+            fail_dst_reads: u32,
+        ) -> (
+            tempfile::TempDir,
+            MockBackend,
+            MockBackend,
+            Arc<JobStore>,
+            JobId,
+        ) {
             let src_backend = MockBackend::new("s3:source", false);
-            let mut dst_backend = MockBackend::new("s3-multipart:destination", false);
+            let dst_backend = MockBackend::new("s3-multipart:destination", false);
             src_backend.put("source.bin", b"abc");
-            dst_backend.multipart_competing_data = Some(b"xyz".to_vec());
-            dst_backend.fail_next_aborts(1);
-            let dst = make_ref("s3-multipart:destination", "destination.bin");
+            dst_backend.put("destination.bin", dst_bytes);
+            if fail_dst_reads > 0 {
+                dst_backend.fail_next_reads(fail_dst_reads);
+            }
             let dir = tempdir().unwrap();
-            let store = Arc::new(JobStore::open(&dir.path().join("jobs.sqlite3")).unwrap());
-            let job_id = JobId(45);
+            let path = dir.path().join("jobs.sqlite3");
+            let store = Arc::new(JobStore::open(&path).unwrap());
+            let job_id = JobId(91);
             store
                 .save_job(&PersistedJob {
                     id: job_id.clone(),
                     state: JobState::Running,
                     created_at: "2026-07-10T00:00:00Z".into(),
                     updated_at: "2026-07-10T00:00:00Z".into(),
-                    description: "conditional completion abort failure".into(),
+                    description: "list recovery".into(),
                     tasks: Vec::new(),
                 })
                 .unwrap();
+            // A valid record whose remote upload is gone forces the
+            // ListParts-error recovery path on the next resume.
+            store
+                .save_multipart_upload(&PersistedMultipartUpload {
+                    job_id: job_id.clone(),
+                    entry_index: 0,
+                    destination_backend: "s3-multipart:destination".into(),
+                    destination_path: "destination.bin".into(),
+                    source_identity: Some("source-etag".into()),
+                    upload_id: "missing-upload".into(),
+                    total_len: 3,
+                    part_size: 2,
+                    cleanup_pending: false,
+                })
+                .unwrap();
+            (dir, src_backend, dst_backend, store, job_id)
+        }
+        async fn run_list_copy(
+            src_backend: &MockBackend,
+            dst_backend: &MockBackend,
+            store: &Arc<JobStore>,
+            job_id: &JobId,
+        ) -> Result<(), BackendError> {
             let (tx, _rx) = watch::channel(ProgressInfo::single_file(0, Some(3), false));
             let (_pause_tx, pause_rx) = watch::channel(false);
-            let result = copy_chunked_to_multipart(MultipartCopyRequest {
-                src_backend: &src_backend,
+            copy_chunked_to_multipart(MultipartCopyRequest {
+                src_backend,
                 src: make_ref("s3:source", "source.bin"),
-                dst_backend: &dst_backend,
-                dst: &dst,
+                dst_backend,
+                dst: &make_ref("s3-multipart:destination", "destination.bin"),
                 total_len: 3,
                 part_size: 2,
                 source_identity: Some("source-etag".into()),
                 requested_in_flight: 1,
-                job_store: Arc::clone(&store),
+                job_store: Arc::clone(store),
                 job_id: job_id.clone(),
                 entry_index: 0,
                 progress_tx: &tx,
                 retry: ChunkRetryControls {
-                    policy: RetryPolicy::default(),
+                    policy: RetryPolicy {
+                        max_retries: 0,
+                        initial_delay: Duration::ZERO,
+                        max_delay: Duration::ZERO,
+                        backoff_factor: 2.0,
+                    },
                     pause_rx,
                     cancel_token: CancellationToken::new(),
                 },
             })
-            .await;
-            assert!(matches!(result, Err(BackendError::Conflict { .. })));
-            assert_eq!(dst_backend.get("destination.bin"), Some(b"xyz".to_vec()));
-            assert_eq!(dst_backend.abort_call_count(), 1);
+            .await
+        }
+        // A missing upload plus same-size competing bytes must never recover
+        // as success.
+        {
+            let (_dir, src, dst, store, job_id) = setup_list_store(b"xyz", 0).await;
+            let result = run_list_copy(&src, &dst, &store, &job_id).await;
             assert!(
-                store.load_multipart_upload(&job_id, 0).unwrap().is_none(),
-                "failed abort must not retain a session that can be mistaken for success"
+                matches!(result, Err(BackendError::Conflict { .. })),
+                "same-size competitor must conflict, got {result:?}"
             );
+            assert_eq!(dst.get("destination.bin"), Some(b"xyz".to_vec()));
+        }
+        // A transient ListParts failure is not evidence the upload disappeared;
+        // keep the persisted session instead of creating an orphan replacement.
+        {
+            let (_dir, src, dst, store, job_id) = setup_list_store(b"xyz", 0).await;
+            dst.fail_next_lists(1);
+            let result = run_list_copy(&src, &dst, &store, &job_id).await;
+            assert!(matches!(result, Err(BackendError::Network(_))));
+            assert_eq!(dst.created_multipart_uploads(), 0);
+            assert_eq!(
+                store
+                    .load_multipart_upload(&job_id, 0)
+                    .unwrap()
+                    .unwrap()
+                    .upload_id,
+                "missing-upload"
+            );
+        }
+        // Byte-identical destination recovers a lost response.
+        {
+            let (_dir, src, dst, store, job_id) = setup_list_store(b"abc", 0).await;
+            run_list_copy(&src, &dst, &store, &job_id)
+                .await
+                .expect("exact content must recover");
+            assert!(store.load_multipart_upload(&job_id, 0).unwrap().is_none());
+            assert_eq!(dst.get("destination.bin"), Some(b"abc".to_vec()));
+        }
+        // An unverifiable destination must not report success.
+        {
+            let (_dir, src, dst, store, job_id) = setup_list_store(b"abc", 1).await;
+            let result = run_list_copy(&src, &dst, &store, &job_id).await;
+            assert!(result.is_err(), "unverifiable destination must not succeed");
+            assert!(store.load_multipart_upload(&job_id, 0).unwrap().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn multipart_move_never_deletes_source_without_byte_identical_recovery() {
+        // A same-size competitor behind a completion error must keep the source.
+        {
+            let src_backend = MockBackend::new("s3:source", false);
+            let dst_backend = MockBackend::new("s3-multipart:destination", false);
+            let total_len = crate::chunked::CHUNKED_RANGE_MIN_BYTES;
+            src_backend.put("source.bin", &vec![1; total_len as usize]);
+            dst_backend.put("destination.bin", &vec![2; total_len as usize]);
+            dst_backend.fail_next_completes(1);
+            let src = make_ref("s3:source", "source.bin");
+            let dst = make_ref("s3-multipart:destination", "destination.bin");
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("jobs.sqlite3");
+            let store = Arc::new(JobStore::open(&path).unwrap());
+            let job_id = JobId(93);
+            store
+                .save_job(&PersistedJob {
+                    id: job_id.clone(),
+                    state: JobState::Running,
+                    created_at: "2026-07-10T00:00:00Z".into(),
+                    updated_at: "2026-07-10T00:00:00Z".into(),
+                    description: "move competitor".into(),
+                    tasks: Vec::new(),
+                })
+                .unwrap();
+            let (tx, _rx) = watch::channel(ProgressInfo::single_file(0, Some(total_len), false));
+            let context = ResumableTransferContext {
+                job_store: Arc::clone(&store),
+                job_id: job_id.clone(),
+                entry_index: 0,
+            };
+            let no_retries = RetryPolicy {
+                max_retries: 0,
+                initial_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+                backoff_factor: 2.0,
+            };
+            let result = move_via_relay_with_verify_and_control(
+                &src_backend,
+                &src,
+                &dst_backend,
+                &dst,
+                &tx,
+                MoveRelayOptions {
+                    resumable: Some(&context),
+                    retry_policy: Some(&no_retries),
+                    ..MoveRelayOptions::default()
+                },
+            )
+            .await;
+            assert!(result.is_err(), "competitor must not move, got {result:?}");
+            assert!(
+                src_backend.deleted_paths().is_empty(),
+                "competitor must not delete the source"
+            );
+            assert_eq!(
+                dst_backend.get("destination.bin"),
+                Some(vec![2; total_len as usize])
+            );
+        }
+        // Byte-identical destination behind the same error still recovers and deletes.
+        {
+            let src_backend = MockBackend::new("s3:source", false);
+            let dst_backend = MockBackend::new("s3-multipart:destination", false);
+            let total_len = crate::chunked::CHUNKED_RANGE_MIN_BYTES;
+            src_backend.put("source.bin", &vec![1; total_len as usize]);
+            dst_backend.put("destination.bin", &vec![1; total_len as usize]);
+            dst_backend.fail_next_completes(1);
+            let src = make_ref("s3:source", "source.bin");
+            let dst = make_ref("s3-multipart:destination", "destination.bin");
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("jobs.sqlite3");
+            let store = Arc::new(JobStore::open(&path).unwrap());
+            let job_id = JobId(94);
+            store
+                .save_job(&PersistedJob {
+                    id: job_id.clone(),
+                    state: JobState::Running,
+                    created_at: "2026-07-10T00:00:00Z".into(),
+                    updated_at: "2026-07-10T00:00:00Z".into(),
+                    description: "move exact".into(),
+                    tasks: Vec::new(),
+                })
+                .unwrap();
+            let (tx, _rx) = watch::channel(ProgressInfo::single_file(0, Some(total_len), false));
+            let context = ResumableTransferContext {
+                job_store: Arc::clone(&store),
+                job_id: job_id.clone(),
+                entry_index: 0,
+            };
+            let no_retries = RetryPolicy {
+                max_retries: 0,
+                initial_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+                backoff_factor: 2.0,
+            };
+            move_via_relay_with_verify_and_control(
+                &src_backend,
+                &src,
+                &dst_backend,
+                &dst,
+                &tx,
+                MoveRelayOptions {
+                    resumable: Some(&context),
+                    retry_policy: Some(&no_retries),
+                    ..MoveRelayOptions::default()
+                },
+            )
+            .await
+            .expect("exact content must recover and move");
+            assert_eq!(src_backend.deleted_paths(), vec!["source.bin"]);
         }
     }
 

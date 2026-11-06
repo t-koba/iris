@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS persisted_multipart_uploads (
     upload_id       TEXT NOT NULL,
     total_len       INTEGER NOT NULL,
     part_size       INTEGER NOT NULL,
+    cleanup_pending INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (job_id, entry_index),
     FOREIGN KEY (job_id) REFERENCES persisted_jobs (id) ON DELETE CASCADE
 );
@@ -63,5 +64,19 @@ CREATE TABLE IF NOT EXISTS persisted_multipart_uploads (
 
 /// A database with a different schema version holds jobs that cannot be resumed; it is rebuilt.
 pub fn open(path: Option<&Path>, mmap_bytes: u64) -> rusqlite::Result<Connection> {
-    iris_core_domain::sqlite::open(path, mmap_bytes, SCHEMA_VERSION, SCHEMA)
+    let conn = iris_core_domain::sqlite::open(path, mmap_bytes, SCHEMA_VERSION, SCHEMA)?;
+    // Additive migration: rebuilding the store would orphan resumable uploads.
+    let has_cleanup_pending: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('persisted_multipart_uploads')
+         WHERE name = 'cleanup_pending')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_cleanup_pending {
+        conn.execute_batch(
+            "ALTER TABLE persisted_multipart_uploads
+             ADD COLUMN cleanup_pending INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    Ok(conn)
 }

@@ -80,6 +80,7 @@ fn adapter(responses: Vec<Result<HttpResponse, ConnectorError>>) -> (S3Adapter, 
             bucket: "archive".into(),
             prefix: None,
             endpoint_url: Some("https://s3.test".into()),
+            custom_endpoint_conditional_writes_confirmed: true,
             region: "us-east-1".into(),
         },
         BackendId("s3:test".into()),
@@ -249,13 +250,15 @@ async fn existing_objects_keep_conflict_and_rename_behavior() {
 #[tokio::test]
 async fn overwrite_does_not_depend_on_head() {
     for write in WRITES {
-        let (adapter, http) = adapter(vec![write.success()]);
+        let (mut adapter, http) = adapter(vec![write.success()]);
+        adapter.config.custom_endpoint_conditional_writes_confirmed = false;
         write
             .run(&adapter, ConflictResolution::Overwrite)
             .await
             .unwrap();
         let requests = http.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
+        assert!(http.conditions.lock().unwrap().iter().all(Option::is_none));
         assert_ne!(requests[0].0, "HEAD");
         assert!(requests[0].1.contains("/archive/file.txt"));
         assert!(http.responses.lock().unwrap().is_empty());
@@ -266,18 +269,19 @@ async fn overwrite_does_not_depend_on_head() {
 // the race, never fall back to an unconditional write (including Rename).
 #[tokio::test]
 async fn final_writes_are_conditional_except_overwrite() {
-    for policy in POLICIES.into_iter().chain([ConflictResolution::Overwrite]) {
-        for write in WRITES {
-            for status in [200, 409, 412, 501] {
-                let overwrite = matches!(policy, ConflictResolution::Overwrite);
-                let mut responses = Vec::new();
-                if !overwrite {
-                    responses.push(response(404, ""));
-                }
-                if matches!(write, Write::Multipart) {
-                    responses.push(write.success());
-                }
-                responses.push(if status == 200 {
+    for default_aws in [false, true] {
+        for policy in POLICIES.into_iter().chain([ConflictResolution::Overwrite]) {
+            for write in WRITES {
+                for status in [200, 409, 412, 501] {
+                    let overwrite = matches!(policy, ConflictResolution::Overwrite);
+                    let mut responses = Vec::new();
+                    if !overwrite {
+                        responses.push(response(404, ""));
+                    }
+                    if matches!(write, Write::Multipart) {
+                        responses.push(write.success());
+                    }
+                    responses.push(if status == 200 {
                     if matches!(write, Write::Multipart) {
                         response(200, "<CompleteMultipartUploadResult><ETag>test</ETag></CompleteMultipartUploadResult>")
                     } else {
@@ -286,46 +290,53 @@ async fn final_writes_are_conditional_except_overwrite() {
                 } else {
                     response(status, "<Error><Code>ConditionalRequestConflict</Code></Error>")
                 });
-                let expected_requests = responses.len();
-                let (adapter, http) = adapter(responses);
-                let result = if matches!(write, Write::Multipart) {
-                    let session = adapter
-                        .create_multipart_upload(&object("file.txt"), policy.clone())
-                        .await
-                        .unwrap();
-                    adapter
-                        .complete_multipart_upload(&session, vec![], policy.clone())
-                        .await
-                        .map(|_| ())
-                } else {
-                    write.run(&adapter, policy.clone()).await
-                };
-                match (status, overwrite) {
-                    (200, _) => result.unwrap(),
-                    (409 | 412, false) => assert!(
-                        matches!(&result, Err(BackendError::Conflict { object }) if object.display_path == "file.txt"),
-                        "{policy:?} {write:?} {status}: {result:?}"
-                    ),
-                    (409 | 412, true) => assert!(
-                        matches!(&result, Err(BackendError::Network(_))),
-                        "{policy:?} {write:?} {status}: {result:?}"
-                    ),
-                    _ => assert!(matches!(result, Err(BackendError::Network(_)))),
+                    let expected_requests = responses.len();
+                    let (mut adapter, http) = adapter(responses);
+                    if default_aws {
+                        adapter.config.endpoint_url = None;
+                        adapter.config.custom_endpoint_conditional_writes_confirmed = false;
+                    } else if overwrite {
+                        adapter.config.custom_endpoint_conditional_writes_confirmed = false;
+                    }
+                    let result = if matches!(write, Write::Multipart) {
+                        let session = adapter
+                            .create_multipart_upload(&object("file.txt"), policy.clone())
+                            .await
+                            .unwrap();
+                        adapter
+                            .complete_multipart_upload(&session, vec![], policy.clone())
+                            .await
+                            .map(|_| ())
+                    } else {
+                        write.run(&adapter, policy.clone()).await
+                    };
+                    match (status, overwrite) {
+                        (200, _) => result.unwrap(),
+                        (409 | 412, false) => assert!(
+                            matches!(&result, Err(BackendError::Conflict { object }) if object.display_path == "file.txt"),
+                            "{policy:?} {write:?} {status}: {result:?}"
+                        ),
+                        (409 | 412, true) => assert!(
+                            matches!(&result, Err(BackendError::Network(_))),
+                            "{policy:?} {write:?} {status}: {result:?}"
+                        ),
+                        _ => assert!(matches!(result, Err(BackendError::Network(_)))),
+                    }
+                    let conditions = http.conditions.lock().unwrap();
+                    assert_eq!(
+                        conditions.len(),
+                        expected_requests,
+                        "{policy:?} {write:?} {status}"
+                    );
+                    assert_eq!(
+                        conditions.last().unwrap().as_deref(),
+                        if overwrite { None } else { Some("*") }
+                    );
+                    assert!(conditions[..conditions.len() - 1]
+                        .iter()
+                        .all(Option::is_none));
+                    assert!(http.responses.lock().unwrap().is_empty());
                 }
-                let conditions = http.conditions.lock().unwrap();
-                assert_eq!(
-                    conditions.len(),
-                    expected_requests,
-                    "{policy:?} {write:?} {status}"
-                );
-                assert_eq!(
-                    conditions.last().unwrap().as_deref(),
-                    if overwrite { None } else { Some("*") }
-                );
-                assert!(conditions[..conditions.len() - 1]
-                    .iter()
-                    .all(Option::is_none));
-                assert!(http.responses.lock().unwrap().is_empty());
             }
         }
     }
@@ -385,5 +396,114 @@ async fn streamed_multipart_keeps_policy_and_aborts_after_conflict() {
             assert_eq!(conditions.len(), if status == 412 { 4 } else { 3 });
             assert!(http.responses.lock().unwrap().is_empty());
         }
+    }
+}
+
+#[tokio::test]
+async fn list_parts_maps_only_no_such_upload_to_not_found() {
+    use iris_core_domain::types::multipart::MultipartUploadSession;
+
+    let session = MultipartUploadSession {
+        destination: object("file.txt"),
+        upload_id: "missing-upload".into(),
+    };
+    let (s3, http) = adapter(vec![response(
+        404,
+        "<Error><Code>NoSuchUpload</Code><Message>The specified multipart upload does not exist.</Message></Error>",
+    )]);
+    assert!(matches!(
+        s3.list_multipart_parts(&session).await,
+        Err(BackendError::NotFound { object }) if object.display_path == "file.txt"
+    ));
+    assert!(http.responses.lock().unwrap().is_empty());
+
+    for failure in [
+        response(403, "<Error><Code>AccessDenied</Code></Error>"),
+        response(500, "<Error><Code>InternalError</Code></Error>"),
+    ] {
+        let (s3, http) = adapter(vec![failure]);
+        assert!(matches!(
+            s3.list_multipart_parts(&session).await,
+            Err(BackendError::Network(_))
+        ));
+        assert!(http.responses.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn abort_is_idempotent_only_for_no_such_upload() {
+    use iris_core_domain::types::multipart::MultipartUploadSession;
+    let session = MultipartUploadSession {
+        destination: object("file.txt"),
+        upload_id: "missing-upload".into(),
+    };
+    // The definitive already-absent upload error must clean up without
+    // retaining retry state.
+    {
+        let (s3, http) = adapter(vec![response(
+            404,
+            "<Error><Code>NoSuchUpload</Code><Message>The specified multipart upload does not exist.</Message></Error>",
+        )]);
+        s3.abort_multipart_upload(&session)
+            .await
+            .expect("NoSuchUpload retries must succeed");
+        assert!(http.responses.lock().unwrap().is_empty());
+    }
+
+    // Permission, service, and transport failures must stay retryable.
+    for failure in [
+        response(403, "<Error><Code>AccessDenied</Code></Error>"),
+        response(500, "<Error><Code>InternalError</Code></Error>"),
+    ] {
+        let (s3, http) = adapter(vec![failure]);
+        let result = s3.abort_multipart_upload(&session).await;
+        assert!(
+            matches!(result, Err(BackendError::Network(_))),
+            "unexpected abort result: {result:?}"
+        );
+        assert!(http.responses.lock().unwrap().is_empty());
+    }
+    let io_error: Result<HttpResponse, _> =
+        Err(aws_smithy_runtime_api::client::result::ConnectorError::io(
+            std::io::Error::new(std::io::ErrorKind::ConnectionReset, "test reset").into(),
+        ));
+    {
+        let (s3, _) = adapter(vec![io_error]);
+        assert!(matches!(
+            s3.abort_multipart_upload(&session).await,
+            Err(BackendError::Network(_))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn unconfirmed_custom_endpoint_stops_before_any_request() {
+    for policy in POLICIES {
+        let (mut adapter, http) = adapter(vec![]);
+        adapter.config.custom_endpoint_conditional_writes_confirmed = false;
+        for write in WRITES {
+            assert!(matches!(
+                write.run(&adapter, policy.clone()).await,
+                Err(BackendError::Unsupported { .. })
+            ));
+        }
+        // Resumed uploads must not bypass the guard at completion.
+        let session = MultipartUploadSession {
+            destination: object("file.txt"),
+            upload_id: "existing-upload".into(),
+        };
+        assert!(matches!(
+            adapter
+                .complete_multipart_upload(&session, vec![], policy.clone())
+                .await,
+            Err(BackendError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            adapter
+                .upload_multipart_chunks("file.txt", vec![], Box::pin(tokio::io::empty()), &policy)
+                .await,
+            Err(BackendError::Unsupported { .. })
+        ));
+        assert!(http.requests.lock().unwrap().is_empty());
     }
 }

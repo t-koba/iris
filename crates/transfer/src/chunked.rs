@@ -1,5 +1,6 @@
 use crate::error_handler::RetryPolicy;
 use crate::method_selector::global_concurrency_governor;
+use crate::verify::{verify_strong, VerifyResult};
 use futures_util::stream::{FuturesUnordered, Stream, StreamExt};
 use iris_core_domain::backend_adapter::BackendAdapter;
 use iris_core_domain::memory_budget::{MemoryBudget, MemoryBudgetPermit};
@@ -394,6 +395,21 @@ pub(crate) async fn copy_chunked_to_multipart(
     let persisted = job_store
         .load_multipart_upload(&job_id, entry_index)
         .map_err(jobstore_error_to_backend_error)?;
+    if let Some(upload) = persisted.as_ref().filter(|upload| upload.cleanup_pending) {
+        // A known competing object must never enter lost-response recovery,
+        // even when the upload has disappeared and the destination size matches.
+        if upload.destination_backend == dst.key.backend_id.0 {
+            cleanup_conflicted_multipart(
+                dst_backend,
+                &journal,
+                &multipart_session_from_persisted(upload),
+            )
+            .await?;
+        }
+        return Err(BackendError::Conflict {
+            object: dst.clone(),
+        });
+    }
     let persisted_is_valid = persisted.as_ref().is_some_and(|upload| {
         upload.destination_backend == dst.key.backend_id.0
             && source_identity.is_some()
@@ -422,32 +438,27 @@ pub(crate) async fn copy_chunked_to_multipart(
     .await
     {
         Ok(parts) => parts,
-        Err(_list_error) if persisted_is_valid => {
-            let destination_is_complete = dst_backend
-                .stat(dst)
-                .await
-                .ok()
-                .and_then(|metadata| (!metadata.is_dir).then_some(metadata.size).flatten())
-                == Some(total_len);
-            if destination_is_complete {
-                job_store
-                    .remove_multipart_upload(&job_id, entry_index)
-                    .map_err(jobstore_error_to_backend_error)?;
-                return Ok(());
+        Err(list_error @ BackendError::NotFound { .. }) if persisted_is_valid => {
+            // Size alone cannot prove the destination holds our bytes: a
+            // same-size competitor must never be mistaken for success.
+            // Only byte-identical content recovers. A proven mismatch falls
+            // through to a fresh upload (which will conflict if the
+            // competitor remains); an unverifiable destination fails closed
+            // with the original error so a move never deletes the source.
+            match verified_destination_match(src_backend, &src, dst_backend, dst, total_len).await {
+                Ok(true) => {
+                    job_store
+                        .remove_multipart_upload(&job_id, entry_index)
+                        .map_err(jobstore_error_to_backend_error)?;
+                    return Ok(());
+                }
+                Ok(false) => {}
+                Err(_) => return Err(list_error),
             }
 
-            let replacement = retry_backend_operation(
-                &retry.policy,
-                retry.pause_rx.clone(),
-                retry.cancel_token.clone(),
-                || dst_backend.create_multipart_upload(dst, ConflictResolution::Fail),
-            )
-            .await?;
+            let replacement =
+                create_and_persist_multipart_session(dst_backend, dst, &journal, &retry).await?;
             let _ = dst_backend.abort_multipart_upload(&session).await;
-            if let Err(error) = persist_multipart_session(&journal, &replacement) {
-                let _ = dst_backend.abort_multipart_upload(&replacement).await;
-                return Err(error);
-            }
             session = replacement;
             Vec::new()
         }
@@ -552,23 +563,18 @@ pub(crate) async fn copy_chunked_to_multipart(
         // A conditional rejection identifies a competing object, not a lost
         // success response. Equal size cannot establish that it is our data.
         if matches!(error, BackendError::Conflict { .. }) {
-            // The competing object wins, so this upload cannot safely be
-            // resumed: a missing upload on restart must not be mistaken for a
-            // same-size successful destination. Abort best-effort, then drop
-            // the local session even if cleanup failed.
-            let _ = dst_backend.abort_multipart_upload(&session).await;
-            job_store
-                .remove_multipart_upload(&job_id, entry_index)
-                .map_err(jobstore_error_to_backend_error)?;
+            // Commit the rejection before touching the remote session. A crash
+            // after abort must leave a cleanup-only record, not a resumable one.
+            persist_multipart_session(&journal, &session, true)?;
+            cleanup_conflicted_multipart(dst_backend, &journal, &session).await?;
             return Err(error);
         }
-        let destination_is_complete = dst_backend
-            .stat(dst)
-            .await
-            .ok()
-            .and_then(|metadata| (!metadata.is_dir).then_some(metadata.size).flatten())
-            == Some(total_len);
-        if !destination_is_complete {
+        // A non-conflict completion error (for example a lost response) may
+        // only recover when the destination holds byte-identical content.
+        // Size alone cannot rule out a same-size competitor; mismatch or an
+        // unverifiable destination must return the original error so a move
+        // never deletes the source.
+        if !destination_holds_source_bytes(src_backend, &src, dst_backend, dst, total_len).await {
             return Err(error);
         }
     }
@@ -591,21 +597,78 @@ async fn create_and_persist_multipart_session(
         || backend.create_multipart_upload(dst, ConflictResolution::Fail),
     )
     .await?;
-    if let Err(error) = persist_multipart_session(journal, &session) {
+    if let Err(error) = persist_multipart_session(journal, &session, false) {
         let _ = backend.abort_multipart_upload(&session).await;
         return Err(error);
     }
     Ok(session)
 }
 
-fn persist_multipart_session(
+async fn cleanup_conflicted_multipart(
+    backend: &dyn BackendAdapter,
     journal: &MultipartJournal<'_>,
     session: &MultipartUploadSession,
 ) -> Result<(), BackendError> {
-    journal
-        .job_store
-        .remove_multipart_upload(journal.job_id, journal.entry_index)
-        .map_err(jobstore_error_to_backend_error)?;
+    // Only the definitive already-absent upload error counts as idempotent
+    // cleanup success alongside Ok. Uncertain, permission, or service
+    // failures keep the record for another resume (or the job's deletion).
+    match backend.abort_multipart_upload(session).await {
+        Ok(()) | Err(BackendError::NotFound { .. }) => {
+            journal
+                .job_store
+                .remove_multipart_upload(journal.job_id, journal.entry_index)
+                .map_err(jobstore_error_to_backend_error)?;
+        }
+        Err(_) => {}
+    }
+    Ok(())
+}
+
+async fn verified_destination_match(
+    src_backend: &dyn BackendAdapter,
+    src: &ObjectRef,
+    dst_backend: &dyn BackendAdapter,
+    dst: &ObjectRef,
+    total_len: u64,
+) -> Result<bool, BackendError> {
+    // A size mismatch already proves the destination is not our data.
+    let size_matches = dst_backend
+        .stat(dst)
+        .await
+        .ok()
+        .and_then(|metadata| (!metadata.is_dir).then_some(metadata.size).flatten())
+        == Some(total_len);
+    if !size_matches {
+        return Ok(false);
+    }
+    // Only byte-identical content may recover. A mismatch is a proven
+    // competitor; any verification failure leaves the destination
+    // unverifiable and must fail closed.
+    match verify_strong(src_backend, src, dst_backend, dst).await {
+        Ok(VerifyResult::Match) => Ok(true),
+        Ok(VerifyResult::Mismatch { .. } | VerifyResult::Inconclusive { .. }) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+async fn destination_holds_source_bytes(
+    src_backend: &dyn BackendAdapter,
+    src: &ObjectRef,
+    dst_backend: &dyn BackendAdapter,
+    dst: &ObjectRef,
+    total_len: u64,
+) -> bool {
+    matches!(
+        verified_destination_match(src_backend, src, dst_backend, dst, total_len).await,
+        Ok(true)
+    )
+}
+
+fn persist_multipart_session(
+    journal: &MultipartJournal<'_>,
+    session: &MultipartUploadSession,
+    cleanup_pending: bool,
+) -> Result<(), BackendError> {
     journal
         .job_store
         .save_multipart_upload(&PersistedMultipartUpload {
@@ -617,6 +680,7 @@ fn persist_multipart_session(
             upload_id: session.upload_id.clone(),
             total_len: journal.total_len,
             part_size: journal.part_size,
+            cleanup_pending,
         })
         .map_err(jobstore_error_to_backend_error)
 }

@@ -25,6 +25,7 @@ impl S3Adapter {
         data: Vec<u8>,
         on_conflict: &ConflictResolution,
     ) -> Result<(), BackendError> {
+        self.require_conditional_writes(on_conflict)?;
         self.client()
             .await?
             .put_object()
@@ -96,6 +97,7 @@ impl S3Adapter {
         parts: Vec<aws_sdk_s3::types::CompletedPart>,
         on_conflict: &ConflictResolution,
     ) -> Result<(), BackendError> {
+        self.require_conditional_writes(on_conflict)?;
         self.client()
             .await?
             .complete_multipart_upload()
@@ -149,6 +151,7 @@ impl S3Adapter {
         mut reader: Pin<Box<dyn AsyncRead + Send>>,
         on_conflict: &ConflictResolution,
     ) -> Result<(), BackendError> {
+        self.require_conditional_writes(on_conflict)?;
         let upload_id = self.start_multipart_upload(key).await?;
 
         let result = async {

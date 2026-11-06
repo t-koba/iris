@@ -21,18 +21,17 @@ impl S3Adapter {
 
 pub(super) async fn build_client(config: &S3Config) -> Result<S3Client, BackendError> {
     let http_client = build_tuned_http_client();
-    let mut sdk_config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
+    let sdk_config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(aws_sdk_s3::config::Region::new(config.region.clone()))
         .http_client(http_client);
 
-    if let Some(endpoint) = &config.endpoint_url {
-        sdk_config_loader = sdk_config_loader.endpoint_url(endpoint);
-    }
-
     let sdk_config = sdk_config_loader.load().await;
-    Ok(S3Client::from_conf(
-        aws_sdk_s3::config::Builder::from(&sdk_config).build(),
-    ))
+    let mut s3_config = aws_sdk_s3::config::Builder::from(&sdk_config);
+    // The connection's endpoint is authoritative. Otherwise the AWS SDK may
+    // inherit an environment/profile endpoint that bypasses per-connection
+    // custom-endpoint conditional-write confirmation.
+    s3_config.set_endpoint_url(config.endpoint_url.clone());
+    Ok(S3Client::from_conf(s3_config.build()))
 }
 
 fn build_tuned_http_client() -> aws_sdk_s3::config::SharedHttpClient {
@@ -55,6 +54,7 @@ mod tests {
                 bucket: "archive".into(),
                 prefix: None,
                 endpoint_url: Some("http://127.0.0.1:1".into()),
+                custom_endpoint_conditional_writes_confirmed: false,
                 region: "us-east-1".into(),
             },
             BackendId("s3:test".into()),

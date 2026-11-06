@@ -23,7 +23,9 @@ use iris_backends::localfs::adapter::LocalFsAdapter;
 use iris_backends::localfs::stable_id::get_stable_id as get_local_stable_id;
 use iris_backends::pcloud::adapter::PCloudAdapter;
 use iris_backends::registry::BackendRegistry;
-use iris_backends::s3::adapter::{S3Adapter, S3Config};
+use iris_backends::s3::adapter::{
+    S3Adapter, S3Config, S3_CUSTOM_ENDPOINT_CONDITIONAL_WRITES_UNCONFIRMED,
+};
 use iris_backends::smb::adapter::SmbAdapter;
 use iris_backends::smb::connection::SmbConnectionConfig;
 use iris_catalog::repository::{
@@ -145,6 +147,8 @@ enum CloudAccountConfig {
         bucket: String,
         region: String,
         endpoint_url: Option<String>,
+        #[serde(default)]
+        custom_endpoint_conditional_writes_confirmed: bool,
         prefix: Option<String>,
     },
     PCloud {
@@ -221,6 +225,11 @@ fn user_facing_backend_error(error: BackendError) -> String {
         BackendError::NotFound { .. } => crate::i18n::tr("backend-error-not-found"),
         BackendError::PermissionDenied { .. } => crate::i18n::tr("backend-error-permission"),
         BackendError::StorageFull => crate::i18n::tr("backend-error-storage-full"),
+        BackendError::Unsupported { operation }
+            if operation == S3_CUSTOM_ENDPOINT_CONDITIONAL_WRITES_UNCONFIRMED =>
+        {
+            crate::i18n::tr("connections-s3-conditional-writes-required")
+        }
         BackendError::Unsupported { .. } => crate::i18n::tr("backend-error-unsupported"),
         BackendError::Conflict { .. } => crate::i18n::tr("backend-error-conflict"),
         BackendError::Internal(_) => crate::i18n::tr("backend-error-internal"),
@@ -576,4 +585,34 @@ fn cloud_account_backend_id(config: &CloudAccountConfig) -> &str {
 
 fn is_cloud_backend_id(backend_id: &BackendId) -> bool {
     backend_id.0.starts_with("s3:") || backend_id.0.starts_with("pcloud:")
+}
+
+#[cfg(test)]
+mod cloud_config_tests {
+    use super::CloudAccountConfig;
+
+    #[test]
+    fn s3_confirmation_defaults_closed_and_round_trips() {
+        let mut saved = serde_json::json!({
+            "provider": "s3", "backend_id": "s3:test", "display_name": "Test",
+            "bucket": "archive", "region": "us-east-1", "endpoint_url": "https://s3.test",
+            "prefix": null
+        });
+        for confirmed in [false, true] {
+            if confirmed {
+                saved["custom_endpoint_conditional_writes_confirmed"] = true.into();
+            }
+            let config: CloudAccountConfig = serde_json::from_value(saved.clone()).unwrap();
+            assert!(matches!(&config, CloudAccountConfig::S3 {
+                custom_endpoint_conditional_writes_confirmed, ..
+            } if *custom_endpoint_conditional_writes_confirmed == confirmed));
+            let round_trip: CloudAccountConfig =
+                serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+            assert!(matches!(round_trip, CloudAccountConfig::S3 {
+                custom_endpoint_conditional_writes_confirmed, ..
+            } if custom_endpoint_conditional_writes_confirmed == confirmed));
+        }
+        saved["custom_endpoint_conditional_writes_confirmed"] = "true".into();
+        assert!(serde_json::from_value::<CloudAccountConfig>(saved).is_err());
+    }
 }
