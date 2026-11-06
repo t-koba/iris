@@ -96,8 +96,8 @@ jpeg-decoder = "0.3"
 # PDF
 pdfium-render = "0.9"
 
-# Video
-ffmpeg-next = "9.0"
+# Video: only the codec, container and scaler APIs used by thumbnails.
+ffmpeg-next = { version = "9.0", default-features = false, features = ["codec", "format", "software-scaling"] }
 
 # S3
 # S3 injects Smithy's Hyper 1.x client and uses ring for TLS, like reqwest and russh.
