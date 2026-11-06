@@ -570,12 +570,20 @@ pub(crate) async fn copy_chunked_to_multipart(
             return Err(error);
         }
         // A non-conflict completion error (for example a lost response) may
-        // only recover when the destination holds byte-identical content.
-        // Size alone cannot rule out a same-size competitor; mismatch or an
-        // unverifiable destination must return the original error so a move
-        // never deletes the source.
+        // recover only when the destination holds byte-identical content and
+        // this upload is gone or is durably aborted. A live upload plus a
+        // matching pre-existing destination is not evidence our completion
+        // succeeded, and must not be forgotten from the journal.
         if !destination_holds_source_bytes(src_backend, &src, dst_backend, dst, total_len).await {
             return Err(error);
+        }
+        match dst_backend.list_multipart_parts(&session).await {
+            Err(BackendError::NotFound { .. }) => {}
+            Ok(_) => match dst_backend.abort_multipart_upload(&session).await {
+                Ok(()) | Err(BackendError::NotFound { .. }) => {}
+                Err(_) => return Err(error),
+            },
+            Err(_) => return Err(error),
         }
     }
     job_store

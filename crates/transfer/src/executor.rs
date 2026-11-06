@@ -1883,18 +1883,39 @@ mod tests {
         // keep the persisted session instead of creating an orphan replacement.
         {
             let (_dir, src, dst, store, job_id) = setup_list_store(b"xyz", 0).await;
+            let session = dst
+                .create_multipart_upload(
+                    &make_ref("s3-multipart:destination", "destination.bin"),
+                    ConflictResolution::Fail,
+                )
+                .await
+                .unwrap();
+            store
+                .save_multipart_upload(&PersistedMultipartUpload {
+                    job_id: job_id.clone(),
+                    entry_index: 0,
+                    destination_backend: "s3-multipart:destination".into(),
+                    destination_path: "destination.bin".into(),
+                    source_identity: Some("source-etag".into()),
+                    upload_id: session.upload_id.clone(),
+                    total_len: 3,
+                    part_size: 2,
+                    cleanup_pending: false,
+                })
+                .unwrap();
             dst.fail_next_lists(1);
             let result = run_list_copy(&src, &dst, &store, &job_id).await;
             assert!(matches!(result, Err(BackendError::Network(_))));
-            assert_eq!(dst.created_multipart_uploads(), 0);
+            assert_eq!(dst.created_multipart_uploads(), 1);
             assert_eq!(
                 store
                     .load_multipart_upload(&job_id, 0)
                     .unwrap()
                     .unwrap()
                     .upload_id,
-                "missing-upload"
+                session.upload_id
             );
+            assert!(dst.list_multipart_parts(&session).await.is_ok());
         }
         // Byte-identical destination recovers a lost response.
         {
@@ -1974,8 +1995,12 @@ mod tests {
                 dst_backend.get("destination.bin"),
                 Some(vec![2; total_len as usize])
             );
+            assert!(store.load_multipart_upload(&job_id, 0).unwrap().is_some());
+            assert_eq!(dst_backend.multipart_uploads.lock().unwrap().len(), 1);
         }
-        // Byte-identical destination behind the same error still recovers and deletes.
+        // Byte-identical destination behind a completion error is safe only
+        // after aborting the still-live upload.
+
         {
             let src_backend = MockBackend::new("s3:source", false);
             let dst_backend = MockBackend::new("s3-multipart:destination", false);
@@ -2026,6 +2051,65 @@ mod tests {
             .await
             .expect("exact content must recover and move");
             assert_eq!(src_backend.deleted_paths(), vec!["source.bin"]);
+            assert_eq!(dst_backend.abort_call_count(), 1);
+            assert!(dst_backend.multipart_uploads.lock().unwrap().is_empty());
+            assert!(store.load_multipart_upload(&job_id, 0).unwrap().is_none());
+        }
+        // If cleanup of a live upload fails, neither the source nor journal
+        // can be discarded even though matching bytes already exist.
+        {
+            let src_backend = MockBackend::new("s3:source", false);
+            let dst_backend = MockBackend::new("s3-multipart:destination", false);
+            let total_len = crate::chunked::CHUNKED_RANGE_MIN_BYTES;
+            src_backend.put("source.bin", &vec![1; total_len as usize]);
+            dst_backend.put("destination.bin", &vec![1; total_len as usize]);
+            dst_backend.fail_next_completes(1);
+            dst_backend.fail_next_aborts(1);
+            let src = make_ref("s3:source", "source.bin");
+            let dst = make_ref("s3-multipart:destination", "destination.bin");
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("jobs.sqlite3");
+            let store = Arc::new(JobStore::open(&path).unwrap());
+            let job_id = JobId(95);
+            store
+                .save_job(&PersistedJob {
+                    id: job_id.clone(),
+                    state: JobState::Running,
+                    created_at: "2026-07-10T00:00:00Z".into(),
+                    updated_at: "2026-07-10T00:00:00Z".into(),
+                    description: "move cleanup failure".into(),
+                    tasks: Vec::new(),
+                })
+                .unwrap();
+            let (tx, _rx) = watch::channel(ProgressInfo::single_file(0, Some(total_len), false));
+            let context = ResumableTransferContext {
+                job_store: Arc::clone(&store),
+                job_id: job_id.clone(),
+                entry_index: 0,
+            };
+            let no_retries = RetryPolicy {
+                max_retries: 0,
+                initial_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+                backoff_factor: 2.0,
+            };
+            let result = move_via_relay_with_verify_and_control(
+                &src_backend,
+                &src,
+                &dst_backend,
+                &dst,
+                &tx,
+                MoveRelayOptions {
+                    resumable: Some(&context),
+                    retry_policy: Some(&no_retries),
+                    ..MoveRelayOptions::default()
+                },
+            )
+            .await;
+            assert!(matches!(result, Err(BackendError::Network(_))));
+            assert!(src_backend.deleted_paths().is_empty());
+            assert!(store.load_multipart_upload(&job_id, 0).unwrap().is_some());
+            assert_eq!(dst_backend.multipart_uploads.lock().unwrap().len(), 1);
         }
     }
 
