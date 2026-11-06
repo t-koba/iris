@@ -1,6 +1,12 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Source branch, tag or commit to audit (never publishes)"
+        required: true
+        type: string
   push:
     tags:
       - "v*"
@@ -14,6 +20,10 @@ env:
   INSTA_UPDATE: no
   IRIS_MACOS_DEPLOYMENT_TARGET: "14.0"
   MACOSX_DEPLOYMENT_TARGET: "14.0"
+  IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES || 2097152 }}
+  IRIS_RELEASE_AUDIT_MAX_COMMAND_BYTES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_COMMAND_BYTES || 32768 }}
+  IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES || 256 }}
+  IRIS_RELEASE_AUDIT_COMMAND_SECONDS: ${{ vars.IRIS_RELEASE_AUDIT_COMMAND_SECONDS || 30 }}
 
 jobs:
   release-preflight:
@@ -21,12 +31,34 @@ jobs:
     permissions:
       contents: read
       attestations: read
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+      version: ${{ steps.source.outputs.version }}
+      pdfium_attestation_verified: ${{ steps.pdfium.outputs.attestation_verified }}
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
           fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Validate release audit contract
+        run: python scripts/test-release-audit.py
+
+      - name: Resolve package source and workspace version
+        id: source
+        shell: bash
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          version="$(sed -n '/^\[workspace.package\]$/,/^\[/{s/^version = "\([^" ]*\)".*/\1/p;}' Cargo.toml | head -n 1)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Verify tag commit belongs to main
+        if: github.event_name == 'push'
         shell: bash
         run: |
           if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
@@ -35,15 +67,18 @@ jobs:
           fi
 
       - name: Verify pinned PDFium runtime
+        id: pdfium
         env:
-          IRIS_VERIFY_PDFIUM_PROVENANCE: "1"
-          GH_TOKEN: ${{ github.token }}
+          IRIS_VERIFY_PDFIUM_PROVENANCE: ${{ github.event_name == 'push' && '1' || '0' }}
+          GH_TOKEN: ${{ github.event_name == 'push' && github.token || '' }}
         run: |
           ./scripts/fetch-pdfium-runtime.sh "$RUNNER_TEMP/iris-pdfium-preflight"
           test -f "$RUNNER_TEMP/iris-pdfium-preflight/usr/lib/iris/libpdfium.so"
           test -f "$RUNNER_TEMP/iris-pdfium-preflight/usr/share/doc/iris/pdfium/LICENSE"
+          echo "attestation_verified=$([[ $IRIS_VERIFY_PDFIUM_PROVENANCE == 1 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: Check tag matches crate version
+        if: github.event_name == 'push'
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
@@ -59,9 +94,17 @@ jobs:
 
   package-macos:
     needs: release-preflight
+    env:
+      IRIS_RELEASE_VERSION: ${{ needs.release-preflight.outputs.version }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-preflight.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -72,14 +115,14 @@ jobs:
         run: brew install ffmpeg pkg-config
       - name: Package macOS app
         env:
-          IRIS_MACOS_SIGN_IDENTITY: ${{ secrets.IRIS_MACOS_SIGN_IDENTITY || '-' }}
-          IRIS_MACOS_NOTARY_PROFILE: ${{ secrets.IRIS_MACOS_NOTARY_PROFILE || '' }}
+          IRIS_MACOS_SIGN_IDENTITY: ${{ github.event_name == 'push' && secrets.IRIS_MACOS_SIGN_IDENTITY || '-' }}
+          IRIS_MACOS_NOTARY_PROFILE: ${{ github.event_name == 'push' && secrets.IRIS_MACOS_NOTARY_PROFILE || '' }}
           IRIS_MACOS_DEPLOYMENT_TARGET: ${{ env.IRIS_MACOS_DEPLOYMENT_TARGET }}
         run: ./scripts/package-macos-app.sh
       - name: Verify macOS artifact
         run: |
           test -x dist/macos/Iris.app/Contents/MacOS/Iris
-          plutil -extract CFBundleShortVersionString raw -o - dist/macos/Iris.app/Contents/Info.plist | grep -Fx "${GITHUB_REF_NAME#v}"
+          plutil -extract CFBundleShortVersionString raw -o - dist/macos/Iris.app/Contents/Info.plist | grep -Fx "$IRIS_RELEASE_VERSION"
           zipinfo -1 dist/macos/Iris-macos.zip | grep -Fx "Iris.app/Contents/MacOS/Iris"
           codesign --verify --deep --strict --verbose=2 dist/macos/Iris.app
           pkgutil --payload-files dist/macos/Iris-macos.pkg > "$RUNNER_TEMP/iris-pkg-payload.txt"
@@ -102,8 +145,23 @@ jobs:
             dist/macos/Iris-macos.pkg
             dist/macos/Iris-macos.pkg.sha256
 
+      - name: Audit staged macos runtime
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: python scripts/release-audit.py macos --output audit/macos.json
+      - name: Retain macos audit evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-macos
+          if-no-files-found: error
+          path: audit/macos.json
+
   package-linux:
     needs: release-preflight
+    env:
+      IRIS_RELEASE_VERSION: ${{ needs.release-preflight.outputs.version }}
+      IRIS_PDFIUM_ATTESTATION_VERIFIED: ${{ needs.release-preflight.outputs.pdfium_attestation_verified }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -112,6 +170,12 @@ jobs:
       deb-arch: ${{ steps.deb.outputs.arch }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-preflight.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -148,7 +212,7 @@ jobs:
         id: deb
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="$IRIS_RELEASE_VERSION"
           arch="$(dpkg --print-architecture)"
           deb="dist/linux/iris_${version}_${arch}.deb"
           shopt -s nullglob
@@ -182,11 +246,31 @@ jobs:
             dist/linux/*.deb
             dist/linux/*.deb.sha256
 
+      - name: Audit staged linux runtime
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: python scripts/release-audit.py linux --output audit/linux.json
+      - name: Retain linux audit evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-linux
+          if-no-files-found: error
+          path: audit/linux.json
+
   package-windows:
     needs: release-preflight
+    env:
+      IRIS_RELEASE_VERSION: ${{ needs.release-preflight.outputs.version }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-preflight.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
@@ -261,7 +345,20 @@ jobs:
             dist/windows/Iris-windows-setup.exe
             dist/windows/Iris-windows-setup.exe.sha256
 
+      - name: Audit staged windows runtime
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: python scripts/release-audit.py windows --output audit/windows.json
+      - name: Retain windows audit evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-windows
+          if-no-files-found: error
+          path: audit/windows.json
+
   publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [package-macos, package-linux, package-windows]
     runs-on: ubuntu-latest
     permissions:

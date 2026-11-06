@@ -152,10 +152,52 @@ fuzz 用のクレートは各 `fuzz/` ディレクトリで同じ操作をしま
 | Linux | `./scripts/package-linux-appdir.sh` | `Iris.AppDir`（`appimagetool` があれば AppImage にできる） |
 | Windows | `./scripts/package-windows.ps1` | `Iris.exe` を含む zip（`IRIS_BUILD_VARIANT=minimal`） |
 
+### 公開しないパッケージ監査
+
+`Release` の **Run workflow** で `source_ref` に監査対象のブランチ・タグ・commit SHA を指定できます。
+監査機能を含む revision を選んでください。最初に解決した SHA を全 OS で checkout し、
+そのワークスペースのバージョンで通常と同じパッケージ・チェックサム・インストール検証を実行します。
+手動実行はタグを選んでも `publish` を実行せず、macOS の署名・公証 secret も使いません（ad-hoc 署名）。
+read-only GitHub token も渡さないため、手動 run は PDFium の固定サイズ・digest のみ確認し、upstream attestation は未検証と JSON に記録します。
+タグ push は従来どおり PDFium attestation を検証します。タグ push の `main` 到達性・バージョン一致チェックと公開ファイル名・チェックサム形式は変わりません。
+
+実行の Actions artifacts に `release-macos` / `release-linux` / `release-windows` と、
+別名の `audit-macos` / `audit-linux` / `audit-windows`（JSON）が残ります。
+公開ジョブは `release-*` のみ取得します。監査は検証失敗時にも可能な範囲で実行します。
+監査追加はリリース保留の解除やライセンス・脆弱性対応の承認ではありません。
+
+- macOS: staged `Iris.app` の実行ファイル・dylib の SHA-256 と `otool` load commands、
+  解決できた依存を記録します。Homebrew の formula/version/license、bottle/source metadata、
+  install receipt と formula 定義は候補元の証拠です。install-name 書換え・署名後の bytes と
+  元の bytes の同一性は主張せず、複数候補や不明な shared-cache / rpath は明記します。
+- Linux: staged Iris と PDFium から `readelf` / `ldd` で辿った依存の SHA-256、
+  所有 Debian package の正確な installed/source version、APT origin 情報と copyright を記録します。
+  APT 設定は過去のダウンロード元の証明ではありません。bundled PDFium の PROVENANCE、
+  VERSION、args.gn、LICENSE と第三者ライセンスも記録します。
+- FFmpeg 情報は辿った**実ライブラリ**を別プロセスで読み、その version/configuration/license API
+  を問い合わせます。`ffmpeg-next` や別の `ffmpeg` 実行ファイルから推測しません。
+  読込み失敗・不足証拠は失敗として残ります。
+- Windows: 現行 release の minimal flags、staged executable の SHA-256 と payload files、
+  利用可能なら LLVM / Visual Studio ツールによる PE imports を記録します。
+  FFmpeg/PDFium は選択されず、動画・PDF preview 対応を主張しません。
+
+`python scripts/test-release-audit.py` は軽量・offline の回帰検証です。
+レポートは `python scripts/release-audit.py <macos|linux|windows> --output <file>` でも生成できます。
+既定値は `IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES=2097152`、
+`IRIS_RELEASE_AUDIT_MAX_COMMAND_BYTES=32768`、`IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES=256`、
+`IRIS_RELEASE_AUDIT_COMMAND_SECONDS=30` です。workflow 実行では同名の GitHub repository variables
+で調整でき、個別実行では `--max-report-bytes`、`--max-command-bytes`、
+`--max-native-files`、`--command-seconds` で上書きできます。すべて正の整数で、report budget は
+JSON metadata を保持できる大きさが必要です。抜粋には元ファイル全体の hash と
+`truncated`、容量不足には `omitted_records` が付き、欠落は承認と解釈できません。
+環境変数一覧や credential は取得せず、runner の workspace/home/temp paths は置換します。
+Iris 自体のライセンス、静的リンクされた全 native code、未解決・dlopen-only 依存、vendor の
+patch 適用状況やライセンス互換性をこのレポートだけで保証するものではありません。
+
 ## CI
 
 | ワークフロー | いつ | 内容 |
 |---|---|---|
 | `ci.yml` | push・プルリクエスト・週 1 回 | 整形、lint、依存の監査、ビルド、バイナリサイズの上限、テスト、SFTP / SMB の結合テスト、fuzz の短時間実行。Windows は minimal 構成 |
-| `release.yml` | `main` 上の version 一致 `v<version>` タグ | 3 つの OS のアーカイブ・インストーラと SHA-256 チェックサムを検証して Release に添付 |
+| `release.yml` | `main` 上の version 一致 `v<version>` タグ / 手動 `source_ref` | 3 OS のパッケージ・チェックサムと別 artifact の監査レポート。Release 公開はタグ push のみ |
 | `fuzz-long.yml` | 週 1 回 | fuzz を長時間実行 |
