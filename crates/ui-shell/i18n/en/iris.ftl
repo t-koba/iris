@@ -424,6 +424,7 @@ connections-s3-bucket-placeholder = Example: my-bucket
 connections-s3-region-label = Region:
 connections-s3-region-placeholder = Example: ap-northeast-1
 connections-s3-endpoint-label = Endpoint:
+connections-s3-conditional-writes-note = Custom endpoints must honor S3 conditional writes (If-None-Match: *) for non-Overwrite conflict handling. Iris has not verified provider support.
 connections-s3-prefix-label = Prefix:
 connections-pcloud-client-id-label = Client ID:
 connections-pcloud-client-id-placeholder = pCloud OAuth client_id

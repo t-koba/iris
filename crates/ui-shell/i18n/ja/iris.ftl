@@ -420,6 +420,7 @@ connections-s3-bucket-placeholder = 例: my-bucket
 connections-s3-region-label = リージョン:
 connections-s3-region-placeholder = 例: ap-northeast-1
 connections-s3-endpoint-label = Endpoint:
+connections-s3-conditional-writes-note = カスタムエンドポイントで上書き以外の競合処理を使うには、S3 の条件付き書き込み（If-None-Match: *）への対応が必要です。各プロバイダの対応は Iris では検証していません。
 connections-s3-prefix-label = Prefix:
 connections-pcloud-client-id-label = Client ID:
 connections-pcloud-client-id-placeholder = pCloud OAuth client_id

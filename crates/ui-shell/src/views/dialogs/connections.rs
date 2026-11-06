@@ -328,6 +328,11 @@ fn build_cloud_connect_fields<'a>(
                 .padding(6)
                 .size(12),
             ));
+            content = content.push(
+                text(tr("connections-s3-conditional-writes-note"))
+                    .size(10)
+                    .style(theme::muted_text_style),
+            );
             content = content.push(labeled(
                 tr("connections-s3-prefix-label"),
                 110.0,
