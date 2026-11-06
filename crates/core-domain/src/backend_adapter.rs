@@ -148,10 +148,13 @@ pub trait BackendAdapter: Send + Sync {
         })
     }
 
+    /// Finalize with the caller's conflict policy; non-overwrite policies must
+    /// protect the destination even if it was absent when the upload started.
     async fn complete_multipart_upload(
         &self,
         _session: &MultipartUploadSession,
         _parts: Vec<MultipartPart>,
+        _on_conflict: ConflictResolution,
     ) -> Result<OperationTicket, BackendError> {
         Err(BackendError::Unsupported {
             operation: "complete_multipart_upload",

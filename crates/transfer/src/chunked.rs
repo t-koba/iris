@@ -545,10 +545,23 @@ pub(crate) async fn copy_chunked_to_multipart(
     }
     let completion =
         retry_backend_operation(&retry.policy, retry.pause_rx, retry.cancel_token, || {
-            dst_backend.complete_multipart_upload(&session, parts.clone())
+            dst_backend.complete_multipart_upload(&session, parts.clone(), ConflictResolution::Fail)
         })
         .await;
     if let Err(error) = completion {
+        // A conditional rejection identifies a competing object, not a lost
+        // success response. Equal size cannot establish that it is our data.
+        if matches!(error, BackendError::Conflict { .. }) {
+            // The competing object wins, so this upload cannot safely be
+            // resumed: a missing upload on restart must not be mistaken for a
+            // same-size successful destination. Abort best-effort, then drop
+            // the local session even if cleanup failed.
+            let _ = dst_backend.abort_multipart_upload(&session).await;
+            job_store
+                .remove_multipart_upload(&job_id, entry_index)
+                .map_err(jobstore_error_to_backend_error)?;
+            return Err(error);
+        }
         let destination_is_complete = dst_backend
             .stat(dst)
             .await

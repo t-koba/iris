@@ -40,6 +40,14 @@ pub struct S3Config {
 
 /// S3-compatible adapter: range GETs for partial reads, server-side copy within a bucket,
 /// and move as copy + verify + delete.
+///
+/// Non-overwrite writes require the endpoint to honor `If-None-Match: *` on
+/// PutObject, CopyObject, and CompleteMultipartUpload. AWS documents these
+/// conditional writes (including 412/409 conflicts):
+/// <https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html>.
+/// Arbitrary configured custom endpoints are unverified; an endpoint that ignores
+/// the header cannot provide the no-overwrite guarantee. HEAD only selects a key;
+/// the conditional final write protects against concurrent creators.
 pub struct S3Adapter {
     config: S3Config,
     backend_id: BackendId,
@@ -126,16 +134,37 @@ impl S3Adapter {
                     counter += 1;
                 }
             }
-            ConflictResolution::Fail | ConflictResolution::Skip => Err(BackendError::Conflict {
-                object: ObjectRef {
-                    key: ObjectKey {
-                        backend_id: self.backend_id.clone(),
-                        stable_id: StableId("unknown".to_string()),
-                    },
-                    parent_stable_id: None,
-                    display_path: requested_key,
+            ConflictResolution::Fail | ConflictResolution::Skip => {
+                Err(self.conflict_error(requested_key))
+            }
+        }
+    }
+
+    fn conflict_error(&self, key: String) -> BackendError {
+        BackendError::Conflict {
+            object: ObjectRef {
+                key: ObjectKey {
+                    backend_id: self.backend_id.clone(),
+                    stable_id: StableId("unknown".to_string()),
                 },
-            }),
+                parent_stable_id: None,
+                display_path: key,
+            },
+        }
+    }
+
+    fn write_error(
+        &self,
+        operation: &str,
+        key: &str,
+        was_conditional: bool,
+        status: Option<u16>,
+        error: impl std::fmt::Display,
+    ) -> BackendError {
+        if was_conditional && matches!(status, Some(409 | 412)) {
+            self.conflict_error(key.to_string())
+        } else {
+            self.network_error(operation, error)
         }
     }
 
@@ -378,14 +407,20 @@ impl BackendAdapter for S3Adapter {
         let requested_key = self.object_key(dst);
         let final_key = self.resolve_write_key(requested_key, &on_conflict).await?;
         if data.len() <= SINGLE_PART_UPLOAD_MAX_BYTES {
-            self.put_object_bytes(&final_key, data).await?;
+            self.put_object_bytes(&final_key, data, &on_conflict)
+                .await?;
         } else {
             let mut chunks = Vec::new();
             for chunk in data.chunks(MULTIPART_CHUNK_BYTES) {
                 chunks.push(chunk.to_vec());
             }
-            self.upload_multipart_chunks(&final_key, chunks, Box::pin(tokio::io::empty()))
-                .await?;
+            self.upload_multipart_chunks(
+                &final_key,
+                chunks,
+                Box::pin(tokio::io::empty()),
+                &on_conflict,
+            )
+            .await?;
         }
 
         Ok(self.next_ticket(OperationKind::Copy))
@@ -400,7 +435,7 @@ impl BackendAdapter for S3Adapter {
     ) -> Result<OperationTicket, BackendError> {
         let requested_key = self.object_key(dst);
         let final_key = self.resolve_write_key(requested_key, &on_conflict).await?;
-        self.upload_from_reader(&final_key, reader, content_length)
+        self.upload_from_reader(&final_key, reader, content_length, &on_conflict)
             .await?;
         Ok(self.next_ticket(OperationKind::Copy))
     }
@@ -523,6 +558,7 @@ impl BackendAdapter for S3Adapter {
         &self,
         session: &MultipartUploadSession,
         parts: Vec<MultipartPart>,
+        on_conflict: ConflictResolution,
     ) -> Result<OperationTicket, BackendError> {
         let completed = parts
             .into_iter()
@@ -537,6 +573,7 @@ impl BackendAdapter for S3Adapter {
             &session.destination.display_path,
             &session.upload_id,
             completed,
+            &on_conflict,
         )
         .await?;
         Ok(self.next_ticket(OperationKind::Copy))
@@ -614,13 +651,21 @@ impl BackendAdapter for S3Adapter {
             .bucket(&self.config.bucket)
             .copy_source(&copy_source)
             .key(&dst_key)
+            .set_if_none_match(
+                (!matches!(options.on_conflict, ConflictResolution::Overwrite)).then(|| "*".into()),
+            )
             .send()
             .await
-            .map_err(|e| {
-                BackendError::Network(NetworkErrorDetail {
-                    message: format!("S3 copy failed: {}", e),
-                    is_timeout: false,
-                })
+            .map_err(|error| {
+                self.write_error(
+                    "copy",
+                    &dst_key,
+                    !matches!(options.on_conflict, ConflictResolution::Overwrite),
+                    error
+                        .raw_response()
+                        .map(|response| response.status().as_u16()),
+                    error,
+                )
             })?;
 
         Ok(self.next_ticket(OperationKind::Copy))

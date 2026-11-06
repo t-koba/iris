@@ -14,6 +14,7 @@ use std::sync::Mutex;
 struct MockHttp {
     responses: Arc<Mutex<VecDeque<Result<HttpResponse, ConnectorError>>>>,
     requests: Arc<Mutex<Vec<(String, String)>>>,
+    conditions: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 impl HttpClient for MockHttp {
@@ -28,6 +29,10 @@ impl HttpClient for MockHttp {
 
 impl HttpConnector for MockHttp {
     fn call(&self, request: HttpRequest) -> HttpConnectorFuture {
+        self.conditions
+            .lock()
+            .unwrap()
+            .push(request.headers().get("if-none-match").map(str::to_owned));
         self.requests
             .lock()
             .unwrap()
@@ -53,6 +58,7 @@ fn adapter(responses: Vec<Result<HttpResponse, ConnectorError>>) -> (S3Adapter, 
     let http = MockHttp {
         responses: Arc::new(Mutex::new(responses.into())),
         requests: Default::default(),
+        conditions: Default::default(),
     };
     let config = aws_sdk_s3::Config::builder()
         .behavior_version(BehaviorVersion::latest())
@@ -253,5 +259,131 @@ async fn overwrite_does_not_depend_on_head() {
         assert_ne!(requests[0].0, "HEAD");
         assert!(requests[0].1.contains("/archive/file.txt"));
         assert!(http.responses.lock().unwrap().is_empty());
+    }
+}
+
+// Simulate a creator winning after HEAD: final conditional writes must reject
+// the race, never fall back to an unconditional write (including Rename).
+#[tokio::test]
+async fn final_writes_are_conditional_except_overwrite() {
+    for policy in POLICIES.into_iter().chain([ConflictResolution::Overwrite]) {
+        for write in WRITES {
+            for status in [200, 409, 412, 501] {
+                let overwrite = matches!(policy, ConflictResolution::Overwrite);
+                let mut responses = Vec::new();
+                if !overwrite {
+                    responses.push(response(404, ""));
+                }
+                if matches!(write, Write::Multipart) {
+                    responses.push(write.success());
+                }
+                responses.push(if status == 200 {
+                    if matches!(write, Write::Multipart) {
+                        response(200, "<CompleteMultipartUploadResult><ETag>test</ETag></CompleteMultipartUploadResult>")
+                    } else {
+                        write.success()
+                    }
+                } else {
+                    response(status, "<Error><Code>ConditionalRequestConflict</Code></Error>")
+                });
+                let expected_requests = responses.len();
+                let (adapter, http) = adapter(responses);
+                let result = if matches!(write, Write::Multipart) {
+                    let session = adapter
+                        .create_multipart_upload(&object("file.txt"), policy.clone())
+                        .await
+                        .unwrap();
+                    adapter
+                        .complete_multipart_upload(&session, vec![], policy.clone())
+                        .await
+                        .map(|_| ())
+                } else {
+                    write.run(&adapter, policy.clone()).await
+                };
+                match (status, overwrite) {
+                    (200, _) => result.unwrap(),
+                    (409 | 412, false) => assert!(
+                        matches!(&result, Err(BackendError::Conflict { object }) if object.display_path == "file.txt"),
+                        "{policy:?} {write:?} {status}: {result:?}"
+                    ),
+                    (409 | 412, true) => assert!(
+                        matches!(&result, Err(BackendError::Network(_))),
+                        "{policy:?} {write:?} {status}: {result:?}"
+                    ),
+                    _ => assert!(matches!(result, Err(BackendError::Network(_)))),
+                }
+                let conditions = http.conditions.lock().unwrap();
+                assert_eq!(
+                    conditions.len(),
+                    expected_requests,
+                    "{policy:?} {write:?} {status}"
+                );
+                assert_eq!(
+                    conditions.last().unwrap().as_deref(),
+                    if overwrite { None } else { Some("*") }
+                );
+                assert!(conditions[..conditions.len() - 1]
+                    .iter()
+                    .all(Option::is_none));
+                assert!(http.responses.lock().unwrap().is_empty());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn streamed_multipart_keeps_policy_and_aborts_after_conflict() {
+    for policy in [ConflictResolution::Fail, ConflictResolution::Overwrite] {
+        for status in [200, 412] {
+            let mut responses = vec![
+                Write::Multipart.success(),
+                response(200, ""), // UploadPart
+                response(
+                    status,
+                    if status == 200 {
+                        "<CompleteMultipartUploadResult><ETag>test</ETag></CompleteMultipartUploadResult>"
+                    } else {
+                        "<Error><Code>PreconditionFailed</Code></Error>"
+                    },
+                ),
+            ];
+            if status == 412 {
+                responses.push(response(204, "")); // AbortMultipartUpload
+            }
+            let (adapter, http) = adapter(responses);
+            let result = adapter
+                .upload_multipart_chunks(
+                    "file.txt",
+                    vec![b"abc".to_vec()],
+                    Box::pin(tokio::io::empty()),
+                    &policy,
+                )
+                .await;
+            let overwrite = matches!(policy, ConflictResolution::Overwrite);
+            if status == 412 && !overwrite {
+                assert!(
+                    matches!(&result, Err(BackendError::Conflict { .. })),
+                    "{policy:?} {status}: {result:?}"
+                );
+            } else if status == 412 {
+                assert!(
+                    matches!(&result, Err(BackendError::Network(_))),
+                    "{policy:?} {status}: {result:?}"
+                );
+            } else {
+                result.unwrap();
+            }
+            let conditions = http.conditions.lock().unwrap();
+            assert_eq!(
+                conditions[2].as_deref(),
+                if matches!(policy, ConflictResolution::Overwrite) {
+                    None
+                } else {
+                    Some("*")
+                }
+            );
+            assert_eq!(conditions.len(), if status == 412 { 4 } else { 3 });
+            assert!(http.responses.lock().unwrap().is_empty());
+        }
     }
 }

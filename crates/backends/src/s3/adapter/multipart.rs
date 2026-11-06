@@ -2,6 +2,7 @@ use super::S3Adapter;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::Future;
 use iris_core_domain::types::error::BackendError;
+use iris_core_domain::types::options::ConflictResolution;
 use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -22,16 +23,30 @@ impl S3Adapter {
         &self,
         key: &str,
         data: Vec<u8>,
+        on_conflict: &ConflictResolution,
     ) -> Result<(), BackendError> {
         self.client()
             .await?
             .put_object()
             .bucket(&self.config.bucket)
             .key(key)
+            .set_if_none_match(
+                (!matches!(on_conflict, ConflictResolution::Overwrite)).then(|| "*".into()),
+            )
             .body(aws_sdk_s3::primitives::ByteStream::from(data))
             .send()
             .await
-            .map_err(|error| self.network_error("put", error))?;
+            .map_err(|error| {
+                self.write_error(
+                    "put",
+                    key,
+                    !matches!(on_conflict, ConflictResolution::Overwrite),
+                    error
+                        .raw_response()
+                        .map(|response| response.status().as_u16()),
+                    error,
+                )
+            })?;
         Ok(())
     }
 
@@ -79,10 +94,14 @@ impl S3Adapter {
         key: &str,
         upload_id: &str,
         parts: Vec<aws_sdk_s3::types::CompletedPart>,
+        on_conflict: &ConflictResolution,
     ) -> Result<(), BackendError> {
         self.client()
             .await?
             .complete_multipart_upload()
+            .set_if_none_match(
+                (!matches!(on_conflict, ConflictResolution::Overwrite)).then(|| "*".into()),
+            )
             .bucket(&self.config.bucket)
             .key(key)
             .upload_id(upload_id)
@@ -93,7 +112,17 @@ impl S3Adapter {
             )
             .send()
             .await
-            .map_err(|error| self.network_error("complete_multipart_upload", error))?;
+            .map_err(|error| {
+                self.write_error(
+                    "complete_multipart_upload",
+                    key,
+                    !matches!(on_conflict, ConflictResolution::Overwrite),
+                    error
+                        .raw_response()
+                        .map(|response| response.status().as_u16()),
+                    error,
+                )
+            })?;
         Ok(())
     }
 
@@ -118,6 +147,7 @@ impl S3Adapter {
         key: &str,
         mut chunks: Vec<Vec<u8>>,
         mut reader: Pin<Box<dyn AsyncRead + Send>>,
+        on_conflict: &ConflictResolution,
     ) -> Result<(), BackendError> {
         let upload_id = self.start_multipart_upload(key).await?;
 
@@ -155,6 +185,7 @@ impl S3Adapter {
                 key,
                 &upload_id,
                 parts.into_iter().map(|(_, part)| part).collect(),
+                on_conflict,
             )
             .await
         }
@@ -171,28 +202,29 @@ impl S3Adapter {
         key: &str,
         mut reader: Pin<Box<dyn AsyncRead + Send>>,
         content_length: Option<u64>,
+        on_conflict: &ConflictResolution,
     ) -> Result<(), BackendError> {
         if content_length.is_some_and(|len| len <= SINGLE_PART_UPLOAD_MAX_BYTES as u64) {
             let small = read_chunk(&mut reader, SINGLE_PART_UPLOAD_MAX_BYTES).await?;
-            return self.put_object_bytes(key, small).await;
+            return self.put_object_bytes(key, small, on_conflict).await;
         }
 
         let first_chunk = read_chunk(&mut reader, MULTIPART_CHUNK_BYTES).await?;
         if first_chunk.is_empty() {
-            return self.put_object_bytes(key, Vec::new()).await;
+            return self.put_object_bytes(key, Vec::new(), on_conflict).await;
         }
 
         if content_length.is_none() && first_chunk.len() < SINGLE_PART_UPLOAD_MAX_BYTES {
             let second_chunk = read_chunk(&mut reader, MULTIPART_CHUNK_BYTES).await?;
             if second_chunk.is_empty() {
-                return self.put_object_bytes(key, first_chunk).await;
+                return self.put_object_bytes(key, first_chunk, on_conflict).await;
             }
             return self
-                .upload_multipart_chunks(key, vec![first_chunk, second_chunk], reader)
+                .upload_multipart_chunks(key, vec![first_chunk, second_chunk], reader, on_conflict)
                 .await;
         }
 
-        self.upload_multipart_chunks(key, vec![first_chunk], reader)
+        self.upload_multipart_chunks(key, vec![first_chunk], reader, on_conflict)
             .await
     }
 }
