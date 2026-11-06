@@ -10,6 +10,5 @@ russh = { workspace = true }
 russh-sftp = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-
-[dev-dependencies]
+getrandom = { workspace = true }
 tempfile = { workspace = true }

@@ -9,7 +9,7 @@ use russh::client;
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::{self, Algorithm, HashAlg};
 use russh_sftp::client::{error::Error as SftpError, RawSftpSession, SftpSession};
-use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
+use russh_sftp::protocol::{FileAttributes, OpenFlags, Packet, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinSet;
 use tracing::debug;
@@ -40,6 +40,10 @@ pub struct SftpTransferEntry {
     pub is_dir: bool,
 }
 
+/// Overwrite-oriented batch transfer. Files are staged individually, not as one
+/// atomic directory transaction. Remote replacement requires the server's
+/// advertised OpenSSH POSIX-rename extension; standard SFTP rename is used only
+/// without replacement. Lost publication replies have an uncertain outcome.
 #[derive(Clone, Debug)]
 pub struct SftpTransferPlan {
     pub mapping: RemoteTransportMapping,
@@ -61,7 +65,111 @@ struct SftpHandlerError(String);
 struct ConnectedSftp {
     _handle: SshHandle,
     session: SftpSession,
-    transfer_session: Arc<RawSftpSession>,
+    transfer_session: Arc<SftpTransferSession>,
+}
+
+// The batch shortcut requests Overwrite only. Standard SFTP v3 rename cannot
+// replace an existing entry; never emulate replacement by unlinking it first.
+struct SftpTransferSession {
+    raw: RawSftpSession,
+    posix_rename: bool,
+}
+
+impl std::ops::Deref for SftpTransferSession {
+    type Target = RawSftpSession;
+
+    fn deref(&self) -> &Self::Target {
+        &self.raw
+    }
+}
+
+impl SftpTransferSession {
+    async fn init(raw: RawSftpSession) -> Result<Arc<Self>, SftpError> {
+        let version = raw.init().await?;
+        Ok(Arc::new(Self {
+            raw,
+            posix_rename: version
+                .extensions
+                .get("posix-rename@openssh.com")
+                .is_some_and(|version| version == "1"),
+        }))
+    }
+
+    async fn publish(&self, staging: &str, destination: &str) -> Result<(), String> {
+        let result = if self.posix_rename {
+            let mut data = Vec::new();
+            for path in [staging, destination] {
+                // SFTP strings have a protocol-defined u32 byte length.
+                let length = u32::try_from(path.len())
+                    .map_err(|_| "SFTP rename path exceeds the protocol string length")?;
+                data.extend_from_slice(&length.to_be_bytes());
+                data.extend_from_slice(path.as_bytes());
+            }
+            match self.raw.extended("posix-rename@openssh.com", data).await {
+                Ok(Packet::Status(status)) if status.status_code == StatusCode::Ok => Ok(()),
+                Ok(Packet::Status(status)) => Err(SftpError::Status(status)),
+                Ok(_) => Err(SftpError::UnexpectedPacket),
+                Err(error) => Err(error),
+            }
+        } else {
+            self.raw.rename(staging, destination).await.map(|_| ())
+        };
+        let rename_strategy = if self.posix_rename {
+            "server-advertised POSIX rename was attempted"
+        } else {
+            "server did not advertise POSIX rename; standard SFTP rename was attempted"
+        };
+        result.map_err(|error| {
+            format!(
+                "failed to publish remote file {destination}: {error}; {rename_strategy}; \
+                 publication outcome may be uncertain and Iris did not unlink the destination"
+            )
+        })
+    }
+}
+
+// Ownership begins only after an exclusive OPEN is acknowledged. A lost OPEN
+// reply can leave staging data, but must never cause deletion of an unowned path.
+struct RemoteStagingFile {
+    session: Arc<SftpTransferSession>,
+    path: String,
+    handle: Option<String>,
+    owned: bool,
+}
+
+impl RemoteStagingFile {
+    async fn cleanup(&mut self, error: String) -> Result<(), String> {
+        let cleanup = self.session.remove(self.path.clone()).await;
+        self.owned = false;
+        match cleanup {
+            Ok(_) => Err(error),
+            Err(cleanup_error) => Err(format!(
+                "{error}; failed to clean SFTP staging file {}: {cleanup_error}",
+                self.path
+            )),
+        }
+    }
+}
+
+impl Drop for RemoteStagingFile {
+    fn drop(&mut self) {
+        if !self.owned {
+            return;
+        }
+        // Cancellation cannot await cleanup. Never publish from this task, and
+        // only remove the exclusively created sibling, not the destination.
+        let session = Arc::clone(&self.session);
+        let path = self.path.clone();
+        let handle = self.handle.take();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Some(handle) = handle {
+                    let _ = session.close(handle).await;
+                }
+                let _ = session.remove(path).await;
+            });
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -264,8 +372,7 @@ async fn connect_sftp(mapping: &RemoteTransportMapping) -> Result<ConnectedSftp,
         .map_err(|error| format!("failed to request SFTP transfer subsystem: {error}"))?;
     let transfer_session = RawSftpSession::new(transfer_channel.into_stream());
     transfer_session.set_timeout(KEEPALIVE_SECS);
-    transfer_session
-        .init()
+    let transfer_session = SftpTransferSession::init(transfer_session)
         .await
         .map_err(|error| format!("failed to initialize SFTP transfer session: {error}"))?;
 
@@ -277,7 +384,7 @@ async fn connect_sftp(mapping: &RemoteTransportMapping) -> Result<ConnectedSftp,
     Ok(ConnectedSftp {
         _handle: handle,
         session,
-        transfer_session: Arc::new(transfer_session),
+        transfer_session,
     })
 }
 
@@ -344,7 +451,7 @@ impl SftpConnectionLease {
             .session
     }
 
-    fn transfer_session(&self) -> Arc<RawSftpSession> {
+    fn transfer_session(&self) -> Arc<SftpTransferSession> {
         Arc::clone(
             &self
                 .connected
@@ -449,7 +556,7 @@ fn sftp_pool_auth_detail(mapping: &RemoteTransportMapping) -> String {
 async fn execute_sftp_entries(
     plan: &SftpTransferPlan,
     session: &SftpSession,
-    transfer_session: Arc<RawSftpSession>,
+    transfer_session: Arc<SftpTransferSession>,
     pipeline_depth: usize,
     progress: &mut SftpPlanProgress,
 ) -> Result<(), String> {
@@ -732,7 +839,7 @@ fn home_dir() -> Option<PathBuf> {
 
 fn upload_directory_tree<'a>(
     session: &'a SftpSession,
-    transfer_session: Arc<RawSftpSession>,
+    transfer_session: Arc<SftpTransferSession>,
     pipeline_depth: usize,
     local_root: &'a Path,
     remote_root: &'a str,
@@ -785,7 +892,7 @@ fn upload_directory_tree<'a>(
 
 fn download_directory_tree<'a>(
     session: &'a SftpSession,
-    transfer_session: Arc<RawSftpSession>,
+    transfer_session: Arc<SftpTransferSession>,
     pipeline_depth: usize,
     remote_root: &'a str,
     local_root: &'a Path,
@@ -844,7 +951,7 @@ fn download_directory_tree<'a>(
 
 async fn upload_file(
     session: &SftpSession,
-    transfer_session: Arc<RawSftpSession>,
+    transfer_session: Arc<SftpTransferSession>,
     pipeline_depth: usize,
     local_path: &Path,
     remote_path: &str,
@@ -856,7 +963,7 @@ async fn upload_file(
 
 async fn download_file(
     session: &SftpSession,
-    transfer_session: Arc<RawSftpSession>,
+    transfer_session: Arc<SftpTransferSession>,
     pipeline_depth: usize,
     remote_path: &str,
     local_path: &Path,
@@ -879,7 +986,7 @@ async fn download_file(
 }
 
 async fn pipelined_upload(
-    session: Arc<RawSftpSession>,
+    session: Arc<SftpTransferSession>,
     local_path: &Path,
     remote_path: &str,
     pipeline_depth: usize,
@@ -899,15 +1006,33 @@ async fn pipelined_upload(
     if !metadata.is_file() {
         return Err(format!("not a local file: {}", local_path.display()));
     }
+    let mut random = [0; 16];
+    getrandom::fill(&mut random)
+        .map_err(|error| format!("failed to name SFTP staging file: {error}"))?;
+    let staging_path = join_remote_path(
+        &remote_parent(remote_path).unwrap_or_default(),
+        &format!(".iris-sftp-{:032x}", u128::from_ne_bytes(random)),
+    );
     let handle = session
         .open(
-            remote_path.to_string(),
-            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+            staging_path.clone(),
+            OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
             FileAttributes::empty(),
         )
         .await
-        .map_err(|error| format!("failed to create remote file {remote_path}: {error}"))?
+        .map_err(|error| {
+            format!(
+                "failed to exclusively create SFTP staging file {staging_path}: {error}; \
+             a lost acknowledgement may leave staging data"
+            )
+        })?
         .handle;
+    let mut staging = RemoteStagingFile {
+        session: Arc::clone(&session),
+        path: staging_path,
+        handle: Some(handle.clone()),
+        owned: true,
+    };
 
     let transfer_result = async {
         let mut writes = JoinSet::new();
@@ -962,22 +1087,71 @@ async fn pipelined_upload(
     }
     .await;
 
-    close_raw_file(
+    let result = close_raw_file(
         &session,
         handle,
         transfer_result,
-        &format!("remote file {remote_path}"),
+        &format!("SFTP staging file {}", staging.path),
     )
-    .await
+    .await;
+    staging.handle = None;
+    let result = match result {
+        Ok(()) => session.publish(&staging.path, remote_path).await,
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(()) => {
+            staging.owned = false;
+            Ok(())
+        }
+        Err(error) => staging.cleanup(error).await,
+    }
+}
+
+// Atomic replacement cannot preserve inode ownership, ACLs or hard links like
+// truncation did. Preserve regular-file rwx bits, but never copy privilege bits
+// onto a new inode. Symlinks are replaced, not followed for permission selection.
+#[cfg(unix)]
+fn download_permissions(local_path: &Path, parent: &Path) -> std::io::Result<std::fs::Permissions> {
+    use std::os::unix::fs::PermissionsExt;
+
+    match std::fs::symlink_metadata(local_path) {
+        Ok(metadata) if metadata.is_file() => {
+            return Ok(std::fs::Permissions::from_mode(
+                metadata.permissions().mode() & 0o777,
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    // Let the filesystem apply 0666-and-umask (and directory defaults) without
+    // reading/changing the process-wide umask. This probe stays empty and is
+    // removed on drop: payload staging must remain private throughout transfer.
+    let probe = tempfile::Builder::new()
+        .prefix(".iris-sftp-mode-")
+        .permissions(std::fs::Permissions::from_mode(0o666))
+        .tempfile_in(parent)?;
+    Ok(probe.as_file().metadata()?.permissions())
 }
 
 async fn pipelined_download(
-    session: Arc<RawSftpSession>,
+    session: Arc<SftpTransferSession>,
     remote_path: &str,
     local_path: &Path,
     file_size: u64,
     pipeline_depth: usize,
 ) -> Result<(), String> {
+    let parent = local_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let staging = tempfile::Builder::new()
+        .prefix(".iris-sftp-")
+        .tempfile_in(parent)
+        .map_err(|error| format!("failed to create local staging file: {error}"))?;
+    let (local_file, staging) = staging.into_parts();
+    let mut local_file = tokio::fs::File::from_std(local_file);
     let handle = session
         .open(
             remote_path.to_string(),
@@ -989,12 +1163,6 @@ async fn pipelined_download(
         .handle;
 
     let transfer_result = async {
-        let mut local_file = tokio::fs::File::create(local_path).await.map_err(|error| {
-            format!(
-                "failed to create local file {}: {error}",
-                local_path.display()
-            )
-        })?;
         local_file.set_len(file_size).await.map_err(|error| {
             format!(
                 "failed to size local file {}: {error}",
@@ -1065,17 +1233,39 @@ async fn pipelined_download(
     }
     .await;
 
-    close_raw_file(
+    let result = close_raw_file(
         &session,
         handle,
         transfer_result,
         &format!("remote file {remote_path}"),
     )
-    .await
+    .await;
+    // Finish Tokio's pending filesystem operations and close the local handle
+    // before installation (also required on Windows).
+    let local_file = local_file.into_std().await;
+    result?;
+    #[cfg(unix)]
+    {
+        let permissions = download_permissions(local_path, parent)
+            .and_then(|permissions| local_file.set_permissions(permissions));
+        permissions.map_err(|error| {
+            format!(
+                "failed to set download permissions for {}: {error}",
+                local_path.display()
+            )
+        })?;
+    }
+    drop(local_file);
+    staging.persist(local_path).map_err(|error| {
+        format!(
+            "failed to publish local file {}: {error}",
+            local_path.display()
+        )
+    })
 }
 
 async fn read_sftp_range(
-    session: Arc<RawSftpSession>,
+    session: Arc<SftpTransferSession>,
     handle: String,
     offset: u64,
     length: usize,
@@ -1286,7 +1476,7 @@ fn join_remote_path(base: &str, segment: &str) -> String {
 mod tests {
     use super::*;
     use crate::RemoteTransportKind;
-    use russh_sftp::protocol::{Data, File, Handle, Name, Status};
+    use russh_sftp::protocol::{Attrs, Data, File, Handle, Name, Status, Version};
     use russh_sftp::server::StatusReply;
     use tokio::sync::Mutex as TokioMutex;
 
@@ -1299,14 +1489,80 @@ mod tests {
     struct MemoryFaults {
         probes: usize,
         fail_probe_at: Option<usize>,
-        fail_close_once: Option<String>,
+        closes: usize,
+        fail_close_at: Option<usize>,
+        fail_publish_reply_for: Option<String>,
+        fail_publish: bool,
+        fail_remove: bool,
+        fail_io: bool,
+        pause_io: bool,
+        no_posix_rename: bool,
+        occupy_staging: bool,
+        listed: HashSet<String>,
         opened: Vec<String>,
+        published: Vec<String>,
+        removed: Vec<String>,
     }
 
     #[derive(Clone, Default)]
     struct MemorySftpServer {
         files: Arc<TokioMutex<HashMap<String, Vec<u8>>>>,
         faults: Arc<Mutex<MemoryFaults>>,
+        io_started: Arc<tokio::sync::Notify>,
+        io_resume: Arc<tokio::sync::Notify>,
+    }
+
+    fn memory_ok(id: u32) -> Status {
+        Status {
+            id,
+            status_code: StatusCode::Ok,
+            error_message: String::new(),
+            language_tag: String::new(),
+        }
+    }
+
+    impl MemorySftpServer {
+        async fn check_io(&self, offset: u64) -> Result<(), StatusReply> {
+            let (pause, fail) = {
+                let faults = self.faults.lock().unwrap();
+                (faults.pause_io, faults.fail_io)
+            };
+            if pause {
+                self.io_started.notify_one();
+                self.io_resume.notified().await;
+            }
+            if fail && offset >= SFTP_PIPELINE_CHUNK_BYTES as u64 {
+                return Err(StatusCode::Failure.with_message("injected transfer failure"));
+            }
+            Ok(())
+        }
+
+        async fn publish(
+            &self,
+            id: u32,
+            old: String,
+            new: String,
+            replace: bool,
+        ) -> Result<Status, StatusReply> {
+            if self.faults.lock().unwrap().fail_publish {
+                return Err(StatusCode::Failure.with_message("injected rename failure"));
+            }
+            let mut files = self.files.lock().await;
+            if !replace && files.contains_key(&new) {
+                return Err(StatusCode::Failure.with_message("destination exists"));
+            }
+            let data = files.remove(&old).ok_or(StatusCode::NoSuchFile)?;
+            files.insert(new.clone(), data);
+            let mut faults = self.faults.lock().unwrap();
+            faults.published.push(new.clone());
+            if faults.fail_publish_reply_for.as_deref() == Some(&new) {
+                faults.fail_publish_reply_for = None;
+                return Err(
+                    StatusCode::Failure.with_message("connection reset (injected after rename)")
+                );
+            }
+            Ok(memory_ok(id))
+        }
     }
 
     impl russh_sftp::server::Handler for MemorySftpServer {
@@ -1314,6 +1570,119 @@ mod tests {
 
         fn unimplemented(&self) -> Self::Error {
             StatusCode::OpUnsupported.into()
+        }
+
+        async fn init(
+            &mut self,
+            _version: u32,
+            _extensions: HashMap<String, String>,
+        ) -> Result<Version, Self::Error> {
+            let mut version = Version::new();
+            if !self.faults.lock().unwrap().no_posix_rename {
+                version
+                    .extensions
+                    .insert("posix-rename@openssh.com".into(), "1".into());
+            }
+            Ok(version)
+        }
+
+        async fn extended(
+            &mut self,
+            id: u32,
+            request: String,
+            data: Vec<u8>,
+        ) -> Result<Packet, Self::Error> {
+            if request != "posix-rename@openssh.com" {
+                return Err(StatusCode::OpUnsupported.into());
+            }
+            let mut input = data.as_slice();
+            let mut paths = Vec::new();
+            for _ in 0..2 {
+                let length = u32::from_be_bytes(input[..4].try_into().unwrap()) as usize;
+                paths.push(String::from_utf8(input[4..4 + length].to_vec()).unwrap());
+                input = &input[4 + length..];
+            }
+            assert!(input.is_empty());
+            self.publish(id, paths[0].clone(), paths[1].clone(), true)
+                .await
+                .map(Packet::Status)
+        }
+
+        async fn rename(
+            &mut self,
+            id: u32,
+            old: String,
+            new: String,
+        ) -> Result<Status, Self::Error> {
+            self.publish(id, old, new, false).await
+        }
+
+        async fn remove(&mut self, id: u32, filename: String) -> Result<Status, Self::Error> {
+            {
+                let mut faults = self.faults.lock().unwrap();
+                faults.removed.push(filename.clone());
+                if faults.fail_remove {
+                    return Err(StatusCode::Failure.with_message("injected cleanup failure"));
+                }
+            }
+            self.files
+                .lock()
+                .await
+                .remove(&filename)
+                .ok_or(StatusCode::NoSuchFile)?;
+            Ok(memory_ok(id))
+        }
+
+        async fn mkdir(
+            &mut self,
+            id: u32,
+            _path: String,
+            _attrs: FileAttributes,
+        ) -> Result<Status, Self::Error> {
+            Ok(memory_ok(id))
+        }
+
+        async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+            let files = self.files.lock().await;
+            let data = files.get(&path).ok_or(StatusCode::NoSuchFile)?;
+            let mut attrs = FileAttributes::empty();
+            attrs.size = Some(data.len() as u64);
+            attrs.set_regular(true);
+            Ok(Attrs { id, attrs })
+        }
+
+        async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
+            self.faults.lock().unwrap().listed.remove(&path);
+            Ok(Handle { id, handle: path })
+        }
+
+        async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, Self::Error> {
+            if !self.faults.lock().unwrap().listed.insert(handle.clone()) {
+                return Err(StatusCode::Eof.into());
+            }
+            let prefix = format!("{handle}/");
+            let mut children = BTreeMap::new();
+            for (path, data) in self.files.lock().await.iter() {
+                if let Some(relative) = path.strip_prefix(&prefix) {
+                    let mut attrs = FileAttributes::empty();
+                    let name = if let Some((dir, _)) = relative.split_once('/') {
+                        attrs.set_dir(true);
+                        dir
+                    } else {
+                        attrs.set_regular(true);
+                        attrs.size = Some(data.len() as u64);
+                        relative
+                    };
+                    children.insert(name.to_string(), attrs);
+                }
+            }
+            Ok(Name {
+                id,
+                files: children
+                    .into_iter()
+                    .map(|(name, attrs)| File::new(name, attrs))
+                    .collect(),
+            })
         }
 
         async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
@@ -1340,6 +1709,14 @@ mod tests {
         ) -> Result<Handle, Self::Error> {
             self.faults.lock().unwrap().opened.push(filename.clone());
             let mut files = self.files.lock().await;
+            if flags.contains(OpenFlags::EXCLUDE) {
+                if self.faults.lock().unwrap().occupy_staging {
+                    files.insert(filename.clone(), b"not owned by Iris".to_vec());
+                }
+                if files.contains_key(&filename) {
+                    return Err(StatusCode::Failure.with_message("exclusive create collision"));
+                }
+            }
             if flags.contains(OpenFlags::TRUNCATE) {
                 files.insert(filename.clone(), Vec::new());
             } else if !files.contains_key(&filename) && !flags.contains(OpenFlags::CREATE) {
@@ -1353,20 +1730,16 @@ mod tests {
             })
         }
 
-        async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
+        async fn close(&mut self, id: u32, _handle: String) -> Result<Status, Self::Error> {
             let mut faults = self.faults.lock().unwrap();
-            if faults.fail_close_once.as_deref() == Some(&handle) {
-                faults.fail_close_once = None;
+            faults.closes += 1;
+            if faults.fail_close_at == Some(faults.closes) {
+                faults.fail_close_at = None;
                 return Err(
                     StatusCode::Failure.with_message("connection reset (injected after close)")
                 );
             }
-            Ok(Status {
-                id,
-                status_code: StatusCode::Ok,
-                error_message: String::new(),
-                language_tag: String::new(),
-            })
+            Ok(memory_ok(id))
         }
 
         async fn read(
@@ -1376,6 +1749,7 @@ mod tests {
             offset: u64,
             len: u32,
         ) -> Result<Data, Self::Error> {
+            self.check_io(offset).await?;
             let files = self.files.lock().await;
             let file = files.get(&handle).ok_or(StatusCode::NoSuchFile)?;
             let start = offset as usize;
@@ -1400,6 +1774,7 @@ mod tests {
             offset: u64,
             data: Vec<u8>,
         ) -> Result<Status, Self::Error> {
+            self.check_io(offset).await?;
             let mut files = self.files.lock().await;
             let file = files.get_mut(&handle).ok_or(StatusCode::NoSuchFile)?;
             let start = offset as usize;
@@ -1408,22 +1783,24 @@ mod tests {
                 file.resize(end, 0);
             }
             file[start..end].copy_from_slice(&data);
-            Ok(Status {
-                id,
-                status_code: StatusCode::Ok,
-                error_message: String::new(),
-                language_tag: String::new(),
-            })
+            Ok(memory_ok(id))
         }
     }
 
-    async fn memory_sftp_session() -> (Arc<RawSftpSession>, MemorySftpServer) {
+    async fn memory_sftp_session() -> (Arc<SftpTransferSession>, MemorySftpServer) {
+        memory_sftp_with_server(MemorySftpServer::default()).await
+    }
+
+    async fn memory_sftp_with_server(
+        handler: MemorySftpServer,
+    ) -> (Arc<SftpTransferSession>, MemorySftpServer) {
         let (client, server) = tokio::io::duplex(4 * 1024 * 1024);
-        let handler = MemorySftpServer::default();
         russh_sftp::server::run(server, handler.clone()).await;
         let session = RawSftpSession::new(client);
-        session.init().await.expect("initialize memory SFTP");
-        (Arc::new(session), handler)
+        let session = SftpTransferSession::init(session)
+            .await
+            .expect("initialize memory SFTP");
+        (session, handler)
     }
 
     async fn memory_control_session(server: &MemorySftpServer) -> SftpSession {
@@ -1586,8 +1963,8 @@ mod tests {
             {
                 let mut faults = server.faults.lock().unwrap();
                 if ambiguous {
-                    // The second payload is committed but its close reply is lost.
-                    faults.fail_close_once = Some("/second".into());
+                    // The second publication committed but its reply is lost.
+                    faults.fail_publish_reply_for = Some("/second".into());
                 } else {
                     faults.fail_probe_at = Some(2);
                 }
@@ -1624,8 +2001,9 @@ mod tests {
                 let control = memory_control_session(&server).await;
                 let (client, stream) = tokio::io::duplex(4 * 1024 * 1024);
                 russh_sftp::server::run(stream, server.clone()).await;
-                let transfer = Arc::new(RawSftpSession::new(client));
-                transfer.init().await.expect("replacement transfer session");
+                let transfer = SftpTransferSession::init(RawSftpSession::new(client))
+                    .await
+                    .expect("replacement transfer session");
                 execute_sftp_entries(
                     &plan,
                     &control,
@@ -1650,7 +2028,13 @@ mod tests {
                 server.files.lock().await.get("/second").unwrap(),
                 b"/second"
             );
-            assert_eq!(server.faults.lock().unwrap().opened, ["/first", "/second"]);
+            let faults = server.faults.lock().unwrap();
+            assert_eq!(faults.published, ["/first", "/second"]);
+            assert_eq!(faults.opened.len(), 2);
+            assert!(faults
+                .opened
+                .iter()
+                .all(|path| path.starts_with("/.iris-sftp-")));
         }
     }
 
@@ -1682,6 +2066,332 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn staged_transfers_preserve_existing_files_on_transfer_and_close_failure() {
+        for upload in [true, false] {
+            for close_failure in [false, true] {
+                let (session, server) = memory_sftp_session().await;
+                let temp = tempfile::tempdir().unwrap();
+                let local = temp.path().join("destination");
+                let payload = vec![42; SFTP_PIPELINE_CHUNK_BYTES + 1];
+                let (local_data, remote_data) = if upload {
+                    (payload.as_slice(), b"existing".as_slice())
+                } else {
+                    (b"existing".as_slice(), payload.as_slice())
+                };
+                tokio::fs::write(&local, local_data).await.unwrap();
+                server
+                    .files
+                    .lock()
+                    .await
+                    .insert("/destination".into(), remote_data.to_vec());
+                {
+                    let mut faults = server.faults.lock().unwrap();
+                    faults.fail_io = !close_failure;
+                    faults.fail_close_at = close_failure.then_some(1);
+                }
+                let result = if upload {
+                    pipelined_upload(Arc::clone(&session), &local, "/destination", 1).await
+                } else {
+                    pipelined_download(
+                        Arc::clone(&session),
+                        "/destination",
+                        &local,
+                        payload.len() as u64,
+                        1,
+                    )
+                    .await
+                };
+                let error = result.expect_err("injected transfer or close failure");
+                assert!(
+                    error.contains(if close_failure {
+                        "failed to close"
+                    } else {
+                        "injected transfer failure"
+                    }),
+                    "{error}"
+                );
+                let files = server.files.lock().await;
+                assert_eq!(files.len(), 1, "remote staging cleaned up");
+                assert_eq!(files["/destination"], remote_data);
+                assert_eq!(tokio::fs::read(&local).await.unwrap(), local_data);
+                assert_eq!(
+                    std::fs::read_dir(temp.path()).unwrap().count(),
+                    1,
+                    "local staging cleaned up"
+                );
+                let faults = server.faults.lock().unwrap();
+                assert!(faults.published.is_empty());
+                if upload {
+                    assert_eq!(faults.removed, faults.opened);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn downloads_preserve_destination_modes_and_keep_partial_content_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for existing_mode in [None, Some(0o640), Some(0o751)] {
+            let (session, server) = memory_sftp_session().await;
+            let temp = tempfile::tempdir().unwrap();
+            let local = temp.path().join("destination");
+            // Compare against ordinary creation without changing the process-wide
+            // umask, which would race other tests. Run under umask 027 to also
+            // distinguish the new-file result from tempfile's default 0600.
+            let reference = temp.path().join("ordinary");
+            std::fs::File::create(&reference).unwrap();
+            let expected = existing_mode.unwrap_or_else(|| {
+                std::fs::metadata(&reference).unwrap().permissions().mode() & 0o777
+            });
+            if let Some(mode) = existing_mode {
+                std::fs::write(&local, b"existing").unwrap();
+                std::fs::set_permissions(&local, std::fs::Permissions::from_mode(mode)).unwrap();
+            }
+            server
+                .files
+                .lock()
+                .await
+                .insert("/source".into(), b"replacement".to_vec());
+            server.faults.lock().unwrap().pause_io = true;
+            let transfer = pipelined_download(Arc::clone(&session), "/source", &local, 11, 1);
+            tokio::pin!(transfer);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    result = &mut transfer => panic!("transfer unexpectedly finished: {result:?}"),
+                    _ = server.io_started.notified() => {}
+                }
+            })
+            .await
+            .expect("reach in-flight read");
+            let staging = std::fs::read_dir(temp.path())
+                .unwrap()
+                .map(Result::unwrap)
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".iris-sftp-")
+                })
+                .expect("private staging file");
+            assert_eq!(staging.metadata().unwrap().permissions().mode() & 0o077, 0);
+            if existing_mode.is_some() {
+                assert_eq!(std::fs::read(&local).unwrap(), b"existing");
+                assert_eq!(
+                    std::fs::metadata(&local).unwrap().permissions().mode() & 0o777,
+                    expected
+                );
+            } else {
+                assert!(!local.exists(), "partial file is not published");
+            }
+            server.faults.lock().unwrap().pause_io = false;
+            server.io_resume.notify_one();
+            transfer.await.expect("publish download");
+            assert_eq!(std::fs::read(&local).unwrap(), b"replacement");
+            assert_eq!(
+                std::fs::metadata(&local).unwrap().permissions().mode() & 0o777,
+                expected
+            );
+            assert_eq!(
+                std::fs::read_dir(temp.path()).unwrap().count(),
+                2,
+                "staging and mode probe removed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_publication_and_cleanup_fail_safely_without_deleting_unowned_files() {
+        for mode in ["rename", "cleanup", "collision", "no-posix"] {
+            let server = MemorySftpServer::default();
+            {
+                let mut faults = server.faults.lock().unwrap();
+                faults.fail_publish = mode == "rename" || mode == "cleanup";
+                faults.fail_remove = mode == "cleanup";
+                faults.occupy_staging = mode == "collision";
+                faults.no_posix_rename = mode == "no-posix";
+            }
+            let (session, server) = memory_sftp_with_server(server).await;
+            let temp = tempfile::tempdir().unwrap();
+            let local = temp.path().join("source");
+            tokio::fs::write(&local, b"replacement").await.unwrap();
+            server
+                .files
+                .lock()
+                .await
+                .insert("/existing".into(), b"keep".to_vec());
+            let error = pipelined_upload(Arc::clone(&session), &local, "/existing", 1)
+                .await
+                .expect_err("publication must fail safely");
+            {
+                let files = server.files.lock().await;
+                assert_eq!(files["/existing"], b"keep");
+                let faults = server.faults.lock().unwrap();
+                assert!(faults.published.is_empty());
+                assert!(!faults.removed.iter().any(|path| path == "/existing"));
+                if mode == "collision" {
+                    assert!(
+                        faults.removed.is_empty(),
+                        "exclusive OPEN did not establish ownership"
+                    );
+                    assert_eq!(files[&faults.opened[0]], b"not owned by Iris");
+                } else if mode == "cleanup" {
+                    assert!(
+                        error.contains("failed to clean SFTP staging file"),
+                        "{error}"
+                    );
+                    assert_eq!(files.len(), 2, "unreachable staging cleanup is reported");
+                } else {
+                    assert_eq!(files.len(), 1);
+                    assert!(
+                        error.contains("publication outcome may be uncertain"),
+                        "{error}"
+                    );
+                    assert!(
+                        error.contains(if mode == "no-posix" {
+                            "server did not advertise POSIX rename"
+                        } else {
+                            "server-advertised POSIX rename was attempted"
+                        }),
+                        "{error}"
+                    );
+                }
+            }
+            if mode == "no-posix" {
+                pipelined_upload(Arc::clone(&session), &local, "/new", 1)
+                    .await
+                    .expect("standard rename can install a new file");
+                assert_eq!(server.files.lock().await["/new"], b"replacement");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_transfer_preserves_destination_and_cleans_staging() {
+        for upload in [true, false] {
+            let (session, server) = memory_sftp_session().await;
+            let temp = tempfile::tempdir().unwrap();
+            let local = temp.path().join("destination");
+            tokio::fs::write(&local, b"local data").await.unwrap();
+            server
+                .files
+                .lock()
+                .await
+                .insert("/destination".into(), b"remote data".to_vec());
+            server.faults.lock().unwrap().pause_io = true;
+            {
+                let transfer = async {
+                    if upload {
+                        pipelined_upload(Arc::clone(&session), &local, "/destination", 1).await
+                    } else {
+                        pipelined_download(Arc::clone(&session), "/destination", &local, 11, 1)
+                            .await
+                    }
+                };
+                tokio::pin!(transfer);
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::select! {
+                        result = &mut transfer => panic!("transfer unexpectedly finished: {result:?}"),
+                        _ = server.io_started.notified() => {}
+                    }
+                }).await.expect("reach in-flight request");
+                // Dropping this future cancels it, rather than allowing a detached
+                // worker to finish the payload and replace the destination.
+            }
+            server.faults.lock().unwrap().pause_io = false;
+            server.io_resume.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let clean = if upload {
+                        server.files.lock().await.len() == 1
+                    } else {
+                        std::fs::read_dir(temp.path()).unwrap().count() == 1
+                    };
+                    if clean {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("best-effort cancellation cleanup");
+            assert_eq!(server.files.lock().await["/destination"], b"remote data");
+            assert_eq!(tokio::fs::read(&local).await.unwrap(), b"local data");
+            assert!(server.faults.lock().unwrap().published.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn recursive_transfers_stage_siblings_and_publish_individual_files() {
+        let (session, server) = memory_sftp_session().await;
+        let control = memory_control_session(&server).await;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        tokio::fs::create_dir_all(source.join("nested/deeper"))
+            .await
+            .unwrap();
+        tokio::fs::write(source.join("nested/deeper/payload"), b"new data")
+            .await
+            .unwrap();
+        tokio::fs::write(source.join("empty"), []).await.unwrap();
+        server
+            .files
+            .lock()
+            .await
+            .insert("/tree/nested/deeper/payload".into(), b"old remote".to_vec());
+        upload_directory_tree(
+            &control,
+            Arc::clone(&session),
+            1,
+            &source,
+            "/tree",
+            &mut RemoteDirCreateCache::default(),
+        )
+        .await
+        .unwrap();
+        {
+            let files = server.files.lock().await;
+            assert_eq!(files.len(), 2);
+            assert_eq!(files["/tree/nested/deeper/payload"], b"new data");
+            assert!(files["/tree/empty"].is_empty());
+            let faults = server.faults.lock().unwrap();
+            assert!(faults
+                .opened
+                .iter()
+                .any(|path| path.starts_with("/tree/nested/deeper/.iris-sftp-")));
+        }
+        tokio::fs::create_dir_all(destination.join("nested/deeper"))
+            .await
+            .unwrap();
+        tokio::fs::write(destination.join("nested/deeper/payload"), b"old local")
+            .await
+            .unwrap();
+        download_directory_tree(&control, Arc::clone(&session), 1, "/tree", &destination)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read(destination.join("nested/deeper/payload"))
+                .await
+                .unwrap(),
+            b"new data"
+        );
+        assert!(tokio::fs::read(destination.join("empty"))
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            std::fs::read_dir(destination.join("nested/deeper"))
+                .unwrap()
+                .count(),
+            1
+        );
+        control.close().await.unwrap();
+        session.close_session().unwrap();
+    }
+
+    #[tokio::test]
     async fn pipelined_transfer_round_trips_multiple_windows_and_short_reads() {
         let (session, server) = memory_sftp_session().await;
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1695,6 +2405,12 @@ mod tests {
             .await
             .expect("write source");
 
+        server
+            .files
+            .lock()
+            .await
+            .insert("/roundtrip.bin".into(), b"old remote".to_vec());
+        tokio::fs::write(&destination, b"old local").await.unwrap();
         pipelined_upload(
             Arc::clone(&session),
             &source,
