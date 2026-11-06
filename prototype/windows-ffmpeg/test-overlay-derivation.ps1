@@ -1,0 +1,47 @@
+# Bounded offline regression: exercises the real rewrite, no native build.
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'derive-ffmpeg-overlay.ps1')
+$commit = 'db8537d8cc7962bd3d07254d6ceff21d888817d4'
+$repo = 'https://git.ffmpeg.org/ffmpeg.git'
+$helper = 'cmake_parse_arguments(PARSE_ARGV 0 "arg" "" "OUT_SOURCE_PATH;URL;REF;FETCH_REF;HEAD_REF" "PATCHES")'
+# Representative baseline shape, not a claim to be the exact upstream port.
+$port = @'
+set(KEEP_CONFIG unchanged)
+vcpkg_from_github(
+    OUT_SOURCE_PATH SOURCE_PATH
+    REPO ffmpeg/ffmpeg
+    REF "n${VERSION}"
+    SHA512 HASH
+    HEAD_REF master
+    PATCHES
+        z-first.patch # retained CMake comment
+        "a-second.patch"
+)
+set(KEEP_REF "REF unchanged")
+'@ -replace 'HASH', ('a' * 128)
+foreach ($inputPort in @($port, $port.Replace('REPO ffmpeg/ffmpeg', 'REPO "ffmpeg/ffmpeg"'), $port.Replace("`n", "`r`n"))) {
+    $result = ConvertTo-PrototypeFfmpegPort $inputPort $helper $repo $commit
+    if (($result.Patches -join ',') -cne 'z-first.patch,a-second.patch') { throw 'patch order changed' }
+    $expected = $inputPort.Replace('vcpkg_from_github(', 'vcpkg_from_git(')
+    $expected = $expected.Replace('REPO ffmpeg/ffmpeg', "URL $repo").Replace('REPO "ffmpeg/ffmpeg"', "URL $repo")
+    $expected = $expected.Replace('REF "n${VERSION}"', "REF $commit")
+    $expected = $expected -replace '(?m)^    SHA512 [a-f0-9]+\r?\n', ''
+    if ($result.Portfile -cne $expected) { throw 'rewrite modified unrelated config/patch text or used invalid fetch parameters' }
+}
+foreach ($bad in @($port.Replace('REPO ffmpeg/ffmpeg', 'URL bogus'), $port.Replace('z-first.patch', '../escape.patch'), $port.Replace('HEAD_REF master', 'UNKNOWN argument'), ($port + "`nvcpkg_from_git(`n)`n"))) {
+    $rejected = $false
+    try { ConvertTo-PrototypeFfmpegPort $bad $helper $repo $commit | Out-Null } catch { $rejected = $true }
+    if (!$rejected) { throw 'accepted unsupported baseline fetch' }
+}
+$rejected = $false
+try { ConvertTo-PrototypeFfmpegPort $port ($helper.Replace(';URL;', ';REPO;')) $repo $commit | Out-Null } catch { $rejected = $true }
+if (!$rejected) { throw 'accepted incompatible helper signature' }
+
+# Guard discovery and sequential patch application in the caller without builds.
+$build = Get-Content -Raw (Join-Path $PSScriptRoot 'build-windows-ffmpeg-prototype.ps1')
+$stage = Get-Content -Raw (Join-Path $PSScriptRoot 'stage-windows-prototype-app.ps1')
+foreach ($script in @($build, $stage)) {
+    if ($script -notmatch '\$installedDir = Join-Path .* "installed"' -or $script -notmatch '\$env:VCPKGRS_TRIPLET = \$effectiveTriplet') { throw 'Rust discovery root/triplet regression' }
+}
+if ($build -notmatch '(?s)foreach \(\$name in \$derived.Patches\).*git apply --check.*git apply --whitespace=nowarn \$patchPath') { throw 'patch validation is not sequential in declared order' }
+Write-Host 'prototype overlay/discovery regressions passed (no native build)'

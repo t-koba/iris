@@ -1,0 +1,16 @@
+# Prototype-only Visual C++ redistributable allowlist (matched case-insensitively).
+# Only the documented VC/UCRT redistributable DLLs belong here. Unknown CRTs
+# (for example msvcr120.dll, vcruntime140d.dll, msvcp140d.dll) must never be
+# treated as OS DLLs; the inventory script fails closed on any CRT import that
+# is neither staged nor listed here.
+# Staged FFmpeg / PDFium / Iris DLLs must never be added here.
+# `*` is a wildcard for the api-ms-win CRT contract sets.
+# This is an initial documented set. It changes only from measured Windows
+# evidence (installed VC Redist version); unknown imports fail closed.
+msvcrt.dll            # legacy CRT (only if measured; prefer Universal CRT)
+vcruntime140.dll      # VS redistributable CRT
+vcruntime140_1.dll    # VS redistributable CRT (x64 exception handling)
+msvcp140.dll          # VS redistributable C++ standard library
+concrt140.dll         # VS concurrency runtime (only if measured)
+ucrtbase.dll          # Universal CRT
+api-ms-win-crt-*.dll  # Universal CRT contracts

@@ -1,0 +1,158 @@
+name: Windows FFmpeg prototype
+
+# Isolated, non-publishing prototype for the Windows default-preview
+# investigation. Path-scoped: runs for prototype, workflow, and app-build input
+# changes. Never publishes, never touches release packaging
+# (.github/workflows/release.yml, scripts/package-windows.ps1,
+# scripts/windows-installer.iss are intentionally untouched).
+on:
+  push:
+    paths:
+      - "prototype/windows-ffmpeg/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "crates/**"
+      - "assets/**"
+      - ".github/workflows/windows-ffmpeg-prototype.yml"
+  pull_request:
+    paths:
+      - "prototype/windows-ffmpeg/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "crates/**"
+      - "assets/**"
+      - ".github/workflows/windows-ffmpeg-prototype.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prototype:
+    # Explicit Windows Server 2022 runner track (not windows-latest). The
+    # hosted image behind windows-2022 can still change: assertions pin the
+    # OS build and VS major and record exact observed tools for review; exact
+    # image/tool minor pins require a measured runner result first.
+    runs-on: windows-2022
+    env:
+      CARGO_TERM_COLOR: always
+      # Isolated checkout: Rust and vcpkg both use its installed/ tree.
+      VCPKG_ROOT: ${{ github.workspace }}/.vcpkg-prototype
+      VCPKG_INSTALLED_DIR: ${{ github.workspace }}/.vcpkg-prototype/installed
+      VCPKG_TARGET_TRIPLET: x64-windows-prototype-dynamic
+      VCPKG_DEFAULT_TRIPLET: x64-windows-prototype-dynamic
+      VCPKGRS_TRIPLET: x64-windows-prototype-dynamic
+      VCPKGRS_DYNAMIC: "1"
+      IRIS_PROTOTYPE_TRIPLET: x64-windows-prototype-dynamic
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check prototype overlay derivation (no native build)
+        shell: pwsh
+        run: ./prototype/windows-ffmpeg/test-overlay-derivation.ps1
+
+      - name: Check installed-smoke evidence lifecycle (no native build)
+        shell: pwsh
+        run: ./prototype/windows-ffmpeg/test-installed-smoke-lifecycle.ps1
+
+      # Pinned vcpkg source checkout at the exact baseline from pins.json.
+      # Fail-closed: the build gate verifies HEAD == baseline before any build.
+      - name: Checkout pinned vcpkg source
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          ref: b8dfe957ec8b5c0ef5c4b31eea594b8486af744f
+          path: .vcpkg-prototype
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bootstrap pinned vcpkg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:VCPKG_ROOT)) { throw "VCPKG_ROOT is not set" }
+          if (!(Test-Path -LiteralPath $env:VCPKG_ROOT -PathType Container)) { throw "VCPKG_ROOT missing: $env:VCPKG_ROOT" }
+          $bootstrap = Join-Path $env:VCPKG_ROOT "bootstrap-vcpkg.bat"
+          if (!(Test-Path -LiteralPath $bootstrap -PathType Leaf)) { throw "bootstrap-vcpkg.bat missing: $bootstrap" }
+          & $bootstrap
+          if ($LASTEXITCODE -ne 0) { throw "pinned vcpkg bootstrap failed: $LASTEXITCODE" }
+          $exe = Join-Path $env:VCPKG_ROOT "vcpkg.exe"
+          if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw "vcpkg.exe missing after bootstrap: $exe" }
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg --version failed" }
+
+      # MSVC developer environment (x64) so cl.exe/dumpbin are on PATH.
+      - name: Set up MSVC developer environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-ffmpeg-prototype-cargo
+
+      - name: Assert pinned Windows Server 2022 toolchain
+        shell: pwsh
+        run: ./prototype/windows-ffmpeg/assert-windows-toolchain-prototype.ps1
+
+      - name: Pinned FFmpeg source and toolchain gate
+        shell: pwsh
+        run: ./prototype/windows-ffmpeg/build-windows-ffmpeg-prototype.ps1
+
+      - name: Stage pinned Windows PDFium runtime
+        shell: pwsh
+        run: ./prototype/windows-ffmpeg/stage-windows-pdfium-prototype.ps1
+
+      - name: Stage test-only prototype app
+        shell: pwsh
+        run: ./prototype/windows-ffmpeg/stage-windows-prototype-app.ps1
+
+      - name: Inventory PE imports
+        shell: pwsh
+        run: ./prototype/windows-ffmpeg/inventory-windows-imports.ps1
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install innosetup --version=6.7.1 --allow-downgrade --yes --no-progress
+          if ($LASTEXITCODE -notin @(0, 3010)) { throw "Inno Setup installation failed: $LASTEXITCODE" }
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6/ISCC.exe"
+          if (!(Test-Path -LiteralPath $iscc -PathType Leaf)) { throw "ISCC.exe missing after install: $iscc" }
+          & $iscc /? 2>&1 | Select-Object -First 3
+          exit 0
+
+      - name: Clean-installed preview smoke (video, PDF, RAW)
+        shell: pwsh
+        run: ./prototype/windows-ffmpeg/smoke-windows-installed-previews.ps1
+
+      # Bounded prototype evidence only. Never release artifacts, never dist/,
+      # never publishing. Runs on success and failure for diagnosis.
+      - name: Upload bounded prototype evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-prototype-evidence
+          path: |
+            target/prototype-windows-ffmpeg/**
+            target/prototype-windows-pdfium/PROVENANCE.json
+            target/prototype-windows-pdfium/pdfium-members.txt
+            target/prototype-windows-app/PROTOTYPE-APP.json
+            target/prototype-windows-app/IMPORT-CLOSURE.json
+            target/prototype-windows-installer/**
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 9

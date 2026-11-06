@@ -1,0 +1,21 @@
+{
+  "$comment": "Single source of truth for the isolated Windows preview prototype. Test-only; never a release payload.",
+  "ffmpeg": {
+    "repository": "https://git.ffmpeg.org/ffmpeg.git",
+    "commit": "db8537d8cc7962bd3d07254d6ceff21d888817d4",
+    "note": "Exact later commit under investigation. The pinned vcpkg FFmpeg port is for 9.0.2; do not claim its patches apply here."
+  },
+  "vcpkg": {
+    "repository": "https://github.com/microsoft/vcpkg",
+    "baseline": "b8dfe957ec8b5c0ef5c4b31eea594b8486af744f"
+  },
+  "pdfium": {
+    "release": "chromium/8138",
+    "version": "159.0.8138.0",
+    "asset": "pdfium-win-x64.tgz",
+    "bytes": 4031929,
+    "sha256": "8d48973e3eb472dda0f5f2435e595ac043f9f2219dd71883392f549445afa8a5",
+    "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8138/pdfium-win-x64.tgz"
+  },
+  "triplet": "x64-windows"
+}

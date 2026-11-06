@@ -1,0 +1,30 @@
+# Prototype-only Windows OS DLL allowlist (matched case-insensitively).
+# Only genuine Windows OS components belong here. Visual C++ redistributable
+# CRT DLLs belong in windows-vc-redist-allowlist.txt, never here.
+# Staged FFmpeg / PDFium / Iris DLLs must never be added here; they live in
+# the prototype app directory and are resolved there first.
+# `*` is a wildcard for the api-ms-win versioned contract sets.
+# This is an initial documented set. It changes only from measured Windows
+# evidence; the inventory script fails closed on any other import.
+kernel32.dll          # process, memory, files
+ntdll.dll             # NT syscalls
+user32.dll            # windowing (Rust std / winit)
+gdi32.dll             # GDI (software rendering fallback)
+advapi32.dll          # registry, crypto APIs
+ole32.dll             # COM
+oleaut32.dll          # COM automation
+shell32.dll           # shell APIs
+comdlg32.dll          # common dialogs (file picker)
+winmm.dll             # multimedia timer
+version.dll           # version resources
+ws2_32.dll            # Winsock (Rust std networking)
+mswsock.dll           # Winsock extensions
+bcrypt.dll            # CNG (Rust crypto)
+crypt32.dll           # certificate store
+secur32.dll           # SSPI
+ncrypt.dll            # CNG router
+api-ms-win-core-*.dll # Windows core contracts (OS only; CRT contracts are in the VC list)
+d3d11.dll             # Direct3D 11 (FFmpeg hwaccel; OS component only)
+dxgi.dll              # DXGI (FFmpeg hwaccel; OS component only)
+mfplat.dll            # Media Foundation platform (only if measured)
+propsys.dll           # property system (only if measured)

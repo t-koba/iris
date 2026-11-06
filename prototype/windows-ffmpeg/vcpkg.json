@@ -1,0 +1,13 @@
+{
+  "$comment": "Prototype-only vcpkg manifest. LGPL-only/default library features plus one test-only ffmpeg executable feature for deterministic smoke-video generation. No gpl, nonfree, or broad all feature is requested.",
+  "name": "iris-windows-ffmpeg-prototype",
+  "version": "0.0.0",
+  "builtin-baseline": "b8dfe957ec8b5c0ef5c4b31eea594b8486af744f",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": true,
+      "features": ["ffmpeg"]
+    }
+  ]
+}

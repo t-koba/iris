@@ -1,0 +1,13 @@
+[package]
+name = "iris-windows-prototype-preview-smoke"
+version = "0.0.0"
+edition = "2021"
+
+# Detached prototype-only package: not a member of the product workspace and
+# never a release payload. It exercises the product default preview APIs only
+# (video + pdf + raw-full, never minimal).
+[workspace]
+
+[dependencies]
+iris-thumb-preview = { path = "../../../crates/thumb-preview", features = ["test-fixtures", "video", "pdf", "raw-full"] }
+tokio-util = "0.7"
