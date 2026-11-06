@@ -46,6 +46,66 @@ class Audit:
             self.records.append(record)
             self.used += size
 
+    @staticmethod
+    def sha256_file(path):
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def pdfium_attestation(self, docs, library):
+        result = dict(attestation_verified=False, attestation_status="unknown",
+                      asset_sha256=None, library_sha256=None,
+                      attestation_pin_sha256=None,
+                      note="staged PDFium provenance is missing or invalid")
+        provenance = Path(docs) / "PROVENANCE.json"
+        try:
+            with provenance.open("rb") as stream:
+                raw = stream.read(self.args.max_command_bytes + 1)
+            if len(raw) > self.args.max_command_bytes:
+                return result
+            record = json.loads(raw)
+            if not isinstance(record, dict) or record.get("schema") != 1:
+                return result
+            archive = record.get("archive")
+            runtime = record.get("runtime")
+            attestation = record.get("attestation")
+            if not all(isinstance(item, dict) for item in (archive, runtime, attestation)):
+                return result
+            asset_sha256 = archive.get("sha256")
+            runtime_sha256 = runtime.get("sha256")
+            attestation_pin_sha256 = attestation.get("pin_sha256")
+            if (archive.get("asset") not in ("pdfium-linux-x64.tgz", "pdfium-linux-arm64.tgz")
+                    or type(archive.get("bytes")) is not int or archive["bytes"] < 1
+                    or not isinstance(asset_sha256, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", asset_sha256)
+                    or attestation.get("subject_sha256") != asset_sha256
+                    or not isinstance(attestation_pin_sha256, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", attestation_pin_sha256)
+                    or runtime.get("path") != "usr/lib/iris/libpdfium.so"
+                    or not isinstance(runtime_sha256, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", runtime_sha256)):
+                return result
+            actual_library_sha256 = self.sha256_file(library)
+            if actual_library_sha256 != runtime_sha256:
+                return result
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            return result
+
+        status = attestation.get("status")
+        if status not in ("verified", "not_attempted"):
+            return result
+        result.update(attestation_status=status, asset_sha256=asset_sha256,
+                      library_sha256=actual_library_sha256,
+                      attestation_pin_sha256=attestation_pin_sha256)
+        if status == "verified":
+            result.update(attestation_verified=True,
+                          note="staged provenance records successful verification for this exact archive digest")
+        else:
+            result.update(note="staged provenance records that upstream attestation verification was not attempted")
+        return result
+
     def command(self, *argv):
         # Temp output is deleted here, including on timeout; retain only bounded text.
         with tempfile.TemporaryFile() as output:
@@ -278,11 +338,10 @@ def main():
     if args.platform == "linux":
         app = directory / "Iris.AppDir"
         audit.add("build", variant="product", features="Cargo defaults", opt_level="s")
-        audit.add("provenance-check", subject="PDFium",
-                  attestation_verified=os.environ.get("IRIS_PDFIUM_ATTESTATION_VERIFIED") == "true",
-                  note="A manual package audit verifies the pinned asset size/digest but does not receive a GitHub token for attestation verification; tag releases verify the upstream attestation in preflight.")
-        audit.linux([app / "usr/bin/Iris", app / "usr/lib/iris/libpdfium.so"])
         docs = app / "usr/share/doc/iris/pdfium"
+        audit.add("provenance-check", subject="PDFium",
+                  **audit.pdfium_attestation(docs, app / "usr/lib/iris/libpdfium.so"))
+        audit.linux([app / "usr/bin/Iris", app / "usr/lib/iris/libpdfium.so"])
         if not docs.is_dir():
             audit.add("missing", path=str(docs), reason="PDFium provenance/license directory absent")
         else:

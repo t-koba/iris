@@ -78,12 +78,28 @@ else
     fi
 fi
 
-if [[ ${IRIS_VERIFY_PDFIUM_PROVENANCE:-0} == 1 ]]; then
+verify_provenance=${IRIS_VERIFY_PDFIUM_PROVENANCE:-0}
+case "$verify_provenance" in
+    0|1) ;;
+    *)
+        echo "IRIS_VERIFY_PDFIUM_PROVENANCE must be 0 or 1" >&2
+        exit 1
+        ;;
+esac
+
+attestation_status=not_attempted
+if [[ $verify_provenance == 1 ]]; then
+    [[ -n ${GH_TOKEN:-} ]] || {
+        echo "GH_TOKEN is required to verify PDFium build provenance" >&2
+        exit 1
+    }
     command -v gh >/dev/null 2>&1 || {
         echo "gh is required to verify PDFium build provenance" >&2
         exit 1
     }
+    # With set -e, a failed verification exits before any successful status is recorded.
     gh attestation verify "$tarball" --repo bblanchon/pdfium-binaries
+    attestation_status=verified
 fi
 
 extract=$(mktemp -d)
@@ -125,8 +141,28 @@ Asset bytes:    $asset_bytes
 Asset sha256:   $asset_sha256
 Download:       $url
 Release:        immutable GitHub release by bblanchon/pdfium-binaries
-Attestation:    pdfium-attestation.json sha256 $pdfium_attestation_sha256
+Attestation digest pin: $pdfium_attestation_sha256
+Attestation verification: $attestation_status (subject sha256 $asset_sha256)
 Library sha256: $library_sha256
 License:        see LICENSE and licenses/ in this directory
 PROVENANCE
+cat > "$doc_dir/PROVENANCE.json" <<PROVENANCE_JSON
+{
+  "schema": 1,
+  "archive": {
+    "asset": "$asset",
+    "bytes": $asset_bytes,
+    "sha256": "$asset_sha256"
+  },
+  "runtime": {
+    "path": "usr/lib/iris/libpdfium.so",
+    "sha256": "$library_sha256"
+  },
+  "attestation": {
+    "status": "$attestation_status",
+    "pin_sha256": "$pdfium_attestation_sha256",
+    "subject_sha256": "$asset_sha256"
+  }
+}
+PROVENANCE_JSON
 echo "staged PDFium $pdfium_version in $lib_dir"

@@ -30,11 +30,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      attestations: read
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
       version: ${{ steps.source.outputs.version }}
-      pdfium_attestation_verified: ${{ steps.pdfium.outputs.attestation_verified }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -65,17 +63,6 @@ jobs:
             echo "release tags must point to a commit reachable from main" >&2
             exit 1
           fi
-
-      - name: Verify pinned PDFium runtime
-        id: pdfium
-        env:
-          IRIS_VERIFY_PDFIUM_PROVENANCE: ${{ github.event_name == 'push' && '1' || '0' }}
-          GH_TOKEN: ${{ github.event_name == 'push' && github.token || '' }}
-        run: |
-          ./scripts/fetch-pdfium-runtime.sh "$RUNNER_TEMP/iris-pdfium-preflight"
-          test -f "$RUNNER_TEMP/iris-pdfium-preflight/usr/lib/iris/libpdfium.so"
-          test -f "$RUNNER_TEMP/iris-pdfium-preflight/usr/share/doc/iris/pdfium/LICENSE"
-          echo "attestation_verified=$([[ $IRIS_VERIFY_PDFIUM_PROVENANCE == 1 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: Check tag matches crate version
         if: github.event_name == 'push'
@@ -161,7 +148,6 @@ jobs:
     needs: release-preflight
     env:
       IRIS_RELEASE_VERSION: ${{ needs.release-preflight.outputs.version }}
-      IRIS_PDFIUM_ATTESTATION_VERIFIED: ${{ needs.release-preflight.outputs.pdfium_attestation_verified }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -188,7 +174,13 @@ jobs:
           sudo apt-get install -y zsh pkg-config clang ffmpeg dpkg-dev \
             libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev
-      - name: Package Linux AppDir
+      - name: Package Linux AppDir for manual audit
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          IRIS_VERIFY_PDFIUM_PROVENANCE: "0"
+        run: ./scripts/package-linux-appdir.sh
+      - name: Package Linux AppDir for tagged release
+        if: github.event_name == 'push'
         env:
           IRIS_VERIFY_PDFIUM_PROVENANCE: "1"
           GH_TOKEN: ${{ github.token }}

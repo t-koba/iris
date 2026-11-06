@@ -149,10 +149,57 @@ class Reports(unittest.TestCase):
                 report.windows(path)
             self.assertTrue(any(r["kind"] == "missing" for r in report.records))
 
+    def test_pdfium_attestation_requires_matching_staged_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            docs = Path(directory) / "usr/share/doc/iris/pdfium"
+            library = Path(directory) / "usr/lib/iris/libpdfium.so"
+            docs.mkdir(parents=True)
+            library.parent.mkdir(parents=True)
+            library.write_bytes(b"staged PDFium bytes")
+            asset_sha256 = hashlib.sha256(b"pinned archive").hexdigest()
+            library_sha256 = hashlib.sha256(library.read_bytes()).hexdigest()
+            record = {
+                "schema": 1,
+                "archive": {"asset": "pdfium-linux-x64.tgz", "bytes": 1234,
+                            "sha256": asset_sha256},
+                "runtime": {"path": "usr/lib/iris/libpdfium.so",
+                            "sha256": library_sha256},
+                "attestation": {"status": "verified", "pin_sha256": "1" * 64,
+                                "subject_sha256": asset_sha256},
+            }
+            provenance = docs / "PROVENANCE.json"
+            report = audit(max_command_bytes=4096)
+            provenance.write_text(json.dumps(record), encoding="utf-8")
+            verified = report.pdfium_attestation(docs, library)
+            self.assertTrue(verified["attestation_verified"])
+            self.assertEqual(verified["asset_sha256"], asset_sha256)
+            self.assertEqual(verified["library_sha256"], library_sha256)
+            self.assertEqual(verified["attestation_pin_sha256"], "1" * 64)
+
+            record["attestation"]["status"] = "not_attempted"
+            provenance.write_text(json.dumps(record), encoding="utf-8")
+            manual = report.pdfium_attestation(docs, library)
+            self.assertFalse(manual["attestation_verified"])
+            self.assertEqual(manual["attestation_status"], "not_attempted")
+
+            record["attestation"]["status"] = "failed"
+            provenance.write_text(json.dumps(record), encoding="utf-8")
+            failed = report.pdfium_attestation(docs, library)
+            self.assertFalse(failed["attestation_verified"])
+            self.assertEqual(failed["attestation_status"], "unknown")
+
+            record["attestation"]["status"] = "verified"
+            record["runtime"]["sha256"] = "0" * 64
+            provenance.write_text(json.dumps(record), encoding="utf-8")
+            mismatch = report.pdfium_attestation(docs, library)
+            self.assertFalse(mismatch["attestation_verified"])
+            self.assertEqual(mismatch["attestation_status"], "unknown")
+
     def test_cli_missing_outputs_is_bounded_evidence_not_approval(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "audit.json"
-            with patch.dict(os.environ, {"IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES": "8192"}):
+            with patch.dict(os.environ, {"IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES": "8192",
+                                         "IRIS_PDFIUM_ATTESTATION_VERIFIED": "true"}):
                 subprocess.run([sys.executable, str(ROOT / "scripts/release-audit.py"), "linux",
                                 "--output", str(output)], cwd=directory, check=True)
             self.assertLessEqual(output.stat().st_size, 8192)
@@ -161,6 +208,7 @@ class Reports(unittest.TestCase):
             self.assertIn("NOT approval", report["records"][0]["note"])
             pdfium = next(r for r in report["records"] if r["kind"] == "provenance-check")
             self.assertFalse(pdfium["attestation_verified"])
+            self.assertEqual(pdfium["attestation_status"], "unknown")
 
 
 class Workflow(unittest.TestCase):
@@ -192,8 +240,31 @@ class Workflow(unittest.TestCase):
             self.assertIn("python scripts/release-audit.py " + platform, job)
         self.assertEqual(self.source.count("contents: write"), 1)
         self.assertIn("github.event_name == 'push' && secrets.IRIS_MACOS_SIGN_IDENTITY", self.source)
-        self.assertIn("github.event_name == 'push' && github.token", self.source)
+        linux = self.jobs["package-linux"]
+        manual = linux.split("      - name: Package Linux AppDir for manual audit\n", 1)[1].split("      - name:", 1)[0]
+        tagged = linux.split("      - name: Package Linux AppDir for tagged release\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("if: github.event_name == 'workflow_dispatch'", manual)
+        self.assertIn('IRIS_VERIFY_PDFIUM_PROVENANCE: "0"', manual)
+        self.assertNotIn("GH_TOKEN", manual)
+        self.assertIn("run: ./scripts/package-linux-appdir.sh", manual)
+        self.assertIn("if: github.event_name == 'push'", tagged)
+        self.assertIn('IRIS_VERIFY_PDFIUM_PROVENANCE: "1"', tagged)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", tagged)
+        self.assertIn("run: ./scripts/package-linux-appdir.sh", tagged)
+        self.assertEqual(self.source.count("GH_TOKEN:"), 1)
+        self.assertNotIn("IRIS_PDFIUM_ATTESTATION_VERIFIED", self.source)
+        self.assertNotIn("pdfium_attestation_verified", self.source)
         self.assertIn("vars.IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES", self.source)
+
+    def test_failed_pdfium_verification_cannot_be_written_as_verified(self):
+        fetch = (ROOT / "scripts/fetch-pdfium-runtime.sh").read_text()
+        self.assertIn("set -euo pipefail", fetch)
+        self.assertIn("[[ -n ${GH_TOKEN:-} ]]", fetch)
+        verify = fetch.index('gh attestation verify "$tarball" --repo bblanchon/pdfium-binaries')
+        success = fetch.index("attestation_status=verified")
+        metadata = fetch.index('cat > "$doc_dir/PROVENANCE.json"')
+        self.assertLess(verify, success)
+        self.assertLess(success, metadata)
 
     def test_tag_ancestry_and_version_checks_still_fail_closed(self):
         preflight = self.jobs["release-preflight"]
