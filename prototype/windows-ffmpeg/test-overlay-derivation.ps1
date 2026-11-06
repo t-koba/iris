@@ -19,7 +19,12 @@ vcpkg_from_github(
 )
 set(KEEP_REF "REF unchanged")
 '@ -replace 'HASH', ('a' * 128)
-foreach ($inputPort in @($port, $port.Replace('REPO ffmpeg/ffmpeg', 'REPO "ffmpeg/ffmpeg"'), $port.Replace("`n", "`r`n"))) {
+# PowerShell may preserve checkout line endings in the here-string. Normalize
+# first so the CRLF case is exactly CRLF, never CRCRLF.
+$portLf = $port.Replace("`r`n", "`n").Replace("`r", "")
+$portCrLf = $portLf.Replace("`n", "`r`n")
+$quotedPort = $portLf.Replace('REPO ffmpeg/ffmpeg', 'REPO "ffmpeg/ffmpeg"')
+foreach ($inputPort in @($portLf, $quotedPort, $portCrLf)) {
     $result = ConvertTo-PrototypeFfmpegPort $inputPort $helper $repo $commit
     if (($result.Patches -join ',') -cne 'z-first.patch,a-second.patch') { throw 'patch order changed' }
     $expected = $inputPort.Replace('vcpkg_from_github(', 'vcpkg_from_git(')
@@ -40,8 +45,10 @@ if (!$rejected) { throw 'accepted incompatible helper signature' }
 # Guard discovery and sequential patch application in the caller without builds.
 $build = Get-Content -Raw (Join-Path $PSScriptRoot 'build-windows-ffmpeg-prototype.ps1')
 $stage = Get-Content -Raw (Join-Path $PSScriptRoot 'stage-windows-prototype-app.ps1')
-foreach ($script in @($build, $stage)) {
-    if ($script -notmatch '\$installedDir = Join-Path .* "installed"' -or $script -notmatch '\$env:VCPKGRS_TRIPLET = \$effectiveTriplet') { throw 'Rust discovery root/triplet regression' }
+$smoke = Get-Content -Raw (Join-Path $PSScriptRoot 'smoke-windows-installed-previews.ps1')
+foreach ($script in @($build, $stage, $smoke)) {
+    if ($script -notmatch '\$env:VCPKGRS_TRIPLET = \$effectiveTriplet' -or $script -notmatch 'VCPKG_INSTALLED_DIR must equal VCPKG_ROOT/installed') { throw 'Rust discovery root/triplet regression' }
 }
+if ($build -notmatch '\$installedDir = Join-Path \$vcpkgRoot "installed"' -or $stage -notmatch '\$installedDir = Join-Path \(Resolve-Path \$env:VCPKG_ROOT\)\.Path "installed"' -or $smoke -notmatch '\$installedDirEnv = Join-Path \$vcpkgRoot "installed"') { throw 'Rust discovery must use VCPKG_ROOT/installed' }
 if ($build -notmatch '(?s)foreach \(\$name in \$derived.Patches\).*git apply --check.*git apply --whitespace=nowarn \$patchPath') { throw 'patch validation is not sequential in declared order' }
 Write-Host 'prototype overlay/discovery regressions passed (no native build)'

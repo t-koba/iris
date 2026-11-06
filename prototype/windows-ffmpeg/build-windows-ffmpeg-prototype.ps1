@@ -80,16 +80,18 @@ if ([Environment]::GetEnvironmentVariable("VCPKGRS_DYNAMIC") -ne "1") {
 $env:VCPKGRS_TRIPLET = $effectiveTriplet
 
 # Tool versions are logged; assert the measured OS/VS bounds in the workflow gate. Exact minor pins remain unconfigured until a Windows runner is measured.
-foreach ($tool in @("git", "cmake", "ninja")) {
+foreach ($tool in @("git", "cmake", "ninja", "python")) {
     if (!(Get-Command $tool -ErrorAction SilentlyContinue)) { throw "required tool is missing: $tool" }
 }
 Write-Host "--- tool versions ---"
 $gitVer = ((git --version) 2>&1 | Out-String).Trim()
 $cmakeVer = ((cmake --version 2>&1 | Select-Object -First 1 | Out-String)).Trim()
 $ninjaVer = ((ninja --version) 2>&1 | Out-String).Trim()
+$pythonVer = ((python --version) 2>&1 | Out-String).Trim()
 Write-Host $gitVer
 Write-Host $cmakeVer
 Write-Host $ninjaVer
+Write-Host $pythonVer
 $cl = Get-Command "cl.exe" -ErrorAction SilentlyContinue
 if ($cl) {
     Write-Host ("cl: " + $cl.Source)
@@ -264,6 +266,16 @@ $overlayRaw | Out-File -Encoding utf8 (Join-Path $evidenceDir "overlay-portfile.
     patches = $patchResults
 } | ConvertTo-Json -Depth 6 | Out-File -Encoding utf8 (Join-Path $evidenceDir "overlay.json")
 
+# Retain deterministic pristine source + exact baseline port/patches + recipe.
+$sourceBundle = Join-Path $evidenceDir "source-bundle"
+& python (Join-Path $scriptDir "source-bundle.py") create $workDir $vcpkgRoot $overlayPortDir $sourceBundle
+if ($LASTEXITCODE -ne 0) { throw "prototype FFmpeg source bundle generation/verification failed" }
+$sourceBundleManifest = Join-Path $sourceBundle "MANIFEST.json"
+$sourceBundleRecord = [ordered]@{
+    sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceBundleManifest).Hash.ToLowerInvariant()
+    bytes = (Get-Item -LiteralPath $sourceBundleManifest).Length
+}
+
 # --- Install/build FFmpeg from the exact pinned commit via the overlay ---
 New-Item -ItemType Directory -Force -Path $installedDir | Out-Null
 $installLog = Join-Path $evidenceDir "vcpkg-install.log"
@@ -340,9 +352,10 @@ $buildconfRaw | Select-Object -First 1 | ForEach-Object { Write-Host $_ }
     triplet = $effectiveTriplet
     linkage = "dynamic"
     features = "default-only plus test-only ffmpeg executable (no gpl, nonfree, all)"
-    tools = [ordered]@{ git = $gitVer; cmake = $cmakeVer; ninja = $ninjaVer; cl = $clOut }
+    tools = [ordered]@{ git = $gitVer; cmake = $cmakeVer; ninja = $ninjaVer; python = $pythonVer; cl = $clOut }
     overlay = [ordered]@{ dir = $overlayPortDir; portfile_sha256 = $overlayPortfileHash; baseline_portfile_sha256 = $baselinePortfileHash }
     install = [ordered]@{ root = $installedDir; bin = $tripletBin; dlls = @($dllRecords); tool = "$ffmpegExe" }
+    source_bundle_manifest = $sourceBundleRecord
     buildconf = ($buildconfRaw -split "`n" | Select-Object -First 5)
     note = "Prototype-only exact-commit FFmpeg build evidence. No licensing conclusion."
 } | ConvertTo-Json -Depth 8 | Out-File -Encoding utf8 (Join-Path $evidenceDir "ffmpeg-build.json")

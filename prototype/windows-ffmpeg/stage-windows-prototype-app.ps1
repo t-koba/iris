@@ -89,6 +89,12 @@ Copy-Item -LiteralPath $pdfiumDll -Destination (Join-Path $appDir "pdfium.dll") 
 # Source / license / notice material plus tested config evidence (copies only; no licensing conclusion).
 $docDir = Join-Path $appDir "doc"
 New-Item -ItemType Directory -Force -Path $docDir | Out-Null
+# Manifest identity is bound by the successful build record. Verify every input
+# before copying and again in app/doc; missing material is never optional.
+$bundleRecord = $build.source_bundle_manifest
+if (!$bundleRecord -or !$bundleRecord.sha256 -or !$bundleRecord.bytes) { throw "refusing to stage: source bundle manifest identity missing" }
+& python (Join-Path $scriptDir "source-bundle.py") stage (Join-Path $ffmpegDir "source-bundle") (Join-Path $docDir "ffmpeg-source-bundle") $bundleRecord.sha256 $bundleRecord.bytes
+if ($LASTEXITCODE -ne 0) { throw "refusing to stage: source bundle missing or hash/byte mismatch" }
 Copy-Item -LiteralPath $pinsPath -Destination (Join-Path $docDir "pins.json") -Force
 Copy-Item -LiteralPath (Join-Path $scriptDir "vcpkg.json") -Destination (Join-Path $docDir "vcpkg.json") -Force
 Copy-Item -LiteralPath (Join-Path $scriptDir "vcpkg-configuration.json") -Destination (Join-Path $docDir "vcpkg-configuration.json") -Force

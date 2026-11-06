@@ -43,7 +43,7 @@ behavior, or licensing conclusions, and it never publishes.
 - Runner: `windows-2022` (Windows Server 2022, Build 20348, VS2022 17.x);
   `windows-latest` is never used. GitHub's `windows-2022` image label is still
   mutable: the gate asserts OS build and VS major and records the exact
-  observed compiler/SDK/Git/CMake/Ninja versions, but does not yet pin their
+  observed compiler/SDK/Git/CMake/Ninja/Python versions, but does not yet pin their
   minor versions or a runner-image revision. Capture a Windows run before
   establishing those assertions. Rust 1.97.1, Inno Setup 6.7.1.
 
@@ -51,7 +51,7 @@ behavior, or licensing conclusions, and it never publishes.
 
 1. `assert-windows-toolchain-prototype.ps1` (workflow): asserts Server 2022
    caption/build/arch, `cl.exe` on PATH via the MSVC setup step, VS2022
-   17.x via `vswhere`, `git`/`cmake`/`ninja` presence with logged versions,
+   17.x via `vswhere`, `git`/`cmake`/`ninja`/`python` presence with logged versions,
    `VCPKG_ROOT` HEAD == pinned baseline with bootstrapped `vcpkg.exe`, and
    the prototype triplet env (`VCPKGRS_DYNAMIC=1`). Records
    `target/prototype-windows-ffmpeg/toolchain.json`.
@@ -123,20 +123,56 @@ behavior, or licensing conclusions, and it never publishes.
    `raw-full` path. Writes `smoke-result.json` for the bounded evidence
    upload.
 
-## Validation status (this change)
+## Evidence boundaries
 
-No Windows step was run in this change (Linux-only host). In particular:
+The offline fixtures check script behavior and bundle integrity; they do not
+prove a Windows-native build, runtime DLL closure, PDFium loading, installer
+behavior, or installed preview success. Those results require the path-scoped
+workflow on the exact source snapshot and its retained evidence artifacts.
+Only a completed native build and clean-installed smoke can establish those
+prototype observations; neither those observations nor copied notices are a
+licensing, signing, notarization, or SmartScreen conclusion.
 
-- None of the `.ps1` scripts, the Inno installer build, the PE import
-  inventory, or the installed smoke were executed on `windows-2022`.
-- The `preview-smoke` crate was formatted and its workspace-adjacent checks
-  run on Linux where feasible (see the finish summary); its Windows run is
-  left for the path-scoped prototype CI.
-- `cargo fmt --check` and the workspace `clippy` acceptance commands were
-  run on Linux; the prototype PowerShell is validated by inspection and the
-  toolchain-assertion gate on Windows.
-- The OS and VC allowlists are documented starting sets only. They change
-  solely from measured Windows evidence via the inventory failure output.
+The Windows OS and VC runtime import allowlists are documented starting sets.
+They may be revised only from measured `dumpbin` evidence, never to turn an
+unknown import into an assumed system dependency.
+
+## Retained FFmpeg source material
+
+The build creates `target/prototype-windows-ffmpeg/source-bundle/` before
+installing FFmpeg. It contains:
+
+- `ffmpeg-db8537d8cc7962bd3d07254d6ceff21d888817d4.tar`: a deterministic,
+  uncompressed `git archive` of the exact upstream commit tree, with a fixed
+  prefix and tar permissions. It reads the commit, not the patched worktree.
+- `baseline/ports/ffmpeg/`: every tracked file from the exact pinned vcpkg
+  baseline, including its original portfile, manifest and retained patches;
+  `baseline/scripts/cmake/vcpkg_from_git.cmake` identifies the fetch helper.
+  These are Git blob bytes, not potentially CRLF-converted checkout copies.
+- `overlay/ffmpeg/`: the actual generated port, manifest and patch/config
+  files used for the prototype. Retained patches must match the baseline
+  except for checkout line endings; both byte forms are hashed separately.
+- `build-inputs/`: pins, vcpkg manifest/configuration, custom dynamic triplet,
+  source/overlay/build/toolchain scripts, workflow and this recipe. The
+  sibling `ffmpeg-build.json`, `ffmpeg-buildconf.txt` and `toolchain.json`
+  evidence records the observed build/tools; runner/tool minor versions are
+  not yet reproducibly pinned.
+
+`MANIFEST.json` records SHA-256 and byte count for every included input, the
+source/baseline commits, and the original PATCHES text (comments included)
+plus its ordered file list. No timestamps or absolute local paths enter this
+manifest. The successful build record binds its hash and byte count. Staging
+requires that identity and verifies all required files, patches and hashes
+before and after copying to app `doc/ffmpeg-source-bundle/`. The prototype
+installer recursively includes that directory; the evidence artifact retains
+both the generated bundle and the staged app-doc copy. Missing or altered
+material fails staging instead of silently omitting source.
+
+This is FFmpeg source material and the prototype recipe, **not complete source
+for other dependencies**, vcpkg tooling or SDKs. It makes no licensing/legal
+compliance conclusion and does not change production packaging. Windows
+bundle generation, native compilation and installed-package contents still
+require evidence from the Windows prototype run.
 
 ## Non-goals
 
@@ -152,7 +188,17 @@ No Windows step was run in this change (Linux-only host). In particular:
 Run `pwsh -File prototype/windows-ffmpeg/test-overlay-derivation.ps1` to test
 quoted/unquoted baseline REPO rewriting, parameter rejection, unchanged config,
 patch order, and discovery wiring without downloading or building native code.
-The prototype workflow runs this before the native gates. Its fixture is not
-upstream provenance: the build gate reads the actual pinned port/helper and
-fails closed on an unsupported shape. A local static check is not evidence of
-a successful Windows build or installed previews.
+Run `pwsh -File prototype/windows-ffmpeg/test-installed-smoke-lifecycle.ps1`
+for bounded install/smoke/uninstall/cleanup fault-injection checks. Run
+`python prototype/windows-ffmpeg/test-source-bundle.py` for offline source
+bundle and hash-verification fixtures. The workflow runs all three before
+native gates. Fixtures are not upstream provenance: the build gate reads the
+actual pinned port/helper and bundle inputs, then fails closed on unsupported
+shapes or hash drift. These local checks do not establish a Windows build or
+installed previews.
+
+Run `python prototype/windows-ffmpeg/test-source-bundle.py` for bounded offline
+archive determinism, pristine-tree, ordered-patch/comment, missing/corrupted
+material and package/evidence wiring guards. It uses a synthetic local Git
+repository, not upstream provenance, and does not build Windows code. Python 3
+and Git are required for source-bundle generation and verification.

@@ -24,16 +24,18 @@ if ($build -ne "20348") { throw "prototype requires Server 2022 build 20348; got
 if ($arch -notmatch "64-bit") { throw "prototype requires 64-bit OS; got '$arch'" }
 
 # --- Required tools must exist; versions are logged for evidence ---
-foreach ($tool in @("git", "cmake", "ninja")) {
+foreach ($tool in @("git", "cmake", "ninja", "python")) {
     if (!(Get-Command $tool -ErrorAction SilentlyContinue)) { throw "required tool is missing: $tool" }
 }
 Write-Host "--- tool versions ---"
 $gitVer = (git --version) 2>&1 | Out-String
 $cmakeVer = (cmake --version 2>&1 | Select-Object -First 1) | Out-String
 $ninjaVer = (ninja --version) 2>&1 | Out-String
+$pythonVer = (python --version) 2>&1 | Out-String
 Write-Host $gitVer.Trim()
 Write-Host $cmakeVer.Trim()
 Write-Host $ninjaVer.Trim()
+Write-Host $pythonVer.Trim()
 
 # --- MSVC: cl.exe must be on PATH via the Developer prompt step ---
 $cl = Get-Command "cl.exe" -ErrorAction SilentlyContinue
@@ -96,7 +98,7 @@ Write-Host "prototype toolchain assertion passed (Server 2022 + VS2022 + pinned 
 [ordered]@{
     schema = 1
     os = [ordered]@{ caption = $caption; build = $build; arch = $arch }
-    tools = [ordered]@{ git = $gitVer.Trim(); cmake = $cmakeVer.Trim(); ninja = $ninjaVer.Trim(); cl = $clOut.Trim() }
+    tools = [ordered]@{ git = $gitVer.Trim(); cmake = $cmakeVer.Trim(); ninja = $ninjaVer.Trim(); python = $pythonVer.Trim(); cl = $clOut.Trim() }
     vs = [ordered]@{ path = $vsPath; version = $vsVer; sdk = $sdkNote; vcTools = $vcTools }
     vcpkg = [ordered]@{ root = $vcpkgRoot; baseline = $vcpkgBaseline; head = $vcpkgHead }
     triplet = "x64-windows-prototype-dynamic"

@@ -7,6 +7,8 @@ import unittest
 ROOT = Path(__file__).resolve().parent
 SMOKE = (ROOT / "smoke-windows-installed-previews.ps1").read_text()
 LIFECYCLE = (ROOT / "installed-smoke-lifecycle.ps1").read_text()
+BUILD = (ROOT / "build-windows-ffmpeg-prototype.ps1").read_text()
+STAGE = (ROOT / "stage-windows-prototype-app.ps1").read_text()
 
 
 class SmokeEvidenceTests(unittest.TestCase):
@@ -23,6 +25,14 @@ class SmokeEvidenceTests(unittest.TestCase):
         self.assertIn('} catch {\n    $evidence.result = "fail"', SMOKE[success:])
         self.assertIn('} finally {\n    $evidence | ConvertTo-Json', SMOKE[success:])
         self.assertNotIn('result = "pass"', LIFECYCLE)
+
+    def test_all_cargo_builds_use_root_installed_and_custom_triplet(self):
+        for source in (BUILD, STAGE, SMOKE):
+            self.assertIn('$env:VCPKGRS_TRIPLET = $effectiveTriplet', source)
+            self.assertIn('VCPKG_INSTALLED_DIR must equal VCPKG_ROOT/installed', source)
+        self.assertIn('Join-Path $vcpkgRoot "installed"', BUILD)
+        self.assertIn('Join-Path (Resolve-Path $env:VCPKG_ROOT).Path "installed"', STAGE)
+        self.assertIn('Join-Path $vcpkgRoot "installed"', SMOKE)
 
     def test_cleanup_does_not_hide_uninstall_failure(self):
         self.assertIn("} finally {", LIFECYCLE)

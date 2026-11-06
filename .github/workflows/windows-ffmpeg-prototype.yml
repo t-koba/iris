@@ -63,6 +63,10 @@ jobs:
         shell: pwsh
         run: ./prototype/windows-ffmpeg/test-installed-smoke-lifecycle.ps1
 
+      - name: Check source bundle requirements (offline, no native build)
+        shell: pwsh
+        run: python ./prototype/windows-ffmpeg/test-source-bundle.py
+
       # Pinned vcpkg source checkout at the exact baseline from pins.json.
       # Fail-closed: the build gate verifies HEAD == baseline before any build.
       - name: Checkout pinned vcpkg source
@@ -150,6 +154,7 @@ jobs:
             target/prototype-windows-ffmpeg/**
             target/prototype-windows-pdfium/PROVENANCE.json
             target/prototype-windows-pdfium/pdfium-members.txt
+            target/prototype-windows-app/doc/ffmpeg-source-bundle/**
             target/prototype-windows-app/PROTOTYPE-APP.json
             target/prototype-windows-app/IMPORT-CLOSURE.json
             target/prototype-windows-installer/**

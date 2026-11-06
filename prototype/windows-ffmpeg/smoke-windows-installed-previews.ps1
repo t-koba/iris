@@ -75,17 +75,26 @@ try {
     $evidence.video_tool = $prototypeFfmpegExe
 
     # Same prototype env for the detached smoke build (dynamic linkage, isolated install).
-    $installedDirEnv = $env:VCPKG_INSTALLED_DIR
-    if ([string]::IsNullOrWhiteSpace($installedDirEnv)) { $installedDirEnv = Join-Path $repoRoot "target/prototype-vcpkg-installed" }
+    if ([string]::IsNullOrWhiteSpace($env:VCPKG_ROOT) -or !(Test-Path -LiteralPath $env:VCPKG_ROOT -PathType Container)) {
+        throw "VCPKG_ROOT is required for detached smoke vcpkg discovery"
+    }
+    $vcpkgRoot = (Resolve-Path $env:VCPKG_ROOT).Path
+    $installedDirEnv = Join-Path $vcpkgRoot "installed"
+    if ($env:VCPKG_INSTALLED_DIR -and [IO.Path]::GetFullPath($env:VCPKG_INSTALLED_DIR) -ne [IO.Path]::GetFullPath($installedDirEnv)) {
+        throw "VCPKG_INSTALLED_DIR must equal VCPKG_ROOT/installed for Rust discovery"
+    }
     $effectiveTriplet = $env:VCPKG_TARGET_TRIPLET
     if ([string]::IsNullOrWhiteSpace($effectiveTriplet)) { $effectiveTriplet = $env:IRIS_PROTOTYPE_TRIPLET }
     if ([string]::IsNullOrWhiteSpace($effectiveTriplet)) { $effectiveTriplet = "x64-windows-prototype-dynamic" }
+    if ($effectiveTriplet -ne "x64-windows-prototype-dynamic") { throw "prototype install triplet drifted: $effectiveTriplet" }
+    if ($env:VCPKGRS_TRIPLET -and $env:VCPKGRS_TRIPLET -ne $effectiveTriplet) { throw "VCPKGRS_TRIPLET mismatch" }
     $env:VCPKGRS_DYNAMIC = "1"
     $env:VCPKG_TARGET_TRIPLET = $effectiveTriplet
     $env:VCPKG_DEFAULT_TRIPLET = $effectiveTriplet
+    $env:VCPKGRS_TRIPLET = $effectiveTriplet
     $env:VCPKG_INSTALLED_DIR = $installedDirEnv
     $env:IRIS_PROTOTYPE_FFMPEG_EXE = $prototypeFfmpegExe
-    Write-Host "smoke build env: VCPKGRS_DYNAMIC=1 triplet=$effectiveTriplet installed=$installedDirEnv"
+    Write-Host "smoke build vcpkg discovery: $vcpkgRoot/installed/$env:VCPKGRS_TRIPLET (dynamic)"
     cargo build --locked --release --manifest-path $smokeManifest
     if ($LASTEXITCODE -ne 0) { throw "prototype preview-smoke build failed" }
     $smokeExe = Join-Path $scriptDir "preview-smoke/target/release/iris-windows-prototype-preview-smoke.exe"
