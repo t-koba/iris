@@ -563,17 +563,9 @@ where
     let message_id = state.reserve_message_id(request.credit_charge);
     let charged = request.credit_charge.max(1);
     state.available_credits = state.available_credits.saturating_sub(charged);
-    let request_signing_key = request
-        .signing_after_send
-        .as_ref()
-        .map(|pending_key| {
-            derive_smb2_signing_key(
-                &pending_key.session_key,
-                pending_key.dialect,
-                &state.preauth_integrity_hash,
-            )
-        })
-        .transpose()?;
+    // The pending key comes from the final authentication token; the server cannot
+    // install it until it processes this SESSION_SETUP. Use it only after send, so
+    // the final response can be verified with the derived session key.
     let packet = match encode_request_packet(
         request.command,
         message_id,
@@ -581,7 +573,7 @@ where
         &request.body,
         request.credit_charge,
         request.header_tree_id,
-        request_signing_key.as_ref(),
+        None,
     ) {
         Ok(packet) => packet,
         Err(error) => {

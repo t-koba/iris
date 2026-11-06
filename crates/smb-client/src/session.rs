@@ -253,11 +253,7 @@ mod tests {
             let second_header = Smb2Header::decode(&second).expect("second header");
             assert_eq!(second_header.command, Smb2Command::SessionSetup);
             assert_eq!(second_header.session_id, session_id);
-            assert_eq!(second_header.flags & SMB2_FLAGS_SIGNED, SMB2_FLAGS_SIGNED);
-            assert!(
-                verify_smb2_packet_hmac_sha256(&expected_session_base_key(), &second)
-                    .expect("verify final session setup request")
-            );
+            assert_eq!(second_header.flags & SMB2_FLAGS_SIGNED, 0);
             let second_body =
                 Smb2SessionSetupRequest::decode(&second[SMB2_HEADER_BYTES..]).expect("second body");
             assert!(second_body
@@ -390,17 +386,7 @@ mod tests {
             let second_header = Smb2Header::decode(&second).expect("second header");
             assert_eq!(second_header.command, Smb2Command::SessionSetup);
             assert_eq!(second_header.session_id, session_id);
-            assert_eq!(second_header.flags & SMB2_FLAGS_SIGNED, SMB2_FLAGS_SIGNED);
-            let pre_final_hash =
-                smb311_preauth_hash_sequence([first.as_slice(), challenge_response.as_slice()]);
-            assert!(derive_smb2_signing_key(
-                &expected_session_base_key(),
-                Smb2Dialect::Smb311,
-                &pre_final_hash,
-            )
-            .expect("derive pre-final signing key")
-            .verify_packet(&second)
-            .expect("verify final session setup request"));
+            assert_eq!(second_header.flags & SMB2_FLAGS_SIGNED, 0);
             let second_body =
                 Smb2SessionSetupRequest::decode(&second[SMB2_HEADER_BYTES..]).expect("second body");
             assert!(second_body
