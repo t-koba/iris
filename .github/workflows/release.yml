@@ -161,21 +161,8 @@ jobs:
           dpkg-deb --contents "$deb"
           dpkg-deb --contents "$deb" | grep -F 'usr/lib/iris/libpdfium.so'
           dpkg-deb --contents "$deb" | grep -F 'usr/share/doc/iris/pdfium/LICENSE'
-          sudo apt-get install -y "./$deb"
-          trap 'sudo rm -f /usr/bin/iris-pdfium-smoke; sudo apt-get remove -y iris' EXIT
-          test -x /usr/bin/Iris
-          test -f /usr/share/applications/iris.desktop
-          test -f /usr/share/doc/iris/pdfium/LICENSE
-          cmp dist/linux/Iris.AppDir/usr/bin/Iris /usr/bin/Iris
-          cmp dist/linux/Iris.AppDir/usr/lib/iris/libpdfium.so /usr/lib/iris/libpdfium.so
-          sudo cp target/package-linux/release/examples/pdf_thumbnail_smoke /usr/bin/iris-pdfium-smoke
-          sudo chmod 0755 /usr/bin/iris-pdfium-smoke
-          /usr/bin/iris-pdfium-smoke
-          sudo rm -f /usr/bin/iris-pdfium-smoke
-          sudo apt-get remove -y iris
-          trap - EXIT
-          test ! -e /usr/bin/Iris
-          test ! -e /usr/lib/iris/libpdfium.so
+          ./scripts/smoke-linux-deb.sh "$deb" dist/linux/Iris.AppDir \
+            target/package-linux/release/examples/pdf_thumbnail_smoke
           echo "arch=$arch" >> "$GITHUB_OUTPUT"
       - name: Generate Linux checksums
         run: |
