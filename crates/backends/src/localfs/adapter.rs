@@ -1,4 +1,7 @@
-use crate::common::{open_file_for_read, write_range_to_file, write_stream_to_file};
+use crate::common::{
+    create_file_for_write, open_file_for_read, rename_no_replace, write_range_to_file,
+    write_stream_to_open_file,
+};
 use crate::localfs::capabilities::localfs_capabilities;
 use crate::localfs::reflink::{platform_may_support_reflink, try_reflink_copy};
 use crate::localfs::stable_id::get_stable_id;
@@ -14,8 +17,8 @@ use iris_core_domain::types::options::{ConflictResolution, CopyOptions, DeleteMo
 use iris_core_domain::types::progress::ByteRange;
 use iris_core_domain::types::read_handle::ReadHandle;
 use iris_core_domain::types::session::BackendSession;
-use iris_platform_integration::copy::{platform_copy, stream_file_copy};
-use iris_platform_integration::path::{ensure_within, unique_sibling_path};
+use iris_platform_integration::copy::{platform_copy_blocking, stream_file_copy_blocking};
+use iris_platform_integration::path::{ensure_within, numbered_sibling_path};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -55,7 +58,7 @@ pub struct LocalFsAdapter {
     root: PathBuf,
     backend_id: BackendId,
     can_clone: bool,
-    /// NFS mount: no trash, range writes or reflink.
+    /// NFS mount: no trash, range writes, reflink or unverified no-replace mutations.
     network_mount: bool,
     ticket_counter: AtomicU64,
     list_cursors: Mutex<LocalListCursorRegistry>,
@@ -137,6 +140,7 @@ impl LocalFsAdapter {
         }
     }
 
+    /// NFS mutations with Fail/Skip/Rename fail closed; server-side exclusion is unverified.
     pub fn nfs_mount(root: PathBuf, backend_id: BackendId) -> Self {
         Self {
             root,
@@ -151,6 +155,35 @@ impl LocalFsAdapter {
     fn resolve(&self, object: &ObjectRef) -> Result<PathBuf, BackendError> {
         let relative = Path::new(&object.display_path);
         ensure_within(&self.root, relative).map_err(|e| BackendError::Internal(Box::new(e)))
+    }
+
+    fn check_conflict_support(&self, resolution: &ConflictResolution) -> Result<(), BackendError> {
+        // A local rename flag does not establish server-side exclusion on arbitrary NFS.
+        // Until that protocol guarantee is verified, reject rather than emulate replacement.
+        if self.network_mount && !matches!(resolution, ConflictResolution::Overwrite) {
+            return Err(BackendError::Unsupported {
+                operation: "atomic non-overwrite mutation on NFS share",
+            });
+        }
+        Ok(())
+    }
+
+    fn early_conflict(
+        dst_path: &Path,
+        display_path: &str,
+        resolution: &ConflictResolution,
+    ) -> Result<(), BackendError> {
+        // Inexpensive pre-check so existing Fail/Skip targets never stage payloads.
+        // Uses symlink_metadata so directories and dangling links count as occupied.
+        // The final no-replace install remains the authority and closes races.
+        if matches!(
+            resolution,
+            ConflictResolution::Fail | ConflictResolution::Skip
+        ) && std::fs::symlink_metadata(dst_path).is_ok()
+        {
+            return Err(conflict_for(display_path));
+        }
+        Ok(())
     }
 
     fn next_ticket(&self, kind: OperationKind) -> OperationTicket {
@@ -445,44 +478,53 @@ impl BackendAdapter for LocalFsAdapter {
         data: Vec<u8>,
         on_conflict: ConflictResolution,
     ) -> Result<OperationTicket, BackendError> {
-        let dst_path = self.resolve(dst)?;
-        let final_dst = handle_conflict(&dst_path, &on_conflict)?;
-        debug!(
-            backend_id = %self.backend_id,
-            path_hash = %iris_core_domain::observability::path_hash(&dst.display_path),
-            bytes = data.len(),
-            "backend.localfs.write_object"
-        );
-
-        if let Some(parent) = final_dst.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|e| BackendError::Internal(Box::new(e)))?;
-        }
-
-        fs::write(&final_dst, data)
-            .await
-            .map_err(|e| BackendError::Internal(Box::new(e)))?;
-
-        Ok(self.next_ticket(OperationKind::Copy))
+        let len = data.len() as u64;
+        self.write_from_reader(
+            dst,
+            Box::pin(std::io::Cursor::new(data)),
+            Some(len),
+            on_conflict,
+        )
+        .await
     }
 
     async fn write_from_reader(
         &self,
         dst: &ObjectRef,
         reader: Pin<Box<dyn AsyncRead + Send>>,
-        _content_length: Option<u64>,
+        content_length: Option<u64>,
         on_conflict: ConflictResolution,
     ) -> Result<OperationTicket, BackendError> {
         let dst_path = self.resolve(dst)?;
-        let final_dst = handle_conflict(&dst_path, &on_conflict)?;
+        self.check_conflict_support(&on_conflict)?;
+        Self::early_conflict(&dst_path, &dst.display_path, &on_conflict)?;
         debug!(
             backend_id = %self.backend_id,
             path_hash = %iris_core_domain::observability::path_hash(&dst.display_path),
-            content_length = _content_length,
+            content_length = content_length,
             "backend.localfs.write_stream"
         );
-        write_stream_to_file(&final_dst, reader, _content_length).await?;
+        let open_dst = dst_path.clone();
+        let open_mode = on_conflict.clone();
+        let open_display = dst.display_path.clone();
+        // Keep path creation and its owner on the same worker: a cancelled future must not
+        // clean staging before a detached filesystem call has finished creating it.
+        let (target, file) = tokio::task::spawn_blocking(move || {
+            Self::early_conflict(&open_dst, &open_display, &open_mode)?;
+            let target = WriteDestination::new(&open_dst, &open_mode)?;
+            if let Some(parent) = target.path().parent() {
+                std::fs::create_dir_all(parent).map_err(|e| BackendError::Internal(Box::new(e)))?;
+            }
+            let file = create_file_for_write(target.path(), content_length)
+                .map_err(|e| BackendError::Internal(Box::new(e)))?;
+            Ok::<_, BackendError>((target, file))
+        })
+        .await
+        .map_err(|e| BackendError::Internal(Box::new(e)))??;
+        write_stream_to_open_file(file, reader, content_length).await?;
+        tokio::task::spawn_blocking(move || target.install(&dst_path, &on_conflict))
+            .await
+            .map_err(|e| BackendError::Internal(Box::new(e)))??;
         Ok(self.next_ticket(OperationKind::Copy))
     }
 
@@ -552,30 +594,32 @@ impl BackendAdapter for LocalFsAdapter {
             "backend.localfs.copy"
         );
 
-        let final_dst = handle_conflict(&dst_path, &options.on_conflict)?;
-
-        if self.can_clone {
-            let (clone_src, clone_dst) = (src_path.clone(), final_dst.clone());
-            let cloned =
-                tokio::task::spawn_blocking(move || try_reflink_copy(&clone_src, &clone_dst))
-                    .await
-                    .map_err(|e| BackendError::Internal(Box::new(e)))?
+        self.check_conflict_support(&options.on_conflict)?;
+        Self::early_conflict(&dst_path, &dst.display_path, &options.on_conflict)?;
+        let can_clone = self.can_clone;
+        let copy_display = dst.display_path.clone();
+        // The worker owns staging until copying and installation finish, even if the caller
+        // cancels its future. No detached copy can outlive cleanup and recreate its paths.
+        tokio::task::spawn_blocking(move || {
+            Self::early_conflict(&dst_path, &copy_display, &options.on_conflict)?;
+            let target = WriteDestination::new(&dst_path, &options.on_conflict)?;
+            let cloned = can_clone
+                && try_reflink_copy(&src_path, target.path())
                     .map_err(|e| BackendError::Internal(Box::new(e)))?;
-            if cloned {
-                return Ok(self.next_ticket(OperationKind::Copy));
+            if !cloned {
+                match platform_copy_blocking(&src_path, target.path()) {
+                    Ok(_) => {}
+                    Err(error) if error.should_fallback_to_streaming() => {
+                        stream_file_copy_blocking(&src_path, target.path())
+                            .map_err(|error| BackendError::Internal(Box::new(error)))?;
+                    }
+                    Err(error) => return Err(BackendError::Internal(Box::new(error))),
+                }
             }
-        }
-
-        match platform_copy(&src_path, &final_dst).await {
-            Ok(_) => {}
-            Err(error) if error.should_fallback_to_streaming() => {
-                stream_file_copy(&src_path, &final_dst)
-                    .await
-                    .map_err(|error| BackendError::Internal(Box::new(error)))?;
-            }
-            Err(error) => return Err(BackendError::Internal(Box::new(error))),
-        }
-
+            target.install(&dst_path, &options.on_conflict)
+        })
+        .await
+        .map_err(|e| BackendError::Internal(Box::new(e)))??;
         Ok(self.next_ticket(OperationKind::Copy))
     }
 
@@ -594,11 +638,17 @@ impl BackendAdapter for LocalFsAdapter {
             "backend.localfs.move"
         );
 
-        let final_dst = handle_conflict(&dst_path, &options.on_conflict)?;
-
-        fs::rename(&src_path, &final_dst)
-            .await
-            .map_err(|e| BackendError::Internal(Box::new(e)))?;
+        self.check_conflict_support(&options.on_conflict)?;
+        Self::early_conflict(&dst_path, &dst.display_path, &options.on_conflict)?;
+        let move_display = dst.display_path.clone();
+        tokio::task::spawn_blocking(move || {
+            // Re-check on the worker so a creator between the async check and this
+            // task still meets the atomic install below as the authority.
+            Self::early_conflict(&dst_path, &move_display, &options.on_conflict)?;
+            install_with_conflict(&src_path, &dst_path, &options.on_conflict)
+        })
+        .await
+        .map_err(|e| BackendError::Internal(Box::new(e)))??;
 
         Ok(self.next_ticket(OperationKind::Move))
     }
@@ -698,27 +748,136 @@ fn invalid_cursor_error(cursor: &str, reason: &str) -> BackendError {
     )))
 }
 
-fn handle_conflict(
-    dst_path: &Path,
-    resolution: &ConflictResolution,
-) -> Result<PathBuf, BackendError> {
-    if !dst_path.exists() {
-        return Ok(dst_path.to_path_buf());
+/// Non-overwrite operations build complete data in an exclusively owned sibling directory.
+/// Nothing under the destination name is opened before atomic installation. Overwrite retains
+/// the existing direct-write/copy behavior. Drop also runs on errors and cancelled futures.
+struct WriteDestination {
+    path: PathBuf,
+    staging_dir: Option<PathBuf>,
+}
+
+impl WriteDestination {
+    fn new(dst: &Path, resolution: &ConflictResolution) -> Result<Self, BackendError> {
+        if matches!(resolution, ConflictResolution::Overwrite) {
+            return Ok(Self {
+                path: dst.to_path_buf(),
+                staging_dir: None,
+            });
+        }
+        let parent = dst.parent().ok_or_else(|| {
+            BackendError::Internal(Box::new(std::io::Error::other("destination has no parent")))
+        })?;
+        let reserve = || -> std::io::Result<Self> {
+            std::fs::create_dir_all(parent)?;
+            static NEXT_WRITE_ID: AtomicU64 = AtomicU64::new(0);
+            loop {
+                let id = NEXT_WRITE_ID.fetch_add(1, Ordering::Relaxed);
+                let dir = parent.join(format!(".iris-write-{}-{id}", std::process::id()));
+                #[cfg(unix)]
+                let result = {
+                    use std::os::unix::fs::DirBuilderExt;
+                    std::fs::DirBuilder::new().mode(0o700).create(&dir)
+                };
+                #[cfg(not(unix))]
+                let result = std::fs::create_dir(&dir);
+                match result {
+                    Ok(()) => {
+                        return Ok(Self {
+                            path: dir.join("data"),
+                            staging_dir: Some(dir),
+                        })
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        };
+        reserve().map_err(|e| BackendError::Internal(Box::new(e)))
     }
 
-    match resolution {
-        ConflictResolution::Fail | ConflictResolution::Skip => Err(BackendError::Conflict {
-            object: ObjectRef {
-                key: ObjectKey {
-                    backend_id: BackendId("local".to_string()),
-                    stable_id: StableId("unknown".to_string()),
-                },
-                parent_stable_id: None,
-                display_path: dst_path.to_string_lossy().to_string(),
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn install(self, dst: &Path, resolution: &ConflictResolution) -> Result<(), BackendError> {
+        if self.staging_dir.is_some() {
+            install_with_conflict(&self.path, dst, resolution)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for WriteDestination {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.staging_dir {
+            let _ = std::fs::remove_file(&self.path);
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+}
+
+fn install_with_conflict(
+    src: &Path,
+    dst: &Path,
+    resolution: &ConflictResolution,
+) -> Result<(), BackendError> {
+    install_with_conflict_using(src, dst, resolution, rename_no_replace)
+}
+
+fn conflict_for(display_path: &str) -> BackendError {
+    BackendError::Conflict {
+        object: ObjectRef {
+            key: ObjectKey {
+                backend_id: BackendId("local".to_string()),
+                stable_id: StableId("unknown".to_string()),
             },
-        }),
-        ConflictResolution::Rename => Ok(unique_sibling_path(dst_path)),
-        ConflictResolution::Overwrite => Ok(dst_path.to_path_buf()),
+            parent_stable_id: None,
+            display_path: display_path.to_string(),
+        },
+    }
+}
+
+fn is_occupied(path: &Path) -> bool {
+    // symlink_metadata treats files, directories and dangling links as taken.
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+fn install_with_conflict_using(
+    src: &Path,
+    dst: &Path,
+    resolution: &ConflictResolution,
+    mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), BackendError> {
+    if matches!(resolution, ConflictResolution::Overwrite) {
+        return std::fs::rename(src, dst).map_err(|e| BackendError::Internal(Box::new(e)));
+    }
+    let mut candidate = dst.to_path_buf();
+    let mut suffixes = 1u64..=u64::MAX;
+    loop {
+        match rename(src, &candidate) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                // Normalize every destination-type collision: files, directories and
+                // dangling links must classify as Conflict (or retry for Rename).
+                // Some filesystems report directory collisions without AlreadyExists,
+                // so an existing entry always means occupied here.
+                let occupied =
+                    e.kind() == std::io::ErrorKind::AlreadyExists || is_occupied(&candidate);
+                if !occupied {
+                    return Err(BackendError::Internal(Box::new(e)));
+                }
+                if matches!(resolution, ConflictResolution::Rename) {
+                    let index = suffixes.next().ok_or_else(|| {
+                        BackendError::Internal(Box::new(std::io::Error::other(
+                            "sibling name suffixes exhausted",
+                        )))
+                    })?;
+                    candidate = numbered_sibling_path(dst, index);
+                } else {
+                    return Err(conflict_for(&candidate.to_string_lossy()));
+                }
+            }
+        }
     }
 }
 
@@ -736,6 +895,450 @@ mod tests {
             parent_stable_id: None,
             display_path: String::new(),
         }
+    }
+
+    fn file_ref(backend_id: &BackendId, name: &str) -> ObjectRef {
+        ObjectRef {
+            display_path: name.into(),
+            ..root_ref(backend_id)
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_entries_obey_conflicts_for_every_mutation() {
+        for dangling in [false, true] {
+            if dangling && !cfg!(unix) {
+                continue;
+            }
+            for mode in [
+                ConflictResolution::Fail,
+                ConflictResolution::Skip,
+                ConflictResolution::Rename,
+                ConflictResolution::Overwrite,
+            ] {
+                // Overwrite's historical symlink-following behavior for writes is unchanged.
+                if dangling && matches!(mode, ConflictResolution::Overwrite) {
+                    continue;
+                }
+                for operation in ["write", "stream", "clone-copy", "byte-copy", "move"] {
+                    let temp = TempDir::new().expect("tempdir");
+                    let backend_id = BackendId("conflict-test".into());
+                    let mut adapter = LocalFsAdapter::new(temp.path().into(), backend_id.clone());
+                    adapter.can_clone = operation == "clone-copy";
+                    let src = file_ref(&backend_id, "src.txt");
+                    let dst = file_ref(&backend_id, "dst.txt");
+                    std::fs::write(temp.path().join("src.txt"), b"ours").expect("source");
+                    let dst_path = temp.path().join("dst.txt");
+                    if dangling {
+                        #[cfg(unix)]
+                        std::os::unix::fs::symlink("missing", &dst_path).expect("dangling link");
+                    } else {
+                        std::fs::write(&dst_path, b"theirs").expect("destination");
+                    }
+                    let result = match operation {
+                        "write" => {
+                            adapter
+                                .write_object(&dst, b"ours".to_vec(), mode.clone())
+                                .await
+                        }
+                        "stream" => {
+                            adapter
+                                .write_from_reader(
+                                    &dst,
+                                    Box::pin(std::io::Cursor::new(b"ours")),
+                                    Some(4),
+                                    mode.clone(),
+                                )
+                                .await
+                        }
+                        "move" => {
+                            adapter
+                                .move_object(
+                                    &src,
+                                    &dst,
+                                    MoveOptions {
+                                        on_conflict: mode.clone(),
+                                    },
+                                )
+                                .await
+                        }
+                        _ => {
+                            adapter
+                                .copy(
+                                    &src,
+                                    &dst,
+                                    CopyOptions {
+                                        on_conflict: mode.clone(),
+                                    },
+                                )
+                                .await
+                        }
+                    };
+                    let renamed = matches!(mode, ConflictResolution::Rename);
+                    let overwritten = matches!(mode, ConflictResolution::Overwrite);
+                    if renamed || overwritten {
+                        result.expect("successful mutation");
+                        let output = if renamed {
+                            temp.path().join("dst (1).txt")
+                        } else {
+                            dst_path.clone()
+                        };
+                        assert_eq!(std::fs::read(output).expect("output"), b"ours");
+                    } else {
+                        assert!(
+                            matches!(result, Err(BackendError::Conflict { .. })),
+                            "{operation} {mode:?}: {result:?}"
+                        );
+                    }
+                    if !overwritten {
+                        if dangling {
+                            assert_eq!(
+                                std::fs::read_link(&dst_path).expect("link survives"),
+                                Path::new("missing")
+                            );
+                            assert!(!temp.path().join("missing").exists());
+                        } else {
+                            assert_eq!(std::fs::read(&dst_path).expect("destination"), b"theirs");
+                        }
+                    }
+                    assert_eq!(
+                        temp.path().join("src.txt").exists(),
+                        operation != "move" || !(renamed || overwritten)
+                    );
+                    assert!(std::fs::read_dir(temp.path())
+                        .expect("list")
+                        .all(|entry| !entry
+                            .expect("entry")
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".iris-")));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn directory_entries_obey_conflicts_for_every_mutation() {
+        for mode in [
+            ConflictResolution::Fail,
+            ConflictResolution::Skip,
+            ConflictResolution::Rename,
+            ConflictResolution::Overwrite,
+        ] {
+            for operation in ["write", "stream", "clone-copy", "byte-copy", "move"] {
+                let temp = TempDir::new().expect("tempdir");
+                let backend_id = BackendId("dir-conflict-test".into());
+                let mut adapter = LocalFsAdapter::new(temp.path().into(), backend_id.clone());
+                adapter.can_clone = operation == "clone-copy";
+                let src = file_ref(&backend_id, "src.txt");
+                let dst = file_ref(&backend_id, "dst.txt");
+                std::fs::write(temp.path().join("src.txt"), b"ours").expect("source");
+                let dst_path = temp.path().join("dst.txt");
+                std::fs::create_dir(&dst_path).expect("directory destination");
+                let result = match operation {
+                    "write" => {
+                        adapter
+                            .write_object(&dst, b"ours".to_vec(), mode.clone())
+                            .await
+                    }
+                    "stream" => {
+                        adapter
+                            .write_from_reader(
+                                &dst,
+                                Box::pin(std::io::Cursor::new(b"ours")),
+                                Some(4),
+                                mode.clone(),
+                            )
+                            .await
+                    }
+                    "move" => {
+                        adapter
+                            .move_object(
+                                &src,
+                                &dst,
+                                MoveOptions {
+                                    on_conflict: mode.clone(),
+                                },
+                            )
+                            .await
+                    }
+                    _ => {
+                        adapter
+                            .copy(
+                                &src,
+                                &dst,
+                                CopyOptions {
+                                    on_conflict: mode.clone(),
+                                },
+                            )
+                            .await
+                    }
+                };
+                if matches!(mode, ConflictResolution::Rename) {
+                    result.expect("rename retries past directory");
+                    assert!(dst_path.is_dir(), "directory destination survives");
+                    assert_eq!(
+                        std::fs::read(temp.path().join("dst (1).txt")).expect("renamed output"),
+                        b"ours"
+                    );
+                } else if matches!(mode, ConflictResolution::Overwrite) {
+                    assert!(
+                        matches!(result, Err(BackendError::Internal(_))),
+                        "{operation} overwrite onto directory must not replace it: {result:?}"
+                    );
+                    assert!(
+                        dst_path.is_dir(),
+                        "directory destination survives overwrite attempt"
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(BackendError::Conflict { .. })),
+                        "{operation} {mode:?} directory must conflict: {result:?}"
+                    );
+                    assert!(dst_path.is_dir(), "directory destination survives");
+                }
+                // A renamed move consumes the source; failed and overwrite-attempted
+                // moves keep it.
+                let renamed = matches!(mode, ConflictResolution::Rename);
+                assert_eq!(
+                    temp.path().join("src.txt").exists(),
+                    operation != "move" || !renamed,
+                    "source lifetime for directory collision"
+                );
+                assert!(std::fs::read_dir(temp.path())
+                    .expect("list")
+                    .all(|entry| !entry
+                        .expect("entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".iris-")));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_fail_skip_short_circuits_without_staging_payload() {
+        use std::task::{Context, Poll};
+        struct CountingReader {
+            polls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl tokio::io::AsyncRead for CountingReader {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                buf.put_slice(b"ours");
+                Poll::Ready(Ok(()))
+            }
+        }
+        for is_dir in [false, true] {
+            for dangling in [false, true] {
+                if dangling && (is_dir || !cfg!(unix)) {
+                    continue;
+                }
+                for mode in [ConflictResolution::Fail, ConflictResolution::Skip] {
+                    let temp = TempDir::new().expect("tempdir");
+                    let backend_id = BackendId("short-circuit-test".into());
+                    let adapter = LocalFsAdapter::new(temp.path().into(), backend_id.clone());
+                    let dst = file_ref(&backend_id, "dst.txt");
+                    let dst_path = temp.path().join("dst.txt");
+                    if dangling {
+                        #[cfg(unix)]
+                        std::os::unix::fs::symlink("missing", &dst_path).expect("dangling link");
+                    } else if is_dir {
+                        std::fs::create_dir(&dst_path).expect("directory");
+                    } else {
+                        std::fs::write(&dst_path, b"theirs").expect("destination");
+                    }
+                    let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let reader = CountingReader {
+                        polls: std::sync::Arc::clone(&polls),
+                    };
+                    let result = adapter
+                        .write_from_reader(&dst, Box::pin(reader), Some(4), mode.clone())
+                        .await;
+                    assert!(
+                        matches!(result, Err(BackendError::Conflict { .. })),
+                        "existing target must conflict without staging: {result:?}"
+                    );
+                    assert_eq!(
+                        polls.load(std::sync::atomic::Ordering::SeqCst),
+                        0,
+                        "payload must not be read when the target already exists"
+                    );
+                    if dangling {
+                        #[cfg(unix)]
+                        assert_eq!(
+                            std::fs::read_link(&dst_path).expect("link survives"),
+                            Path::new("missing")
+                        );
+                    } else if is_dir {
+                        assert!(dst_path.is_dir());
+                    } else {
+                        assert_eq!(std::fs::read(&dst_path).expect("destination"), b"theirs");
+                    }
+                    assert!(std::fs::read_dir(temp.path())
+                        .expect("list")
+                        .all(|entry| !entry
+                            .expect("entry")
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".iris-")));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn install_handles_creators_after_selection_and_fails_closed() {
+        for mode in [
+            ConflictResolution::Fail,
+            ConflictResolution::Skip,
+            ConflictResolution::Rename,
+        ] {
+            let temp = TempDir::new().expect("tempdir");
+            let src = temp.path().join("src.txt");
+            let dst = temp.path().join("dst.txt");
+            std::fs::write(&src, b"ours").expect("source");
+            let mut attempts = 0;
+            let result = install_with_conflict_using(&src, &dst, &mode, |src, selected| {
+                attempts += 1;
+                // Create the original and then the first suffix only AFTER each was selected.
+                if attempts <= 2 {
+                    std::fs::write(selected, b"racer")?;
+                }
+                rename_no_replace(src, selected)
+            });
+            assert_eq!(std::fs::read(&dst).expect("racer survives"), b"racer");
+            if matches!(mode, ConflictResolution::Rename) {
+                result.expect("retried rename");
+                assert_eq!(attempts, 3);
+                assert_eq!(
+                    std::fs::read(temp.path().join("dst (1).txt")).expect("first racer"),
+                    b"racer"
+                );
+                assert_eq!(
+                    std::fs::read(temp.path().join("dst (2).txt")).expect("ours"),
+                    b"ours"
+                );
+            } else {
+                assert!(matches!(result, Err(BackendError::Conflict { .. })));
+                assert_eq!(attempts, 1);
+                assert_eq!(std::fs::read(&src).expect("source survives"), b"ours");
+            }
+        }
+        let temp = TempDir::new().expect("tempdir");
+        let src = temp.path().join("source");
+        let dst = temp.path().join("destination");
+        std::fs::write(&src, b"keep").expect("source");
+        let result =
+            install_with_conflict_using(&src, &dst, &ConflictResolution::Rename, |_, _| {
+                Err(std::io::ErrorKind::Unsupported.into())
+            });
+        assert!(matches!(result, Err(BackendError::Internal(_))));
+        assert!(src.exists());
+        assert!(!dst.exists());
+    }
+
+    #[tokio::test]
+    async fn streamed_write_conflicts_with_a_creator_during_read_and_cleans_failed_data() {
+        struct CreatingReader {
+            destination: PathBuf,
+            read: bool,
+        }
+        impl AsyncRead for CreatingReader {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                buffer: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                if !self.read {
+                    std::fs::write(&self.destination, b"racer")?;
+                    buffer.put_slice(b"ours");
+                    self.read = true;
+                }
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        let temp = TempDir::new().expect("tempdir");
+        let backend_id = BackendId("stream-race-test".into());
+        let adapter = LocalFsAdapter::new(temp.path().into(), backend_id.clone());
+        let dst = file_ref(&backend_id, "dst.txt");
+        let reader = CreatingReader {
+            destination: temp.path().join("dst.txt"),
+            read: false,
+        };
+        let result = adapter
+            .write_from_reader(&dst, Box::pin(reader), Some(4), ConflictResolution::Fail)
+            .await;
+        assert!(matches!(result, Err(BackendError::Conflict { .. })));
+        assert_eq!(
+            std::fs::read(temp.path().join("dst.txt")).expect("racer"),
+            b"racer"
+        );
+        let short = file_ref(&backend_id, "short.txt");
+        assert!(adapter
+            .write_from_reader(
+                &short,
+                Box::pin(std::io::Cursor::new(b"short")),
+                Some(100),
+                ConflictResolution::Rename
+            )
+            .await
+            .is_err());
+        assert!(!temp.path().join("short.txt").exists());
+        assert_eq!(std::fs::read_dir(temp.path()).expect("list").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn nfs_non_overwrite_fails_closed_without_mutation() {
+        let temp = TempDir::new().expect("tempdir");
+        let backend_id = BackendId("nfs-conflict-test".into());
+        let adapter = LocalFsAdapter::nfs_mount(temp.path().into(), backend_id.clone());
+        let src = file_ref(&backend_id, "src");
+        let dst = file_ref(&backend_id, "dst");
+        std::fs::write(temp.path().join("src"), b"source").expect("source");
+        for mode in [
+            ConflictResolution::Fail,
+            ConflictResolution::Skip,
+            ConflictResolution::Rename,
+        ] {
+            assert!(matches!(
+                adapter
+                    .write_object(&dst, b"new".to_vec(), mode.clone())
+                    .await,
+                Err(BackendError::Unsupported { .. })
+            ));
+            assert!(matches!(
+                adapter
+                    .copy(
+                        &src,
+                        &dst,
+                        CopyOptions {
+                            on_conflict: mode.clone()
+                        }
+                    )
+                    .await,
+                Err(BackendError::Unsupported { .. })
+            ));
+            assert!(matches!(
+                adapter
+                    .move_object(&src, &dst, MoveOptions { on_conflict: mode })
+                    .await,
+                Err(BackendError::Unsupported { .. })
+            ));
+        }
+        assert_eq!(std::fs::read_dir(temp.path()).expect("list").count(), 1);
+        adapter
+            .write_object(&dst, b"allowed".to_vec(), ConflictResolution::Overwrite)
+            .await
+            .expect("overwrite is still available");
+        assert_eq!(
+            std::fs::read(temp.path().join("dst")).expect("read"),
+            b"allowed"
+        );
     }
 
     async fn create_flat_files(root: &Path, count: usize) {

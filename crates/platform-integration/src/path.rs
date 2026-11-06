@@ -46,6 +46,14 @@ fn resolve_within(parent: &Path, child: &Path) -> Result<PathBuf, PlatformError>
 ///
 /// A dangling symlink counts as taken: creating a file at its path would fail.
 pub fn unique_sibling_path(path: &Path) -> PathBuf {
+    (1u64..)
+        .map(|index| numbered_sibling_path(path, index))
+        .find(|candidate| std::fs::symlink_metadata(candidate).is_err())
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+/// Form a sibling candidate without checking its availability; the mutation must enforce that.
+pub fn numbered_sibling_path(path: &Path, index: u64) -> PathBuf {
     let stem = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
@@ -54,10 +62,7 @@ pub fn unique_sibling_path(path: &Path) -> PathBuf {
         .extension()
         .map(|ext| format!(".{}", ext.to_string_lossy()))
         .unwrap_or_default();
-    (1u64..)
-        .map(|index| path.with_file_name(format!("{stem} ({index}){ext}")))
-        .find(|candidate| std::fs::symlink_metadata(candidate).is_err())
-        .unwrap_or_else(|| path.to_path_buf())
+    path.with_file_name(format!("{stem} ({index}){ext}"))
 }
 
 #[cfg(test)]

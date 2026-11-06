@@ -92,9 +92,6 @@ pub async fn write_stream_to_file(
     reader: Pin<Box<dyn AsyncRead + Send>>,
     content_length: Option<u64>,
 ) -> Result<(), BackendError> {
-    // 1 MB buffers instead of the 8 KB default speed up both reads and writes.
-    const IO_BUFFER_SIZE: usize = 1024 * 1024;
-
     if let Some(parent) = final_dst.parent() {
         fs::create_dir_all(parent)
             .await
@@ -103,6 +100,17 @@ pub async fn write_stream_to_file(
 
     let std_file = create_file_for_write(final_dst, content_length)
         .map_err(|e| BackendError::Internal(Box::new(e)))?;
+    write_stream_to_open_file(std_file, reader, content_length).await
+}
+
+/// The caller owns the path's lifetime; this function never recreates it on a blocking worker.
+pub(crate) async fn write_stream_to_open_file(
+    std_file: std::fs::File,
+    reader: Pin<Box<dyn AsyncRead + Send>>,
+    content_length: Option<u64>,
+) -> Result<(), BackendError> {
+    // 1 MB buffers instead of the 8 KB default speed up both reads and writes.
+    const IO_BUFFER_SIZE: usize = 1024 * 1024;
     let file = fs::File::from_std(std_file);
     let mut buf_reader = BufReader::with_capacity(IO_BUFFER_SIZE, reader);
     let mut writer = BufWriter::with_capacity(IO_BUFFER_SIZE, file);
@@ -158,7 +166,7 @@ fn open_std_file_for_read(path: &Path, sequential: bool) -> Result<std::fs::File
     options.open(path)
 }
 
-fn create_file_for_write(
+pub(crate) fn create_file_for_write(
     path: &Path,
     content_length: Option<u64>,
 ) -> Result<std::fs::File, std::io::Error> {
@@ -180,6 +188,132 @@ fn create_file_for_write(
     Ok(file)
 }
 
+/// Rename without replacing any destination entry, including dangling symlinks.
+///
+/// Maps to the operating system no-replace primitive where available (Linux
+/// renameat2 with NOREPLACE, macOS renamex with EXCL, Windows MoveFileEx
+/// without REPLACE). The final install is the authority: callers must never
+/// check existence and then rename.
+///
+/// All occupied destinations (regular files, directories and dangling links)
+/// fail with [`std::io::ErrorKind::AlreadyExists`]. Unsupported filesystems
+/// or platforms fail closed with an error instead of replacing. Mounted
+/// filesystems must implement the primitive correctly; this is not a
+/// guarantee of atomicity or crash recovery on arbitrary NFS servers.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn rename_no_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
+    match rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        src,
+        rustix::fs::CWD,
+        dst,
+        rustix::fs::RenameFlags::NOREPLACE,
+    ) {
+        Ok(()) => Ok(()),
+        Err(err) => Err(occupied_error(dst, std::io::Error::from(err))),
+    }
+}
+
+/// Rename without replacing any destination entry, including dangling symlinks.
+///
+/// Maps to the operating system no-replace primitive where available (Linux
+/// renameat2 with NOREPLACE, macOS renamex with EXCL, Windows MoveFileEx
+/// without REPLACE). The final install is the authority: callers must never
+/// check existence and then rename.
+///
+/// All occupied destinations (regular files, directories and dangling links)
+/// fail with [`std::io::ErrorKind::AlreadyExists`]. Unsupported filesystems
+/// or platforms fail closed with an error instead of replacing. Mounted
+/// filesystems must implement the primitive correctly; this is not a
+/// guarantee of atomicity or crash recovery on arbitrary NFS servers.
+#[cfg(windows)]
+pub fn rename_no_replace(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    fn to_verbatim_wide(path: &Path) -> std::io::Result<Vec<u16>> {
+        use std::path::{Component, Prefix};
+
+        // Match std filesystem path handling for long paths; MoveFileExW otherwise
+        // applies the legacy MAX_PATH limit when the caller supplied a long path.
+        let path = std::path::absolute(path)?;
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if wide.contains(&0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "NUL in path",
+            ));
+        }
+        if wide.len() >= 260 {
+            if path
+                .components()
+                .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "long Windows paths with dot segments are unsupported",
+                ));
+            }
+            if let Some(Component::Prefix(prefix)) = path.components().next() {
+                match prefix.kind() {
+                    Prefix::Disk(_) => {
+                        wide.splice(..0, r"\\?\".encode_utf16());
+                    }
+                    Prefix::UNC(_, _) => {
+                        wide.splice(..2, r"\\?\UNC\".encode_utf16());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        wide.push(0);
+        Ok(wide)
+    }
+
+    let from = to_verbatim_wide(src)?;
+    let to = to_verbatim_wide(dst)?;
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::MoveFileExW(from.as_ptr(), to.as_ptr(), 0)
+    };
+    if ok != 0 {
+        Ok(())
+    } else {
+        Err(occupied_error(dst, std::io::Error::last_os_error()))
+    }
+}
+
+/// Rename without replacing any destination entry, including dangling symlinks.
+///
+/// Maps to the operating system no-replace primitive where available (Linux
+/// renameat2 with NOREPLACE, macOS renamex with EXCL, Windows MoveFileEx
+/// without REPLACE). The final install is the authority: callers must never
+/// check existence and then rename.
+///
+/// All occupied destinations (regular files, directories and dangling links)
+/// fail with [`std::io::ErrorKind::AlreadyExists`]. Unsupported filesystems
+/// or platforms fail closed with an error instead of replacing. Mounted
+/// filesystems must implement the primitive correctly; this is not a
+/// guarantee of atomicity or crash recovery on arbitrary NFS servers.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+pub fn rename_no_replace(_src: &Path, _dst: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "no-replace rename is not supported on this platform",
+    ))
+}
+
+fn occupied_error(dst: &Path, err: std::io::Error) -> std::io::Error {
+    if err.kind() == std::io::ErrorKind::AlreadyExists {
+        return err;
+    }
+    if std::fs::symlink_metadata(dst).is_ok() {
+        return std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("destination exists: {}", dst.display()),
+        );
+    }
+    err
+}
+
 fn apply_platform_read_hints(_file: &std::fs::File, sequential: bool) {
     if !sequential {
         return;
@@ -196,11 +330,8 @@ fn apply_platform_read_hints(_file: &std::fs::File, sequential: bool) {
 
     #[cfg(target_os = "linux")]
     {
-        const POSIX_FADV_SEQUENTIAL: i32 = 2;
-        const POSIX_FADV_WILLNEED: i32 = 3;
-
-        let _ = apply_linux_fadvise(_file, POSIX_FADV_SEQUENTIAL);
-        let _ = apply_linux_fadvise(_file, POSIX_FADV_WILLNEED);
+        let _ = apply_linux_fadvise(_file, rustix::fs::Advice::Sequential);
+        let _ = apply_linux_fadvise(_file, rustix::fs::Advice::WillNeed);
     }
 }
 
@@ -213,8 +344,7 @@ fn apply_platform_write_hints(_file: &std::fs::File) {
 
     #[cfg(target_os = "linux")]
     {
-        const POSIX_FADV_SEQUENTIAL: i32 = 2;
-        let _ = apply_linux_fadvise(_file, POSIX_FADV_SEQUENTIAL);
+        let _ = apply_linux_fadvise(_file, rustix::fs::Advice::Sequential);
     }
 }
 
@@ -239,24 +369,11 @@ fn apply_macos_fcntl_hint(
 }
 
 #[cfg(target_os = "linux")]
-fn apply_linux_fadvise(file: &std::fs::File, advice: i32) -> Result<(), std::io::Error> {
-    use std::os::fd::AsRawFd;
-
-    unsafe extern "C" {
-        fn posix_fadvise(
-            fd: std::os::raw::c_int,
-            offset: i64,
-            len: i64,
-            advice: std::os::raw::c_int,
-        ) -> std::os::raw::c_int;
-    }
-
-    let result = unsafe { posix_fadvise(file.as_raw_fd(), 0, 0, advice) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::from_raw_os_error(result))
-    }
+fn apply_linux_fadvise(
+    file: &std::fs::File,
+    advice: rustix::fs::Advice,
+) -> Result<(), std::io::Error> {
+    rustix::fs::fadvise(file, 0, None, advice).map_err(std::io::Error::from)
 }
 
 #[cfg(test)]
@@ -419,5 +536,47 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!dst.exists());
+    }
+
+    #[test]
+    fn no_replace_preserves_occupied_entries_and_moves_to_absent_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let src = temp.path().join("src");
+        let dst = temp.path().join("dst");
+        std::fs::write(&src, b"source").expect("source");
+        std::fs::write(&dst, b"destination").expect("destination");
+        assert_eq!(
+            rename_no_replace(&src, &dst).expect_err("occupied").kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(&dst).expect("destination"), b"destination");
+        std::fs::remove_file(&dst).expect("remove destination");
+        std::fs::create_dir(&dst).expect("directory");
+        assert_eq!(
+            rename_no_replace(&src, &dst)
+                .expect_err("directory occupied")
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert!(dst.is_dir());
+        std::fs::remove_dir(&dst).expect("remove directory");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("missing", &dst).expect("dangling");
+            assert_eq!(
+                rename_no_replace(&src, &dst)
+                    .expect_err("dangling occupied")
+                    .kind(),
+                std::io::ErrorKind::AlreadyExists
+            );
+            assert_eq!(
+                std::fs::read_link(&dst).expect("link"),
+                Path::new("missing")
+            );
+            std::fs::remove_file(&dst).expect("remove link");
+        }
+        rename_no_replace(&src, &dst).expect("absent destination");
+        assert!(!src.exists());
+        assert_eq!(std::fs::read(&dst).expect("installed"), b"source");
     }
 }

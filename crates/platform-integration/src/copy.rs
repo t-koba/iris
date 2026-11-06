@@ -54,7 +54,8 @@ pub async fn stream_file_copy(
         .map_err(|error| std::io::Error::other(format!("stream copy task failed: {error}")))?
 }
 
-fn platform_copy_blocking(src: &Path, dst: &Path) -> Result<u64, PlatformCopyError> {
+/// Blocking form of [`platform_copy`]; callers must use a blocking worker.
+pub fn platform_copy_blocking(src: &Path, dst: &Path) -> Result<u64, PlatformCopyError> {
     let metadata = std::fs::metadata(src)?;
     if !metadata.is_file() {
         return Err(PlatformCopyError::Unsupported(
@@ -81,7 +82,8 @@ fn platform_copy_blocking(src: &Path, dst: &Path) -> Result<u64, PlatformCopyErr
     Ok(copied)
 }
 
-fn stream_file_copy_blocking(src: &Path, dst: &Path) -> Result<u64, PlatformCopyError> {
+/// Blocking form of [`stream_file_copy`]; callers must use a blocking worker.
+pub fn stream_file_copy_blocking(src: &Path, dst: &Path) -> Result<u64, PlatformCopyError> {
     let metadata = std::fs::metadata(src)?;
     if !metadata.is_file() {
         return Err(PlatformCopyError::Unsupported(
