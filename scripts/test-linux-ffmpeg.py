@@ -24,6 +24,8 @@ class RuntimeContracts(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 module.signature(bad)
         policy = module.POLICY
+        self.assertEqual(policy["system_packages"]["libgcc-s1"],
+                         "GPL-3.0-or-later WITH GCC-exception-3.1 (GCC runtime library exception; see distro copyright)")
         self.assertEqual(policy["sha256"], "7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3")
         self.assertEqual(policy["avcodec_version"], [62, 28, 103])
         self.assertEqual(policy["url"], "https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz")
@@ -139,12 +141,26 @@ class RuntimeContracts(unittest.TestCase):
             manifest = {"libraries": dict.fromkeys(names)}
             closure = {n: str(libdir / n) for n in names}
             output = root / "audit.json"
+            package = {"package_identity": ["libgcc-s1:amd64", "14.2.0-4ubuntu2~24.04.1", "gcc-14", "14.2.0-4ubuntu2~24.04.1"],
+                       "sha256": "a" * 64,
+                       "license_reference": module.POLICY["system_packages"]["libgcc-s1"],
+                       "copyright_sha256": "b" * 64}
             with patch.object(module, "validate", return_value=manifest), \
                  patch.object(module, "run", return_value="exact-source-sha"), \
-                 patch.object(module, "resolution", return_value=closure):
+                 patch.object(module, "resolution", return_value=closure), \
+                 patch.object(module, "system_dependency", return_value=package) as provenance:
+                closure["libgcc_s.so.1"] = "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1"
                 module.check(root, output, 4096)
-                self.assertEqual(json.loads(output.read_text())["source_sha"], "exact-source-sha")
+                report = json.loads(output.read_text())
+                self.assertEqual(report["source_sha"], "exact-source-sha")
+                self.assertEqual(report["system_product_dependencies"], {"libgcc_s.so.1": package})
+                provenance.assert_called_once_with("/usr/lib/x86_64-linux-gnu/libgcc_s.so.1")
                 output.unlink()
+                provenance.side_effect = ValueError("unreviewed system library package")
+                with self.assertRaisesRegex(ValueError, "unreviewed system library package"):
+                    module.check(root, output, 4096)
+                self.assertFalse(output.exists())
+                provenance.side_effect = None
                 with self.assertRaisesRegex(ValueError, "byte budget"):
                     module.check(root, output, 1)
                 self.assertFalse(output.exists())
@@ -164,6 +180,8 @@ class RuntimeContracts(unittest.TestCase):
         self.assertIn("ref: ${{ github.sha }}", workflow)
         self.assertIn("toolchain: 1.97.1", workflow)
         self.assertIn('IRIS_MAX_LINUX_RELEASE_BYTES: "35651584"', workflow)
+        self.assertIn("vars.IRIS_FFMPEG_MAX_REPORT_BYTES || 266240", workflow)
+        self.assertIn('IRIS_FFMPEG_MAX_REPORT_BYTES", "266240"', (ROOT / "scripts/linux-ffmpeg.py").read_text())
         self.assertEqual(workflow.count("uses: actions/upload-artifact@"), 1)
         upload = workflow.split("uses: actions/upload-artifact@", 1)[1]
         self.assertEqual(upload.split("path:", 1)[1].strip(), "audit/linux-ffmpeg.json")

@@ -8,10 +8,14 @@ license declaration for Iris. PDFium has its own adjacent notices/provenance.
 `manifest.json` records the exact upstream source URL and SHA-256, required
 signing-key fingerprint, successful detached-signature status, actual library
 ABI/configuration/license strings, enabled codecs, hashes and build tool versions.
-System dependencies are limited to an explicit glibc/GCC/zlib/bzip2/liblzma runtime allowlist;
-the manifest records each resolved file hash, binary/source package identity,
-and distro copyright digest. These platform libraries are not bundled and
-receive updates through the OS package manager. `config.h`,
+FFmpeg system dependencies are limited to an explicit glibc/GCC/zlib/bzip2/liblzma
+runtime allowlist; the runtime manifest records each resolved file hash,
+binary/source package identity, and distro copyright digest. The bounded product
+audit report separately records each non-bundled system library directly resolved
+by Iris, including package identity, file hash, configured license reference, and
+distro copyright digest. Unknown packages block the audit; this is runtime
+inventory evidence, not legal approval. These platform libraries
+are not bundled and receive updates through the OS package manager. `config.h`,
 `config_components.h` and `config.mak` record generated configuration and the
 enabled built-in codecs. GPL, version3 and nonfree are disabled; shared/PIC is
 on. Optional external libraries are not autodetected. Basic zlib/bzip2/liblzma

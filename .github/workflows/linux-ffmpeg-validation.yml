@@ -24,7 +24,7 @@ jobs:
       IRIS_VERIFY_PDFIUM_PROVENANCE: "0"
       IRIS_MAX_LINUX_RELEASE_BYTES: "35651584"
       IRIS_FFMPEG_JOBS: ${{ vars.IRIS_FFMPEG_JOBS || 2 }}
-      IRIS_FFMPEG_MAX_REPORT_BYTES: ${{ vars.IRIS_FFMPEG_MAX_REPORT_BYTES || 262144 }}
+      IRIS_FFMPEG_MAX_REPORT_BYTES: ${{ vars.IRIS_FFMPEG_MAX_REPORT_BYTES || 266240 }}
     steps:
       - uses: actions/checkout@v7
         with:

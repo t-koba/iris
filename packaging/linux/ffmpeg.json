@@ -51,6 +51,7 @@
   "system_packages": {
     "libc6": "LGPL-2.1-or-later (glibc runtime; see distro copyright)",
     "libatomic1": "GPL-3.0-or-later WITH GCC-exception-3.1 (GCC runtime library exception)",
+    "libgcc-s1": "GPL-3.0-or-later WITH GCC-exception-3.1 (GCC runtime library exception; see distro copyright)",
     "zlib1g": "Zlib (zlib runtime; see distro copyright)",
     "libbz2-1.0": "bzip2-1.0.6 (bzip2 runtime; see distro copyright)",
     "liblzma5": "Public-domain/0BSD liblzma runtime components; see distro copyright (not the xz tools)"

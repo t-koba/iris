@@ -219,10 +219,12 @@ def check(appdir, output, max_bytes):
             bundled[name] = digest(Path(path))
     require(any(n.startswith("libavcodec.so.") for n in bundled), "Iris does not link libavcodec")
     require(any(n.startswith("libavformat.so.") for n in bundled), "Iris does not link libavformat")
+    system_dependencies = {name: system_dependency(closure[name])
+                           for name in sorted(set(closure) - set(bundled))}
     report = dict(source_sha=run("git", "-C", str(ROOT), "rev-parse", "HEAD"),
                   iris_sha256=digest(binary), iris_bytes=binary.stat().st_size,
                   runtime=manifest, resolved_bundled_libraries=bundled,
-                  system_product_dependencies=sorted(set(closure) - set(bundled)),
+                  system_product_dependencies=system_dependencies,
                   system_requirements=(docs.parent / "system-dependencies.txt").read_text().strip())
     data = json.dumps(report, indent=2) + "\n"
     require(len(data.encode()) <= max_bytes, "audit report exceeds configured byte budget")
@@ -235,7 +237,7 @@ def main():
     parser.add_argument("command", choices=["signature", "config", "record", "validate", "stage", "check", "shlibs"])
     parser.add_argument("path", type=Path)
     parser.add_argument("destination", type=Path, nargs="?")
-    parser.add_argument("--max-report-bytes", type=int, default=int(os.environ.get("IRIS_FFMPEG_MAX_REPORT_BYTES", "262144")))
+    parser.add_argument("--max-report-bytes", type=int, default=int(os.environ.get("IRIS_FFMPEG_MAX_REPORT_BYTES", "266240")))
     args = parser.parse_args()
     if args.command == "signature":
         signature(args.path.read_text())
