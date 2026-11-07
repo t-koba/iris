@@ -1,41 +1,14 @@
 name: Windows FFmpeg prototype
 
-# Isolated, non-publishing prototype for the Windows default-preview
-# investigation. Path-scoped: runs for prototype, workflow, and app-build input
-# changes. Never publishes, never touches release packaging
-# (.github/workflows/release.yml, scripts/package-windows.ps1,
-# scripts/windows-installer.iss are intentionally untouched).
+# Reusable, non-publishing prototype for the Windows default-preview
+# investigation. The registered CI workflow calls it only on workflow_dispatch,
+# allowing exact-ref validation without registering another top-level workflow.
+# Never publishes or touches release packaging.
 on:
-  push:
-    branches-ignore:
-      - mizu
-    tags:
-      - '**'
-    paths:
-      - "prototype/windows-ffmpeg/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".cargo/**"
-      - "crates/**"
-      - "assets/**"
-      - ".github/workflows/windows-ffmpeg-prototype.yml"
-  pull_request:
-    paths:
-      - "prototype/windows-ffmpeg/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".cargo/**"
-      - "crates/**"
-      - "assets/**"
-      - ".github/workflows/windows-ffmpeg-prototype.yml"
-  workflow_dispatch: {}
+  workflow_call:
 
 permissions:
   contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   prototype:

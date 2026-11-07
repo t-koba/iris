@@ -264,3 +264,9 @@ jobs:
 
       - name: UI shell integration smoke
         run: cargo test -p iris-ui-shell --test integration_smoke --no-default-features --features minimal --locked
+
+  windows-ffmpeg-prototype:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/windows-ffmpeg-prototype.yml

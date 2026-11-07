@@ -6,10 +6,11 @@ behavior, or licensing conclusions, and it never publishes.
 
 ## Scope
 
-- Test-only inputs and scripts under `prototype/windows-ffmpeg/` plus one
-  non-publishing workflow (`.github/workflows/windows-ffmpeg-prototype.yml`),
-  triggered by prototype changes and product inputs the smoke builds (`Cargo.toml`,
-  `Cargo.lock`, `.cargo/`, `crates/`, and `assets/`).
+- Test-only inputs and scripts under `prototype/windows-ffmpeg/` plus the
+  reusable workflow `.github/workflows/windows-ffmpeg-prototype.yml`. The
+  registered `.github/workflows/ci.yml` calls it only for `workflow_dispatch`,
+  so it can run against an exact published ref without adding a separately
+  registered workflow to the default branch.
 - Does not touch `.github/workflows/release.yml` or the release packaging
   scripts (`scripts/package-windows.ps1`, `scripts/windows-installer.iss`,
   `scripts/fetch-pdfium-runtime.sh`, `scripts/release-audit.py`).
