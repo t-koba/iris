@@ -157,8 +157,10 @@ def system(path, sdk):
         install_names = re.findall(r'''^\s*install-name:\s*['"]?([^'"\s]+)''', stub.read_text(), re.M)
         if name in install_names:
             matches.append(stub)
-    require(matches, 'unverified system dependency')
-    require(len(matches) == 1, 'ambiguous system stub')
+    require(matches, f'unverified system dependency {json.dumps(name)}: no matching SDK stub')
+    require(len(matches) == 1,
+            f'ambiguous system stub for {json.dumps(name)}: '
+            f'{json.dumps([str(stub.relative_to(sdk_root)) for stub in matches])}')
     stub = matches[0]
     return dict(system=name, sdk_stub=str(stub.relative_to(sdk_root)), sdk_stub_sha256=digest(stub))
 

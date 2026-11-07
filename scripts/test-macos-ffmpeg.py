@@ -269,8 +269,12 @@ Load command 2
             # A second stub claiming the same install name is ambiguous.
             duplicate = versioned / 'CoreFoundation.tbd'
             duplicate.write_text(f"install-name: {install}\n")
-            with self.assertRaisesRegex(ValueError, 'ambiguous'):
+            with self.assertRaisesRegex(ValueError, 'ambiguous') as caught:
                 m.system(Path(install), sdk)
+            self.assertIn(install, str(caught.exception))
+            self.assertIn('CoreFoundation.tbd', str(caught.exception))
+            self.assertIn('Versions/A/CoreFoundation.tbd', str(caught.exception))
+            self.assertNotIn(str(sdk), str(caught.exception))
             duplicate.unlink()
             with self.assertRaises(ValueError):
                 m.system(Path('/System/Library/Frameworks/Missing.framework/Versions/A/Missing'), sdk)
