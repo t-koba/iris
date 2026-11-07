@@ -3,7 +3,7 @@ use iris_backends::smb::connection::SmbConnectionConfig;
 use iris_core_domain::backend_adapter::BackendAdapter;
 use iris_core_domain::types::object::{BackendId, ObjectKey, ObjectRef, StableId};
 use iris_core_domain::types::options::{ConflictResolution, CopyOptions, DeleteMode, MoveOptions};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 const VERIFY_BUFFER_BYTES: usize = 64 * 1024;
 
@@ -44,16 +44,16 @@ async fn run() -> Result<(), String> {
     let source = object_ref(&backend_id, &format!("iris-smoke-{suffix}.bin"));
     let copied = object_ref(&backend_id, &format!("iris-smoke-{suffix}-copied.bin"));
     let renamed = object_ref(&backend_id, &format!("iris-smoke-{suffix}-renamed.bin"));
-    let payload_path = std::env::var("IRIS_SMB_SMOKE_PAYLOAD").map_err(|_| {
-        "IRIS_SMB_SMOKE_PAYLOAD must name the generated transfer payload".to_string()
-    })?;
-    let payload_size = tokio::fs::metadata(&payload_path)
-        .await
-        .map_err(|error| format!("cannot inspect native SMB smoke payload: {error}"))?
-        .len();
+    let payload_path = std::env::var("IRIS_SMB_SMOKE_PAYLOAD")
+        .map_err(|_| "IRIS_SMB_SMOKE_PAYLOAD must name the native SMB smoke payload".to_string())?;
+    let payload_size = std::env::var("IRIS_SMB_SMOKE_BYTES")
+        .map_err(|_| "IRIS_SMB_SMOKE_BYTES must set the payload size".to_string())?
+        .parse::<u64>()
+        .map_err(|_| "IRIS_SMB_SMOKE_BYTES must be an unsigned integer".to_string())?;
     if payload_size == 0 {
         return Err("native SMB smoke payload must not be empty".to_string());
     }
+    create_position_varying_payload(&payload_path, payload_size).await?;
     let payload_file = tokio::fs::File::open(&payload_path)
         .await
         .map_err(|error| format!("cannot open native SMB smoke payload: {error}"))?;
@@ -155,6 +155,42 @@ async fn run() -> Result<(), String> {
     Ok(())
 }
 
+async fn create_position_varying_payload(path: &str, length: u64) -> Result<(), String> {
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .map_err(|error| format!("cannot create native SMB smoke payload: {error}"))?;
+    let mut buffer = [0; VERIFY_BUFFER_BYTES];
+    let mut offset = 0u64;
+    while offset < length {
+        let chunk_len = usize::try_from((length - offset).min(VERIFY_BUFFER_BYTES as u64))
+            .map_err(|_| "payload chunk length is out of range".to_string())?;
+        fill_position_varying_bytes(&mut buffer[..chunk_len], offset);
+        file.write_all(&buffer[..chunk_len])
+            .await
+            .map_err(|error| format!("cannot write native SMB smoke payload: {error}"))?;
+        offset += chunk_len as u64;
+    }
+    file.flush()
+        .await
+        .map_err(|error| format!("cannot flush native SMB smoke payload: {error}"))?;
+    Ok(())
+}
+
+fn fill_position_varying_bytes(buffer: &mut [u8], offset: u64) {
+    debug_assert_eq!(offset % 8, 0);
+    for (word_index, bytes) in buffer.chunks_mut(8).enumerate() {
+        let word = splitmix64(offset / 8 + word_index as u64).to_le_bytes();
+        bytes.copy_from_slice(&word[..bytes.len()]);
+    }
+}
+
+fn splitmix64(value: u64) -> u64 {
+    let mut mixed = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^ (mixed >> 31)
+}
+
 async fn verify_streams_match<A, E>(
     actual: &mut A,
     expected: &mut E,
@@ -225,24 +261,26 @@ mod tests {
     use std::io::Cursor;
 
     #[tokio::test]
-    async fn stream_comparison_handles_multiple_chunks_and_rejects_differences() {
-        let expected = (0..VERIFY_BUFFER_BYTES * 2 + 17)
-            .map(|index| (index % 251) as u8)
-            .collect::<Vec<_>>();
+    async fn stream_comparison_handles_multiple_chunks_and_rejects_repeated_data() {
+        let mut expected = vec![0; VERIFY_BUFFER_BYTES * 2 + 17];
+        for (chunk_index, chunk) in expected.chunks_mut(VERIFY_BUFFER_BYTES).enumerate() {
+            fill_position_varying_bytes(chunk, (chunk_index * VERIFY_BUFFER_BYTES) as u64);
+        }
         let mut actual = Cursor::new(expected.clone());
         let mut expected_stream = Cursor::new(expected.clone());
         verify_streams_match(&mut actual, &mut expected_stream, expected.len() as u64)
             .await
             .expect("matching streams");
 
-        let mut mismatched = expected.clone();
-        mismatched[VERIFY_BUFFER_BYTES] ^= 1;
-        let mut actual = Cursor::new(mismatched);
+        let mut repeated = expected.clone();
+        repeated[VERIFY_BUFFER_BYTES..VERIFY_BUFFER_BYTES * 2]
+            .copy_from_slice(&expected[..VERIFY_BUFFER_BYTES]);
+        let mut actual = Cursor::new(repeated);
         let mut expected_stream = Cursor::new(expected.clone());
         assert_eq!(
             verify_streams_match(&mut actual, &mut expected_stream, expected.len() as u64)
                 .await
-                .expect_err("mismatched content must fail"),
+                .expect_err("repeated chunk must fail"),
             "payload bytes differ"
         );
 

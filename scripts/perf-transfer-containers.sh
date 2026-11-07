@@ -264,7 +264,8 @@ run_smb_benchmarks() {
       IRIS_SMB_SHARE=bench \
       IRIS_SMB_USER=iris \
       IRIS_SMB_PASSWORD=iris \
-      IRIS_SMB_SMOKE_PAYLOAD="$payload_root/large.bin" \
+      IRIS_SMB_SMOKE_PAYLOAD="$payload_root/smb-smoke.bin" \
+      IRIS_SMB_SMOKE_BYTES="$bytes" \
       IRIS_SMB_PAGING_FILES="$smb_paging_files" \
       cargo run -p iris-backends --release --example smb_native_smoke
   )
