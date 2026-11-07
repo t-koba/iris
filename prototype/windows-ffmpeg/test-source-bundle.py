@@ -166,7 +166,8 @@ class BundleTests(unittest.TestCase):
             )
             (overlay / "0007-fix-lib-naming-pinned.patch").write_text(adapted_lib_naming)
             source = root / "common.mak"
-            source.write_text(dependency_test.BIN2C_FIXTURE)
+            # Preserve the pinned LF fixture bytes on Windows too.
+            source.write_bytes(dependency_test.BIN2C_FIXTURE.encode("utf-8"))
             with patch.dict(dependency_test.patcher.BIN2C_PIN, sha256=synthetic_hash):
                 dependency_test.patcher.generate_bin2c(
                     source, repo / "ports/ffmpeg/0045-use-prebuilt-bin2c.patch",
