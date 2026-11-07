@@ -367,7 +367,7 @@ pub fn handle_pane_message(
                     cancellation_token.expect("recursive filter has a cancellation token");
                 return Task::batch([
                     refresh_preview_for_selection(state),
-                    recursive_filter_task(
+                    recursive_filter_task(RecursiveFilterRequest {
                         pane_idx,
                         run_id,
                         path,
@@ -375,8 +375,8 @@ pub fn handle_pane_message(
                         model,
                         cancellation_token,
                         collect_gps_points,
-                        state.pdf_text_search.limits(),
-                    ),
+                        pdf_limits: state.pdf_text_search.limits(),
+                    }),
                 ]);
             }
             let preview_task = refresh_preview_for_selection(state);

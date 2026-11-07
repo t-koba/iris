@@ -169,17 +169,28 @@ pub(crate) fn folder_open_error(error: &std::io::Error) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn recursive_filter_task(
-    pane_idx: usize,
-    run_id: u64,
-    path: String,
-    show_hidden: bool,
-    model: FilterModel,
-    cancellation_token: CancellationToken,
-    collect_gps_points: bool,
-    pdf_limits: PdfTextLimits,
-) -> Task<Message> {
+pub(crate) struct RecursiveFilterRequest {
+    pub(crate) pane_idx: usize,
+    pub(crate) run_id: u64,
+    pub(crate) path: String,
+    pub(crate) show_hidden: bool,
+    pub(crate) model: FilterModel,
+    pub(crate) cancellation_token: CancellationToken,
+    pub(crate) collect_gps_points: bool,
+    pub(crate) pdf_limits: PdfTextLimits,
+}
+
+pub(crate) fn recursive_filter_task(request: RecursiveFilterRequest) -> Task<Message> {
+    let RecursiveFilterRequest {
+        pane_idx,
+        run_id,
+        path,
+        show_hidden,
+        model,
+        cancellation_token,
+        collect_gps_points,
+        pdf_limits,
+    } = request;
     // Capture on the UI caller thread: workers have their own thread-local locale.
     let pdf_scan_labels = PdfScanLabels::localized();
     Task::run(
