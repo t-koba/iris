@@ -1,4 +1,4 @@
-"""Generate exact-context adaptations for pinned vcpkg FFmpeg patches."""
+"""Adapt the pinned vcpkg FFmpeg port to its exact source context."""
 import difflib
 import hashlib
 import json
@@ -113,6 +113,47 @@ fi
     "check_cxxflags": 'check_cxxflags(){\n    log check_cxxflags "$@"\n    test_cxxflags "$@" && add_cxxflags "$@"\n}\n',
     "check_cflags": 'check_cflags(){\n    log check_cflags "$@"\n    test_cflags "$@" && add_cflags "$@"\n}\n',
 }
+
+
+# Exact baseline feature stanza; retain the unsupported enable branch so a
+# future OpenGL opt-in still fails at configure rather than silently succeeding.
+OPENGL_STANZA = '''if("opengl" IN_LIST FEATURES)
+    set(OPTIONS "${OPTIONS} --enable-opengl")
+else()
+    set(OPTIONS "${OPTIONS} --disable-opengl")
+endif()
+'''
+OPENGL_DISABLE = '    set(OPTIONS "${OPTIONS} --disable-opengl")\n'
+
+
+def omit_opengl_disable(port, configure):
+    digest = hashlib.sha256(configure).hexdigest()
+    if digest != SWSCALE_PIN["source_sha256"]["configure"]:
+        raise ValueError("OpenGL omission requires exact pinned configure hash")
+    if any(option in configure for option in (b"--enable-opengl", b"--disable-opengl")):
+        raise ValueError("pinned configure must support neither OpenGL option")
+    if "\r\n" in port and "\n" in port.replace("\r\n", ""):
+        raise ValueError("portfile has mixed line endings")
+    # Accept checkout CRLF without changing any unrelated port bytes.
+    ending = "\r\n" if "\r\n" in port else "\n"
+    stanza = OPENGL_STANZA.replace("\n", ending)
+    removed = OPENGL_DISABLE.replace("\n", ending)
+    if (len(re.findall("(?m)^" + re.escape(stanza), port)) != 1 or port.count('--disable-opengl') != 1
+            or port.count('--enable-opengl') != 1
+            or port.count('if("opengl" IN_LIST FEATURES)') != 1):
+        raise ValueError("expected unique exact baseline OpenGL stanza/options")
+    result = port.replace(stanza, stanza.replace(removed, ""), 1)
+    if '--disable-opengl' in result or result.count('--enable-opengl') != 1:
+        raise ValueError("unexpected overlay OpenGL options")
+    return result, {
+        "ffmpeg_commit": PINS["ffmpeg"]["commit"],
+        "source": "configure", "source_sha256": digest,
+        "removed_option": "--disable-opengl",
+        "configure_option_occurrences": {"--enable-opengl": 0, "--disable-opengl": 0},
+        "overlay_disable_occurrences": 0,
+        "baseline_stanza_sha256": hashlib.sha256(OPENGL_STANZA.encode()).hexdigest(),
+        "result": "unsupported no-op disable omitted; enable branch retained",
+    }
 
 
 def validate_msvc_utf8(configure):
@@ -355,8 +396,13 @@ def generate_bin2c(source_path, baseline_patch_path, output_path):
 
 if __name__ == "__main__":
     if len(sys.argv) != 5:
-        raise SystemExit("usage: ffmpeg-dependency-patch.py <adapt|adapt-lib-naming|adapt-bin2c|omit-msvc-utf8|omit-unstable-swscale> <source-target> <baseline-patch> <output-patch>")
-    if sys.argv[1] == "adapt":
+        raise SystemExit("usage: ffmpeg-dependency-patch.py <adapt|adapt-lib-naming|adapt-bin2c|omit-msvc-utf8|omit-unstable-swscale|omit-opengl-disable> <source-target> <baseline-patch-or-port> <output-patch-or-port>")
+    if sys.argv[1] == "omit-opengl-disable":
+        port = Path(sys.argv[3]).read_bytes().decode("utf-8-sig")
+        result, evidence = omit_opengl_disable(port, Path(sys.argv[2]).read_bytes())
+        Path(sys.argv[4]).write_bytes(result.encode("utf-8"))
+        print(json.dumps(evidence))
+    elif sys.argv[1] == "adapt":
         digest = generate(sys.argv[2], sys.argv[3], sys.argv[4])
         print(f"generated pinned dependency patch sha256={digest}")
     elif sys.argv[1] == "adapt-lib-naming":
@@ -370,4 +416,4 @@ if __name__ == "__main__":
     elif sys.argv[1] == "omit-unstable-swscale":
         omit_unstable_swscale(*sys.argv[2:])
     else:
-        raise SystemExit("expected adapt, adapt-lib-naming, adapt-bin2c, omit-msvc-utf8 or omit-unstable-swscale")
+        raise SystemExit("expected adapt, adapt-lib-naming, adapt-bin2c, omit-msvc-utf8, omit-unstable-swscale or omit-opengl-disable")

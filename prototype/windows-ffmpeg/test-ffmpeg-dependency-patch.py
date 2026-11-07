@@ -83,6 +83,47 @@ elif enabled_any msvc icl; then
 fi
 '''
 MSVC_UTF8_BASELINE_PATCH = b"synthetic UTF-8 baseline patch\n"
+OPENGL_BASELINE_STANZA = '''if("opengl" IN_LIST FEATURES)
+    set(OPTIONS "${OPTIONS} --enable-opengl")
+else()
+    set(OPTIONS "${OPTIONS} --disable-opengl")
+endif()
+'''
+OPENGL_BASELINE_DISABLE = '    set(OPTIONS "${OPTIONS} --disable-opengl")\n'
+
+
+class OpenGlPortTests(unittest.TestCase):
+    def test_proof_bound_single_line_omission(self):
+        self.assertEqual(patcher.OPENGL_STANZA, OPENGL_BASELINE_STANZA)
+        self.assertEqual(patcher.OPENGL_DISABLE, OPENGL_BASELINE_DISABLE)
+        # Synthetic configure only; never claim this fixture is upstream proof.
+        configure = b"no OpenGL options in fixture\n"
+        pin = {"configure": hashlib.sha256(configure).hexdigest()}
+        for ending in ("\n", "\r\n"):
+            port = ("keep before\n" + OPENGL_BASELINE_STANZA + "keep after\n").replace("\n", ending)
+            with patch.dict(patcher.SWSCALE_PIN, source_sha256=pin):
+                result, evidence = patcher.omit_opengl_disable(port, configure)
+                self.assertEqual(result, port.replace(patcher.OPENGL_DISABLE.replace("\n", ending), ""))
+                self.assertEqual(evidence["source_sha256"], pin["configure"])
+                self.assertEqual(evidence["removed_option"], "--disable-opengl")
+                self.assertEqual(evidence["overlay_disable_occurrences"], 0)
+                for bad in (result, port + port, port.replace('else()', 'else( )'),
+                            port.replace('--enable-opengl', '--enable-other'),
+                            port + '--disable-opengl', port + 'if("opengl" IN_LIST FEATURES)',
+                            port.replace('if("opengl"', '#if("opengl"'),
+                            port.replace('else()' + ending, 'else()\r\n' if ending == "\n" else 'else()\n')):
+                    with self.subTest(port=bad), self.assertRaises(ValueError):
+                        patcher.omit_opengl_disable(bad, configure)
+                with self.assertRaises(ValueError):
+                    patcher.omit_opengl_disable(port, configure + b"drift")
+            # Even a matching digest cannot authorize omission if either option
+            # appears in configure; this guard must not rely only on the hash.
+            for option in (b"--enable-opengl", b"--disable-opengl"):
+                supported = configure + option
+                with patch.dict(patcher.SWSCALE_PIN, source_sha256={
+                        "configure": hashlib.sha256(supported).hexdigest()}):
+                    with self.assertRaises(ValueError):
+                        patcher.omit_opengl_disable(port, supported)
 
 
 class MsvcUtf8Tests(unittest.TestCase):
@@ -412,7 +453,7 @@ class Bin2cPatchTests(unittest.TestCase):
         self.assertIn('$adaptation.command (Join-Path $workDir $adaptation.source)', build)
         self.assertIn('Set-PrototypeFfmpegPatch $overlayRaw $adaptation.baseline $adaptation.overlay', build)
         self.assertLess(build.index('foreach ($name in $derived.Patches)'),
-                        build.index('& python (Join-Path $scriptDir "ffmpeg-dependency-patch.py")'))
+                        build.index('& python (Join-Path $scriptDir "ffmpeg-dependency-patch.py") $adaptation.command'))
 
 
 if __name__ == "__main__":

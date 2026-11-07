@@ -185,16 +185,22 @@ try {
     Pop-Location
 }
 
-# Derive only the source fetch from the exact baseline. Keep every baseline
-# patch in declared order except the hash-pinned 0004, 0007 and 0045
+# Derive the source fetch and omit the proof-bound unsupported OpenGL disable.
+# Keep every baseline patch in declared order except the hash-pinned 0004, 0007 and 0045
 # patches, which receive exact-context replacements for this pinned source.
 # Hash-pinned 0047 and 0052 require upstream-supersession proof at their sequential stages.
 $baselinePortfile = Join-Path $baselinePortDir "portfile.cmake"
-$baselinePortfileRaw = Get-Content -Raw -LiteralPath $baselinePortfile
 $baselinePortfileHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $baselinePortfile).Hash.ToLowerInvariant()
 $gitHelper = Get-Content -Raw -LiteralPath (Join-Path $vcpkgRoot "scripts/cmake/vcpkg_from_git.cmake")
 . (Join-Path $scriptDir "derive-ffmpeg-overlay.ps1")
-$derived = ConvertTo-PrototypeFfmpegPort $baselinePortfileRaw $gitHelper $ffmpegRepo $ffmpegCommit
+# Validate pristine configure before any sequential patch changes its hash.
+# This writes evidence only, never the baseline port or vcpkg checkout.
+$openglPortPath = Join-Path $evidenceDir "opengl-portfile.cmake"
+$openglJson = & python (Join-Path $scriptDir "ffmpeg-dependency-patch.py") omit-opengl-disable (Join-Path $workDir "configure") $baselinePortfile $openglPortPath
+if ($LASTEXITCODE -ne 0) { throw "pinned unsupported OpenGL disable validation failed" }
+$portfileTransformation = $openglJson | ConvertFrom-Json
+$derived = ConvertTo-PrototypeFfmpegPort (Get-Content -Raw -LiteralPath $openglPortPath) $gitHelper $ffmpegRepo $ffmpegCommit
+Remove-Item -LiteralPath $openglPortPath
 $adaptations = @(
     [pscustomobject]@{
         baseline = $pins.vcpkg.ffmpeg_dependency_patch.name
@@ -309,6 +315,7 @@ $sourceRecord = [ordered]@{
     triplet = $effectiveTriplet
     linkage = "dynamic"
     features = "default-only plus test-only ffmpeg executable (no gpl, nonfree, all)"
+    portfile_transformation = $portfileTransformation
     patches = $patchResults
 }
 $sourceRecord | ConvertTo-Json -Depth 6 | Out-File -Encoding utf8 (Join-Path $evidenceDir "ffmpeg-source.json")
@@ -319,8 +326,8 @@ if ($patchResults.Count -eq 0) { throw "baseline ffmpeg port has no patches to v
 
 # --- Test-only overlay derived from the pinned baseline port ---
 # Overlay invokes vcpkg_from_git(REF db8537d8cc7962bd3d07254d6ceff21d888817d4) against https://github.com/FFmpeg/FFmpeg.git.
-# Copy the exact baseline port, then rewrite only the source REF to the pinned
-# commit and helper URL while retaining the baseline MSVC patches/config. The overlay is
+# Copy the exact baseline port, then use the guarded source/patch/OpenGL
+# derivation while retaining unrelated baseline configuration. The overlay is
 # written under target/ (never into the vcpkg checkout or release paths).
 $overlayRoot = Join-Path $evidenceDir "overlay-ports"
 $overlayPortDir = Join-Path $overlayRoot "ffmpeg"
@@ -337,7 +344,8 @@ foreach ($name in $adaptedPatchFiles.Keys) {
 }
 $overlayPortfile = Join-Path $overlayPortDir "portfile.cmake"
 if (!(Test-Path -LiteralPath $overlayPortfile -PathType Leaf)) { throw "overlay portfile missing after copy: $overlayPortfile" }
-$overlayRaw | Out-File -Encoding utf8 -LiteralPath $overlayPortfile
+# Do not append a newline: source-bundle proof preserves unrelated port text.
+[System.IO.File]::WriteAllText($overlayPortfile, $overlayRaw, [System.Text.UTF8Encoding]::new($false))
 $overlayPortfileHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $overlayPortfile).Hash.ToLowerInvariant()
 # Overlay port version must not claim 9.0.2: mark it as the pinned commit.
 $overlayManifestPath = Join-Path $overlayPortDir "vcpkg.json"
@@ -360,6 +368,7 @@ $overlayRaw | Out-File -Encoding utf8 (Join-Path $evidenceDir "overlay-portfile.
     schema = 1
     baseline = [ordered]@{ root = $baselinePortDir; baseline = $vcpkgBaseline; portfile_sha256 = $baselinePortfileHash }
     overlay = [ordered]@{ dir = $overlayPortDir; portfile_sha256 = $overlayPortfileHash; ref = $ffmpegCommit; repo = $ffmpegRepo }
+    portfile_transformation = $portfileTransformation
     patches = $patchResults
 } | ConvertTo-Json -Depth 6 | Out-File -Encoding utf8 (Join-Path $evidenceDir "overlay.json")
 
@@ -452,6 +461,7 @@ $buildconfRaw | Select-Object -First 1 | ForEach-Object { Write-Host $_ }
     tools = [ordered]@{ git = $gitVer; cmake = $cmakeVer; ninja = $ninjaVer; python = $pythonVer; cl = $clOut }
     overlay = [ordered]@{ dir = $overlayPortDir; portfile_sha256 = $overlayPortfileHash; baseline_portfile_sha256 = $baselinePortfileHash }
     install = [ordered]@{ root = $installedDir; bin = $tripletBin; dlls = @($dllRecords); tool = "$ffmpegExe" }
+    portfile_transformation = $portfileTransformation
     source_bundle_manifest = $sourceBundleRecord
     buildconf = ($buildconfRaw -split "`n" | Select-Object -First 5)
     note = "Prototype-only exact-commit FFmpeg build evidence. No licensing conclusion."

@@ -35,6 +35,7 @@ PORT = b'''vcpkg_from_github(
         a-second.patch
 )
 '''
+PORT += dependency_test.OPENGL_BASELINE_STANZA.encode()
 BASELINE_PATCH = b'''diff --git a/configure b/configure
 index 1759694..fcbae49 100644
 --- a/configure
@@ -173,6 +174,7 @@ class BundleTests(unittest.TestCase):
             (overlay / "0047-fix-msvc-utf8.patch").unlink()
             overlay_text = overlay_text.replace("        0052-fix-disable-unstable-swscale-link.patch # changed upstream component\n", "")
             (overlay / "0052-fix-disable-unstable-swscale-link.patch").unlink()
+            overlay_text = overlay_text.replace(dependency_test.OPENGL_BASELINE_DISABLE, "")
             overlay_port.write_text(overlay_text)
             adapted = dependency_test.patcher.patch_text(
                 dependency_test.FIXTURE,
@@ -211,7 +213,7 @@ class BundleTests(unittest.TestCase):
                 self.assertEqual([Path(p).name for p in manifest["patches"]["overlay"]["ordered_files"]],
                                  ["z-first.patch", "0004-dependencies-pinned.patch", "0005-fix-nasm.patch",
                                   "0007-fix-lib-naming-pinned.patch", "0045-use-prebuilt-bin2c-pinned.patch", "a-second.patch"])
-                self.assertEqual(manifest["schema"], 4)
+                self.assertEqual(manifest["schema"], 5)
                 self.assertEqual(len(manifest["patches"]["adaptations"]), 3)
                 self.assertEqual({item["kind"] for item in manifest["patches"]["adaptations"]},
                                  {"exact-context pinned-source adaptation"})
@@ -260,12 +262,25 @@ class BundleTests(unittest.TestCase):
                     (first / "MANIFEST.json").write_text(json.dumps(changed))
                     with self.assertRaises(ValueError):
                         bundle.verify(first, bundle.record(first / "MANIFEST.json"))
+                for key in manifest["patches"]["portfile_transformation"]:
+                    changed = json.loads(json.dumps(manifest))
+                    changed["patches"]["portfile_transformation"][key] = "wrong"
+                    verify_changed(changed)
+                changed = json.loads(json.dumps(manifest))
+                del changed["patches"]["portfile_transformation"]
+                verify_changed(changed)
                 for index in (0, 1):
                     for key in ("baseline_sha256", "source_sha256", "contexts_sha256", "kind", "ffmpeg_commit"):
                         changed = json.loads(json.dumps(manifest))
                         changed["patches"]["supersessions"][index][key] = "wrong"
                         verify_changed(changed)
                 for name, data in (
+                    ("baseline/ports/ffmpeg/portfile.cmake", PORT.replace(b"else()", b"else( )")),
+                    ("baseline/ports/ffmpeg/portfile.cmake", PORT + dependency_test.patcher.OPENGL_STANZA.encode()),
+                    ("baseline/ports/ffmpeg/portfile.cmake", PORT.replace(dependency_test.patcher.OPENGL_STANZA.encode(), b"")),
+                    ("overlay/ffmpeg/portfile.cmake", overlay_port.read_bytes() + b"--disable-opengl\n"),
+                    ("overlay/ffmpeg/portfile.cmake", overlay_port.read_bytes().replace(b"--enable-opengl", b"--enable-other")),
+                    ("overlay/ffmpeg/portfile.cmake", overlay_port.read_bytes().replace(b"else()", b"else( )")),
                     ("overlay/ffmpeg/0052-fix-disable-unstable-swscale-link.patch", dependency_test.SWSCALE_BASELINE_PATCH),
                     ("baseline/ports/ffmpeg/0052-fix-disable-unstable-swscale-link.patch", b"changed patch"),
                     ("overlay/ffmpeg/portfile.cmake", overlay_port.read_bytes().replace(b"        a-second.patch", b"        0052-fix-disable-unstable-swscale-link.patch\n        a-second.patch")),

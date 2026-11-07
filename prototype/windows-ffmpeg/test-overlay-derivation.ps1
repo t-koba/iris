@@ -120,6 +120,7 @@ foreach ($script in @($build, $stage, $smoke)) {
 if ($build -notmatch '\$installedDir = Join-Path \$vcpkgRoot "installed"' -or $stage -notmatch '\$installedDir = Join-Path \(Resolve-Path \$env:VCPKG_ROOT\)\.Path "installed"' -or $smoke -notmatch '\$installedDirEnv = Join-Path \$vcpkgRoot "installed"') { throw 'Rust discovery must use VCPKG_ROOT/installed' }
 if ($build -notmatch '(?s)foreach \(\$name in \$derived.Patches\).*ffmpeg-dependency-patch.py.*adapt.*git apply --check --whitespace=nowarn \$adaptedPatchPath') { throw 'pinned dependency patch adaptation/application is not ordered and guarded' }
 if ($build -notmatch 'git apply --check --whitespace=nowarn \$patchPath' -or $build -notmatch 'Set-PrototypeFfmpegPatch') { throw 'baseline patch sequence or fail-closed overlay replacement is missing' }
+if ($build -notmatch '(?s)omit-opengl-disable.*\$LASTEXITCODE -ne 0.*ConvertTo-PrototypeFfmpegPort.*foreach \(\$name in \$derived.Patches\)' -or $build -notmatch 'portfile_transformation = \$portfileTransformation') { throw 'OpenGL omission must validate pristine source before patching and report its proof' }
 Write-Host 'prototype overlay/discovery regressions passed (no native build)'
 
 foreach ($omissionCase in @(

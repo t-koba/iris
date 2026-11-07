@@ -131,11 +131,7 @@ def validate_adapted_patch(path, pin):
             raise ValueError("adapted library-name patch must preserve the dynamic zlib mapping")
 
 
-def supersession_evidence(bundle):
-    for item in SUPERSEDED_PATCHES:
-        validate_baseline_patch(bundle / "baseline/ports/ffmpeg" / item["name"], item)
-        if (bundle / "overlay/ffmpeg" / item["name"]).exists():
-            raise ValueError("upstream-superseded patch must not be an overlay file")
+def archived_sources(bundle):
     # Never extract external-untrusted source. Require one regular member per
     # evidence target; duplicate names or links cannot supply source proof.
     sources = {}
@@ -146,12 +142,39 @@ def supersession_evidence(bundle):
             if len(matches) != 1 or not matches[0].isfile():
                 raise ValueError("expected exactly one archived pinned " + name)
             sources[name] = archive.extractfile(matches[0]).read()
+    return sources
+
+
+def supersession_evidence(bundle):
+    for item in SUPERSEDED_PATCHES:
+        validate_baseline_patch(bundle / "baseline/ports/ffmpeg" / item["name"], item)
+        if (bundle / "overlay/ffmpeg" / item["name"]).exists():
+            raise ValueError("upstream-superseded patch must not be an overlay file")
+    sources = archived_sources(bundle)
     return [{"baseline": "baseline/ports/ffmpeg/" + MSVC_UTF8_PATCH["name"],
              "archived_source": f"ffmpeg-{COMMIT}/configure",
              **patch_validator.validate_msvc_utf8(sources["configure"])},
             {"baseline": "baseline/ports/ffmpeg/" + SWSCALE_PATCH["name"],
              "archived_sources": [f"ffmpeg-{COMMIT}/{name}" for name in patch_validator.SWSCALE_FILES],
              **patch_validator.validate_unstable_swscale(sources)}]
+
+
+def portfile_transformation(bundle):
+    baseline = (bundle / "baseline/ports/ffmpeg/portfile.cmake").read_bytes().decode("utf-8-sig")
+    adapted, evidence = patch_validator.omit_opengl_disable(
+        baseline, archived_sources(bundle)["configure"])
+    overlay = (bundle / "overlay/ffmpeg/portfile.cmake").read_bytes().decode("utf-8-sig")
+    # Source-fetch/PATCHES changes have their own checks. Everywhere else must
+    # equal exactly the proven single-line omission, including the enable branch.
+    fetch = r"(?ms)^vcpkg_from_(?:github|git)\(.*?^\)"
+    def outside_fetch(text):
+        result, count = re.subn(fetch, "<source-fetch>", text.replace("\r\n", "\n"))
+        if count != 1:
+            raise ValueError("expected one port source fetch")
+        return result
+    if outside_fetch(adapted) != outside_fetch(overlay) or "--disable-opengl" in overlay:
+        raise ValueError("overlay differs beyond authorized portfile transformations")
+    return evidence
 
 
 def validate_patch_manifest(bundle, manifest):
@@ -173,7 +196,8 @@ def validate_patch_manifest(bundle, manifest):
         for item in PATCH_ADAPTATIONS
     ]
     expected = {"baseline": baseline, "overlay": overlay, "adaptations": adaptations,
-                "supersessions": supersession_evidence(bundle)}
+                "supersessions": supersession_evidence(bundle),
+                "portfile_transformation": portfile_transformation(bundle)}
     if expected != manifest["patches"]:
         raise ValueError("source bundle patch order/comments/adaptation metadata mismatch")
     if not set(baseline["ordered_files"] + overlay["ordered_files"]) <= manifest["files"].keys():
@@ -231,13 +255,14 @@ def create(source, vcpkg, overlay, dest):
     baseline_patches = patch_series((dest / "baseline/ports/ffmpeg/portfile.cmake").read_bytes().decode("utf-8-sig"), "baseline/ports/ffmpeg")
     overlay_patches = patch_series((dest / "overlay/ffmpeg/portfile.cmake").read_bytes().decode("utf-8-sig"), "overlay/ffmpeg")
     manifest = {
-        "schema": 4, "ffmpeg_commit": COMMIT, "vcpkg_baseline": BASELINE,
+        "schema": 5, "ffmpeg_commit": COMMIT, "vcpkg_baseline": BASELINE,
         "scope": "FFmpeg upstream tree, retained vcpkg FFmpeg port/patches and prototype recipe only. "
                  "Not complete source for other dependencies, vcpkg tooling or SDKs; no legal conclusion.",
         "patches": {
             "baseline": baseline_patches,
             "overlay": overlay_patches,
             "supersessions": supersession_evidence(dest),
+            "portfile_transformation": portfile_transformation(dest),
             "adaptations": [
                 {
                     "baseline": "baseline/ports/ffmpeg/" + item["name"],
@@ -259,7 +284,7 @@ def verify(bundle, expected):
     if record(bundle / "MANIFEST.json") != expected:
         raise ValueError("source bundle manifest hash/byte mismatch")
     manifest = json.loads((bundle / "MANIFEST.json").read_text(encoding="utf-8-sig"))
-    if (manifest["schema"], manifest["ffmpeg_commit"], manifest["vcpkg_baseline"]) != (4, COMMIT, BASELINE):
+    if (manifest["schema"], manifest["ffmpeg_commit"], manifest["vcpkg_baseline"]) != (5, COMMIT, BASELINE):
         raise ValueError("source bundle pin/schema mismatch")
     files = manifest["files"]
     required = {ARCHIVE, "baseline/ports/ffmpeg/portfile.cmake", "baseline/ports/ffmpeg/vcpkg.json",

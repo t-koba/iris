@@ -108,7 +108,21 @@ behavior, or licensing conclusions, and it never publishes.
    the `0004`, `0007` and `0045` PATCHES entries with their pinned-source
    replacements, omits validated 0047/0052 from PATCHES and overlay patch files,
    and marks the overlay `version-string` as the pinned commit);
-   then runs `vcpkg install` with the prototype manifest, `--overlay-ports`
+   Before patching, the same adapter verifies pristine `configure` against
+   `pins.vcpkg.ffmpeg_unstable_swscale_patch.source_sha256.configure`
+   (`b7aef8b5…ad78cf`) and requires zero occurrences of both OpenGL options.
+   It removes only the unique exact baseline else-branch line
+   `set(OPTIONS "${OPTIONS} --disable-opengl")`: this pinned source rejects that
+   unsupported no-op default. The `--enable-opengl` branch remains, so future
+   OpenGL opt-in still fails closed. Missing, duplicate or changed baseline
+   stanza/options, source drift, or source option support reject the rewrite.
+   `portfile_transformation` in the source/overlay/build JSON records the
+   configure and stanza hashes, removed option, zero counts and result. Source
+   bundle verification independently rechecks the archived configure proof and
+   the portfile outside the authorized fetch/PATCHES changes; the original
+   baseline port and 0047/0052 provenance remain intact. This is not evidence
+   of a successful native build, security status or licensing approval.
+   It then runs `vcpkg install` with the prototype manifest, `--overlay-ports`
    (generated), `--overlay-triplets triplets/`,
    `--triplet x64-windows-prototype-dynamic`, and `--no-binarycaching`.
    Records the actual commit, tool versions, `ffmpeg -buildconf`/`-version`,
@@ -192,7 +206,9 @@ installing FFmpeg. It contains:
 - `overlay/ffmpeg/`: the actual generated port, manifest and patch/config
   files used for the prototype. Baseline order and unrelated bytes are retained;
   only `0004-dependencies.patch`, `0007-fix-lib-naming.patch` and
-  `0045-use-prebuilt-bin2c.patch` are replaced by pinned-source adaptations.
+  `0045-use-prebuilt-bin2c.patch` are replaced by pinned-source adaptations. The
+  overlay portfile also omits only the unsupported default
+  `--disable-opengl` option after a hash-verified configure/stanza proof.
   Superseded 0047/0052 are absent from both overlay PATCHES and overlay files;
   their exact Git blobs remain in `baseline/ports/ffmpeg/`. Each adapter checks its
   exact baseline patch digest and source context. The 0004 adapter preserves
@@ -215,8 +231,9 @@ pinned baseline patch digests; verifies the untouched overlay patches against
 their Git-blob copies (normalizing checkout line endings only); and requires
 each adapted patch to change only its target (`configure` for 0004/0007,
 `ffbuild/common.mak` for 0045) and retain its intended changes, including the
-dynamic zlib mapping. Schema 4 separately records both supersessions,
-including baseline hashes and archived source/context hashes. Verification
+dynamic zlib mapping. Schema 5 separately records both supersessions and the
+proof-bound default OpenGL option omission, including baseline hashes and
+archived source/context hashes. Verification
 reads exactly one regular member per evidence file from the pristine pinned
 archive (without extracting it), repeats MSVC/helper and unstable-swscale
 checks, and compares the recomputed evidence to the manifest. Rehashed metadata cannot substitute for
