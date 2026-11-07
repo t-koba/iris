@@ -48,6 +48,7 @@ jobs:
       - name: Install current runtime and candidate build tools
         run: brew install ffmpeg pkg-config gnupg nasm
       - name: Check candidate contracts
+        id: candidate_contracts
         run: python3 scripts/test-macos-ffmpeg.py
       - name: Audit current default-product package
         shell: bash
@@ -59,6 +60,9 @@ jobs:
           ./scripts/package-macos-app.sh
           python3 scripts/release-audit.py macos --output audit/macos.json
       - name: Validate pinned candidate
+        # Run after a current-runtime failure when candidate prerequisites passed;
+        # never continue after cancellation or a failed candidate-contract step.
+        if: ${{ !cancelled() && steps.candidate_contracts.outcome == 'success' }}
         shell: bash
         run: |
           # Pinned shared-library candidate bound to its fresh prefix. Cargo is

@@ -73,6 +73,14 @@ permissions:
           python3 scripts/release-audit.py macos --output audit/macos.json""" in macos
     and """          trap 'rm -rf dist/macos target/macos-runtime-validation' EXIT
           python3 scripts/macos-ffmpeg.py validate audit/macos-candidate.json""" in macos,
+    "macOS candidate runs after current-audit failure only when its prerequisites passed": """      - name: Check candidate contracts
+        id: candidate_contracts
+""" in macos
+    and """      - name: Validate pinned candidate
+        # Run after a current-runtime failure when candidate prerequisites passed;
+        # never continue after cancellation or a failed candidate-contract step.
+        if: ${{ !cancelled() && steps.candidate_contracts.outcome == 'success' }}
+""" in macos,
     "macOS validation cleans temporary apps before retaining evidence": """      - name: Clean temporary bytes even after interruption
         if: always()
         run: rm -rf dist/macos target/package-macos target/macos-runtime-validation
