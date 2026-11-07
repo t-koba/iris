@@ -180,7 +180,7 @@ class CandidateContracts(unittest.TestCase):
                     self.assertEqual(list(args[3:]), m.POLICY['configure_flags'])
                     env = kwargs['env']
                     self.assertEqual(m.shlex.split(env['CFLAGS']), ['-isysroot', str(sdk), '-I' + str(lzma / 'include')])
-                    self.assertEqual(m.shlex.split(env['LDFLAGS']), ['-isysroot', str(sdk), '-L' + str(lzma / 'lib')])
+                    self.assertEqual(m.shlex.split(env['LDFLAGS']), ['-isysroot', str(sdk), '-L' + str(lzma / 'lib'), '-liconv'])
                     for key in ('PKG_CONFIG_PATH', 'PKG_CONFIG_LIBDIR'):
                         self.assertEqual(env[key], str(lzma / 'lib/pkgconfig'))
                     raise Configured()

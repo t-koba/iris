@@ -328,7 +328,7 @@ def build(prefix, sdk):
     docs.mkdir(parents=True)
     lzma = build_lzma(work, sdk, env, docs)
     env.update(CFLAGS=f'-isysroot {shlex.quote(str(sdk))} -I{shlex.quote(str(lzma / "include"))}',
-               LDFLAGS=f'-isysroot {shlex.quote(str(sdk))} -L{shlex.quote(str(lzma / "lib"))}',
+               LDFLAGS=f'-isysroot {shlex.quote(str(sdk))} -L{shlex.quote(str(lzma / "lib"))} -liconv',
                PKG_CONFIG_PATH=str(lzma / 'lib/pkgconfig'), PKG_CONFIG_LIBDIR=str(lzma / 'lib/pkgconfig'))
     require(run('pkg-config', '--modversion', 'liblzma', env=env) == LZMA['version'], 'wrong liblzma version')
     require(run('pkg-config', '--variable=libdir', 'liblzma', env=env) == str(lzma / 'lib'),
