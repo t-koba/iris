@@ -1,5 +1,6 @@
 """Offline exact-context fixture for the pinned FFmpeg dependency adaptation."""
 import importlib.util
+import hashlib
 from pathlib import Path
 import subprocess
 import tempfile
@@ -44,6 +45,26 @@ enabled debug && add_allcflags -g"$debuglevel" && add_asflags -g"$debuglevel"
 '''
 
 
+LIB_NAMING_FIXTURE = '''            -mfp16-format=*)      ;;
+            -lz)                  echo ${zlib_msvc_lib:-zlib.lib} ;;
+            -lx264)               echo libx264.lib ;;
+            -lstdc++)             ;;
+'''
+LIB_NAMING_BASELINE_PATCH = b'''diff --git a/configure b/configure
+index d6c4388..75b96c3 100644
+--- a/configure
++++ b/configure
+@@ -4781,6 +4781,6 @@ msvc_common_flags(){
+             -mfp16-format=*)      ;;
+-            -lz)                  echo zlib.lib ;;
+             -lx264)               echo libx264.lib ;;
++            -lmp3lame)            echo libmp3lame.lib ;;
+             -lstdc++)             ;;
+             -l*)                  echo ${flag#-l}.lib ;;
+             -LARGEADDRESSAWARE)   echo $flag ;;
+'''
+
+
 class DependencyPatchTests(unittest.TestCase):
     def test_exact_contexts_generate_applicable_patch_for_lf_and_crlf(self):
         for original in (FIXTURE, FIXTURE.replace("\n", "\r\n")):
@@ -76,6 +97,41 @@ class DependencyPatchTests(unittest.TestCase):
         drifted = FIXTURE.replace("enabled libmp3lame", "enabled libmp3lame_changed")
         with self.assertRaisesRegex(ValueError, "libmp3lame"):
             patcher.adapt_configure(drifted)
+
+    def test_lib_naming_preserves_dynamic_zlib_and_adds_mp3lame(self):
+        for original in (LIB_NAMING_FIXTURE, LIB_NAMING_FIXTURE.replace("\n", "\r\n")):
+            adapted = patcher.adapt_lib_naming_configure(original)
+            self.assertIn("-lz)                  echo ${zlib_msvc_lib:-zlib.lib} ;;", adapted)
+            self.assertIn("-lmp3lame)            echo libmp3lame.lib ;;", adapted)
+            self.assertEqual(adapted.count("-lmp3lame)"), 1)
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                subprocess.run(["git", "init", "-q", str(root)], check=True)
+                subprocess.run(["git", "-C", str(root), "config", "core.autocrlf", "false"], check=True)
+                path = root / "configure"
+                path.write_bytes(original.encode("utf-8"))
+                patch = root / "adapt.patch"
+                patch.write_text(patcher.patch_text(original, adapted), encoding="utf-8", newline="")
+                subprocess.run(["git", "-C", str(root), "apply", "--check", str(patch)], check=True)
+                subprocess.run(["git", "-C", str(root), "apply", str(patch)], check=True)
+                self.assertEqual(path.read_bytes().decode("utf-8"), adapted)
+
+    def test_lib_naming_rejects_source_drift_and_duplicate_mapping(self):
+        with self.assertRaisesRegex(ValueError, "zlib/x264 library-name context"):
+            patcher.adapt_lib_naming_configure(LIB_NAMING_FIXTURE.replace("zlib_msvc_lib", "other_zlib_lib"))
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            patcher.adapt_lib_naming_configure(
+                LIB_NAMING_FIXTURE.replace("            -lstdc++)",
+                                           "            -lmp3lame)            echo libmp3lame.lib ;;\n            -lstdc++)"))
+
+    def test_lib_naming_baseline_patch_hash_is_pinned(self):
+        self.assertEqual(hashlib.sha256(LIB_NAMING_BASELINE_PATCH).hexdigest(),
+                         patcher.LIB_NAMING_PIN["sha256"])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / patcher.LIB_NAMING_PIN["name"]
+            path.write_bytes(LIB_NAMING_BASELINE_PATCH)
+            self.assertEqual(patcher.validate_baseline_patch(path, patcher.LIB_NAMING_PIN),
+                             patcher.LIB_NAMING_PIN["sha256"])
 
     def test_baseline_patch_hash_is_pinned(self):
         self.assertEqual(patcher.PIN["name"], "0004-dependencies.patch")

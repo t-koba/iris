@@ -42,6 +42,7 @@ vcpkg_from_git(
     PATCHES
         first.patch
         "0004-dependencies.patch" # retained explanation
+        0007-fix-lib-naming.patch
         last.patch
 )
 '@
@@ -52,9 +53,11 @@ foreach ($ending in @("`n", "`r`n")) {
     foreach ($entry in @('"0004-dependencies.patch"', '0004-dependencies.patch')) {
         foreach ($comment in @('', ' # retained explanation')) {
             $inputPatch = $patchPortLf.Replace('"0004-dependencies.patch" # retained explanation', $entry + $comment).Replace("`n", $ending)
-            $replacedPatch = Set-PrototypeFfmpegDependencyPatch $inputPatch '0004-dependencies.patch' '0004-dependencies-pinned.patch'
+            $replacedPatch = Set-PrototypeFfmpegPatch $inputPatch '0004-dependencies.patch' '0004-dependencies-pinned.patch'
             $expectedPatch = $inputPatch.Replace('0004-dependencies.patch', '0004-dependencies-pinned.patch')
-            if ($replacedPatch.Portfile -cne $expectedPatch) { throw 'adapted PATCHES entry/order/comment/line endings were not preserved' }
+            $replacedNaming = Set-PrototypeFfmpegPatch $replacedPatch.Portfile '0007-fix-lib-naming.patch' '0007-fix-lib-naming-pinned.patch'
+            $expectedPatch = $expectedPatch.Replace('0007-fix-lib-naming.patch', '0007-fix-lib-naming-pinned.patch')
+            if ($replacedNaming.Portfile -cne $expectedPatch) { throw 'adapted PATCHES entry/order/comment/line endings were not preserved' }
             $badPatches = [ordered]@{
                 missing = $inputPatch.Replace('0004-dependencies.patch', 'other.patch')
                 duplicateBaseline = $inputPatch.Replace('last.patch', $entry + $comment)
@@ -63,7 +66,7 @@ foreach ($ending in @("`n", "`r`n")) {
             }
             foreach ($case in $badPatches.Keys) {
                 $rejected = $false
-                try { Set-PrototypeFfmpegDependencyPatch $badPatches[$case] '0004-dependencies.patch' '0004-dependencies-pinned.patch' | Out-Null } catch { $rejected = $true }
+                try { Set-PrototypeFfmpegPatch $badPatches[$case] '0004-dependencies.patch' '0004-dependencies-pinned.patch' | Out-Null } catch { $rejected = $true }
                 if (!$rejected) { throw "accepted $case dependency patch entry (CRLF=$($ending.Length -eq 2), entry=$entry, comment=$comment)" }
             }
         }
@@ -93,5 +96,5 @@ foreach ($script in @($build, $stage, $smoke)) {
 }
 if ($build -notmatch '\$installedDir = Join-Path \$vcpkgRoot "installed"' -or $stage -notmatch '\$installedDir = Join-Path \(Resolve-Path \$env:VCPKG_ROOT\)\.Path "installed"' -or $smoke -notmatch '\$installedDirEnv = Join-Path \$vcpkgRoot "installed"') { throw 'Rust discovery must use VCPKG_ROOT/installed' }
 if ($build -notmatch '(?s)foreach \(\$name in \$derived.Patches\).*ffmpeg-dependency-patch.py.*adapt.*git apply --check --whitespace=nowarn \$adaptedPatchPath') { throw 'pinned dependency patch adaptation/application is not ordered and guarded' }
-if ($build -notmatch 'git apply --check --whitespace=nowarn \$patchPath' -or $build -notmatch 'Set-PrototypeFfmpegDependencyPatch') { throw 'baseline patch sequence or fail-closed overlay replacement is missing' }
+if ($build -notmatch 'git apply --check --whitespace=nowarn \$patchPath' -or $build -notmatch 'Set-PrototypeFfmpegPatch') { throw 'baseline patch sequence or fail-closed overlay replacement is missing' }
 Write-Host 'prototype overlay/discovery regressions passed (no native build)'

@@ -16,6 +16,7 @@ spec.loader.exec_module(bundle)
 dep_spec = importlib.util.spec_from_file_location("dependency_patch_test", ROOT / "test-ffmpeg-dependency-patch.py")
 dependency_test = importlib.util.module_from_spec(dep_spec)
 dep_spec.loader.exec_module(dependency_test)
+LIB_NAMING_BASELINE_PATCH = dependency_test.LIB_NAMING_BASELINE_PATCH
 PORT = b'''vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO ffmpeg/ffmpeg
@@ -24,7 +25,9 @@ PORT = b'''vcpkg_from_github(
     HEAD_REF master
     PATCHES
         z-first.patch # retained inline comment
-        "0004-dependencies.patch" # pinned patch
+        "0004-dependencies.patch" # pinned dependency patch
+        0005-fix-nasm.patch
+        0007-fix-lib-naming.patch
         a-second.patch
 )
 '''
@@ -124,6 +127,8 @@ class BundleTests(unittest.TestCase):
                 "ports/ffmpeg/vcpkg.json": b'{}\n',
                 "ports/ffmpeg/z-first.patch": b"first\n",
                 "ports/ffmpeg/0004-dependencies.patch": BASELINE_PATCH,
+                "ports/ffmpeg/0005-fix-nasm.patch": b"nasm\n",
+                "ports/ffmpeg/0007-fix-lib-naming.patch": LIB_NAMING_BASELINE_PATCH,
                 "ports/ffmpeg/a-second.patch": b"second\n",
                 bundle.HELPER: b"helper\n",
             }.items():
@@ -140,12 +145,18 @@ class BundleTests(unittest.TestCase):
             overlay_port = overlay / "portfile.cmake"
             overlay_text = overlay_port.read_text().replace("vcpkg_from_github(", "vcpkg_from_git(")
             overlay_text = overlay_text.replace('"0004-dependencies.patch"', '"0004-dependencies-pinned.patch"')
+            overlay_text = overlay_text.replace('0007-fix-lib-naming.patch', '0007-fix-lib-naming-pinned.patch')
             overlay_port.write_text(overlay_text)
             adapted = dependency_test.patcher.patch_text(
                 dependency_test.FIXTURE,
                 dependency_test.patcher.adapt_configure(dependency_test.FIXTURE),
             )
             (overlay / "0004-dependencies-pinned.patch").write_text(adapted)
+            adapted_lib_naming = dependency_test.patcher.patch_text(
+                dependency_test.LIB_NAMING_FIXTURE,
+                dependency_test.patcher.adapt_lib_naming_configure(dependency_test.LIB_NAMING_FIXTURE),
+            )
+            (overlay / "0007-fix-lib-naming-pinned.patch").write_text(adapted_lib_naming)
             with patch.multiple(bundle, COMMIT=commit, BASELINE=commit, ARCHIVE=f"ffmpeg-{commit}.tar"):
                 first, second = root / "first", root / "second"
                 bundle.create(repo, repo, overlay, first)
@@ -161,12 +172,18 @@ class BundleTests(unittest.TestCase):
                 manifest = json.loads((first / "MANIFEST.json").read_text())
                 self.assertIn("# retained inline comment", manifest["patches"]["baseline"]["block"])
                 self.assertEqual([Path(p).name for p in manifest["patches"]["baseline"]["ordered_files"]],
-                                 ["z-first.patch", "0004-dependencies.patch", "a-second.patch"])
+                                 ["z-first.patch", "0004-dependencies.patch", "0005-fix-nasm.patch",
+                                  "0007-fix-lib-naming.patch", "a-second.patch"])
                 self.assertEqual([Path(p).name for p in manifest["patches"]["overlay"]["ordered_files"]],
-                                 ["z-first.patch", "0004-dependencies-pinned.patch", "a-second.patch"])
+                                 ["z-first.patch", "0004-dependencies-pinned.patch", "0005-fix-nasm.patch",
+                                  "0007-fix-lib-naming-pinned.patch", "a-second.patch"])
+                self.assertEqual(manifest["schema"], 3)
+                self.assertEqual(len(manifest["patches"]["adaptations"]), 2)
                 # Hash/size mismatches and missing inputs must all stop staging.
                 for name in [bundle.ARCHIVE, "baseline/ports/ffmpeg/0004-dependencies.patch",
+                             "baseline/ports/ffmpeg/0007-fix-lib-naming.patch",
                              "overlay/ffmpeg/0004-dependencies-pinned.patch",
+                             "overlay/ffmpeg/0007-fix-lib-naming-pinned.patch",
                              "overlay/ffmpeg/portfile.cmake", "build-inputs/pins.json", "MANIFEST.json"]:
                     path = first / name
                     original = path.read_bytes()
@@ -181,7 +198,8 @@ class BundleTests(unittest.TestCase):
                         path.write_bytes(original)
                 # Even an internally rehashed manifest cannot omit required
                 # source or rewrite either patch order.
-                for name in [bundle.ARCHIVE, "baseline/ports/ffmpeg/0004-dependencies.patch"]:
+                for name in [bundle.ARCHIVE, "baseline/ports/ffmpeg/0004-dependencies.patch",
+                             "baseline/ports/ffmpeg/0007-fix-lib-naming.patch"]:
                     changed = json.loads(json.dumps(manifest))
                     del changed["files"][name]
                     (first / "MANIFEST.json").write_text(json.dumps(changed))
@@ -192,6 +210,20 @@ class BundleTests(unittest.TestCase):
                 (first / "MANIFEST.json").write_text(json.dumps(changed))
                 with self.assertRaises(ValueError):
                     bundle.verify(first, bundle.record(first / "MANIFEST.json"))
+
+    def test_lib_naming_bundle_patch_is_additive_only(self):
+        original = dependency_test.LIB_NAMING_FIXTURE
+        adapted = dependency_test.patcher.adapt_lib_naming_configure(original)
+        patch_text = dependency_test.patcher.patch_text(original, adapted)
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / bundle.LIB_NAMING_PATCH["overlay_name"]
+            path.write_text(patch_text)
+            bundle.validate_adapted_patch(path, bundle.LIB_NAMING_PATCH)
+            path.write_text(patch_text.replace(
+                "+            -lmp3lame)",
+                "-            -lz)                  echo ${zlib_msvc_lib:-zlib.lib} ;;\n+            -lmp3lame)"))
+            with self.assertRaisesRegex(ValueError, "only add the mp3lame mapping"):
+                bundle.validate_adapted_patch(path, bundle.LIB_NAMING_PATCH)
 
     def test_mirror_pin_and_fetch_guards(self):
         pins = json.loads((ROOT / "pins.json").read_text())["ffmpeg"]
@@ -221,8 +253,9 @@ class BundleTests(unittest.TestCase):
         workflow = (ROOT.parent.parent / ".github/workflows/windows-ffmpeg-prototype.yml").read_text()
         self.assertLess(build.index('source-bundle.py") create'), build.index('& $vcpkgExe install'))
         self.assertIn('source_bundle_manifest = $sourceBundleRecord', build)
-        self.assertIn('ffmpeg-dependency-patch.py") adapt', build)
-        self.assertIn('Set-PrototypeFfmpegDependencyPatch', build)
+        self.assertIn('ffmpeg-dependency-patch.py") $adaptation.command', build)
+        self.assertIn('adapt-lib-naming', build)
+        self.assertIn('Set-PrototypeFfmpegPatch', build)
         self.assertIn('$bundleRecord = $build.source_bundle_manifest', stage)
         self.assertIn('source-bundle.py") stage', stage)
         self.assertIn('(Join-Path $docDir "ffmpeg-source-bundle")', stage)

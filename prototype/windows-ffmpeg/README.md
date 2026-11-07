@@ -66,16 +66,18 @@ behavior, or licensing conclusions, and it never publishes.
    MSVC/SDK/tool versions (only OS build and VS major are currently asserted);
    verifies `VCPKG_ROOT` HEAD == baseline; clones and verifies the exact
    FFmpeg commit; processes patches sequentially in declared portfile order.
-   The pinned vcpkg `0004-dependencies.patch` digest is checked, its configure
-   adaptation requires exact source contexts, and its generated replacement
-   must apply after prior patches; any drift stops the run, with no 9.0.2
+   The pinned vcpkg `0004-dependencies.patch` and `0007-fix-lib-naming.patch`
+   digests are checked; both configure adaptations require exact source
+   contexts and their generated replacements must apply after prior patches.
+   The library-name adaptation preserves FFmpeg's newer dynamic zlib mapping
+   while adding the `libmp3lame.lib` mapping. Drift stops the run, with no 9.0.2
    fallback. Per-patch evidence is recorded in `ffmpeg-source.json`. It derives
    a test-only overlay from the baseline port (rewrites to
    `vcpkg_from_git(URL https://github.com/FFmpeg/FFmpeg.git REF
    db8537d8cc7962bd3d07254d6ceff21d888817d4)`, validates the pinned helper
    signature and generated parameters, removes the archive hash, replaces only
-   the `0004` PATCHES entry with `0004-dependencies-pinned.patch`, and marks
-   the overlay `version-string` as the pinned commit);
+   the `0004` and `0007` PATCHES entries with their pinned-source replacements,
+   and marks the overlay `version-string` as the pinned commit);
    then runs `vcpkg install` with the prototype manifest, `--overlay-ports`
    (generated), `--overlay-triplets triplets/`,
    `--triplet x64-windows-prototype-dynamic`, and `--no-binarycaching`.
@@ -159,12 +161,12 @@ installing FFmpeg. It contains:
   These are Git blob bytes, not potentially CRLF-converted checkout copies.
 - `overlay/ffmpeg/`: the actual generated port, manifest and patch/config
   files used for the prototype. The ordered baseline patch series is retained;
-  only `0004-dependencies.patch` is replaced in the overlay by
-  `0004-dependencies-pinned.patch`. The adapter first checks the pinned
-  baseline patch digest, then requires every expected pinned-FFmpeg `configure`
-  context exactly once before generating a configure-only patch. It preserves
-  the newer MSVC zlib probe and applies the dependency/link changes from the
-  baseline patch. Missing, duplicate or changed contexts fail before install;
+  only `0004-dependencies.patch` and `0007-fix-lib-naming.patch` are replaced
+  by their pinned-source configure-only adaptations. Each adapter checks its
+  exact baseline patch digest and source context. The 0004 adapter preserves
+  the newer MSVC zlib probe and applies the dependency/link changes; the 0007
+  adapter preserves dynamic zlib library-name detection while adding
+  `libmp3lame.lib`. Missing, duplicate or changed contexts fail before install;
   there is no fallback to FFmpeg 9.0.2.
 - `build-inputs/`: pins, vcpkg manifest/configuration, custom dynamic triplet,
   source/overlay/build/toolchain scripts, the adapter and its offline
@@ -174,12 +176,13 @@ installing FFmpeg. It contains:
 
 `MANIFEST.json` records SHA-256 and byte count for every included input, the
 source/baseline commits, and separate baseline/overlay PATCHES blocks with
-comments and exact order. It binds the one authorized patch replacement to the
-pinned baseline patch digest; verifies the untouched overlay patches against
+comments and exact order. It binds both authorized patch replacements to
+pinned baseline patch digests; verifies the untouched overlay patches against
 their Git-blob copies (normalizing checkout line endings only); and requires
-the adapted patch to change `configure` alone and retain the expected dependency
-changes. Staging verifies all required files, patches and hashes before and
-after copying to app `doc/ffmpeg-source-bundle/`. The prototype installer
+each adapted patch to change `configure` alone and retain its intended
+changes, including the dynamic zlib mapping. Staging verifies all required
+files, patches and hashes both before and after copying to app
+`doc/ffmpeg-source-bundle/`. The prototype installer
 recursively includes that directory; the evidence artifact retains both the
 generated bundle and the staged app-doc copy. Missing or altered material
 fails staging instead of silently omitting source.
@@ -202,15 +205,16 @@ require evidence from the Windows prototype run.
 ## Focused offline checks
 
 - `pwsh -File prototype/windows-ffmpeg/test-overlay-derivation.ps1` checks
-  baseline port rewriting, parameter rejection, patch order and the single
-  dependency-patch replacement without downloading or building native code.
+  baseline port rewriting, parameter rejection, patch order and both pinned
+  patch replacements without downloading or building native code.
 - `pwsh -File prototype/windows-ffmpeg/test-installed-smoke-lifecycle.ps1`
   checks bounded install/smoke/uninstall/cleanup fault handling.
 - `python prototype/windows-ffmpeg/test-ffmpeg-dependency-patch.py` checks the
-  pinned configure-context adaptation, CRLF/LF patch applicability, and
-  fail-closed source drift using an offline fixture.
+  pinned dependency and library-name configure adaptations, CRLF/LF patch
+  applicability, baseline hashes, and fail-closed source drift using offline
+  fixtures.
 - `python prototype/windows-ffmpeg/test-source-bundle.py` checks deterministic
-  source bundles, patch order/replacement, blob/hash integrity, missing or
+  source bundles, both patch adaptations/order, blob/hash integrity, missing or
   corrupted material and package/evidence wiring using synthetic local Git
   repositories. The fixtures are not upstream provenance and do not build
   Windows code.

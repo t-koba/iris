@@ -56,8 +56,8 @@ function ConvertTo-PrototypeFfmpegPort {
 
 # Replace exactly one PATCHES entry with its pinned-source adaptation. This is
 # deliberately separate from source-ref rewriting so callers can prove the
-# baseline order and the one authorized replacement.
-function Set-PrototypeFfmpegDependencyPatch {
+# baseline order and the authorized replacements.
+function Set-PrototypeFfmpegPatch {
     param([string]$Portfile, [string]$BaselinePatch, [string]$OverlayPatch)
 
     foreach ($name in @($BaselinePatch, $OverlayPatch)) {

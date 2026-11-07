@@ -1,4 +1,4 @@
-"""Generate a pinned-commit vcpkg 0004 patch; fail closed on baseline or source drift."""
+"""Generate exact-context adaptations for pinned vcpkg FFmpeg patches."""
 import difflib
 import hashlib
 import json
@@ -8,6 +8,7 @@ import sys
 ROOT = Path(__file__).resolve().parent
 PINS = json.loads((ROOT / "pins.json").read_text(encoding="utf-8-sig"))
 PIN = PINS["vcpkg"]["ffmpeg_dependency_patch"]
+LIB_NAMING_PIN = PINS["vcpkg"]["ffmpeg_lib_naming_patch"]
 
 # Exact pinned-commit configure contexts. These carry the vcpkg 9.0.2 patch's
 # dependency/link changes while accepting only the known newer source shape.
@@ -110,15 +111,14 @@ def patch_text(before, after):
     return "diff --git a/configure b/configure\n" + diff
 
 
-def validate_baseline_patch(path):
+def validate_baseline_patch(path, pin=PIN):
     path = Path(path)
     # Git may check out the patch as CRLF on Windows. Validate the pinned Git
-    # blob digest over normalized text; source-bundle.py separately retains and
-    # hashes the exact Git blob bytes from `git show`.
+    # blob digest over normalized text; source-bundle.py retains exact Git blobs.
     blob_text = path.read_bytes().replace(b"\r\n", b"\n")
     digest = hashlib.sha256(blob_text).hexdigest()
-    if path.name != PIN["name"] or digest != PIN["sha256"]:
-        raise ValueError("vcpkg FFmpeg dependency patch does not match its pinned baseline bytes")
+    if path.name != pin["name"] or digest != pin["sha256"]:
+        raise ValueError(f"vcpkg FFmpeg patch {pin['name']} does not match its pinned baseline bytes")
     return digest
 
 
@@ -133,8 +133,42 @@ def generate(configure_path, baseline_patch_path, output_path):
     return hashlib.sha256(patch.encode("utf-8")).hexdigest()
 
 
+def adapt_lib_naming_configure(text):
+    if "\r\n" in text and "\n" in text.replace("\r\n", ""):
+        raise ValueError("configure has mixed line endings")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    normalized = text.replace("\r\n", "\n")
+    before = ("            -lz)                  echo ${zlib_msvc_lib:-zlib.lib} ;;\n"
+              "            -lx264)               echo libx264.lib ;;\n")
+    after = ("            -lz)                  echo ${zlib_msvc_lib:-zlib.lib} ;;\n"
+             "            -lmp3lame)            echo libmp3lame.lib ;;\n"
+             "            -lx264)               echo libx264.lib ;;\n")
+    if normalized.count(before) != 1:
+        raise ValueError("expected exactly one pinned MSVC zlib/x264 library-name context")
+    if "            -lmp3lame)            echo libmp3lame.lib ;;" in normalized:
+        raise ValueError("pinned MSVC mp3lame library mapping already exists")
+    return normalized.replace(before, after, 1).replace("\n", newline)
+
+
+def generate_lib_naming(configure_path, baseline_patch_path, output_path):
+    validate_baseline_patch(baseline_patch_path, LIB_NAMING_PIN)
+    configure_path = Path(configure_path)
+    with configure_path.open("r", encoding="utf-8", newline="") as stream:
+        before = stream.read()
+    after = adapt_lib_naming_configure(before)
+    patch = patch_text(before, after)
+    Path(output_path).write_bytes(patch.encode("utf-8"))
+    return hashlib.sha256(patch.encode("utf-8")).hexdigest()
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 5 or sys.argv[1] != "adapt":
-        raise SystemExit("usage: ffmpeg-dependency-patch.py adapt <configure> <baseline-0004> <output-patch>")
-    digest = generate(sys.argv[2], sys.argv[3], sys.argv[4])
-    print(f"generated pinned dependency patch sha256={digest}")
+    if len(sys.argv) != 5:
+        raise SystemExit("usage: ffmpeg-dependency-patch.py <adapt|adapt-lib-naming> <configure> <baseline-patch> <output-patch>")
+    if sys.argv[1] == "adapt":
+        digest = generate(sys.argv[2], sys.argv[3], sys.argv[4])
+        print(f"generated pinned dependency patch sha256={digest}")
+    elif sys.argv[1] == "adapt-lib-naming":
+        digest = generate_lib_naming(sys.argv[2], sys.argv[3], sys.argv[4])
+        print(f"generated pinned library-name patch sha256={digest}")
+    else:
+        raise SystemExit("expected adapt or adapt-lib-naming")
