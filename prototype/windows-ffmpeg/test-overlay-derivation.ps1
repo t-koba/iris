@@ -46,10 +46,14 @@ vcpkg_from_git(
 )
 '@
 $replacedPatch = Set-PrototypeFfmpegDependencyPatch $patchPort '0004-dependencies.patch' '0004-dependencies-pinned.patch'
-if ($replacedPatch.Portfile -notmatch '(?m)^        "0004-dependencies-pinned\.patch" # retained explanation$') { throw 'quoted adapted PATCHES entry/order/comment was not preserved' }
+# The here-string inherits the checkout's line endings; compare the entry text
+# without changing the returned Portfile or making the assertion OS-dependent.
+$normalizedReplacedPatch = $replacedPatch.Portfile.Replace("`r`n", "`n").Replace("`r", "")
+if ($normalizedReplacedPatch -notmatch '(?m)^        "0004-dependencies-pinned\.patch" # retained explanation$') { throw 'quoted adapted PATCHES entry/order/comment was not preserved' }
 $unquotedPatchPort = $patchPort.Replace('"0004-dependencies.patch" # retained explanation', '0004-dependencies.patch # retained explanation')
 $replacedUnquotedPatch = Set-PrototypeFfmpegDependencyPatch $unquotedPatchPort '0004-dependencies.patch' '0004-dependencies-pinned.patch'
-if ($replacedUnquotedPatch.Portfile -notmatch '(?m)^        0004-dependencies-pinned\.patch # retained explanation$') { throw 'unquoted adapted PATCHES entry/order/comment was not preserved' }
+$normalizedReplacedUnquotedPatch = $replacedUnquotedPatch.Portfile.Replace("`r`n", "`n").Replace("`r", "")
+if ($normalizedReplacedUnquotedPatch -notmatch '(?m)^        0004-dependencies-pinned\.patch # retained explanation$') { throw 'unquoted adapted PATCHES entry/order/comment was not preserved' }
 $duplicateQuotedOverlay = $patchPort.Replace('last.patch', '"0004-dependencies-pinned.patch"')
 $duplicateUnquotedOverlay = $unquotedPatchPort.Replace('last.patch', '0004-dependencies-pinned.patch')
 foreach ($badPatch in @($patchPort.Replace('0004-dependencies.patch', 'other.patch'), $duplicateQuotedOverlay, $duplicateUnquotedOverlay)) {
