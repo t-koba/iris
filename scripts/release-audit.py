@@ -238,9 +238,15 @@ class Audit:
             tree_argv = ["cargo", "tree", "-p", "iris-ui-shell", "--target", hosts[0],
                     "--offline", "--locked", "--prefix", "indent", "--charset", "ascii",
                     "--format", "{p}|{f}", "-e", "normal,build", *flags]
-            metadata = self.cargo_metadata(metadata_argv)
+            catalog_error = None
+            try:
+                metadata = self.cargo_metadata(metadata_argv)
+            except (OSError, ValueError) as error:
+                metadata = None
+                catalog_error = str(error)
             tree_text = self.cargo_tree(tree_argv)
-            packages = {p["id"]: p for p in metadata["packages"]}
+            packages = ({p["id"]: p for p in metadata["packages"]}
+                        if metadata is not None else {})
             by_key = {}
             for pid, pkg in packages.items():
                 key = (pkg["name"], pkg["version"], pkg.get("source") is None)
@@ -300,12 +306,29 @@ class Audit:
                 location = source_match.group(1) if source_match else ""
                 is_path = (location.startswith(("/", "\\", "file://", "./", "../")) or
                            bool(re.match(r"^[A-Za-z]:[\\/]", location)))
-                candidates = by_key.get((name, version, is_path))
-                if candidates is None:
-                    raise ValueError(f"tree package {name} {version} not in catalog")
-                if len(candidates) != 1:
-                    raise ValueError(f"ambiguous catalog entry for {name} {version}")
-                pid = candidates[0]
+                if metadata is None:
+                    # These are tree display identities, not invented metadata IDs.
+                    # In particular, a bare registry display does not identify its
+                    # registry URL. Retain only the source text Cargo actually gave us.
+                    display = re.fullmatch(r"([A-Za-z0-9_-]+) v(\S+?)(?: \((.+)\))?", hint)
+                    if not display or display.groups() != (name, version, location or None):
+                        raise ValueError("ambiguous tree package identity")
+                    pid = "tree:" + hint
+                    proc_macro = p_raw.endswith(" (proc-macro)")
+                    package = dict(id=pid, name=name, version=version,
+                                   source=location or None,
+                                   source_kind="path" if is_path else "tree-location" if location else "unavailable",
+                                   targets=[dict(kind=["proc-macro"])] if proc_macro else [])
+                    if pid in packages and packages[pid] != package:
+                        raise ValueError("ambiguous tree package identity")
+                    packages[pid] = package
+                else:
+                    candidates = by_key.get((name, version, is_path))
+                    if candidates is None:
+                        raise ValueError(f"tree package {name} {version} not in catalog")
+                    if len(candidates) != 1:
+                        raise ValueError(f"ambiguous catalog entry for {name} {version}")
+                    pid = candidates[0]
                 feats = [f.strip() for f in f_raw.split(",") if f.strip()] if f_raw else []
                 if pid not in seen:
                     seen.add(pid)
@@ -389,9 +412,18 @@ class Audit:
                     target_kinds=sorted({k for t in package["targets"] for k in t.get("kind", [])}),
                     license=package.get("license"), license_file=package.get("license_file"),
                     missing_metadata=[k for k in ("license", "license_file") if not package.get(k)]))
-            if self.add("cargo-graph", **context, status="partial" if context["truncated"] else "captured",
+                if metadata is None:
+                    item = projected[-1]
+                    item.update(status="partial", tree_identity=pid.removeprefix("tree:"),
+                                source_kind=package["source_kind"])
+                    item["missing_metadata"].append("target_kinds")
+                    if not package["source"]:
+                        item["missing_metadata"].append("source")
+            if catalog_error is not None:
+                context["metadata_error"] = catalog_error
+            if self.add("cargo-graph", **context, status="partial" if context["truncated"] or metadata is None else "captured",
                         packages=projected, edges=edges,
-                        note="Cargo tree features for the selected target/variant and declared license metadata only; path source is not a registry. Edges are tree package relationships once each; dependency_kinds retains normal/build group membership and dependency_kind is ambiguous when both apply. Unfiltered metadata target predicates are never serialized. Dev-only and unreachable packages are excluded via -p and -e. Runtime/build contexts propagate through normal dependencies, preserving both for dual-kind edges; proc-macro dependencies run at build time. No legal conclusion or native-code closure is inferred."):
+                        note=("Package catalog unavailable: tree display identities and source locations only, not metadata package IDs or registry URLs; licenses and non-proc-macro target kinds are unavailable. " if metadata is None else "") + "Cargo tree features for the selected target/variant and declared license metadata only; path source is not a registry. Edges are tree package relationships once each; dependency_kinds retains normal/build group membership and dependency_kind is ambiguous when both apply. Unfiltered metadata target predicates are never serialized. Dev-only and unreachable packages are excluded via -p and -e. Runtime/build contexts propagate through normal dependencies, preserving both for dual-kind edges; proc-macro dependencies run at build time. No legal conclusion or native-code closure is inferred."):
                 return
             context["truncated"] = True
             reason = "rooted graph omitted: serialized report byte budget exceeded"

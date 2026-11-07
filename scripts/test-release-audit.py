@@ -184,6 +184,107 @@ class Reports(unittest.TestCase):
                 report.cargo_graph(rustc)
             self.assertEqual(report.records[-1]["status"], "absent")
 
+    def test_metadata_miss_retains_partial_product_tree(self):
+        for platform, host in (("macos", "aarch64-apple-darwin"),
+                               ("windows", "x86_64-pc-windows-msvc")):
+            minimal = platform == "windows"
+            tree = ("iris-ui-shell v0.4.0 (/workspace/crates/ui-shell)|" +
+                    ("minimal" if minimal else "default,video,pdf") + "\n" +
+                    ("" if minimal else "|-- video v1.2.3|decode\n") +
+                    "|-- common v1.2.3|std\n"
+                    "|-- macro v1.2.3 (proc-macro)|derive\n"
+                    "|   `-- helper v1.2.3|\n"
+                    "|-- git-dep v1.2.3 (https://example.invalid/repo#abc)|feature\n"
+                    "[build-dependencies]\n"
+                    "|-- common v1.2.3|std (*)\n"
+                    "`-- build-tool v1.2.3|\n"
+                    "    `-- helper v1.2.3| (*)\n")
+            with self.subTest(platform=platform):
+                report = audit(platform=platform)
+                with patch.object(report, "cargo_metadata", side_effect=ValueError("aligned v0.4.3 not cached")) as meta, \
+                     patch.object(report, "cargo_tree", return_value=tree) as cmd:
+                    report.cargo_graph(f"host: {host}\n")
+                for argv in (meta.call_args.args[0], cmd.call_args.args[0]):
+                    self.assertIn("--locked", argv)
+                    self.assertIn("--offline", argv)
+                    self.assertIn(host, argv)
+                    self.assertEqual("--no-default-features" in argv, minimal)
+                    self.assertEqual("minimal" in argv, minimal)
+                self.assertEqual(cmd.call_count, 1)  # no network retry
+                graph = report.records[-1]
+                self.assertEqual(graph["status"], "partial")
+                self.assertFalse(graph["truncated"])
+                self.assertIn("aligned", graph["metadata_error"])
+                self.assertEqual(graph["variant"], "minimal" if minimal else "product")
+                packages = {p["name"]: p for p in graph["packages"]}
+                self.assertEqual(set(packages), {"iris-ui-shell", "common", "macro", "helper",
+                                                "git-dep", "build-tool"} | (set() if minimal else {"video"}))
+                root = packages["iris-ui-shell"]
+                self.assertEqual(graph["root"], root["id"])
+                self.assertEqual(root["tree_identity"], report.clean("iris-ui-shell v0.4.0 (/workspace/crates/ui-shell)"))
+                self.assertEqual(root["features"], ["minimal"] if minimal else ["default", "video", "pdf"])
+                self.assertEqual(root["source_kind"], "path")
+                self.assertEqual(root["source"], report.clean("/workspace/crates/ui-shell"))
+                self.assertEqual(packages["git-dep"]["source"], "https://example.invalid/repo#abc")
+                self.assertEqual(packages["git-dep"]["source_kind"], "tree-location")
+                self.assertIsNone(packages["common"]["source"])
+                self.assertEqual(packages["common"]["source_kind"], "unavailable")
+                self.assertIn("source", packages["common"]["missing_metadata"])
+                self.assertEqual(packages["common"]["features"], ["std"])
+                self.assertEqual(packages["common"]["contexts"], ["build", "runtime"])
+                self.assertEqual(packages["macro"]["contexts"], ["proc-macro"])
+                self.assertEqual(packages["helper"]["contexts"], ["build"])
+                for package in packages.values():
+                    self.assertEqual(package["status"], "partial")
+                    self.assertEqual(package["version"], "0.4.0" if package is root else "1.2.3")
+                    for field in ("license", "license_file"):
+                        self.assertIsNone(package[field])
+                        self.assertIn(field, package["missing_metadata"])
+                edges = {e["destination"]: e for e in graph["edges"] if e["source"] == root["id"]}
+                self.assertEqual(edges[packages["common"]["id"]]["dependency_kinds"], ["build", "normal"])
+                self.assertTrue(edges[packages["macro"]["id"]]["proc_macro"])
+                self.assertEqual(edges[packages["build-tool"]["id"]]["dependency_kind"], "build")
+
+                bounded = audit(platform=platform, max_cargo_packages=2)
+                with patch.object(bounded, "cargo_metadata", side_effect=ValueError("offline miss")), \
+                     patch.object(bounded, "cargo_tree", return_value=tree):
+                    bounded.cargo_graph(f"host: {host}\n")
+                limited = bounded.records[-1]
+                self.assertEqual(limited["status"], "partial")
+                self.assertTrue(limited["truncated"])
+                self.assertEqual(len(limited["packages"]), 2)
+                ids = {p["id"] for p in limited["packages"]}
+                self.assertTrue(all(e["source"] in ids and e["destination"] in ids for e in limited["edges"]))
+
+    def test_metadata_miss_does_not_hide_tree_failure_or_ambiguous_identity(self):
+        root = "iris-ui-shell v0.4.0 (/workspace/crates/ui-shell)|default\n"
+        for tree in (ValueError("tree offline miss"), "", root + "`-- dep unknown identity|\n",
+                     root + "|-- dep v1.0.0 (proc-macro)|\n`-- dep v1.0.0|\n"):
+            with self.subTest(tree=tree):
+                report = audit()
+                with patch.object(report, "cargo_metadata", side_effect=ValueError("offline miss")), \
+                     patch.object(report, "cargo_tree", **({"side_effect": tree} if isinstance(tree, Exception)
+                                                          else {"return_value": tree})) as cmd:
+                    report.cargo_graph("host: test-host\n")
+                self.assertEqual(cmd.call_count, 1)
+                graph = report.records[-1]
+                self.assertEqual(graph["status"], "absent")
+                self.assertEqual(graph["packages"], [])
+                self.assertEqual(graph["edges"], [])
+
+    def test_ambiguous_catalog_does_not_fall_back_to_tree_ids(self):
+        packages = [dict(id="root", name="iris-ui-shell", version="0.4.0", source=None)]
+        packages.extend(dict(id=identity, name="dep", version="1.0.0", source=identity)
+                        for identity in ("registry+one", "registry+two"))
+        report = audit()
+        with patch.object(report, "cargo_metadata", return_value=dict(packages=packages)), \
+             patch.object(report, "cargo_tree", return_value=(
+                 "iris-ui-shell v0.4.0 (/workspace/crates/ui-shell)|default\n`-- dep v1.0.0|\n")):
+            report.cargo_graph("host: test-host\n")
+        self.assertEqual(report.records[-1]["status"], "absent")
+        self.assertIn("ambiguous catalog", report.records[-1]["reason"])
+        self.assertEqual(report.records[-1]["packages"], [])
+
     def test_tree_features_win_over_workspace_wide_metadata_leak(self):
         # Exact shortfall from the checkout: metadata unifies image/avif,
         # tokio/test-util and iris-thumb-preview/test-fixtures from dev/bench
