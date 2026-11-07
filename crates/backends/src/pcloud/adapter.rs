@@ -255,14 +255,9 @@ impl PCloudAdapter {
         }
 
         match on_conflict {
-            ConflictResolution::Overwrite => {
-                if let Some(existing) = existing_by_name.get(&requested_name) {
-                    if let Some(file_id) = existing.file_id {
-                        self.api().await?.delete_file(file_id).await?;
-                    } else if let Some(folder_id) = existing.folder_id {
-                        self.api().await?.delete_folder_recursive(folder_id).await?;
-                    }
-                }
+            // Files use the provider's replacement operation; folder replacement has
+            // no established atomic API and must not be emulated by deleting the target.
+            ConflictResolution::Overwrite if !existing_by_name[&requested_name].is_folder => {
                 Ok((folder_id, requested_name))
             }
             ConflictResolution::Rename => {
@@ -284,7 +279,7 @@ impl PCloudAdapter {
                     index += 1;
                 }
             }
-            ConflictResolution::Skip | ConflictResolution::Fail => {
+            ConflictResolution::Overwrite | ConflictResolution::Skip | ConflictResolution::Fail => {
                 let conflict_path = if parent_path.is_empty() {
                     requested_name.clone()
                 } else {
@@ -474,19 +469,19 @@ impl BackendAdapter for PCloudAdapter {
         dst: &ObjectRef,
         options: CopyOptions,
     ) -> Result<OperationTicket, BackendError> {
+        if src.key == dst.key {
+            return Ok(self.next_ticket(OperationKind::Copy));
+        }
         let (is_folder, source_id) = Self::parse_id(src)?;
         let (to_folder_id, target_name) =
             self.resolve_write_target(dst, &options.on_conflict).await?;
-        let copied = if is_folder {
-            self.api()
+        if is_folder {
+            let copied = self
+                .api()
                 .await?
                 .copy_folder(source_id, to_folder_id)
-                .await?
-        } else {
-            self.api().await?.copy_file(source_id, to_folder_id).await?
-        };
-        if copied.name != target_name {
-            if is_folder {
+                .await?;
+            if copied.name != target_name {
                 self.api()
                     .await?
                     .rename_folder(
@@ -499,20 +494,12 @@ impl BackendAdapter for PCloudAdapter {
                         &target_name,
                     )
                     .await?;
-            } else {
-                self.api()
-                    .await?
-                    .rename_file(
-                        copied.file_id.ok_or_else(|| {
-                            BackendError::Internal(Box::new(std::io::Error::other(
-                                "missing file_id in copied pCloud file",
-                            )))
-                        })?,
-                        to_folder_id,
-                        &target_name,
-                    )
-                    .await?;
             }
+        } else {
+            self.api()
+                .await?
+                .copy_file(source_id, to_folder_id, &target_name)
+                .await?;
         }
         Ok(self.next_ticket(OperationKind::Copy))
     }
@@ -523,6 +510,9 @@ impl BackendAdapter for PCloudAdapter {
         dst: &ObjectRef,
         options: MoveOptions,
     ) -> Result<OperationTicket, BackendError> {
+        if src.key == dst.key {
+            return Ok(self.next_ticket(OperationKind::Move));
+        }
         let (is_folder, source_id) = Self::parse_id(src)?;
         let (to_folder_id, target_name) =
             self.resolve_write_target(dst, &options.on_conflict).await?;
@@ -710,3 +700,7 @@ mod tests {
         server.await.expect("mock server task");
     }
 }
+
+#[cfg(test)]
+#[path = "overwrite_tests.rs"]
+mod overwrite_tests;

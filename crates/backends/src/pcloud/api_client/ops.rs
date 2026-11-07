@@ -34,12 +34,14 @@ impl PCloudApiClient {
         &self,
         file_id: u64,
         to_folder_id: u64,
+        new_name: &str,
     ) -> Result<PCloudMetadata, BackendError> {
         self.call_metadata(
             "copyfile",
             &[
                 ("fileid", file_id.to_string()),
                 ("tofolderid", to_folder_id.to_string()),
+                ("toname", new_name.to_string()),
             ],
         )
         .await
@@ -60,6 +62,7 @@ impl PCloudApiClient {
         .await
     }
 
+    /// pCloud documents renamefile replacement as atomic (unlike folder replacement).
     pub async fn rename_file(
         &self,
         file_id: u64,
@@ -185,12 +188,15 @@ impl PCloudApiClient {
         folder_id: u64,
         part: multipart::Part,
     ) -> Result<PCloudMetadata, BackendError> {
+        // uploadfile overwrites an existing file, retaining its old contents as a
+        // revision. nopartial prevents incomplete uploads from replacing that file.
         let response = self
             .http
             .post(format!("{}/uploadfile", self.api_base))
             .query(&[
                 ("access_token", self.access_token.clone()),
                 ("folderid", folder_id.to_string()),
+                ("nopartial", "1".to_string()),
             ])
             .multipart(multipart::Form::new().part("file", part))
             .send()
