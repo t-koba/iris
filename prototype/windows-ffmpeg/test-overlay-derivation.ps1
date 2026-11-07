@@ -76,6 +76,24 @@ foreach ($ending in @("`n", "`r`n")) {
     }
 }
 
+# Omissions use the same exact-entry matcher: quotes/comments/CRLF do not
+# change the proof of one entry, nor may they change surrounding patch bytes.
+foreach ($ending in @("`n", "`r`n")) {
+    foreach ($entry in @('0047-fix-msvc-utf8.patch', '"0047-fix-msvc-utf8.patch"')) {
+        foreach ($comment in @('', ' # superseded upstream')) {
+            $line = '        ' + $entry + $comment + $ending
+            $inputPatch = $patchPortLf.Replace("        last.patch`n", ('        ' + $entry + $comment + "`n        last.patch`n")).Replace("`n", $ending)
+            $omitted = Set-PrototypeFfmpegPatch $inputPatch '0047-fix-msvc-utf8.patch' ''
+            if ($omitted.Portfile -cne $inputPatch.Replace($line, '')) { throw 'omission changed other patch bytes/order' }
+            foreach ($badPatch in @($omitted.Portfile, $inputPatch.Replace('last.patch', $entry))) {
+                $rejected = $false
+                try { Set-PrototypeFfmpegPatch $badPatch '0047-fix-msvc-utf8.patch' '' | Out-Null } catch { $rejected = $true }
+                if (!$rejected) { throw 'accepted missing/duplicate superseded patch' }
+            }
+        }
+    }
+}
+
 foreach ($bad in @($port.Replace('REPO ffmpeg/ffmpeg', 'URL bogus'), $port.Replace('z-first.patch', '../escape.patch'), $port.Replace('HEAD_REF master', 'UNKNOWN argument'), ($port + "`nvcpkg_from_git(`n)`n"))) {
     $rejected = $false
     try { ConvertTo-PrototypeFfmpegPort $bad $helper $repo $commit | Out-Null } catch { $rejected = $true }
@@ -101,3 +119,33 @@ if ($build -notmatch '\$installedDir = Join-Path \$vcpkgRoot "installed"' -or $s
 if ($build -notmatch '(?s)foreach \(\$name in \$derived.Patches\).*ffmpeg-dependency-patch.py.*adapt.*git apply --check --whitespace=nowarn \$adaptedPatchPath') { throw 'pinned dependency patch adaptation/application is not ordered and guarded' }
 if ($build -notmatch 'git apply --check --whitespace=nowarn \$patchPath' -or $build -notmatch 'Set-PrototypeFfmpegPatch') { throw 'baseline patch sequence or fail-closed overlay replacement is missing' }
 Write-Host 'prototype overlay/discovery regressions passed (no native build)'
+
+$omission = $build.IndexOf('if ($name -ceq $supersededPatch.name)')
+$validate = $build.IndexOf('omit-msvc-utf8', $omission)
+$remove = $build.IndexOf("Set-PrototypeFfmpegPatch `$overlayRaw `$name ''", $validate)
+$skip = $build.IndexOf('continue', $remove)
+$apply = $build.IndexOf('git apply --check', $skip)
+if ($omission -lt 0 -or $validate -le $omission -or $remove -le $validate -or $skip -le $remove -or $apply -le $skip) { throw 'supersession must validate, remove and skip before patch application' }
+if ($build -notmatch 'Remove-Item -LiteralPath \(Join-Path \$overlayPortDir \$supersededPatch.name\)') { throw 'superseded patch must not be copied into the overlay' }
+
+# Execute the real staging filter with synthetic records, without staging/builds.
+$filter = [regex]::Match($stage, '(?s)\$failed = @\(\$gate.patches \| Where-Object \{.*?\n\}\)')
+if (!$filter.Success) { throw 'staging patch filter missing' }
+$filterCode = [scriptblock]::Create($filter.Value)
+$pins = Get-Content -Raw (Join-Path $PSScriptRoot 'pins.json') | ConvertFrom-Json
+$validOmission = @{
+    patch = $pins.vcpkg.ffmpeg_msvc_utf8_patch.name; omitted = $true; applied = $false
+    evidence = @{ baseline_sha256 = $pins.vcpkg.ffmpeg_msvc_utf8_patch.sha256; ffmpeg_commit = $pins.ffmpeg.commit; source_sha256 = ('a' * 64) }
+}
+foreach ($record in @(@{ applies = $true }, $validOmission)) {
+    $gate = @{ patches = @($record) }
+    . $filterCode
+    if ($failed.Count -ne 0) { throw 'staging rejected applied patch or verified omission' }
+}
+foreach ($field in @('patch', 'omitted', 'applied', 'evidence')) {
+    $bad = $validOmission.Clone()
+    $bad[$field] = $null
+    $gate = @{ patches = @($bad) }
+    . $filterCode
+    if ($failed.Count -ne 1) { throw "staging accepted invalid omission: $field" }
+}

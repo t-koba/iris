@@ -54,13 +54,15 @@ function ConvertTo-PrototypeFfmpegPort {
     }
 }
 
-# Replace exactly one PATCHES entry with its pinned-source adaptation. This is
-# deliberately separate from source-ref rewriting so callers can prove the
+# Replace exactly one PATCHES entry, or remove it after supersession validation.
+# This is separate from source-ref rewriting so callers can prove the
 # baseline order and the authorized replacements.
 function Set-PrototypeFfmpegPatch {
     param([string]$Portfile, [string]$BaselinePatch, [string]$OverlayPatch)
 
-    foreach ($name in @($BaselinePatch, $OverlayPatch)) {
+    $names = @($BaselinePatch)
+    if ($OverlayPatch -ne '') { $names += $OverlayPatch }
+    foreach ($name in $names) {
         if ($name -notmatch '^[A-Za-z0-9_-][A-Za-z0-9_.-]*\.patch$') {
             throw 'invalid dependency patch filename'
         }
@@ -74,13 +76,19 @@ function Set-PrototypeFfmpegPatch {
     $matches = [regex]::Matches($fetches[0].Value, $pattern)
     if ($matches.Count -ne 1) { throw "expected exactly one $BaselinePatch entry in PATCHES" }
     $overlayPattern = '(?m)^[ \t]*(?<quote>")?' + [regex]::Escape($OverlayPatch) + '(?(quote)")(?:[ \t]*(?:#[^\r\n]*)?)(?=\r?$)'
-    if ([regex]::IsMatch($fetches[0].Value, $overlayPattern)) { throw "PATCHES already contains $OverlayPatch" }
+    if ($OverlayPatch -ne "" -and [regex]::IsMatch($fetches[0].Value, $overlayPattern)) { throw "PATCHES already contains $OverlayPatch" }
     $evaluator = [System.Text.RegularExpressions.MatchEvaluator]{
         param($match)
         return $match.Groups['indent'].Value + $match.Groups['quote'].Value + $OverlayPatch + $match.Groups['quote'].Value + $match.Groups['suffix'].Value
     }
     $lineRegex = [regex]::new($pattern, [System.Text.RegularExpressions.RegexOptions]::Multiline)
-    $rewrittenFetch = $lineRegex.Replace($fetches[0].Value, $evaluator, 1)
+    if ($OverlayPatch -eq '') {
+        # Remove the complete entry/comment and its newline, preserving all others.
+        $lineRegex = [regex]::new($pattern + '\r?\n')
+        $rewrittenFetch = $lineRegex.Replace($fetches[0].Value, '', 1)
+    } else {
+        $rewrittenFetch = $lineRegex.Replace($fetches[0].Value, $evaluator, 1)
+    }
     if ($rewrittenFetch -ceq $fetches[0].Value) { throw 'dependency PATCHES entry was not replaced' }
     $rewritten = $Portfile.Substring(0, $fetches[0].Index) + $rewrittenFetch + $Portfile.Substring($fetches[0].Index + $fetches[0].Length)
     return [pscustomobject]@{ Portfile = $rewritten }

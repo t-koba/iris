@@ -11,6 +11,7 @@ PINS = json.loads((ROOT / "pins.json").read_text(encoding="utf-8-sig"))
 PIN = PINS["vcpkg"]["ffmpeg_dependency_patch"]
 LIB_NAMING_PIN = PINS["vcpkg"]["ffmpeg_lib_naming_patch"]
 BIN2C_PIN = PINS["vcpkg"]["ffmpeg_bin2c_patch"]
+MSVC_UTF8_PIN = PINS["vcpkg"]["ffmpeg_msvc_utf8_patch"]
 
 # Exact pinned-commit configure contexts. These carry the vcpkg 9.0.2 patch's
 # dependency/link changes while accepting only the known newer source shape.
@@ -82,6 +83,58 @@ fi
         "iconv",
     ),
 )
+
+
+# Exact executable contexts in the pinned configure. Check definitions as well
+# as call sites: a similarly named helper is not proof of C and C++ coverage.
+MSVC_UTF8_CONTEXTS = {
+    "MSVC UTF-8 block": """elif enabled_any msvc icl; then
+    enabled x86_32 && disable aligned_stack
+    enabled_all x86_32 debug && add_allcflags -Oy-
+    enabled debug && add_ldflags -debug
+    enable pragma_deprecated
+    if enabled icl; then
+        # -Qansi-alias is basically -fstrict-aliasing, but does not work
+        # (correctly) on icl 13.x.
+        test_cpp_condition "windows.h" "__ICL < 1300 || __ICL >= 1400" &&
+            add_allcflags -Qansi-alias
+        # Some inline asm is not compilable in debug
+        if enabled debug; then
+            disable ebx_available
+        fi
+    fi
+    # enable utf-8 source processing
+    check_allcflags -utf-8
+fi
+""",
+    "check_allcflags": 'check_allcflags(){\n    check_cxxflags "$@"\n    check_cflags "$@"\n}\n',
+    "check_cxxflags": 'check_cxxflags(){\n    log check_cxxflags "$@"\n    test_cxxflags "$@" && add_cxxflags "$@"\n}\n',
+    "check_cflags": 'check_cflags(){\n    log check_cflags "$@"\n    test_cflags "$@" && add_cflags "$@"\n}\n',
+}
+
+
+def validate_msvc_utf8(configure):
+    text = configure.decode("utf-8").replace("\r\n", "\n")
+    for label, context in MSVC_UTF8_CONTEXTS.items():
+        # Counting the full context alone would miss a second altered definition.
+        anchor = "    check_allcflags -utf-8" if label == "MSVC UTF-8 block" else context.splitlines()[0]
+        if text.count(context) != 1 or text.splitlines().count(anchor) != 1:
+            raise ValueError("expected exactly one pinned " + label + " context")
+    return {
+        "kind": "upstream-superseded MSVC UTF-8 patch; check_allcflags checks C++ and C flags",
+        "ffmpeg_commit": PINS["ffmpeg"]["commit"],
+        "baseline_sha256": MSVC_UTF8_PIN["sha256"],
+        "source": "configure",
+        "source_sha256": hashlib.sha256(configure).hexdigest(),
+        "contexts_sha256": {label: hashlib.sha256(context.encode()).hexdigest()
+                            for label, context in MSVC_UTF8_CONTEXTS.items()},
+    }
+
+
+def omit_msvc_utf8(configure_path, baseline_patch_path, output_path):
+    validate_baseline_patch(baseline_patch_path, MSVC_UTF8_PIN)
+    evidence = validate_msvc_utf8(Path(configure_path).read_bytes())
+    Path(output_path).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
 
 
 def adapt_configure(text):
@@ -207,7 +260,7 @@ def generate_bin2c(source_path, baseline_patch_path, output_path):
 
 if __name__ == "__main__":
     if len(sys.argv) != 5:
-        raise SystemExit("usage: ffmpeg-dependency-patch.py <adapt|adapt-lib-naming|adapt-bin2c> <source-target> <baseline-patch> <output-patch>")
+        raise SystemExit("usage: ffmpeg-dependency-patch.py <adapt|adapt-lib-naming|adapt-bin2c|omit-msvc-utf8> <source-target> <baseline-patch> <output-patch>")
     if sys.argv[1] == "adapt":
         digest = generate(sys.argv[2], sys.argv[3], sys.argv[4])
         print(f"generated pinned dependency patch sha256={digest}")
@@ -217,5 +270,7 @@ if __name__ == "__main__":
     elif sys.argv[1] == "adapt-bin2c":
         digest = generate_bin2c(sys.argv[2], sys.argv[3], sys.argv[4])
         print(f"generated pinned prebuilt-bin2c patch sha256={digest}")
+    elif sys.argv[1] == "omit-msvc-utf8":
+        omit_msvc_utf8(*sys.argv[2:])
     else:
-        raise SystemExit("expected adapt, adapt-lib-naming or adapt-bin2c")
+        raise SystemExit("expected adapt, adapt-lib-naming, adapt-bin2c or omit-msvc-utf8")

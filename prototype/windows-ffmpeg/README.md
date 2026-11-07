@@ -79,13 +79,21 @@ behavior, or licensing conclusions, and it never publishes.
    BIN2CEXE host-link rule. Its deletion anchors come from the hash-verified
    baseline patch; the generated diff uses the actual source context, retaining
    the intervening `INSTALL_FILES` comment (context drift, not line endings).
-   Missing, changed or duplicate anchors stop the run, with no 9.0.2 fallback. Per-patch evidence is recorded in `ffmpeg-source.json`. It derives
+   The hash-pinned `0047-fix-msvc-utf8.patch` is not applied: the pinned
+   [upstream `configure`](https://github.com/FFmpeg/FFmpeg/blob/db8537d8cc7962bd3d07254d6ceff21d888817d4/configure) already has `check_allcflags -utf-8` in the MSVC block.
+   Before omitting it at its sequential stage, the validator requires that
+   exact unique block and unique helper definitions: `check_allcflags` calls
+   both `check_cxxflags` and `check_cflags`, which test and add their flags.
+   Baseline digest, configure digest, commit and context digests are recorded
+   as upstream-supersession evidence, not as a successful patch application.
+   Missing, changed or duplicate contexts stop the run, with no 9.0.2 fallback.
+   Per-patch evidence is recorded in `ffmpeg-source.json`. It derives
    a test-only overlay from the baseline port (rewrites to
    `vcpkg_from_git(URL https://github.com/FFmpeg/FFmpeg.git REF
    db8537d8cc7962bd3d07254d6ceff21d888817d4)`, validates the pinned helper
    signature and generated parameters, removes the archive hash, replaces only
    the `0004`, `0007` and `0045` PATCHES entries with their pinned-source
-   replacements,
+   replacements, omits validated 0047 from PATCHES and overlay patch files,
    and marks the overlay `version-string` as the pinned commit);
    then runs `vcpkg install` with the prototype manifest, `--overlay-ports`
    (generated), `--overlay-triplets triplets/`,
@@ -169,10 +177,11 @@ installing FFmpeg. It contains:
   `baseline/scripts/cmake/vcpkg_from_git.cmake` identifies the fetch helper.
   These are Git blob bytes, not potentially CRLF-converted checkout copies.
 - `overlay/ffmpeg/`: the actual generated port, manifest and patch/config
-  files used for the prototype. The ordered baseline patch series is retained;
+  files used for the prototype. Baseline order and unrelated bytes are retained;
   only `0004-dependencies.patch`, `0007-fix-lib-naming.patch` and
   `0045-use-prebuilt-bin2c.patch` are replaced by pinned-source adaptations.
-  Each adapter checks its
+  Superseded 0047 is absent from both the overlay PATCHES and overlay files;
+  its exact Git blob remains in `baseline/ports/ffmpeg/`. Each adapter checks its
   exact baseline patch digest and source context. The 0004 adapter preserves
   the newer MSVC zlib probe and applies the dependency/link changes; the 0007
   adapter preserves dynamic zlib library-name detection while adding
@@ -193,8 +202,13 @@ pinned baseline patch digests; verifies the untouched overlay patches against
 their Git-blob copies (normalizing checkout line endings only); and requires
 each adapted patch to change only its target (`configure` for 0004/0007,
 `ffbuild/common.mak` for 0045) and retain its intended changes, including the
-dynamic zlib mapping. Staging verifies all required
-files, patches and hashes both before and after copying to app
+dynamic zlib mapping. Schema 4 separately records the 0047 supersession,
+including the baseline hash and archived configure/context hashes. Verification
+reads exactly one regular `configure` member from the pristine pinned archive
+(without extracting it), repeats the MSVC/helper checks, and compares the
+recomputed evidence to the manifest. Rehashed metadata cannot substitute for
+that source proof. Staging accepts only the pinned evidenced omission and
+verifies all required files, patches and hashes both before and after copying to app
 `doc/ffmpeg-source-bundle/`. The prototype installer
 recursively includes that directory; the evidence artifact retains both the
 generated bundle and the staged app-doc copy. Missing or altered material
@@ -227,12 +241,15 @@ require evidence from the Windows prototype run.
   the prebuilt-bin2c adaptation with the intervening comment and a
   `ffbuild/common.mak`-only applicable diff. It checks baseline hash rejection
   and fail-closed source drift using offline fixtures; the bin2c positive
-  fixture uses a synthetic baseline, not upstream provenance.
+  fixture uses a synthetic baseline, not upstream provenance. UTF-8 tests cover
+  missing/changed/duplicate MSVC and helper contexts and baseline hash rejection.
 - `python prototype/windows-ffmpeg/test-source-bundle.py` checks deterministic
-  source bundles, all three patch adaptations/order, blob/hash integrity, missing or
+  source bundles, all three patch adaptations/order, 0047 baseline retention and
+  overlay omission, rehashed supersession/source-context tampering, blob/hash integrity, missing or
   corrupted material and package/evidence wiring using synthetic local Git
   repositories. The fixtures are not upstream provenance and do not build
-  Windows code.
+  Windows code. `test-overlay-derivation.ps1` also exercises exact PATCHES
+  removal with quotes, comments, LF/CRLF and missing/duplicate entries.
 
 These checks do not establish a Windows build or installed previews. The
 workflow runs the offline checks before native gates; its evidence artifacts

@@ -1,6 +1,7 @@
 """Offline exact-context fixture for the pinned FFmpeg dependency adaptation."""
 import importlib.util
 import hashlib
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -44,6 +45,80 @@ fi
 
 enabled debug && add_allcflags -g"$debuglevel" && add_asflags -g"$debuglevel"
 '''
+
+
+# Bounded source-context fixture, not a full upstream tree/native build.
+MSVC_UTF8_FIXTURE = b'''check_cflags(){
+    log check_cflags "$@"
+    test_cflags "$@" && add_cflags "$@"
+}
+
+check_cxxflags(){
+    log check_cxxflags "$@"
+    test_cxxflags "$@" && add_cxxflags "$@"
+}
+
+check_allcflags(){
+    check_cxxflags "$@"
+    check_cflags "$@"
+}
+
+elif enabled_any msvc icl; then
+    enabled x86_32 && disable aligned_stack
+    enabled_all x86_32 debug && add_allcflags -Oy-
+    enabled debug && add_ldflags -debug
+    enable pragma_deprecated
+    if enabled icl; then
+        # -Qansi-alias is basically -fstrict-aliasing, but does not work
+        # (correctly) on icl 13.x.
+        test_cpp_condition "windows.h" "__ICL < 1300 || __ICL >= 1400" &&
+            add_allcflags -Qansi-alias
+        # Some inline asm is not compilable in debug
+        if enabled debug; then
+            disable ebx_available
+        fi
+    fi
+    # enable utf-8 source processing
+    check_allcflags -utf-8
+fi
+'''
+MSVC_UTF8_BASELINE_PATCH = b"synthetic UTF-8 baseline patch\n"
+
+
+class MsvcUtf8Tests(unittest.TestCase):
+    def test_unique_context_and_helper_semantics(self):
+        for source in (MSVC_UTF8_FIXTURE, MSVC_UTF8_FIXTURE.replace(b"\n", b"\r\n")):
+            evidence = patcher.validate_msvc_utf8(source)
+            self.assertEqual(evidence["source_sha256"], hashlib.sha256(source).hexdigest())
+            self.assertEqual(evidence["baseline_sha256"],
+                             "76e199ae27fc8f8be518ffa45d07c152abc3a0e05e42130ae5d6b54a26bc5683")
+        for context in patcher.MSVC_UTF8_CONTEXTS.values():
+            for source in (MSVC_UTF8_FIXTURE.replace(context.encode(), b""),
+                           MSVC_UTF8_FIXTURE + context.encode(),
+                           MSVC_UTF8_FIXTURE + context.replace("$@", "ignored").encode()):
+                with self.assertRaises(ValueError):
+                    patcher.validate_msvc_utf8(source)
+        for before, after in ((b"check_allcflags -utf-8", b"check_cflags -utf-8"),
+                              (b'    check_cxxflags "$@"', b'    : "$@"'),
+                              (b'    check_cflags "$@"', b'    : "$@"'),
+                              (b'&& add_cxxflags', b'&& log'),
+                              (b'&& add_cflags', b'&& log')):
+            with self.assertRaises(ValueError):
+                patcher.validate_msvc_utf8(MSVC_UTF8_FIXTURE.replace(before, after))
+
+    def test_hash_guard_before_omission_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source, baseline, output = root / "configure", root / patcher.MSVC_UTF8_PIN["name"], root / "evidence.json"
+            source.write_bytes(MSVC_UTF8_FIXTURE)
+            baseline.write_bytes(MSVC_UTF8_BASELINE_PATCH)
+            with self.assertRaisesRegex(ValueError, "pinned baseline bytes"):
+                patcher.omit_msvc_utf8(source, baseline, output)
+            self.assertFalse(output.exists())
+            with patch.dict(patcher.MSVC_UTF8_PIN, sha256=hashlib.sha256(MSVC_UTF8_BASELINE_PATCH).hexdigest()):
+                patcher.omit_msvc_utf8(source, baseline, output)
+                self.assertEqual(json.loads(output.read_text()), patcher.validate_msvc_utf8(source.read_bytes()))
+            self.assertEqual(source.read_bytes(), MSVC_UTF8_FIXTURE)
 
 
 LIB_NAMING_FIXTURE = '''            -mfp16-format=*)      ;;

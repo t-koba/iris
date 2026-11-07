@@ -188,6 +188,7 @@ try {
 # Derive only the source fetch from the exact baseline. Keep every baseline
 # patch in declared order except the hash-pinned 0004, 0007 and 0045
 # patches, which receive exact-context replacements for this pinned source.
+# Hash-pinned 0047 is validated as upstream-superseded at its sequential stage.
 $baselinePortfile = Join-Path $baselinePortDir "portfile.cmake"
 $baselinePortfileRaw = Get-Content -Raw -LiteralPath $baselinePortfile
 $baselinePortfileHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $baselinePortfile).Hash.ToLowerInvariant()
@@ -223,6 +224,8 @@ $adaptations = @(
 if ($adaptations[0].baseline -cne "0004-dependencies.patch" -or $adaptations[0].overlay -cne "0004-dependencies-pinned.patch") { throw "unsupported pinned dependency patch name" }
 if ($adaptations[1].baseline -cne "0007-fix-lib-naming.patch" -or $adaptations[1].overlay -cne "0007-fix-lib-naming-pinned.patch") { throw "unsupported pinned library-name patch name" }
 if ($adaptations[2].baseline -cne "0045-use-prebuilt-bin2c.patch" -or $adaptations[2].overlay -cne "0045-use-prebuilt-bin2c-pinned.patch") { throw "unsupported pinned prebuilt-bin2c patch name" }
+$supersededPatch = $pins.vcpkg.ffmpeg_msvc_utf8_patch
+if ($supersededPatch.name -cne "0047-fix-msvc-utf8.patch" -or @($derived.Patches | Where-Object { $_ -ceq $supersededPatch.name }).Count -ne 1) { throw "expected exactly one pinned MSVC UTF-8 patch" }
 $overlayRaw = $derived.Portfile
 foreach ($adaptation in $adaptations) {
     if (@($derived.Patches | Where-Object { $_ -ceq $adaptation.baseline }).Count -ne 1) { throw "baseline FFmpeg patch series must contain exactly one pinned patch: $($adaptation.baseline)" }
@@ -240,6 +243,15 @@ Push-Location $workDir
 try {
     foreach ($name in $derived.Patches) {
         $patchPath = Join-Path $baselinePortDir $name
+        if ($name -ceq $supersededPatch.name) {
+            $supersessionPath = Join-Path $evidenceDir "msvc-utf8-supersession.json"
+            & python (Join-Path $scriptDir "ffmpeg-dependency-patch.py") omit-msvc-utf8 (Join-Path $workDir "configure") $patchPath $supersessionPath
+            if ($LASTEXITCODE -ne 0) { throw "pinned MSVC UTF-8 upstream-supersession validation failed" }
+            $supersession = Get-Content -Raw -LiteralPath $supersessionPath | ConvertFrom-Json
+            $overlayRaw = (Set-PrototypeFfmpegPatch $overlayRaw $name '').Portfile
+            $patchResults += [ordered]@{ patch = $name; omitted = $true; applied = $false; evidence = $supersession }
+            continue
+        }
         $adaptation = $adaptations | Where-Object { $_.baseline -ceq $name } | Select-Object -First 1
         if ($null -ne $adaptation) {
             $adaptedPatchPath = Join-Path $evidenceDir $adaptation.overlay
@@ -304,6 +316,8 @@ $overlayPortDir = Join-Path $overlayRoot "ffmpeg"
 if (Test-Path -LiteralPath $overlayRoot) { Remove-Item -Recurse -Force -LiteralPath $overlayRoot }
 New-Item -ItemType Directory -Force -Path $overlayPortDir | Out-Null
 Copy-Item -Recurse -Force -Path (Join-Path $baselinePortDir "*") -Destination $overlayPortDir
+# Retain 0047 only in the exact baseline section of the source bundle.
+Remove-Item -LiteralPath (Join-Path $overlayPortDir $supersededPatch.name)
 foreach ($name in $adaptedPatchFiles.Keys) {
     $adaptedPatch = $adaptedPatchFiles[$name]
     if (!(Test-Path -LiteralPath $adaptedPatch.path -PathType Leaf)) { throw "adapted patch missing before overlay copy: $name" }

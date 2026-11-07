@@ -3,7 +3,7 @@
   "ffmpeg": {
     "repository": "https://github.com/FFmpeg/FFmpeg.git",
     "commit": "db8537d8cc7962bd3d07254d6ceff21d888817d4",
-    "note": "Exact later commit under investigation. The pinned vcpkg FFmpeg port targets 9.0.2; only its hash-pinned 0004 dependency, 0007 library-name and 0045 prebuilt-bin2c patches are adapted for this source, using exact sequential-stage source contexts."
+    "note": "Exact later commit under investigation. The pinned vcpkg FFmpeg port targets 9.0.2; only its hash-pinned 0004 dependency, 0007 library-name and 0045 prebuilt-bin2c patches are adapted for this source, using exact sequential-stage source contexts. Hash-pinned 0047 is omitted only after exact-context proof that upstream already checks UTF-8 for both C and C++."
   },
   "vcpkg": {
     "repository": "https://github.com/microsoft/vcpkg",
@@ -22,6 +22,10 @@
       "name": "0045-use-prebuilt-bin2c.patch",
       "sha256": "5510a5d6cc0e6cac881157b8432dcd14672e6618c8b9e8719414e1d3c1804e21",
       "overlay_name": "0045-use-prebuilt-bin2c-pinned.patch"
+    },
+    "ffmpeg_msvc_utf8_patch": {
+      "name": "0047-fix-msvc-utf8.patch",
+      "sha256": "76e199ae27fc8f8be518ffa45d07c152abc3a0e05e42130ae5d6b54a26bc5683"
     }
   },
   "pdfium": {

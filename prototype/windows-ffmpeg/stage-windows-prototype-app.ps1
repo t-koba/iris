@@ -28,7 +28,17 @@ foreach ($req in @($ffmpegSourceEvidence, $ffmpegBuildEvidence, $ffmpegBuildconf
     }
 }
 $gate = Get-Content -Raw -LiteralPath $ffmpegSourceEvidence | ConvertFrom-Json
-$failed = @($gate.patches | Where-Object { $_.applies -ne $true })
+# Only the pinned, proven upstream supersession is a valid non-application.
+# source-bundle.py rechecks its pristine source context and manifest below.
+$failed = @($gate.patches | Where-Object {
+    $_.applies -ne $true -and -not (
+        $_.patch -ceq $pins.vcpkg.ffmpeg_msvc_utf8_patch.name -and
+        $_.omitted -eq $true -and $_.applied -eq $false -and
+        $_.evidence.baseline_sha256 -ceq $pins.vcpkg.ffmpeg_msvc_utf8_patch.sha256 -and
+        $_.evidence.ffmpeg_commit -ceq $pins.ffmpeg.commit -and
+        $_.evidence.source_sha256 -cmatch '^[0-9a-f]{64}$'
+    )
+})
 if ($failed.Count -gt 0) { throw "refusing to stage: $($failed.Count) vcpkg patches do not apply to the pinned FFmpeg commit" }
 $build = Get-Content -Raw -LiteralPath $ffmpegBuildEvidence | ConvertFrom-Json
 if ($build.ffmpeg.commit -ne "db8537d8cc7962bd3d07254d6ceff21d888817d4") { throw "refusing to stage: ffmpeg-build.json commit mismatch" }

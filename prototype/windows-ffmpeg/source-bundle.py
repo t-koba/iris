@@ -1,11 +1,13 @@
 """Prototype FFmpeg source material only; not complete dependency source or legal approval."""
 import hashlib
+import importlib.util
 import json
 from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 
 ROOT = Path(__file__).resolve().parent
 PINS = json.loads((ROOT / "pins.json").read_text(encoding="utf-8-sig"))
@@ -14,6 +16,10 @@ BASELINE = PINS["vcpkg"]["baseline"]
 DEPENDENCY_PATCH = PINS["vcpkg"]["ffmpeg_dependency_patch"]
 LIB_NAMING_PATCH = PINS["vcpkg"]["ffmpeg_lib_naming_patch"]
 BIN2C_PATCH = PINS["vcpkg"]["ffmpeg_bin2c_patch"]
+MSVC_UTF8_PATCH = PINS["vcpkg"]["ffmpeg_msvc_utf8_patch"]
+_spec = importlib.util.spec_from_file_location("ffmpeg_patch", ROOT / "ffmpeg-dependency-patch.py")
+patch_validator = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(patch_validator)
 PATCH_ADAPTATIONS = (DEPENDENCY_PATCH, LIB_NAMING_PATCH, BIN2C_PATCH)
 ARCHIVE = f"ffmpeg-{COMMIT}.tar"
 INPUTS = (
@@ -64,7 +70,9 @@ def patch_names(series):
 
 def expected_overlay_names(baseline_names):
     replacements = {item["name"]: item["overlay_name"] for item in PATCH_ADAPTATIONS}
-    result = [replacements.get(name, name) for name in baseline_names]
+    if baseline_names.count(MSVC_UTF8_PATCH["name"]) != 1:
+        raise ValueError("expected exactly one pinned upstream-superseded patch")
+    result = [replacements.get(name, name) for name in baseline_names if name != MSVC_UTF8_PATCH["name"]]
     for item in PATCH_ADAPTATIONS:
         if baseline_names.count(item["name"]) != 1 or result.count(item["overlay_name"]) != 1:
             raise ValueError("expected exactly one pinned patch replacement: " + item["name"])
@@ -120,6 +128,23 @@ def validate_adapted_patch(path, pin):
             raise ValueError("adapted library-name patch must preserve the dynamic zlib mapping")
 
 
+def supersession_evidence(bundle):
+    baseline = "baseline/ports/ffmpeg/" + MSVC_UTF8_PATCH["name"]
+    validate_baseline_patch(bundle / baseline, MSVC_UTF8_PATCH)
+    if (bundle / "overlay/ffmpeg" / MSVC_UTF8_PATCH["name"]).exists():
+        raise ValueError("upstream-superseded patch must not be an overlay file")
+    # Read, never extract, exactly one regular pinned configure member. Recheck
+    # semantics even if a caller supplies a newly hashed manifest/archive.
+    member_name = f"ffmpeg-{COMMIT}/configure"
+    with tarfile.open(bundle / ARCHIVE) as archive:
+        members = [m for m in archive if m.name == member_name]
+        if len(members) != 1 or not members[0].isfile():
+            raise ValueError("expected exactly one archived pinned configure")
+        configure = archive.extractfile(members[0]).read()
+    return [{"baseline": baseline, "archived_source": member_name,
+             **patch_validator.validate_msvc_utf8(configure)}]
+
+
 def validate_patch_manifest(bundle, manifest):
     baseline_port = (bundle / "baseline/ports/ffmpeg/portfile.cmake").read_bytes().decode("utf-8-sig")
     overlay_port = (bundle / "overlay/ffmpeg/portfile.cmake").read_bytes().decode("utf-8-sig")
@@ -138,7 +163,8 @@ def validate_patch_manifest(bundle, manifest):
         }
         for item in PATCH_ADAPTATIONS
     ]
-    expected = {"baseline": baseline, "overlay": overlay, "adaptations": adaptations}
+    expected = {"baseline": baseline, "overlay": overlay, "adaptations": adaptations,
+                "supersessions": supersession_evidence(bundle)}
     if expected != manifest["patches"]:
         raise ValueError("source bundle patch order/comments/adaptation metadata mismatch")
     if not set(baseline["ordered_files"] + overlay["ordered_files"]) <= manifest["files"].keys():
@@ -148,9 +174,12 @@ def validate_patch_manifest(bundle, manifest):
         validate_baseline_patch(bundle / adaptation["baseline"], item)
         validate_adapted_patch(bundle / adaptation["overlay"], item)
         adapted_baselines.add(adaptation["baseline"])
-    for baseline_file, overlay_file in zip(baseline["ordered_files"], overlay["ordered_files"]):
-        if baseline_file in adapted_baselines:
+    overlay_files = dict(zip(overlay_names, overlay["ordered_files"]))
+    for baseline_file in baseline["ordered_files"]:
+        name = PurePosixPath(baseline_file).name
+        if baseline_file in adapted_baselines or name == MSVC_UTF8_PATCH["name"]:
             continue
+        overlay_file = overlay_files[name]
         if (bundle / overlay_file).read_bytes().replace(b"\r\n", b"\n") != (bundle / baseline_file).read_bytes().replace(b"\r\n", b"\n"):
             raise ValueError("overlay retained patch differs from baseline: " + baseline_file)
 
@@ -181,7 +210,7 @@ def create(source, vcpkg, overlay, dest):
                     "--", "ports/ffmpeg", HELPER], check=True)
     for name in names:
         put(dest, "baseline/" + name, git(vcpkg, "show", f"{BASELINE}:{name}"))
-    for item in PATCH_ADAPTATIONS:
+    for item in (*PATCH_ADAPTATIONS, MSVC_UTF8_PATCH):
         validate_baseline_patch(dest / "baseline/ports/ffmpeg" / item["name"], item)
     for path in sorted(overlay.rglob("*")):
         if path.is_file():
@@ -193,12 +222,13 @@ def create(source, vcpkg, overlay, dest):
     baseline_patches = patch_series((dest / "baseline/ports/ffmpeg/portfile.cmake").read_bytes().decode("utf-8-sig"), "baseline/ports/ffmpeg")
     overlay_patches = patch_series((dest / "overlay/ffmpeg/portfile.cmake").read_bytes().decode("utf-8-sig"), "overlay/ffmpeg")
     manifest = {
-        "schema": 3, "ffmpeg_commit": COMMIT, "vcpkg_baseline": BASELINE,
+        "schema": 4, "ffmpeg_commit": COMMIT, "vcpkg_baseline": BASELINE,
         "scope": "FFmpeg upstream tree, retained vcpkg FFmpeg port/patches and prototype recipe only. "
                  "Not complete source for other dependencies, vcpkg tooling or SDKs; no legal conclusion.",
         "patches": {
             "baseline": baseline_patches,
             "overlay": overlay_patches,
+            "supersessions": supersession_evidence(dest),
             "adaptations": [
                 {
                     "baseline": "baseline/ports/ffmpeg/" + item["name"],
@@ -220,7 +250,7 @@ def verify(bundle, expected):
     if record(bundle / "MANIFEST.json") != expected:
         raise ValueError("source bundle manifest hash/byte mismatch")
     manifest = json.loads((bundle / "MANIFEST.json").read_text(encoding="utf-8-sig"))
-    if (manifest["schema"], manifest["ffmpeg_commit"], manifest["vcpkg_baseline"]) != (3, COMMIT, BASELINE):
+    if (manifest["schema"], manifest["ffmpeg_commit"], manifest["vcpkg_baseline"]) != (4, COMMIT, BASELINE):
         raise ValueError("source bundle pin/schema mismatch")
     files = manifest["files"]
     required = {ARCHIVE, "baseline/ports/ffmpeg/portfile.cmake", "baseline/ports/ffmpeg/vcpkg.json",
