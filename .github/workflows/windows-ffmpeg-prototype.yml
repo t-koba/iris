@@ -72,6 +72,10 @@ jobs:
         shell: pwsh
         run: python ./prototype/windows-ffmpeg/test-ffmpeg-dependency-patch.py
 
+      - name: Check bounded prototype audit report (offline, no native build)
+        shell: pwsh
+        run: python ./prototype/windows-ffmpeg/test-prototype-audit-report.py
+
       - name: Check source bundle requirements (offline, no native build)
         shell: pwsh
         run: python ./prototype/windows-ffmpeg/test-source-bundle.py
@@ -165,21 +169,21 @@ jobs:
         shell: pwsh
         run: ./prototype/windows-ffmpeg/smoke-windows-installed-previews.ps1
 
-      # Bounded prototype evidence only. Never release artifacts, never dist/,
-      # never publishing. Runs on success and failure for diagnosis.
-      - name: Upload bounded prototype evidence
+      # Retain one bounded, path-sanitized report only. Never upload source
+      # bundles, packages, AppDirs, installers, or native runtime libraries.
+      - name: Prepare bounded prototype audit report
+        if: always()
+        shell: pwsh
+        env:
+          IRIS_PROTOTYPE_AUDIT_REPORT_MAX_BYTES: "262144"
+        run: python ./prototype/windows-ffmpeg/create-prototype-audit-report.py
+
+      - name: Upload bounded prototype audit report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-prototype-evidence
-          path: |
-            target/prototype-windows-ffmpeg/**
-            target/prototype-windows-pdfium/PROVENANCE.json
-            target/prototype-windows-pdfium/pdfium-members.txt
-            target/prototype-windows-app/doc/ffmpeg-source-bundle/**
-            target/prototype-windows-app/PROTOTYPE-APP.json
-            target/prototype-windows-app/IMPORT-CLOSURE.json
-            target/prototype-windows-installer/**
-          if-no-files-found: warn
+          name: windows-prototype-audit-report
+          path: target/prototype-audit-report.json
+          if-no-files-found: error
           retention-days: 7
           compression-level: 9

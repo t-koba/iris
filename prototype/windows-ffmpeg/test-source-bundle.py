@@ -205,7 +205,19 @@ class BundleTests(unittest.TestCase):
         self.assertIn('source-bundle.py") stage', stage)
         self.assertIn('(Join-Path $docDir "ffmpeg-source-bundle")', stage)
         self.assertIn('if ($LASTEXITCODE -ne 0) { throw "refusing to stage: source bundle', stage)
-        self.assertIn('target/prototype-windows-app/doc/ffmpeg-source-bundle/**', workflow)
+        self.assertIn('test-prototype-audit-report.py', workflow)
+        self.assertIn('create-prototype-audit-report.py', workflow)
+        self.assertIn('IRIS_PROTOTYPE_AUDIT_REPORT_MAX_BYTES: "262144"', workflow)
+        self.assertIn('path: target/prototype-audit-report.json', workflow)
+        self.assertIn('if-no-files-found: error', workflow)
+        for forbidden in (
+            'target/prototype-windows-ffmpeg/**',
+            'target/prototype-windows-pdfium/**',
+            'target/prototype-windows-app/**',
+            'target/prototype-windows-app/doc/ffmpeg-source-bundle/**',
+            'target/prototype-windows-installer/**',
+        ):
+            self.assertNotIn(forbidden, workflow)
         self.assertIn('test-source-bundle.py', workflow)
         self.assertIn('test-ffmpeg-dependency-patch.py', workflow)
         self.assertIn('Flags: recursesubdirs', (ROOT / "windows-prototype-installer.iss").read_text())
