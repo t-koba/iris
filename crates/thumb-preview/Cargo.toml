@@ -57,3 +57,7 @@ harness = false
 [[example]]
 name = "pdf_thumbnail_smoke"
 required-features = ["pdf"]
+
+[[example]]
+name = "video_thumbnail_smoke"
+required-features = ["video"]

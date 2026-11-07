@@ -1,0 +1,65 @@
+{
+  "version": "8.1.3",
+  "url": "https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz",
+  "sha256": "7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3",
+  "signature_url": "https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz.asc",
+  "key_url": "https://ffmpeg.org/ffmpeg-devel.asc",
+  "fingerprint": "FCF986EA15E6E293A5644F10B4322F04D67658D8",
+  "configure_flags": [
+    "--enable-shared",
+    "--disable-static",
+    "--enable-pic",
+    "--disable-gpl",
+    "--disable-version3",
+    "--disable-nonfree",
+    "--disable-autodetect",
+    "--disable-doc",
+    "--enable-zlib",
+    "--enable-bzlib",
+    "--enable-lzma",
+    "--enable-iconv"
+  ],
+  "libraries": [
+    "avcodec",
+    "avdevice",
+    "avfilter",
+    "avformat",
+    "avutil",
+    "swresample",
+    "swscale"
+  ],
+  "avcodec_version": [
+    62,
+    28,
+    103
+  ],
+  "system_sonames": [
+    "libc.so.6",
+    "libm.so.6",
+    "libpthread.so.0",
+    "libdl.so.2",
+    "librt.so.1",
+    "libatomic.so.1",
+    "ld-linux-x86-64.so.2",
+    "ld-linux-aarch64.so.1",
+    "libz.so.1",
+    "libbz2.so.1.0",
+    "liblzma.so.5"
+  ],
+  "security_reference": "https://ffmpeg.org/security.html",
+  "security_scope": "Upstream lists fixes for CVE-2026-8461 and CVE-2026-30999 in 8.1.2; selected 8.1.3 is newer. No broader security review is claimed.",
+  "system_packages": {
+    "libc6": "LGPL-2.1-or-later (glibc runtime; see distro copyright)",
+    "libatomic1": "GPL-3.0-or-later WITH GCC-exception-3.1 (GCC runtime library exception)",
+    "zlib1g": "Zlib (zlib runtime; see distro copyright)",
+    "libbz2-1.0": "bzip2-1.0.6 (bzip2 runtime; see distro copyright)",
+    "liblzma5": "Public-domain/0BSD liblzma runtime components; see distro copyright (not the xz tools)"
+  },
+  "required_decoders": [
+    "PNG_DECODER",
+    "TIFF_DECODER",
+    "MPEG4_DECODER",
+    "H264_DECODER",
+    "HEVC_DECODER"
+  ]
+}

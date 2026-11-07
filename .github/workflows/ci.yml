@@ -54,7 +54,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config clang ffmpeg netcat-openbsd openssh-client ripgrep zsh dpkg-dev \
+          sudo apt-get install -y pkg-config clang ffmpeg netcat-openbsd openssh-client ripgrep zsh dpkg-dev build-essential nasm patchelf curl gnupg zlib1g-dev libbz2-dev liblzma-dev \
             libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev
 

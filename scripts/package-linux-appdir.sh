@@ -11,9 +11,15 @@ arch=$(uname -m)
 build_variant="${IRIS_BUILD_VARIANT:-product}"
 
 cd "$repo_root"
-build_args=(cargo build --locked --release -p iris-ui-shell --bin "$binary_name")
+build_args=(cargo build --locked --offline --release -p iris-ui-shell --bin "$binary_name")
 case "$build_variant" in
     product)
+        export IRIS_FFMPEG_PREFIX="${IRIS_FFMPEG_PREFIX:-$repo_root/target/linux-ffmpeg}"
+        "$script_dir/build-linux-ffmpeg.sh"
+        # Only the verified local FFmpeg pkg-config set may satisfy libav imports.
+        export PKG_CONFIG_LIBDIR="$IRIS_FFMPEG_PREFIX/lib/pkgconfig"
+        export PKG_CONFIG_PATH="$PKG_CONFIG_LIBDIR"
+        export FFMPEG_DIR="$IRIS_FFMPEG_PREFIX"
         # Match the Linux CI profile used to satisfy the release binary size budget.
         export CARGO_PROFILE_RELEASE_OPT_LEVEL=s
         # Debian packaging requires dpkg-dev (dpkg-shlibdeps) and binutils.
@@ -34,6 +40,8 @@ case "$build_variant" in
 esac
 CARGO_TARGET_DIR="$target_dir" "${build_args[@]}"
 
+# This fixed output tree belongs to the packager; never retain stale runtimes.
+rm -rf -- "$appdir"
 mkdir -p \
     "$appdir/usr/bin" \
     "$appdir/usr/share/applications" \
@@ -55,6 +63,10 @@ chmod +x "$appdir/AppRun" "$appdir/usr/bin/$binary_name"
 
 if [[ "$build_variant" = product ]]; then
     "$repo_root/scripts/fetch-pdfium-runtime.sh" "$appdir"
+    python3 "$script_dir/linux-ffmpeg.py" stage "$IRIS_FFMPEG_PREFIX" "$appdir"
+    max_bytes=${IRIS_MAX_LINUX_RELEASE_BYTES:-35651584}
+    actual=$(stat -c %s "$appdir/usr/bin/$binary_name")
+    [[ "$actual" -le "$max_bytes" ]]
 fi
 
 # Minimal builds still produce an AppDir, but only the default-feature product
@@ -79,14 +91,24 @@ Description: Cross-platform file manager
 EOF
     # The bundled PDFium is loaded at run time, so include its own shared-library
     # closure explicitly; dpkg-shlibdeps cannot discover dlopen() dependencies.
-    shlibdeps=$(cd "$deb_build_dir" && dpkg-shlibdeps -O \
-        -e"$deb_root/usr/bin/$binary_name" \
-        -e"$deb_root/usr/lib/iris/libpdfium.so")
+    python3 "$script_dir/linux-ffmpeg.py" shlibs "$deb_root/usr/lib/iris" "$deb_build_dir/debian/shlibs.local"
+    # Private libav SONAMEs belong to iris, not Ubuntu's FFmpeg packages.
+    # -xiris omits only that self-dependency; every external DSO still needs
+    # a valid distro mapping. Explicit -e covers all bundled library closures.
+    native_args=()
+    for library in "$deb_root"/usr/lib/iris/*.so; do
+        native_args+=(-e"$library")
+    done
+    shlibdeps=$(cd "$deb_build_dir" && dpkg-shlibdeps -O -xiris \
+        -l"$deb_root/usr/lib/iris" \
+        -e"$deb_root/usr/bin/$binary_name" "${native_args[@]}")
     depends=$(printf '%s\n' "$shlibdeps" | sed -n 's/^shlibs:Depends=//p')
     if [[ -z "$depends" ]]; then
         echo "dpkg-shlibdeps returned no runtime dependencies" >&2
         exit 1
     fi
+    printf '%s\n' "$depends" > "$appdir/usr/share/doc/iris/system-dependencies.txt"
+    cp "$appdir/usr/share/doc/iris/system-dependencies.txt" "$deb_root/usr/share/doc/iris/"
     cat > "$deb_root/DEBIAN/control" <<EOF
 Package: iris
 Version: $version
@@ -105,6 +127,7 @@ EOF
     mv -f "$deb_build_dir/$deb_name" "$repo_root/dist/linux/$deb_name"
     rm -rf -- "$deb_build_dir"
     trap - EXIT HUP INT TERM
+    python3 "$script_dir/linux-ffmpeg.py" check "$appdir" "$repo_root/dist/linux/ffmpeg-audit.json"
     echo "created $repo_root/dist/linux/$deb_name"
 fi
 

@@ -168,9 +168,9 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y zsh pkg-config clang ffmpeg dpkg-dev \
-            libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
-            libavdevice-dev libswscale-dev libswresample-dev
+          sudo apt-get install -y zsh pkg-config clang dpkg-dev build-essential nasm patchelf curl gnupg zlib1g-dev libbz2-dev liblzma-dev
+      - name: Fetch locked Rust inputs before offline packaging
+        run: cargo fetch --locked
       - name: Package Linux AppDir for manual audit
         if: github.event_name == 'workflow_dispatch'
         env:
@@ -186,7 +186,10 @@ jobs:
         env:
           CARGO_PROFILE_RELEASE_OPT_LEVEL: s
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/package-linux
-        run: cargo build --release -p iris-thumb-preview --example pdf_thumbnail_smoke --locked
+          FFMPEG_DIR: ${{ github.workspace }}/target/linux-ffmpeg
+          PKG_CONFIG_LIBDIR: ${{ github.workspace }}/target/linux-ffmpeg/lib/pkgconfig
+          PKG_CONFIG_PATH: ${{ github.workspace }}/target/linux-ffmpeg/lib/pkgconfig
+        run: cargo build --release -p iris-thumb-preview --example pdf_thumbnail_smoke --locked --offline
       - name: Archive Linux AppDir
         run: tar -C dist/linux -czf dist/linux/Iris-linux-appdir.tar.gz Iris.AppDir
       - name: Verify Linux artifact

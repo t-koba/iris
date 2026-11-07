@@ -1,0 +1,101 @@
+name: Linux FFmpeg validation
+
+# Explicit opt-in only. Never dispatch Release or retain executable/package bytes.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/linux-runtime-validation
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: s
+      IRIS_FFMPEG_PREFIX: ${{ github.workspace }}/target/linux-ffmpeg
+      FFMPEG_DIR: ${{ github.workspace }}/target/linux-ffmpeg
+      PKG_CONFIG_LIBDIR: ${{ github.workspace }}/target/linux-ffmpeg/lib/pkgconfig
+      PKG_CONFIG_PATH: ${{ github.workspace }}/target/linux-ffmpeg/lib/pkgconfig
+      IRIS_BUILD_VARIANT: product
+      IRIS_VERIFY_PDFIUM_PROVENANCE: "0"
+      IRIS_MAX_LINUX_RELEASE_BYTES: "35651584"
+      IRIS_FFMPEG_JOBS: ${{ vars.IRIS_FFMPEG_JOBS || 2 }}
+      IRIS_FFMPEG_MAX_REPORT_BYTES: ${{ vars.IRIS_FFMPEG_MAX_REPORT_BYTES || 262144 }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+      - name: Install build tools (not system FFmpeg)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang nasm pkg-config patchelf zsh dpkg-dev curl gnupg zlib1g-dev libbz2-dev liblzma-dev
+      - name: Check lightweight runtime contracts
+        run: python3 scripts/test-linux-ffmpeg.py
+      - name: Fetch locked Rust inputs
+        run: cargo fetch --locked
+      - name: Build verified FFmpeg and package default product locally
+        run: ./scripts/package-linux-appdir.sh
+      - name: Locked offline Rust checks and smoke build
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --no-deps --locked --offline -- -D warnings
+          cargo build --release -p iris-thumb-preview --example pdf_thumbnail_smoke --example video_thumbnail_smoke --locked --offline
+      - name: Generate built-in codec clip and smoke AppDir
+        shell: bash
+        run: |
+          LD_LIBRARY_PATH="$IRIS_FFMPEG_PREFIX/lib" "$IRIS_FFMPEG_PREFIX/bin/ffmpeg" \
+            -nostdin -v error -f lavfi -i testsrc2=size=64x48:rate=4 -t 1 -c:v mpeg4 -an "$RUNNER_TEMP/iris-video.avi"
+          for kind in pdf video; do
+            cp "$CARGO_TARGET_DIR/release/examples/${kind}_thumbnail_smoke" "dist/linux/Iris.AppDir/usr/bin/iris-${kind}-smoke"
+            patchelf --set-rpath '$ORIGIN/../lib/iris' "dist/linux/Iris.AppDir/usr/bin/iris-${kind}-smoke"
+          done
+          dist/linux/Iris.AppDir/usr/bin/iris-video-smoke "$RUNNER_TEMP/iris-video.avi"
+          dist/linux/Iris.AppDir/usr/bin/iris-pdf-smoke
+          # The check inspects the actual staged Iris, not the clip generator.
+          python3 scripts/linux-ffmpeg.py check dist/linux/Iris.AppDir dist/linux/ffmpeg-audit.json
+      - name: Clean-installed Debian runtime and thumbnail smoke
+        shell: bash
+        run: |
+          ./scripts/smoke-linux-deb.sh dist/linux/iris_*.deb dist/linux/Iris.AppDir \
+            dist/linux/Iris.AppDir/usr/bin/iris-pdf-smoke \
+            dist/linux/Iris.AppDir/usr/bin/iris-video-smoke "$RUNNER_TEMP/iris-video.avi"
+      - name: Summarize bounded evidence (no packages or libraries)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          staged = json.loads(Path('dist/linux/ffmpeg-audit.json').read_text())
+          installed = json.loads(Path('dist/linux/installed-ffmpeg-audit.json').read_text())
+          assert staged == installed, 'installed runtime differs from AppDir'
+          assert staged['source_sha'] == os.environ['GITHUB_SHA']
+          deb, = Path('dist/linux').glob('*.deb')
+          staged['debian'] = dict(sha256=hashlib.sha256(deb.read_bytes()).hexdigest(),
+                                  depends=subprocess.check_output(['dpkg-deb', '-f', str(deb), 'Depends'], text=True).strip())
+          assert staged['debian']['depends'] == staged['system_requirements']
+          staged['validation'] = dict(appdir_video=True, appdir_pdf=True, installed_video=True, installed_pdf=True)
+          report = json.dumps(staged, indent=2) + '\n'
+          assert len(report.encode()) <= int(os.environ['IRIS_FFMPEG_MAX_REPORT_BYTES'])
+          Path('audit').mkdir(exist_ok=True)
+          Path('audit/linux-ffmpeg.json').write_text(report)
+          PY
+      - name: Retain JSON evidence only
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-ffmpeg-audit
+          if-no-files-found: error
+          path: audit/linux-ffmpeg.json
