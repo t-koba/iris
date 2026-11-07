@@ -269,7 +269,11 @@ async fn authenticate_native_smb(
     )
     .await
     .map(|_| ())
-    .map_err(|error| auth_error(format!("SMB native NTLMv2 authentication failed: {error}")))
+    .map_err(|error| {
+        auth_error(format!(
+            "SMB native NTLMv2 authentication failed for negotiated dialect {dialect:?}: {error}"
+        ))
+    })
 }
 
 fn has_native_credentials(config: &SmbConnectionConfig) -> bool {
