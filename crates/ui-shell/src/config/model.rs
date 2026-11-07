@@ -135,6 +135,7 @@ pub struct LayoutConfig {
     pub shortcut_overrides: Vec<ShortcutOverride>,
     pub remote_copy_undo_enabled: bool,
     pub notification_timeout_secs: u64,
+    pub pdf_text_search: PdfTextSearchSettings,
     pub list_columns: Vec<ListColumnSpec>,
     pub secondary_list_columns: Vec<ListColumnSpec>,
     pub properties_split_ratio: f32,
@@ -180,6 +181,7 @@ impl Default for LayoutConfig {
             shortcut_overrides: Vec::new(),
             remote_copy_undo_enabled: true,
             notification_timeout_secs: DEFAULT_NOTIFICATION_TIMEOUT_SECS,
+            pdf_text_search: PdfTextSearchSettings::default(),
             list_columns: ListColumnSpec::default_columns(),
             secondary_list_columns: ListColumnSpec::default_columns(),
             properties_split_ratio: 0.5,
@@ -189,6 +191,35 @@ impl Default for LayoutConfig {
             remote_transport_mappings: Vec::new(),
             remote_transport_secret_warnings: Vec::new(),
             quarantined_files: Vec::new(),
+        }
+    }
+}
+
+/// Search-only per-document byte budgets; not PDF rendering limits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PdfTextSearchSettings {
+    pub input_bytes: usize,
+    pub decoded_bytes: usize,
+    pub text_bytes: usize,
+}
+
+impl Default for PdfTextSearchSettings {
+    fn default() -> Self {
+        Self {
+            input_bytes: 8 * 1024 * 1024,
+            decoded_bytes: 16 * 1024 * 1024,
+            text_bytes: 1024 * 1024,
+        }
+    }
+}
+
+impl PdfTextSearchSettings {
+    pub fn limits(self) -> iris_thumb_preview::pdf_text::PdfTextLimits {
+        iris_thumb_preview::pdf_text::PdfTextLimits {
+            input_bytes: self.input_bytes,
+            decoded_bytes: self.decoded_bytes,
+            text_bytes: self.text_bytes,
         }
     }
 }
@@ -208,6 +239,8 @@ pub(crate) struct SettingsFile {
     pub(crate) shortcut_overrides: Vec<ShortcutOverride>,
     pub(crate) remote_copy_undo_enabled: bool,
     pub(crate) notification_timeout_secs: u64,
+    #[serde(default)]
+    pub(crate) pdf_text_search: PdfTextSearchSettings,
 }
 
 impl Default for SettingsFile {
@@ -225,6 +258,7 @@ impl Default for SettingsFile {
             shortcut_overrides: defaults.shortcut_overrides,
             remote_copy_undo_enabled: defaults.remote_copy_undo_enabled,
             notification_timeout_secs: defaults.notification_timeout_secs,
+            pdf_text_search: defaults.pdf_text_search,
         }
     }
 }

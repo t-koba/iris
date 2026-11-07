@@ -481,3 +481,6 @@ settings-remote-transfer-notes = メモ
 notification-remote-secret-load-failed-title = リモート認証情報を利用できません
 notification-remote-secret-load-failed-body = { $host } の保存済み SSH secret を読み込めなかったため、このマッピングを無効化しました。{ $error }
 notification-remote-secret-delete-failed-title = リモート認証情報の削除に失敗
+
+pdf-text-scan-incomplete = PDF 本文の走査は不完全です
+pdf-text-scan-match-unknown = PDF 本文の走査は不完全です。一致の有無は不明です

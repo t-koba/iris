@@ -57,6 +57,7 @@ pub(super) fn layout_config_snapshot(state: &AppState) -> LayoutConfig {
         shortcut_overrides: state.shortcut_overrides.clone(),
         remote_copy_undo_enabled: state.remote_copy_undo_enabled,
         notification_timeout_secs: state.notification_timeout_secs,
+        pdf_text_search: state.pdf_text_search,
         list_columns: state.pane(0).list_columns.clone(),
         secondary_list_columns: state.pane(1).list_columns.clone(),
         properties_split_ratio: state.properties_split_ratio,
@@ -416,6 +417,7 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
             state.shortcut_overrides = config.shortcut_overrides;
             state.remote_copy_undo_enabled = config.remote_copy_undo_enabled;
             state.notification_timeout_secs = config.notification_timeout_secs;
+            state.pdf_text_search = config.pdf_text_search;
             state.refresh_notification_expirations();
             crate::i18n::initialize(state.locale.as_deref());
             trim_thumbnail_cache_to_limits(state);

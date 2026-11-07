@@ -485,3 +485,6 @@ settings-remote-transfer-notes = Notes
 notification-remote-secret-load-failed-title = Remote credential unavailable
 notification-remote-secret-load-failed-body = The saved SSH secret for { $host } could not be loaded, so the mapping was disabled. { $error }
 notification-remote-secret-delete-failed-title = Remote credential cleanup failed
+
+pdf-text-scan-incomplete = PDF text scan incomplete
+pdf-text-scan-match-unknown = PDF text scan incomplete; match unknown

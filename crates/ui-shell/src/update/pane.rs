@@ -375,6 +375,7 @@ pub fn handle_pane_message(
                         model,
                         cancellation_token,
                         collect_gps_points,
+                        state.pdf_text_search.limits(),
                     ),
                 ]);
             }

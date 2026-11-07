@@ -172,6 +172,7 @@ pub struct AppState {
     pub notifications: Vec<Notification>,
     pub next_notification_id: u64,
     pub notification_timeout_secs: u64,
+    pub pdf_text_search: crate::config::PdfTextSearchSettings,
 
     pub preview_data: Option<PreviewData>,
     pub preview_target_path: Option<String>,
@@ -264,6 +265,7 @@ impl Default for AppState {
             notifications: Vec::new(),
             next_notification_id: 1,
             notification_timeout_secs: DEFAULT_NOTIFICATION_TIMEOUT_SECS,
+            pdf_text_search: crate::config::PdfTextSearchSettings::default(),
             preview_data: None,
             preview_target_path: None,
             preview_target_stamp: None,

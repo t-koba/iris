@@ -48,6 +48,7 @@ pub async fn load_config() -> LayoutConfig {
         shortcut_overrides: settings.shortcut_overrides,
         remote_copy_undo_enabled: settings.remote_copy_undo_enabled,
         notification_timeout_secs,
+        pdf_text_search: settings.pdf_text_search,
         sidebar_width: layout.sidebar_width,
         right_panel_width: layout.right_panel_width,
         preview_panel_height: layout.preview_panel_height,
@@ -343,6 +344,7 @@ pub async fn save_config(config: LayoutConfig) -> Result<(), String> {
         shortcut_overrides: config.shortcut_overrides,
         remote_copy_undo_enabled: config.remote_copy_undo_enabled,
         notification_timeout_secs: config.notification_timeout_secs,
+        pdf_text_search: config.pdf_text_search,
     };
     let layout = LayoutFile {
         schema_version: SCHEMA_VERSION,

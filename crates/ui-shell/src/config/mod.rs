@@ -11,8 +11,8 @@ pub use io::{
     save_config,
 };
 pub use model::{
-    LayoutConfig, LocaleChoice, PaneTabConfig, RemoteTransportSecretWarning, ShortcutOverride,
-    SidebarGroupConfig, SidebarItemConfig, ThemeChoice,
+    LayoutConfig, LocaleChoice, PaneTabConfig, PdfTextSearchSettings, RemoteTransportSecretWarning,
+    ShortcutOverride, SidebarGroupConfig, SidebarItemConfig, ThemeChoice,
 };
 
 #[cfg(test)]

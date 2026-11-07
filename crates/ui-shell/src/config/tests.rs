@@ -367,3 +367,32 @@ fn notification_timeout_setting_is_clamped_on_read() {
         crate::state::MAX_NOTIFICATION_TIMEOUT_SECS
     );
 }
+
+#[test]
+fn pdf_text_search_settings_default_on_old_files_and_preserve_overrides() {
+    let mut old = serde_json::to_value(SettingsFile {
+        show_hidden_files: true,
+        ..SettingsFile::default()
+    })
+    .unwrap();
+    old.as_object_mut().unwrap().remove("pdf_text_search");
+    let loaded: SettingsFile = serde_json::from_value(old.clone()).unwrap();
+    assert!(loaded.show_hidden_files);
+    assert_eq!(
+        loaded.pdf_text_search,
+        PdfTextSearchSettings {
+            input_bytes: 8_388_608,
+            decoded_bytes: 16_777_216,
+            text_bytes: 1_048_576
+        }
+    );
+    // Partial overrides inherit each missing field; zero is a real stop budget.
+    old["pdf_text_search"] = serde_json::json!({"text_bytes": 0});
+    let loaded: SettingsFile = serde_json::from_value(old).unwrap();
+    assert_eq!(loaded.pdf_text_search.input_bytes, 8_388_608);
+    assert_eq!(loaded.pdf_text_search.text_bytes, 0);
+    let saved = serde_json::to_string(&loaded).unwrap();
+    let roundtrip: SettingsFile = serde_json::from_str(&saved).unwrap();
+    assert_eq!(roundtrip.pdf_text_search, loaded.pdf_text_search);
+    assert_eq!(roundtrip.pdf_text_search.limits().text_bytes, 0);
+}

@@ -16,6 +16,7 @@ use iris_search::reconcile::reconcile_segment;
 use iris_search::segment::{IndexedKind, Segment, SegmentRecord};
 use iris_search::stream::{filter_segment_incremental, FilterEvent};
 use iris_search::walker::{walk_local, WalkOptions};
+use iris_thumb_preview::pdf_text::PdfTextLimits;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -168,6 +169,7 @@ pub(crate) fn folder_open_error(error: &std::io::Error) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn recursive_filter_task(
     pane_idx: usize,
     run_id: u64,
@@ -176,7 +178,10 @@ pub fn recursive_filter_task(
     model: FilterModel,
     cancellation_token: CancellationToken,
     collect_gps_points: bool,
+    pdf_limits: PdfTextLimits,
 ) -> Task<Message> {
+    // Capture on the UI caller thread: workers have their own thread-local locale.
+    let pdf_scan_labels = PdfScanLabels::localized();
     Task::run(
         stream::channel::<Message>(
             16,
@@ -232,6 +237,7 @@ pub fn recursive_filter_task(
                     &model,
                     &cancellation_token,
                     collect_gps_points,
+                    pdf_limits,
                 )
                 .await;
                 if cancellation_token.is_cancelled() {
@@ -281,6 +287,8 @@ pub fn recursive_filter_task(
                                         hit.content_candidate,
                                         hit.record,
                                         &filter_text,
+                                        pdf_limits,
+                                        &pdf_scan_labels,
                                     );
                                     (hit.record.path.clone(), annotation)
                                 })
@@ -366,6 +374,7 @@ async fn enrich_recursive_records_if_needed(
     model: &FilterModel,
     cancellation_token: &CancellationToken,
     collect_gps_points: bool,
+    pdf_limits: PdfTextLimits,
 ) {
     let needs_pdf_content = model.content && !model.text.trim().is_empty();
     if !collect_gps_points && !filter_needs_media_metadata(model) && !needs_pdf_content {
@@ -374,19 +383,22 @@ async fn enrich_recursive_records_if_needed(
 
     let semaphore = Arc::new(Semaphore::new(4));
     let mut tasks = JoinSet::new();
-    for (index, record) in records.iter().enumerate() {
+    for (index, record) in records.iter_mut().enumerate() {
         if cancellation_token.is_cancelled() {
             return;
         }
         if record.kind != IndexedKind::Image {
-            if record.kind == IndexedKind::Pdf && model.content && !model.text.trim().is_empty() {
+            if record.kind == IndexedKind::Pdf && needs_pdf_content {
+                // Cached signatures may predate these budgets/settings. Even an
+                // empty new scan must replace a stale negative/positive signature.
+                record.content_signature = None;
                 let Ok(permit) = semaphore.clone().acquire_owned().await else {
                     return;
                 };
                 let path = PathBuf::from(record.path.clone());
                 tasks.spawn_blocking(move || {
                     let _permit = permit;
-                    let signature = pdf_content_signature(&path);
+                    let signature = pdf_content_signature(&path, pdf_limits);
                     (index, None::<MediaMetadata>, signature)
                 });
             }
@@ -422,9 +434,16 @@ async fn enrich_recursive_records_if_needed(
     }
 }
 
-fn pdf_content_signature(path: &Path) -> Option<BloomSignature> {
-    let text = iris_thumb_preview::pdf_text::extract_pdf_text(path, 64).text;
-    (!text.trim().is_empty()).then(|| BloomSignature::from_content(&text))
+fn pdf_content_signature(path: &Path, limits: PdfTextLimits) -> Option<BloomSignature> {
+    let result = iris_thumb_preview::pdf_text::extract_pdf_text(path, limits);
+    if result.truncated {
+        // Saturate: every query remains a candidate, never a partial negative.
+        Some(BloomSignature::from_bytes(
+            [u8::MAX; iris_search::bloom::BLOOM_BYTES],
+        ))
+    } else {
+        (!result.text.is_empty()).then(|| BloomSignature::from_content(&result.text))
+    }
 }
 
 fn filter_needs_media_metadata(model: &FilterModel) -> bool {
@@ -476,20 +495,49 @@ async fn list_entries_for_paths_with_annotations(
     entries
 }
 
+struct PdfScanLabels {
+    incomplete: String,
+    unknown: String,
+}
+
+impl PdfScanLabels {
+    fn localized() -> Self {
+        Self {
+            incomplete: tr("pdf-text-scan-incomplete"),
+            unknown: tr("pdf-text-scan-match-unknown"),
+        }
+    }
+}
+
 fn recursive_content_annotation(
     content_candidate: bool,
     record: &SegmentRecord,
     query: &str,
+    limits: PdfTextLimits,
+    labels: &PdfScanLabels,
 ) -> Option<String> {
     if !content_candidate || record.kind != IndexedKind::Pdf {
         return None;
     }
-    pdf_content_snippet(Path::new(&record.path), query)
+    pdf_content_snippet(Path::new(&record.path), query, limits, labels)
 }
 
-fn pdf_content_snippet(path: &Path, query: &str) -> Option<String> {
-    let text = iris_thumb_preview::pdf_text::extract_pdf_text(path, 64).text;
-    verify_content_match(&text, query, 18).map(|snippet| snippet.snippet)
+fn pdf_content_snippet(
+    path: &Path,
+    query: &str,
+    limits: PdfTextLimits,
+    labels: &PdfScanLabels,
+) -> Option<String> {
+    let result = iris_thumb_preview::pdf_text::extract_pdf_text(path, limits);
+    let snippet = verify_content_match(&result.text, query, 18).map(|snippet| snippet.snippet);
+    if result.truncated {
+        Some(match snippet {
+            Some(text) => format!("{text} [{}]", labels.incomplete),
+            None => labels.unknown.clone(),
+        })
+    } else {
+        snippet
+    }
 }
 
 async fn build_local_l0_entry_safe(
@@ -1128,10 +1176,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reconcile_records_with_index_cache_reuses_fresh_content_signature() {
+    #[tokio::test]
+    async fn pdf_content_rescan_replaces_cached_signature_and_keeps_partial_candidates() {
         let temp = tempfile::tempdir().expect("tempdir");
         let cache_path = temp.path().join("root.idx");
+        let path = temp.path().join("doc.pdf");
+        std::fs::write(&path, b"<< >>\nstream\n(invoice total)\nendstream").unwrap();
         let mut cached = SegmentRecord {
             path: temp.path().join("doc.pdf").to_string_lossy().to_string(),
             name: "doc.pdf".to_string(),
@@ -1159,6 +1209,51 @@ mod tests {
             .content_signature
             .as_ref()
             .is_some_and(|signature| signature.might_contain_query("invoice")));
+
+        let limits = PdfTextLimits {
+            text_bytes: 3,
+            ..crate::config::PdfTextSearchSettings::default().limits()
+        };
+        let model = FilterModel {
+            content: true,
+            text: "unseenword".into(),
+            ..FilterModel::default()
+        };
+        let mut records = segment.into_records();
+        enrich_recursive_records_if_needed(
+            &mut records,
+            &model,
+            &CancellationToken::new(),
+            false,
+            limits,
+        )
+        .await;
+        let compiled = iris_search::filter::CompiledFilter::new(model.clone());
+        assert!(
+            compiled
+                .matches_record(&records[0])
+                .unwrap()
+                .content_candidate
+        );
+        crate::i18n::initialize(Some("en"));
+        let labels = PdfScanLabels::localized();
+        let snippet =
+            recursive_content_annotation(true, &records[0], &model.text, limits, &labels).unwrap();
+        assert!(snippet.contains("incomplete") && snippet.contains("unknown"));
+        let found = pdf_content_snippet(&path, "inv", limits, &labels).unwrap();
+        assert!(found.contains("inv") && found.contains("incomplete"));
+
+        // A complete empty scan must also clear the previous cached signature.
+        std::fs::write(&path, b"<< >>\nstream\n( )\nendstream").unwrap();
+        enrich_recursive_records_if_needed(
+            &mut records,
+            &model,
+            &CancellationToken::new(),
+            false,
+            crate::config::PdfTextSearchSettings::default().limits(),
+        )
+        .await;
+        assert!(records[0].content_signature.is_none());
     }
 
     #[test]
@@ -1178,9 +1273,47 @@ endstream endobj
         )
         .expect("write pdf");
 
-        let signature = pdf_content_signature(&path).expect("signature");
+        let signature = pdf_content_signature(
+            &path,
+            crate::config::PdfTextSearchSettings::default().limits(),
+        )
+        .expect("signature");
 
         assert!(signature.might_contain_query("invoice"));
+    }
+
+    #[test]
+    fn pdf_content_snippet_keeps_caller_locale_on_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("doc.pdf");
+        std::fs::write(&path, b"<< >>\nstream\n(invoice total)\nendstream").unwrap();
+        let limits = PdfTextLimits {
+            text_bytes: 3,
+            ..crate::config::PdfTextSearchSettings::default().limits()
+        };
+        for (locale, worker_locale) in [("en", "ja"), ("ja", "en")] {
+            crate::i18n::initialize(Some(locale));
+            let labels = PdfScanLabels::localized();
+            let expected_incomplete = labels.incomplete.clone();
+            let expected_unknown = labels.unknown.clone();
+            assert_ne!(expected_incomplete, "pdf-text-scan-incomplete");
+            assert_ne!(expected_unknown, "pdf-text-scan-match-unknown");
+            let path = path.clone();
+            std::thread::spawn(move || {
+                crate::i18n::initialize(Some(worker_locale));
+                assert_ne!(PdfScanLabels::localized().incomplete, expected_incomplete);
+                assert_eq!(
+                    pdf_content_snippet(&path, "inv", limits, &labels).unwrap(),
+                    format!("inv [{expected_incomplete}]")
+                );
+                assert_eq!(
+                    pdf_content_snippet(&path, "unseenword", limits, &labels).unwrap(),
+                    expected_unknown
+                );
+            })
+            .join()
+            .unwrap();
+        }
     }
 
     #[test]
@@ -1200,7 +1333,13 @@ endstream endobj
         )
         .expect("write pdf");
 
-        let snippet = pdf_content_snippet(&path, "total due").expect("snippet");
+        let snippet = pdf_content_snippet(
+            &path,
+            "total due",
+            crate::config::PdfTextSearchSettings::default().limits(),
+            &PdfScanLabels::localized(),
+        )
+        .expect("snippet");
 
         assert!(snippet.contains("total due"));
     }

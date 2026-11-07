@@ -2,21 +2,35 @@ use flate2::read::ZlibDecoder;
 use std::io::Read;
 use std::path::Path;
 
+/// Per-document search budgets. Policy/defaults belong to the caller's settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PdfTextLimits {
+    pub input_bytes: usize,
+    pub decoded_bytes: usize,
+    pub text_bytes: usize,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PdfText {
     pub text: String,
-    pub pages_scanned: u32,
+    /// This stream parser cannot associate text with pages; always None.
+    pub pages_scanned: Option<u32>,
+    /// A budget, I/O error, or undecodable stream prevented a full stream scan.
+    /// False still means best-effort text extraction, not complete PDF interpretation.
     pub truncated: bool,
 }
 
-pub fn extract_pdf_text(file_path: &Path, max_pages: u32) -> PdfText {
-    if max_pages == 0 || !is_pdf_path(file_path) {
+pub fn extract_pdf_text(file_path: &Path, limits: PdfTextLimits) -> PdfText {
+    if !is_pdf_path(file_path) {
         return PdfText::default();
     }
-    let Ok(bytes) = std::fs::read(file_path) else {
-        return PdfText::default();
-    };
-    extract_pdf_text_from_bytes(&bytes, max_pages)
+    match std::fs::File::open(file_path) {
+        Ok(file) => extract_pdf_text_from_reader(file, limits),
+        Err(_) => PdfText {
+            truncated: true,
+            ..PdfText::default()
+        },
+    }
 }
 
 fn is_pdf_path(file_path: &Path) -> bool {
@@ -26,87 +40,136 @@ fn is_pdf_path(file_path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
 }
 
-fn extract_pdf_text_from_bytes(bytes: &[u8], max_pages: u32) -> PdfText {
-    let page_count = count_pdf_pages(bytes);
-    let streams = extract_content_streams(bytes);
-    let mut text = String::new();
-    for stream in streams {
-        extract_text_operators(&stream, &mut text);
+// Never reads beyond the budget, even if a file grows after opening. At an exact
+// boundary EOF is unknown: conservatively report truncation without a probe read.
+fn read_budgeted(mut reader: impl Read, limit: usize) -> (Vec<u8>, bool) {
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 8192];
+    while bytes.len() < limit {
+        let count = buffer.len().min(limit - bytes.len());
+        match reader.read(&mut buffer[..count]) {
+            Ok(0) => return (bytes, false),
+            Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return (bytes, true),
+        }
     }
-
-    PdfText {
-        text: normalize_extracted_text(&text),
-        pages_scanned: page_count.min(max_pages).max((!text.is_empty()) as u32),
-        truncated: page_count > max_pages,
-    }
+    (bytes, true)
 }
 
-fn count_pdf_pages(bytes: &[u8]) -> u32 {
-    let text = String::from_utf8_lossy(bytes);
-    text.match_indices("/Type")
-        .filter(|(idx, _)| text[*idx..].starts_with("/Type /Page"))
-        .filter(|(idx, _)| !text[*idx..].starts_with("/Type /Pages"))
-        .count()
-        .try_into()
-        .unwrap_or(u32::MAX)
-}
-
-fn extract_content_streams(bytes: &[u8]) -> Vec<Vec<u8>> {
-    let mut streams = Vec::new();
+fn extract_pdf_text_from_reader(reader: impl Read, limits: PdfTextLimits) -> PdfText {
+    let (bytes, mut truncated) = read_budgeted(reader, limits.input_bytes);
+    let mut output = TextOutput {
+        text: String::new(),
+        pending_space: false,
+        limit: limits.text_bytes,
+    };
+    truncated |= limits.decoded_bytes == 0 || limits.text_bytes == 0;
+    let mut remaining = limits.decoded_bytes;
     let mut cursor = 0;
-    while let Some(stream_pos) = find_bytes(&bytes[cursor..], b"stream") {
-        let stream_start_token = cursor + stream_pos;
-        let data_start = skip_stream_line_end(bytes, stream_start_token + b"stream".len());
-        let Some(end_rel) = find_bytes(&bytes[data_start..], b"endstream") else {
+    while limits.text_bytes > 0 && remaining > 0 {
+        let Some(stream_pos) = find_bytes(&bytes[cursor..], b"stream") else {
             break;
         };
-        let data_end = trim_stream_line_end(bytes, data_start + end_rel);
-        let dict_start = bytes[..stream_start_token]
+        let stream_start_token = cursor + stream_pos;
+        let data_start = skip_stream_line_end(&bytes, stream_start_token + b"stream".len());
+        let Some(end_rel) = find_bytes(&bytes[data_start..], b"endstream") else {
+            truncated = true;
+            break;
+        };
+        let end_token = data_start + end_rel;
+        let data_end = trim_stream_line_end(&bytes, end_token).max(data_start);
+        let dict_start = bytes[cursor..stream_start_token]
             .windows(2)
             .rposition(|window| window == b"<<")
-            .unwrap_or(stream_start_token);
+            .map_or(stream_start_token, |pos| cursor + pos);
         let dict = &bytes[dict_start..stream_start_token];
         let raw = &bytes[data_start..data_end];
-        if dict
-            .windows(b"/FlateDecode".len())
-            .any(|w| w == b"/FlateDecode")
-        {
-            let mut decoder = ZlibDecoder::new(raw);
-            let mut decoded = Vec::new();
-            if decoder.read_to_end(&mut decoded).is_ok() {
-                streams.push(decoded);
+        let decoded;
+        let stream;
+        let stopped;
+        match stream_uses_flate(dict) {
+            Some(true) => {
+                (decoded, stopped) = read_budgeted(ZlibDecoder::new(raw), remaining);
+                stream = decoded.as_slice();
             }
-        } else {
-            streams.push(raw.to_vec());
+            Some(false) => {
+                stream = &raw[..raw.len().min(remaining)];
+                stopped = raw.len() >= remaining;
+            }
+            None => {
+                truncated = true;
+                cursor = end_token + b"endstream".len();
+                continue;
+            }
         }
-        cursor = data_end + b"endstream".len();
+        remaining -= stream.len();
+        let complete = extract_text_operators(stream, &mut output);
+        truncated |= stopped || !complete;
+        if stopped || !complete {
+            break;
+        }
+        cursor = end_token + b"endstream".len();
     }
-    streams
+    PdfText {
+        text: output.text,
+        pages_scanned: None,
+        truncated,
+    }
 }
 
-fn extract_text_operators(stream: &[u8], output: &mut String) {
+// Only an absent Filter or a single direct /FlateDecode name is supported.
+// Arrays (even single-element ones), indirect values and duplicate keys are not
+// interpreted: a partial decode must never produce a negative search signature.
+fn stream_uses_flate(dict: &[u8]) -> Option<bool> {
+    let is_boundary = |byte: u8| byte.is_ascii_whitespace() || b"\0()<>[]{}/%".contains(&byte);
+    let mut filters = dict
+        .windows(b"/Filter".len())
+        .enumerate()
+        .filter(|(pos, token)| {
+            *token == b"/Filter"
+                && dict
+                    .get(pos + b"/Filter".len())
+                    .is_none_or(|byte| is_boundary(*byte))
+        });
+    let Some((pos, _)) = filters.next() else {
+        return Some(false);
+    };
+    if filters.next().is_some() {
+        return None;
+    }
+    let value = dict[pos + b"/Filter".len()..]
+        .trim_ascii_start()
+        .strip_prefix(b"/FlateDecode")?;
+    value
+        .first()
+        .is_none_or(|byte| is_boundary(*byte))
+        .then_some(true)
+}
+
+fn extract_text_operators(stream: &[u8], output: &mut TextOutput) -> bool {
     let mut index = 0;
     while index < stream.len() {
-        match stream[index] {
-            b'(' => {
-                if let Some((value, next)) = read_literal_string(stream, index + 1) {
-                    push_pdf_string(output, &value);
-                    index = next;
-                } else {
-                    index += 1;
-                }
-            }
+        let parsed = match stream[index] {
+            b'(' => Some(read_literal_string(stream, index + 1)),
             b'<' if stream.get(index + 1) != Some(&b'<') => {
-                if let Some((value, next)) = read_hex_string(stream, index + 1) {
-                    push_pdf_string(output, &value);
-                    index = next;
-                } else {
-                    index += 1;
-                }
+                Some(read_hex_string(stream, index + 1))
             }
-            _ => index += 1,
+            _ => None,
+        };
+        if let Some(parsed) = parsed {
+            let Some((value, next)) = parsed else {
+                return false;
+            };
+            if !output.push_pdf_string(&value) {
+                return false;
+            }
+            index = next;
+        } else {
+            index += 1;
         }
     }
+    true
 }
 
 fn read_literal_string(stream: &[u8], mut index: usize) -> Option<(Vec<u8>, usize)> {
@@ -170,34 +233,60 @@ fn read_hex_string(stream: &[u8], mut index: usize) -> Option<(Vec<u8>, usize)> 
     None
 }
 
-fn push_pdf_string(output: &mut String, bytes: &[u8]) {
-    if bytes.is_empty() {
-        return;
-    }
-    if let Some(text) = decode_utf16be(bytes) {
-        output.push_str(&text);
-    } else {
-        output.push_str(&String::from_utf8_lossy(bytes));
-    }
-    output.push(' ');
+// Normalize while emitting; no whole decoded/normalized intermediate String.
+// Limits count UTF-8 bytes and never split a character.
+struct TextOutput {
+    text: String,
+    pending_space: bool,
+    limit: usize,
 }
 
-fn decode_utf16be(bytes: &[u8]) -> Option<String> {
-    let data = bytes.strip_prefix(&[0xfe, 0xff])?;
-    if data.len() % 2 != 0 {
-        return None;
+impl TextOutput {
+    fn push_char(&mut self, ch: char) -> bool {
+        if ch.is_whitespace() {
+            self.pending_space = !self.text.is_empty();
+            return true;
+        }
+        let extra = ch.len_utf8() + usize::from(self.pending_space);
+        if extra > self.limit - self.text.len() {
+            return false;
+        }
+        if self.pending_space {
+            self.text.push(' ');
+        }
+        self.pending_space = false;
+        self.text.push(ch);
+        true
     }
-    String::from_utf16(
-        &data
-            .chunks_exact(2)
-            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
-            .collect::<Vec<_>>(),
-    )
-    .ok()
-}
 
-fn normalize_extracted_text(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    fn push_pdf_string(&mut self, bytes: &[u8]) -> bool {
+        if let Some(data) = bytes
+            .strip_prefix(&[0xfe, 0xff])
+            .filter(|data| data.len() % 2 == 0)
+        {
+            for ch in char::decode_utf16(
+                data.chunks_exact(2)
+                    .map(|p| u16::from_be_bytes([p[0], p[1]])),
+            ) {
+                if !self.push_char(ch.unwrap_or(char::REPLACEMENT_CHARACTER)) {
+                    return false;
+                }
+            }
+        } else {
+            for chunk in bytes.utf8_chunks() {
+                for ch in chunk.valid().chars() {
+                    if !self.push_char(ch) {
+                        return false;
+                    }
+                }
+                if !chunk.invalid().is_empty() && !self.push_char(char::REPLACEMENT_CHARACTER) {
+                    return false;
+                }
+            }
+        }
+        self.pending_space = !self.text.is_empty();
+        true
+    }
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -235,16 +324,15 @@ fn hex_value(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const LIMITS: PdfTextLimits = PdfTextLimits {
+        input_bytes: 4096,
+        decoded_bytes: 4096,
+        text_bytes: 4096,
+    };
 
     #[test]
     fn ignores_non_pdf_paths() {
-        let text = extract_pdf_text(Path::new("note.txt"), 8);
-        assert_eq!(text, PdfText::default());
-    }
-
-    #[test]
-    fn zero_page_limit_skips_work() {
-        let text = extract_pdf_text(Path::new("scan.pdf"), 0);
+        let text = extract_pdf_text(Path::new("note.txt"), LIMITS);
         assert_eq!(text, PdfText::default());
     }
 
@@ -258,8 +346,9 @@ BT (Hello\ World) Tj <FEFF65E5672C8A9E> Tj [(PDF) 120 (text)] TJ ET
 endstream
 endobj
 %%EOF"#;
-        let text = extract_pdf_text_from_bytes(pdf, 8);
-        assert_eq!(text.pages_scanned, 1);
+        let text = extract_pdf_text_from_reader(pdf.as_slice(), LIMITS);
+        assert_eq!(text.pages_scanned, None);
+        assert!(!text.truncated);
         assert_eq!(text.text, "Hello World 日本語 PDF text");
     }
 
@@ -277,7 +366,235 @@ endobj
         pdf.extend_from_slice(&encoded);
         pdf.extend_from_slice(b"\nendstream\nendobj\n%%EOF");
 
-        let text = extract_pdf_text_from_bytes(&pdf, 8);
+        let text = extract_pdf_text_from_reader(pdf.as_slice(), LIMITS);
         assert_eq!(text.text, "Compressed text");
+    }
+    #[test]
+    fn filter_arrays_and_chains_are_incomplete_not_single_flate() {
+        let compressed = stream_pdf(&[(b"(must not decode)", true)]);
+        let header = b"%PDF-1.4\n<< /Filter /FlateDecode >>";
+        for filter in [
+            "/Filter [/ASCII85Decode /FlateDecode]",
+            "/Filter [/FlateDecode /ASCII85Decode]",
+            "/Filter [/FlateDecode /FlateDecode]",
+            "/Filter [/FlateDecode]",
+            "/Filter /FlateDecode /Filter /ASCII85Decode",
+            "/Filter /FlateDecodeExtra",
+            "/Filter /ASCII85Decode /Other /FlateDecode",
+        ] {
+            let mut pdf = format!("%PDF-1.4\n<< {filter} >>").into_bytes();
+            pdf.extend_from_slice(&compressed[header.len()..]);
+            pdf.extend_from_slice(&stream_pdf(&[(b"(later text)", false)]));
+            let result = extract_pdf_text_from_reader(pdf.as_slice(), LIMITS);
+            assert!(result.truncated, "{filter}");
+            assert_eq!(result.text, "later text", "{filter}");
+        }
+        // PDF name boundaries do not require intervening spaces.
+        assert_eq!(stream_uses_flate(b"<</Filter/FlateDecode>>"), Some(true));
+        assert_eq!(
+            stream_uses_flate(b"<</FilterOther/FlateDecode>>"),
+            Some(false)
+        );
+    }
+
+    fn stream_pdf(streams: &[(&[u8], bool)]) -> Vec<u8> {
+        use flate2::{write::ZlibEncoder, Compression};
+        use std::io::Write;
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        for (data, compressed) in streams {
+            pdf.extend_from_slice(if *compressed {
+                b"<< /Filter /FlateDecode >>\nstream\n"
+            } else {
+                b"<< >>\nstream\n"
+            });
+            if *compressed {
+                let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(data).unwrap();
+                pdf.extend_from_slice(&encoder.finish().unwrap());
+            } else {
+                pdf.extend_from_slice(data);
+            }
+            pdf.extend_from_slice(b"\nendstream\n");
+        }
+        pdf
+    }
+
+    #[test]
+    fn actual_file_reads_stop_at_input_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bounded.pdf");
+        let mut pdf = stream_pdf(&[(b"(early)", false)]);
+        let limit = pdf.len() + 1;
+        pdf.extend_from_slice(&[b' '; 256]);
+        pdf.extend_from_slice(&stream_pdf(&[(b"(late)", false)]));
+        std::fs::write(&path, pdf).unwrap();
+        let result = extract_pdf_text(
+            &path,
+            PdfTextLimits {
+                input_bytes: limit,
+                ..LIMITS
+            },
+        );
+        assert_eq!(result.text, "early");
+        assert!(result.truncated);
+        assert_eq!(result.pages_scanned, None);
+    }
+
+    #[test]
+    fn growing_file_cannot_exceed_read_budget() {
+        use std::io::Write;
+        struct GrowingFile {
+            file: std::fs::File,
+            writer: Option<std::fs::File>,
+            read: usize,
+        }
+        impl Read for GrowingFile {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.file.read(buf)?;
+                self.read += count;
+                if let Some(mut writer) = self.writer.take() {
+                    writer.write_all(&[b' '; 256])?;
+                }
+                Ok(count)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("growing.pdf");
+        let pdf = stream_pdf(&[(b"(early)", false)]);
+        std::fs::write(&path, &pdf).unwrap();
+        let mut reader = GrowingFile {
+            file: std::fs::File::open(&path).unwrap(),
+            writer: Some(
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap(),
+            ),
+            read: 0,
+        };
+        let limit = pdf.len() + 7;
+        assert!(reader.file.metadata().unwrap().len() < limit as u64);
+        let result = extract_pdf_text_from_reader(
+            &mut reader,
+            PdfTextLimits {
+                input_bytes: limit,
+                ..LIMITS
+            },
+        );
+        assert_eq!(reader.read, limit);
+        assert!(result.truncated);
+        assert_eq!(result.text, "early");
+        // No extra EOF/overrun probe, including at an exact boundary.
+        let mut cursor = std::io::Cursor::new(vec![0; 16]);
+        let (bytes, stopped) = read_budgeted(&mut cursor, 16);
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(cursor.position(), 16);
+        assert!(stopped);
+    }
+
+    #[test]
+    fn compressed_expansion_stops_during_decode() {
+        let mut data = b"(early) (".to_vec();
+        data.extend_from_slice(&[b'x'; 65536]);
+        data.push(b')');
+        let pdf = stream_pdf(&[(&data, true)]);
+        assert!(pdf.len() < 512);
+        let limits = PdfTextLimits {
+            decoded_bytes: 128,
+            ..LIMITS
+        };
+        let result = extract_pdf_text_from_reader(pdf.as_slice(), limits);
+        assert_eq!(result.text, "early");
+        assert!(result.truncated);
+        let (decoded, stopped) = read_budgeted(
+            ZlibDecoder::new(&pdf[pdf.windows(7).position(|w| w == b"stream\n").unwrap() + 7..]),
+            128,
+        );
+        assert_eq!(decoded.len(), 128);
+        assert!(stopped);
+    }
+
+    #[test]
+    fn decoded_budget_is_cumulative_for_all_streams() {
+        for compressed in [false, true] {
+            let pdf = stream_pdf(&[
+                (b"(one)", compressed),
+                (b"(two)", compressed),
+                (b"(hidden)", compressed),
+            ]);
+            let result = extract_pdf_text_from_reader(
+                pdf.as_slice(),
+                PdfTextLimits {
+                    decoded_bytes: 8,
+                    ..LIMITS
+                },
+            );
+            assert_eq!(result.text, "one");
+            assert!(result.truncated);
+        }
+    }
+
+    #[test]
+    fn output_budget_counts_normalized_utf8_across_strings() {
+        for (data, limit, expected) in [
+            ("(one) (two)".as_bytes(), 5, "one t"),
+            ("(é日本)".as_bytes(), 7, "é日"),
+            (b"<FEFF65E5672C8A9E>".as_slice(), 7, "日本"),
+        ] {
+            let pdf = stream_pdf(&[(data, false)]);
+            let result = extract_pdf_text_from_reader(
+                pdf.as_slice(),
+                PdfTextLimits {
+                    text_bytes: limit,
+                    ..LIMITS
+                },
+            );
+            assert_eq!(result.text, expected);
+            assert!(result.text.len() <= limit);
+            assert!(result.truncated);
+        }
+    }
+
+    #[test]
+    fn zero_budgets_disable_work_not_limits_and_page_count_is_unavailable() {
+        let pdf = stream_pdf(&[(b"(first)", false), (b"(second)", false)]);
+        let full = extract_pdf_text_from_reader(pdf.as_slice(), LIMITS);
+        assert_eq!(full.text, "first second");
+        assert!(!full.truncated);
+        assert_eq!(full.pages_scanned, None);
+        for limits in [
+            PdfTextLimits {
+                input_bytes: 0,
+                ..LIMITS
+            },
+            PdfTextLimits {
+                decoded_bytes: 0,
+                ..LIMITS
+            },
+            PdfTextLimits {
+                text_bytes: 0,
+                ..LIMITS
+            },
+        ] {
+            let result = extract_pdf_text_from_reader(pdf.as_slice(), limits);
+            assert!(result.truncated);
+            assert!(result.text.is_empty());
+            assert_eq!(result.pages_scanned, None);
+        }
+    }
+
+    #[test]
+    fn failed_streams_are_not_reported_as_complete() {
+        let corrupt = b"<< /Filter /FlateDecode >>\nstream\nnot zlib\nendstream";
+        let unsupported = b"<< /Filter /ASCII85Decode >>\nstream\nabc\nendstream";
+        let missing_end = b"<< >>\nstream\n(early)";
+        for pdf in [
+            corrupt.as_slice(),
+            unsupported.as_slice(),
+            missing_end.as_slice(),
+        ] {
+            assert!(extract_pdf_text_from_reader(pdf, LIMITS).truncated);
+        }
+        assert!(extract_pdf_text(Path::new("missing.pdf"), LIMITS).truncated);
     }
 }
