@@ -1257,6 +1257,30 @@ mod tests {
     }
 
     #[test]
+    fn pdf_content_signature_keeps_nested_decode_parameters_as_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("doc.pdf");
+        for filter in ["ASCII85Decode", "FlateDecode"] {
+            std::fs::write(
+                &path,
+                format!(
+                    "<< /Filter /{filter} /DecodeParms << /Columns 5 >> >>\nstream\n(encoded text)\nendstream"
+                ),
+            )
+            .unwrap();
+            let signature = pdf_content_signature(
+                &path,
+                crate::config::PdfTextSearchSettings::default().limits(),
+            )
+            .expect("incomplete scan must retain a signature");
+            assert!(
+                signature.might_contain_query("arbitrary unseen query"),
+                "{filter}"
+            );
+        }
+    }
+
+    #[test]
     fn pdf_content_signature_reads_text_layer() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("doc.pdf");

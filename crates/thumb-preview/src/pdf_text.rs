@@ -119,10 +119,33 @@ fn extract_pdf_text_from_reader(reader: impl Read, limits: PdfTextLimits) -> Pdf
 }
 
 // Only an absent Filter or a single direct /FlateDecode name is supported.
-// Arrays (even single-element ones), indirect values and duplicate keys are not
-// interpreted: a partial decode must never produce a negative search signature.
+// Arrays (even single-element ones), indirect values, duplicate keys and decode
+// parameters are not interpreted: a partial decode must never produce a negative
+// search signature. Nested dictionaries are conservatively rejected.
 fn stream_uses_flate(dict: &[u8]) -> Option<bool> {
+    let dict = dict.trim_ascii().strip_prefix(b"<<")?.strip_suffix(b">>")?;
+    // Selection starts at the last <<. Any remaining dictionary delimiter means
+    // that this is not an unambiguous, flat stream dictionary (e.g. DecodeParms
+    // hid the enclosing Filter). Never treat its encoded bytes as plain text.
+    if dict
+        .windows(2)
+        .any(|token| token == b"<<" || token == b">>")
+    {
+        return None;
+    }
     let is_boundary = |byte: u8| byte.is_ascii_whitespace() || b"\0()<>[]{}/%".contains(&byte);
+    if dict
+        .windows(b"/DecodeParms".len())
+        .enumerate()
+        .any(|(pos, token)| {
+            token == b"/DecodeParms"
+                && dict
+                    .get(pos + b"/DecodeParms".len())
+                    .is_none_or(|byte| is_boundary(*byte))
+        })
+    {
+        return None;
+    }
     let mut filters = dict
         .windows(b"/Filter".len())
         .enumerate()
@@ -395,6 +418,25 @@ endobj
             stream_uses_flate(b"<</FilterOther/FlateDecode>>"),
             Some(false)
         );
+    }
+
+    #[test]
+    fn nested_decode_parameters_skip_stream_and_keep_later_text() {
+        for dictionary in [
+            "/Filter /ASCII85Decode /DecodeParms << /Columns 5 >>",
+            "/Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns 5 >>",
+            "/DecodeParms << /Columns 5 >> /Filter /ASCII85Decode",
+            "/DecodeParms << /Columns 5 >>",
+            "/Filter /FlateDecode /DecodeParms 2 0 R",
+        ] {
+            let mut pdf =
+                format!("%PDF-1.4\n<< {dictionary} >>\nstream\n(must not extract)\nendstream\n")
+                    .into_bytes();
+            pdf.extend_from_slice(&stream_pdf(&[(b"(later text)", false)]));
+            let result = extract_pdf_text_from_reader(pdf.as_slice(), LIMITS);
+            assert!(result.truncated, "{dictionary}");
+            assert_eq!(result.text, "later text", "{dictionary}");
+        }
     }
 
     fn stream_pdf(streams: &[(&[u8], bool)]) -> Vec<u8> {
