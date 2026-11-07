@@ -51,6 +51,171 @@ class CandidateContracts(unittest.TestCase):
             with self.assertRaises(ValueError):
                 m.selected_flags(bad)
 
+    def test_liblzma_pin_and_signature_identity(self):
+        self.assertEqual(m.LZMA['version'], '5.8.4')
+        self.assertEqual(m.LZMA['url'], 'https://github.com/tukaani-project/xz/releases/download/v5.8.4/xz-5.8.4.tar.xz')
+        self.assertEqual(m.LZMA['sha256'], '4ce24038fd4221e0d13bc1a2de7a4db56e90b92b3bf75321f6c14be73f65de4b')
+        self.assertEqual(m.LZMA['signature_url'], m.LZMA['url'] + '.sig')
+        self.assertEqual(m.LZMA['key_url'], 'https://github.com/Larhzu.gpg')
+        self.assertEqual(m.LZMA['fingerprint'], '3690C240CE51B4670D30AD1C38EE757D69184620')
+        self.assertEqual(m.LZMA['license'], dict(scope='liblzma', spdx='0BSD', metadata_file='COPYING',
+                         file='COPYING.0BSD', sha256='0b01625d853911cd0e2e088dcfb743261034a091bb379246cb25a14cc4c74bf1'))
+        primary = m.LZMA['fingerprint']
+        valid = f'[GNUPG:] VALIDSIG {"A" * 40} 2026-01-01 1 0 4 0 1 10 00 {primary}\n'
+        self.assertEqual(m.lzma_signature(valid)['primary_fingerprint'], primary)
+        for bad in ('', valid + valid, valid.replace(primary, 'B' * 40),
+                    valid + '[GNUPG:] BADSIG bad\n', valid + '[GNUPG:] EXPKEYSIG expired\n',
+                    valid + '[GNUPG:] REVKEYSIG revoked\n'):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                m.lzma_signature(bad)
+
+    def test_liblzma_build_contract_and_fail_closed_inputs(self):
+        # Synthetic bytes test orchestration only; no upstream signature/native claims.
+        for failure in (None, 'archive', 'key', 'signature', 'license', 'metadata', 'spdx', 'dylib'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp).resolve()
+                docs = work / 'docs'
+                docs.mkdir()
+                archive = docs / 'xz-source.tar.xz'
+                license = docs / 'xz-COPYING.0BSD'
+                archive.write_text('synthetic archive')
+                license.write_text('synthetic license')
+                pin = dict(m.LZMA, sha256=m.digest(archive), license=dict(m.LZMA['license'], sha256=m.digest(license)))
+                primary = pin['fingerprint']
+                calls = []
+
+                def run(*args, **kwargs):
+                    args = tuple(str(a) for a in args)
+                    calls.append(args)
+                    if args[0] == 'curl' and failure == 'archive':
+                        archive.write_text('corrupt')
+                    if '--list-keys' in args:
+                        return f"{'sub' if failure == 'key' else 'pub'}:-:255:22:x::::::\nfpr:::::::::{primary}:"
+                    if '--verify' in args:
+                        return '' if failure == 'signature' else f'[GNUPG:] VALIDSIG {primary} 2026-01-01 1 0 4 0 1 10 00 {primary}'
+                    if args[0] == 'tar':
+                        source = work / f"xz-{pin['version']}"
+                        source.mkdir()
+                        (source / 'COPYING').write_text('unknown' if failure == 'metadata' else
+                                                       'liblzma is under the BSD Zero Clause License (0BSD).')
+                        (source / 'COPYING.0BSD').write_text('corrupt' if failure == 'license' else 'synthetic license')
+                    if args[:2] == ('cmake', '--install'):
+                        prefix = work / 'liblzma'
+                        (prefix / 'lib').mkdir(parents=True)
+                        (prefix / 'include').mkdir()
+                        (prefix / 'lib/liblzma.a').write_text('static')
+                        (prefix / 'include/lzma.h').write_text('header')
+                        if failure == 'dylib':
+                            (prefix / 'lib/liblzma.dylib').touch()
+                    return 'cmake version test'
+
+                if failure == 'spdx':
+                    pin['license']['spdx'] = 'unknown'
+                with patch.object(m, 'LZMA', pin), patch.object(m, 'run', side_effect=run):
+                    if failure:
+                        with self.assertRaises(ValueError):
+                            m.build_lzma(work, work / 'sdk', {'CC': 'clang'}, docs)
+                        if failure != 'dylib':
+                            self.assertFalse(any(c[0] == 'cmake' for c in calls))
+                        if failure in ('archive', 'key', 'signature'):
+                            self.assertFalse(any(c[0] == 'tar' for c in calls))
+                        continue
+                    prefix = m.build_lzma(work, work / 'sdk', {'CC': 'clang'}, docs)
+                configure = next(c for c in calls if c[:2] == ('cmake', '-S'))
+                for flag in ('-DBUILD_SHARED_LIBS=OFF', '-DCMAKE_POSITION_INDEPENDENT_CODE=ON',
+                             '-DBUILD_TESTING=OFF', '-DXZ_NLS=OFF', '-DXZ_DOC=OFF',
+                             '-DXZ_TOOL_XZ=OFF', '-DXZ_TOOL_XZDEC=OFF', '-DXZ_TOOL_LZMADEC=OFF',
+                             '-DXZ_TOOL_LZMAINFO=OFF', '-DXZ_TOOL_SCRIPTS=OFF', '-DCMAKE_INSTALL_LIBDIR=lib'):
+                    self.assertIn(flag, configure)
+                self.assertIn(f'-DCMAKE_INSTALL_PREFIX={prefix}', configure)
+                install = next(c for c in calls if c[:2] == ('cmake', '--install'))
+                self.assertEqual(install[-2:], ('--component', 'liblzma_Development'))
+                evidence = json.loads((docs / 'liblzma-build.json').read_text())
+                self.assertTrue(evidence['signature']['verified'])
+                self.assertEqual(evidence['static_archive_sha256'], m.digest(prefix / 'lib/liblzma.a'))
+                self.assertEqual(evidence['cmake'], 'cmake version test')
+
+    def test_candidate_rejects_ambient_liblzma_and_dynamic_edge(self):
+        with patch.dict(m.os.environ, dict(CPATH='/opt/homebrew/include', LIBRARY_PATH='/opt/homebrew/lib',
+                        CFLAGS='ambient', LDFLAGS='ambient', PKG_CONFIG_PATH='ambient',
+                        PKG_CONFIG_LIBDIR='ambient', PKG_CONFIG_SYSROOT_DIR='ambient',
+                        CMAKE_PREFIX_PATH='ambient', CPPFLAGS='ambient')):
+            env = m.candidate_env(Path('/sdk'), '/clang')
+        self.assertEqual(env['CFLAGS'], '-isysroot /sdk')
+        self.assertEqual(env['LDFLAGS'], '-isysroot /sdk')
+        for key in ('CPATH', 'LIBRARY_PATH', 'CMAKE_PREFIX_PATH', 'PKG_CONFIG_SYSROOT_DIR', 'CPPFLAGS'):
+            self.assertNotIn(key, env)
+        self.assertEqual(env['PKG_CONFIG_LIBDIR'], '')
+        self.assertEqual(env['PKG_CONFIG_PATH'], '')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            exe = root / 'Iris'
+            exe.touch()
+            with patch.object(m, 'macho', return_value=(['/usr/lib/liblzma.5.dylib'], [], None)):
+                with self.assertRaisesRegex(ValueError, 'statically linked'):
+                    m.closure(exe, [], root / 'sdk')
+
+    def test_ffmpeg_build_uses_only_pinned_liblzma_prefix(self):
+        class Configured(Exception):
+            pass
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp).resolve()
+            lzma, sdk = work / 'liblzma', work / 'sdk'
+            seen = []
+
+            def run(*args, **kwargs):
+                seen.append(args)
+                if args[:2] == ('xcrun', '-f'):
+                    return '/clang'
+                if args[:2] == ('pkg-config', '--modversion'):
+                    return m.LZMA['version']
+                if args[:2] == ('pkg-config', '--variable=libdir'):
+                    return str(lzma / 'lib')
+                if '--list-keys' in args:
+                    return f"fpr:::::::::{m.POLICY['fingerprint']}:"
+                if '--verify' in args:
+                    fp = m.POLICY['fingerprint']
+                    return f'[GNUPG:] VALIDSIG {fp} 2026-01-01 1 0 4 0 1 10 00 {fp}'
+                if args[0] == './configure':
+                    self.assertEqual(list(args[3:]), m.POLICY['configure_flags'])
+                    env = kwargs['env']
+                    self.assertEqual(m.shlex.split(env['CFLAGS']), ['-isysroot', str(sdk), '-I' + str(lzma / 'include')])
+                    self.assertEqual(m.shlex.split(env['LDFLAGS']), ['-isysroot', str(sdk), '-L' + str(lzma / 'lib')])
+                    for key in ('PKG_CONFIG_PATH', 'PKG_CONFIG_LIBDIR'):
+                        self.assertEqual(env[key], str(lzma / 'lib/pkgconfig'))
+                    raise Configured()
+                return ''
+
+            with patch.object(m, 'build_lzma', return_value=lzma), patch.object(m, 'digest', return_value=m.POLICY['sha256']), \
+                    patch.object(m, 'run', side_effect=run), self.assertRaises(Configured):
+                m.build(work / 'candidate', sdk)
+            probe = next(c for c in seen if c[0] == '/clang')
+            self.assertIn(lzma / 'lib/liblzma.a', probe)
+            self.assertNotIn('-llzma', probe)
+
+    def test_candidate_failure_cleans_all_scratch_and_writes_bounded_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            app = root / 'dist/macos/Iris.app'
+            output = root / 'audit/candidate.json'
+
+            def failed_build(prefix, sdk):
+                prefix.mkdir()
+                (prefix / 'source.tar.xz').write_text('temporary')
+                (prefix.parent / 'cargo').mkdir()
+                app.mkdir(parents=True)
+                raise ValueError('synthetic prerequisite failure')
+
+            with patch.object(m, 'ROOT', root), patch.object(m.sys, 'platform', 'darwin'), \
+                    patch.object(m, 'run', return_value=str(root / 'sdk')), \
+                    patch.object(m, 'build', side_effect=failed_build), \
+                    patch.dict(m.REDACTIONS), self.assertRaisesRegex(ValueError, 'synthetic'):
+                m.validate(output)
+            self.assertFalse(app.parent.exists())
+            self.assertFalse((root / 'target/macos-runtime-validation').exists())
+            self.assertEqual(json.loads(output.read_text())['status'], 'failed')
+            self.assertLessEqual(output.stat().st_size, 266240)
+
     def test_load_commands_exclude_id_include_weak_and_rpaths(self):
         text = '''example:
 Load command 0
@@ -196,7 +361,7 @@ Load command 2
         workflow = (ROOT / '.github/workflows/macos-runtime-validation.yml').read_text()
         # The current release path still uses Homebrew FFmpeg only to document
         # the unchanged release runtime; the candidate never uses Homebrew.
-        self.assertIn('brew install ffmpeg', workflow)
+        self.assertIn('brew install ffmpeg pkg-config gnupg nasm cmake', workflow)
         self.assertIn('./scripts/package-macos-app.sh', workflow)
         self.assertIn('python3 scripts/release-audit.py macos --output audit/macos.json', workflow)
         self.assertIn('macos-ffmpeg.py validate audit/macos-candidate.json', workflow)
@@ -210,7 +375,7 @@ Load command 2
         self.assertIn('rm -rf dist/macos target/package-macos target/macos-runtime-validation', workflow)
         self.assertNotIn('dist/macos/Iris', workflow.split('upload-artifact')[-1])
         source = (ROOT / 'scripts/macos-ffmpeg.py').read_text()
-        self.assertLess(source.index('common.signature(status)'), source.index("run('tar'"))
+        self.assertLess(source.index('common.signature(status)'), source.index("run('tar'", source.index('def build(')))
         self.assertIn("CARGO_TARGET_DIR=str(target)", source)
         self.assertIn("PKG_CONFIG_LIBDIR=str(prefix / 'lib/pkgconfig')", source)
         self.assertIn("FFMPEG_DIR=str(prefix)", source)

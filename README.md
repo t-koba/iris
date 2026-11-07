@@ -37,6 +37,8 @@ Rust と [iced](https://iced.rs) で作ったクロスプラットフォーム�
 - macOS: `brew install ffmpeg pkg-config`
 - Ubuntu: `sudo apt-get install pkg-config clang libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev`
 
+レポート専用 macOS FFmpeg 候補は、この通常ビルドとは別に、ソース・署名・0BSD ライセンス文書を固定した XZ Utils 5.8.4 の静的 liblzma を一時ビルドします。Homebrew/SDK の liblzma には代替せず、保持するのはサイズ制限付き JSON のみです。ソース・鍵・ライブラリ・アプリ・Cargo 作業領域は終了時に削除します。これはライセンス承認やリリース経路の変更ではありません。詳細は [候補のビルド入力と証拠範囲](packaging/macos/ffmpeg-README.md) を参照してください。
+
 macOS 以外で PDF をプレビューするには、実行時に PDFium 共有ライブラリが必要です。Iris は実行ファイルの隣、インストール先の `lib/iris`（例: `/usr/lib/iris`）、作業ディレクトリ、システムのライブラリパスの順に探し、見つからない場合は PDF サムネイルを表示しません。
 
 ## リリースのダウンロードとインストール

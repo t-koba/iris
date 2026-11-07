@@ -19,7 +19,9 @@ spec = importlib.util.spec_from_file_location("ffmpeg_policy", ROOT / "scripts/l
 common = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(common)
 POLICY, require, digest = common.POLICY, common.require, common.digest
+LZMA = json.loads((ROOT / "packaging/macos/liblzma.json").read_text())
 MACOS_POLICY = {
+    'liblzma': LZMA,
     'platform': 'macOS',
     'source': {key: POLICY[key] for key in (
         'version', 'url', 'sha256', 'signature_url', 'key_url', 'fingerprint',
@@ -178,6 +180,7 @@ def closure(executable, allowed, sdk, root=None):
         visited.add(key)
         require(len(visited) <= setting('IRIS_FFMPEG_MAX_NATIVE_FILES', 256), 'closure exceeds traversal budget')
         for dep in deps:
+            require(not re.search(r'(^|/)liblzma[.]', dep), 'liblzma must be statically linked')
             if dep.startswith('@rpath/'):
                 options = [p / dep[len('@rpath/'):] for p in stack]
             else:
@@ -242,18 +245,101 @@ def runtime(paths):
     return records
 
 
+def lzma_signature(text):
+    valid = [line.split()[2:] for line in text.splitlines()
+             if line.startswith('[GNUPG:] VALIDSIG ')]
+    require(len(valid) == 1 and len(valid[0]) in (9, 10)
+            and (valid[0][-1] if len(valid[0]) == 10 else valid[0][0]) == LZMA['fingerprint'],
+            'liblzma signature is not from the pinned primary key')
+    require(not re.search(r'\[GNUPG:\] (BADSIG|ERRSIG|REVKEYSIG|EXPKEYSIG|EXPSIG) ', text),
+            'invalid, expired or revoked liblzma signature')
+    return dict(verified=True, primary_fingerprint=LZMA['fingerprint'], signing_fingerprint=valid[0][0])
+
+
+def lzma_evidence(docs):
+    require(digest(docs / 'xz-source.tar.xz') == LZMA['sha256'], 'liblzma source hash mismatch')
+    license = LZMA['license']
+    require(license['scope'] == 'liblzma' and license['spdx'] == '0BSD'
+            and license['file'] == 'COPYING.0BSD' and license['metadata_file'] == 'COPYING',
+            'unexpected liblzma license metadata')
+    require(digest(docs / 'xz-COPYING.0BSD') == license['sha256'], 'liblzma license hash mismatch')
+    metadata = docs / 'xz-COPYING'
+    require(re.search(r'liblzma.*?BSD\s+Zero\s+Clause\s+License\s+\(0BSD\)', metadata.read_text(), re.S),
+            'missing upstream liblzma license declaration')
+    return dict(source=LZMA, signature=lzma_signature((docs / 'xz-signature.status').read_text()),
+                license_metadata_sha256=digest(metadata))
+
+
+def build_lzma(work, sdk, env, docs):
+    # Use a separate prefix: no static archive or liblzma dylib may enter candidate/lib.
+    prefix, source, target = work / 'liblzma', work / f"xz-{LZMA['version']}", work / 'xz-build'
+    require(not any(p.exists() for p in (prefix, source, target)), 'liblzma scratch must be fresh')
+    for field, filename in (('url', 'xz-source.tar.xz'), ('signature_url', 'xz-source.tar.xz.sig'),
+                            ('key_url', 'xz-signing-key.asc')):
+        run('curl', '--fail', '--location', '--silent', '--show-error', '--proto', '=https',
+            '--proto-redir', '=https', '--tlsv1.2', LZMA[field], '-o', docs / filename,
+            seconds=setting('IRIS_FFMPEG_FETCH_SECONDS', 300))
+    require(digest(docs / 'xz-source.tar.xz') == LZMA['sha256'], 'liblzma source hash mismatch')
+    run('gpg', '--batch', '--import', docs / 'xz-signing-key.asc', env=env)
+    keys = run('gpg', '--batch', '--with-colons', '--fingerprint', '--list-keys', LZMA['fingerprint'], env=env)
+    require(re.search(r'^pub:[^\n]*\nfpr:::::::::' + LZMA['fingerprint'] + ':$', keys, re.M),
+            'missing liblzma primary signing identity')
+    status = run('gpg', '--batch', '--status-fd', '1', '--verify', docs / 'xz-source.tar.xz.sig',
+                 docs / 'xz-source.tar.xz', env=env)
+    lzma_signature(status)
+    (docs / 'xz-signature.status').write_text(status + '\n')
+    run('tar', '-xJf', docs / 'xz-source.tar.xz', '-C', work)
+    for filename in ('COPYING', 'COPYING.0BSD'):
+        shutil.copy2(source / filename, docs / ('xz-' + filename))
+    evidence = lzma_evidence(docs)
+    run('cmake', '-S', source, '-B', target, f'-DCMAKE_INSTALL_PREFIX={prefix}',
+        '-DCMAKE_INSTALL_LIBDIR=lib', '-DCMAKE_BUILD_TYPE=Release', f'-DCMAKE_OSX_SYSROOT={sdk}',
+        f"-DCMAKE_C_COMPILER={env['CC']}", *LZMA['cmake_flags'], env=env,
+        seconds=setting('IRIS_FFMPEG_BUILD_SECONDS', 3600))
+    run('cmake', '--build', target, '--config', 'Release', '--parallel', str(setting('IRIS_FFMPEG_JOBS', 2)),
+        env=env, seconds=setting('IRIS_FFMPEG_BUILD_SECONDS', 3600))
+    run('cmake', '--install', target, '--config', 'Release', '--component', LZMA['install_component'],
+        env=env, seconds=setting('IRIS_FFMPEG_BUILD_SECONDS', 3600))
+    archive = prefix / 'lib/liblzma.a'
+    require(archive.is_file() and (prefix / 'include/lzma.h').is_file()
+            and not list(prefix.rglob('*.dylib')), 'missing static-only liblzma installation')
+    evidence.update(static_archive_sha256=digest(archive), cmake=run('cmake', '--version').splitlines()[0])
+    (docs / 'liblzma-build.json').write_text(json.dumps(evidence, indent=2) + '\n')
+    return prefix
+
+
+def candidate_env(sdk, compiler):
+    # Do not let ambient compiler/pkg-config search paths select Homebrew liblzma.
+    env = {k: v for k, v in os.environ.items() if k not in (
+        'CPATH', 'C_INCLUDE_PATH', 'CPLUS_INCLUDE_PATH', 'OBJC_INCLUDE_PATH', 'LIBRARY_PATH',
+        'CPPFLAGS', 'CXXFLAGS', 'LIBS', 'PKG_CONFIG_SYSROOT_DIR', 'PKG_CONFIG',
+        'CMAKE_PREFIX_PATH', 'CMAKE_TOOLCHAIN_FILE') and not k.startswith('PKG_CONFIG_')}
+    return dict(env, SDKROOT=str(sdk), CC=compiler, CFLAGS=f'-isysroot {shlex.quote(str(sdk))}',
+                LDFLAGS=f'-isysroot {shlex.quote(str(sdk))}', PKG_CONFIG_PATH='', PKG_CONFIG_LIBDIR='')
+
+
 def build(prefix, sdk):
     require(not prefix.exists(), 'candidate prefix must be fresh (no native cache reuse)')
     work = prefix.parent
-    env = dict(os.environ, GNUPGHOME=str(work / 'gnupg'), SDKROOT=str(sdk),
-               CC=run('xcrun', '-f', 'clang'), CFLAGS=f'-isysroot {sdk}', LDFLAGS=f'-isysroot {sdk}')
+    env = candidate_env(sdk, run('xcrun', '-f', 'clang'))
+    env['GNUPGHOME'] = str(work / 'gnupg')
     Path(env['GNUPGHOME']).mkdir(mode=0o700)
-    # Probe the compiler/SDK compression and iconv support before downloading/building.
+    docs = prefix / 'share/iris-ffmpeg'
+    docs.mkdir(parents=True)
+    lzma = build_lzma(work, sdk, env, docs)
+    env.update(CFLAGS=f'-isysroot {shlex.quote(str(sdk))} -I{shlex.quote(str(lzma / "include"))}',
+               LDFLAGS=f'-isysroot {shlex.quote(str(sdk))} -L{shlex.quote(str(lzma / "lib"))}',
+               PKG_CONFIG_PATH=str(lzma / 'lib/pkgconfig'), PKG_CONFIG_LIBDIR=str(lzma / 'lib/pkgconfig'))
+    require(run('pkg-config', '--modversion', 'liblzma', env=env) == LZMA['version'], 'wrong liblzma version')
+    require(run('pkg-config', '--variable=libdir', 'liblzma', env=env) == str(lzma / 'lib'),
+            'liblzma pkg-config escaped prefix')
+    # Probe pinned static liblzma and the SDK's other compression/iconv support.
     probe = work / 'probe.c'
     probe.write_text('#include <zlib.h>\n#include <bzlib.h>\n#include <lzma.h>\n#include <iconv.h>\n'
                      'int main(void) { return !zlibVersion() || !BZ2_bzlibVersion() || '
                      '!lzma_version_number() || iconv_open("UTF-8", "UTF-8") == (iconv_t)-1; }\n')
-    run(env['CC'], '-isysroot', sdk, probe, '-lz', '-lbz2', '-llzma', '-liconv', '-o', work / 'probe', env=env)
+    run(env['CC'], *shlex.split(env['CFLAGS']), probe, '-lz', '-lbz2', lzma / 'lib/liblzma.a',
+        '-liconv', '-o', work / 'probe', env=env)
     run(work / 'probe')
     for field, filename in (('url', 'source.tar.xz'), ('signature_url', 'source.tar.xz.asc'),
                             ('key_url', 'signing-key.asc')):
@@ -276,8 +362,6 @@ def build(prefix, sdk):
     run('make', f"-j{setting('IRIS_FFMPEG_JOBS', 2)}", cwd=source, env=env,
         seconds=setting('IRIS_FFMPEG_BUILD_SECONDS', 3600))
     run('make', 'install', cwd=source, env=env, seconds=setting('IRIS_FFMPEG_BUILD_SECONDS', 3600))
-    docs = prefix / 'share/iris-ffmpeg'
-    docs.mkdir(parents=True)
     for filename in ('source.tar.xz', 'source.tar.xz.asc', 'signing-key.asc', 'signature.status'):
         shutil.copy2(work / filename, docs)
     for filename in ('COPYING.LGPLv2.1', 'config.h', 'config_components.h', 'ffbuild/config.mak'):
@@ -288,6 +372,7 @@ def build(prefix, sdk):
     for path in paths.values():
         closure(path, paths.values(), sdk)
     manifest = dict(policy=MACOS_POLICY, signature_verified=True, enabled_codecs=codecs,
+                    liblzma=json.loads((docs / 'liblzma-build.json').read_text()),
                     libraries={p.name: digest(p) for p in paths.values()},
                     documents={p.name: digest(p) for p in docs.iterdir()},
                     tools=dict(clang=run(env['CC'], '--version').splitlines()[0],
@@ -306,6 +391,8 @@ def stage(prefix, app, sdk):
     require(manifest['policy'] == MACOS_POLICY and manifest['signature_verified'] is True, 'candidate policy mismatch')
     require(digest(docs / 'source.tar.xz') == POLICY['sha256'], 'source hash mismatch')
     common.signature((docs / 'signature.status').read_text())
+    evidence = lzma_evidence(docs)
+    require(all(manifest['liblzma'].get(k) == v for k, v in evidence.items()), 'liblzma evidence mismatch')
     codecs = generated_config((docs / 'config.h').read_text(), (docs / 'config_components.h').read_text())
     require(manifest['enabled_codecs'] == codecs, 'candidate codec manifest mismatch')
     require(manifest['documents'] == {p.name: digest(p) for p in docs.iterdir() if p.name != 'manifest.json'},
@@ -376,10 +463,12 @@ def check(app, sdk):
     require(manifest['documents'] == {p.name: digest(p) for p in docs.iterdir() if p.name != 'manifest.json'},
             'staged source/notice evidence changed')
     common.signature((docs / 'signature.status').read_text())
+    evidence = lzma_evidence(docs)
+    require(all(manifest['liblzma'].get(k) == v for k, v in evidence.items()), 'liblzma evidence mismatch')
     require(digest(docs / 'source.tar.xz') == POLICY['sha256'], 'staged source mismatch')
     return dict(source_sha=os.environ.get('GITHUB_SHA', run('git', '-C', ROOT, 'rev-parse', 'HEAD')),
                 scope='Report-only pinned candidate inventory (not the current release runtime); not legal approval, latency parity or release approval.',
-                policy=manifest['policy'], signature_verified=True, tools=manifest['tools'],
+                policy=manifest['policy'], signature_verified=True, tools=manifest['tools'], liblzma=manifest['liblzma'],
                 enabled_codecs=manifest['enabled_codecs'], documents=manifest['documents'],
                 build_libraries=manifest['libraries'], runtime=runtime(paths), closure=edges,
                 executables={p.name: digest(p) for p in (app / 'Contents/MacOS').iterdir()})

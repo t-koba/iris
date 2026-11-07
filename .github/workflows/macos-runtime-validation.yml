@@ -46,7 +46,7 @@ jobs:
       - name: Fetch locked Rust inputs
         run: cargo fetch --locked
       - name: Install current runtime and candidate build tools
-        run: brew install ffmpeg pkg-config gnupg nasm
+        run: brew install ffmpeg pkg-config gnupg nasm cmake
       - name: Check candidate contracts
         id: candidate_contracts
         run: python3 scripts/test-macos-ffmpeg.py

@@ -8,7 +8,9 @@ determination or approval, and they do not state Iris's project license. This
 inventory describes only the pinned macOS candidate, not the current release
 runtime inventoried separately as audit/macos.json. The manifest identifies the
 macOS build and its shared source pin, signature identity and verification,
-generated decoder inventory, build tools, source and staged dylib hashes. It does
+generated decoder inventory, build tools, source and staged dylib hashes. Its
+liblzma record includes the XZ source pin, verified primary/signing fingerprints,
+source-license digests, CMake version/flags and static archive hash. It does
 not report Linux system-package or SONAME policy as macOS evidence. config.h,
 config_components.h and config.mak retain the generated build configuration.
 The final candidate JSON resolves all Mach-O load edges, including weak loads
@@ -27,18 +29,38 @@ bytes.
 
 ## Rebuilding and replacing
 
-Install Xcode command-line tools, Python 3, GnuPG, pkg-config, make and nasm
-(nasm is used on x86). Build against the selected Apple SDK, which must provide
-zlib, bzip2, liblzma and iconv headers and linker stubs. The final load-closure
-check rejects unresolved non-SDK runtime dependencies outside the exact candidate
-dylibs. Extract source.tar.xz, enter its ffmpeg-version directory and set
-SDKROOT=$(xcrun --sdk macosx --show-sdk-path), CC=$(xcrun -f clang),
-CFLAGS="-isysroot $SDKROOT" and LDFLAGS="-isysroot $SDKROOT" in the environment.
-Run ./configure --prefix=/absolute/prefix --libdir=/absolute/prefix/lib followed
-by every manifest policy.source.configure_flags entry, then make -j2 && make install.
-There are no source patches. Shared/PIC are enabled, static/GPL/version3/nonfree
-and optional autodetection disabled; built-in decoders are not pruned and
-compression/iconv remain explicitly enabled.
+Install Xcode command-line tools, Python 3, GnuPG, pkg-config, CMake, make and
+nasm (nasm is used on x86). The selected Apple SDK must supply zlib, bzip2 and
+iconv headers and linker stubs; liblzma is **not** taken from the SDK or Homebrew.
+
+`packaging/macos/liblzma.json` pins the official XZ Utils v5.8.4 release asset
+`xz-5.8.4.tar.xz`, its SHA-256, detached `.sig`, Lasse Collin's public-key URL
+and required primary fingerprint `3690C240CE51B4670D30AD1C38EE757D69184620`.
+The driver checks the archive hash, imported primary identity and GnuPG signature
+before extraction. `xz-COPYING` records upstream's liblzma-specific 0BSD
+statement; `xz-COPYING.0BSD` must match the pinned source-license digest. This is
+source licensing evidence for **liblzma**, not a license claim for all XZ tools,
+Iris, the current release runtime or the complete candidate. It is not legal
+approval. The temporary documents include `xz-source.tar.xz`, its `.sig`,
+`xz-signing-key.asc`, `xz-signature.status` and `liblzma-build.json`.
+
+The driver configures XZ in a fresh, separate scratch prefix with every pinned
+`cmake_flags` entry: static/PIC, tests/NLS/tools/docs off. It builds with
+`cmake --build` and installs only `liblzma_Development` with `cmake --install`.
+The SDK and xcrun compiler are selected explicitly. It then sets FFmpeg CFLAGS
+to the SDK plus that prefix's include directory, LDFLAGS to the SDK plus that
+prefix's lib directory, and both PKG_CONFIG_PATH and PKG_CONFIG_LIBDIR to only
+that prefix's lib/pkgconfig. Ambient compiler and pkg-config search overrides
+are removed; the pkg-config version and libdir must match the pin/prefix.
+The preflight links that exact static archive. FFmpeg receives the unchanged
+`policy.source.configure_flags` (including `--enable-lzma`), then make/build and
+install run; generated `CONFIG_LZMA=1` remains mandatory. There are no patches.
+Shared FFmpeg/PIC are enabled, static FFmpeg/GPL/version3/nonfree and optional
+autodetection disabled; built-in decoders are not pruned. The static liblzma
+code is linked into FFmpeg, never copied into candidate `/lib` or app Frameworks.
+Dynamic liblzma edges (even SDK ones), extra dylibs and static archives in
+candidate `/lib` fail closed. The final closure remains the exact FFmpeg
+candidate dylibs plus verified Apple SDK edges.
 
 The exact-source Iris checkout automates this with
 `python3 scripts/macos-ffmpeg.py validate audit/macos-candidate.json`; it
@@ -60,7 +82,8 @@ app signature and does not preserve the original distribution trust claims.
 
 Only bounded JSON leaves this validation job: the current release runtime as
 audit/macos.json and this candidate as audit/macos-candidate.json. Downloaded
-sources, generated fixtures, staged apps, libraries and build scratch are
+sources, signatures, keys, generated fixtures, staged apps, static/shared libraries,
+Cargo targets and build scratch are
 temporary and cleaned even on failure. No ZIP, installer, source bundle or
 Release dispatch is retained. The tagged release workflow is unchanged and
 remains on hold; this candidate is not a release and its inventory is not legal

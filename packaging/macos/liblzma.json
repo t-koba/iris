@@ -1,0 +1,30 @@
+{
+  "version": "5.8.4",
+  "url": "https://github.com/tukaani-project/xz/releases/download/v5.8.4/xz-5.8.4.tar.xz",
+  "sha256": "4ce24038fd4221e0d13bc1a2de7a4db56e90b92b3bf75321f6c14be73f65de4b",
+  "signature_url": "https://github.com/tukaani-project/xz/releases/download/v5.8.4/xz-5.8.4.tar.xz.sig",
+  "key_url": "https://github.com/Larhzu.gpg",
+  "fingerprint": "3690C240CE51B4670D30AD1C38EE757D69184620",
+  "signer": "Lasse Collin",
+  "identity_reference": "https://tukaani.org/contact.html",
+  "license": {
+    "scope": "liblzma",
+    "spdx": "0BSD",
+    "metadata_file": "COPYING",
+    "file": "COPYING.0BSD",
+    "sha256": "0b01625d853911cd0e2e088dcfb743261034a091bb379246cb25a14cc4c74bf1"
+  },
+  "cmake_flags": [
+    "-DBUILD_SHARED_LIBS=OFF",
+    "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+    "-DBUILD_TESTING=OFF",
+    "-DXZ_NLS=OFF",
+    "-DXZ_TOOL_XZ=OFF",
+    "-DXZ_TOOL_XZDEC=OFF",
+    "-DXZ_TOOL_LZMADEC=OFF",
+    "-DXZ_TOOL_LZMAINFO=OFF",
+    "-DXZ_TOOL_SCRIPTS=OFF",
+    "-DXZ_DOC=OFF"
+  ],
+  "install_component": "liblzma_Development"
+}
