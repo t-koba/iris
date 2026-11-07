@@ -113,7 +113,9 @@ Load command 2
 
     def test_loader_executable_and_inherited_runpaths_with_cycle(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            # closure resolves its loader paths; mock keys must match on macOS,
+            # where TemporaryDirectory may live behind /var -> /private/var.
+            root = Path(tmp).resolve()
             exe, a, b = root / 'MacOS/Iris', root / 'Frameworks/liba.dylib', root / 'Frameworks/libb.dylib'
             for path in (exe, a, b):
                 path.parent.mkdir(exist_ok=True)
@@ -130,7 +132,7 @@ Load command 2
 
     def test_missing_tokens_external_first_match_and_basename_collision_fail(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             exe, a, other = root / 'Iris', root / 'one/liba.dylib', root / 'two/liba.dylib'
             for path in (exe, a, other):
                 path.parent.mkdir(exist_ok=True)
