@@ -65,7 +65,9 @@ behavior, or licensing conclusions, and it never publishes.
    `ffmpeg` tool feature), and the custom dynamic triplet; logs observed
    MSVC/SDK/tool versions (only OS build and VS major are currently asserted);
    verifies `VCPKG_ROOT` HEAD == baseline; clones and verifies the exact
-   FFmpeg commit; processes patches sequentially in declared portfile order.
+   FFmpeg commit with repository-local `core.autocrlf=false` so its source
+   contexts match vcpkg's LF patch blobs; processes patches sequentially in
+   declared portfile order.
    The pinned vcpkg `0004-dependencies.patch` and `0007-fix-lib-naming.patch`
    digests are checked; both configure adaptations require exact source
    contexts and their generated replacements must apply after prior patches.

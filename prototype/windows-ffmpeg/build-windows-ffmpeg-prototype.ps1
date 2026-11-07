@@ -168,6 +168,12 @@ Push-Location $workDir
 try {
     git fetch --depth 1 origin $ffmpegCommit
     if ($LASTEXITCODE -ne 0) { throw "FFmpeg fetch of pinned commit $ffmpegCommit failed" }
+    # vcpkg stores its patch files as -text/LF, but FFmpeg Makefiles may be
+    # converted by Windows core.autocrlf. Keep patch contexts byte-compatible.
+    git -C $workDir config core.autocrlf false
+    if ($LASTEXITCODE -ne 0) { throw "FFmpeg checkout line-ending configuration failed" }
+    $autoCrlf = ((git -C $workDir config --get core.autocrlf) | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $autoCrlf -ne "false") { throw "FFmpeg checkout must keep core.autocrlf=false" }
     git cat-file -e "$ffmpegCommit^{commit}"
     if ($LASTEXITCODE -ne 0) { throw "pinned FFmpeg commit object is missing after fetch" }
     git checkout --detach $ffmpegCommit --quiet

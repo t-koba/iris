@@ -66,6 +66,13 @@ index d6c4388..75b96c3 100644
 
 
 class DependencyPatchTests(unittest.TestCase):
+    def test_pinned_source_checkout_keeps_patch_line_endings_compatible(self):
+        build = (ROOT / "build-windows-ffmpeg-prototype.ps1").read_text(encoding="utf-8")
+        configure = build.index("git -C $workDir config core.autocrlf false")
+        checkout = build.index("git checkout --detach $ffmpegCommit --quiet")
+        self.assertLess(configure, checkout)
+        self.assertIn("$autoCrlf -ne \"false\"", build[configure:checkout])
+
     def test_exact_contexts_generate_applicable_patch_for_lf_and_crlf(self):
         for original in (FIXTURE, FIXTURE.replace("\n", "\r\n")):
             adapted = patcher.adapt_configure(original)
