@@ -1,15 +1,13 @@
 name: Linux FFmpeg validation
 
-# Explicit opt-in only. Never dispatch Release or retain executable/package bytes.
+# Reusable, report-only Linux runtime validation. The registered CI workflow
+# calls this only on workflow_dispatch at the caller's exact ref. Never dispatch
+# Release or retain packages, AppDirs, source bundles, or runtime libraries.
 on:
-  workflow_dispatch: {}
+  workflow_call:
 
 permissions:
   contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   validate:

@@ -154,9 +154,10 @@ class RuntimeContracts(unittest.TestCase):
 
     def test_build_staging_and_workflow_contract(self):
         workflow = (ROOT / ".github/workflows/linux-ffmpeg-validation.yml").read_text()
-        # This deliberately small workflow has exactly one trigger and one upload.
+        # This reusable workflow has one call trigger and one bounded JSON upload.
         triggers = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
-        self.assertEqual(triggers.strip(), "workflow_dispatch: {}")
+        self.assertEqual(triggers.strip(), "workflow_call:")
+        self.assertNotIn("workflow_dispatch:", workflow)
         self.assertNotIn("inputs:", workflow)
         self.assertNotIn("release.yml", workflow)
         self.assertNotIn("GH_TOKEN", workflow)

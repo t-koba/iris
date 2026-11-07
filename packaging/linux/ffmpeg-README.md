@@ -64,9 +64,10 @@ The runtime's allowed system SONAMEs are explicit in the manifest policy.
 
 ## Validation without publication
 
-The dispatch-only Linux FFmpeg validation workflow checks out its triggering
-SHA (no source override), builds with Rust 1.97.1, locked/offline Cargo, and
-packages locally. It verifies actual Iris ELF resolution to these exact DSOs,
+The registered `.github/workflows/ci.yml` calls the reusable Linux FFmpeg
+validation job only on `workflow_dispatch`, at the caller's exact SHA (no source
+override). It builds with Rust 1.97.1 and locked/offline Cargo, then packages
+locally. It verifies actual Iris ELF resolution to these exact DSOs,
 ABI/configuration/license/closure, binary size, PDFium and video thumbnails in
 the AppDir and after a clean Debian install. Only bounded JSON audit reports
 may leave that runner; no library, AppDir, source bundle, archive or installer

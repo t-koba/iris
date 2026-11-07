@@ -6,6 +6,7 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 ci = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 prototype = (root / ".github/workflows/windows-ffmpeg-prototype.yml").read_text(encoding="utf-8")
+linux = (root / ".github/workflows/linux-ffmpeg-validation.yml").read_text(encoding="utf-8")
 
 checks = {
     "CI mizu exclusion and all-tag filter": """  push:
@@ -24,6 +25,16 @@ checks = {
   workflow_call:
 """ in prototype
     and all(trigger not in prototype for trigger in ("  workflow_dispatch:", "  pull_request:", "  push:")),
+    "CI invokes the Linux runtime audit only on manual dispatch": """  linux-ffmpeg-validation:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/linux-ffmpeg-validation.yml
+""" in ci,
+    "Linux runtime audit is reusable, not independently registered": """on:
+  workflow_call:
+""" in linux
+    and all(trigger not in linux for trigger in ("  workflow_dispatch:", "  pull_request:", "  push:")),
     "CI manual, pull-request, and scheduled triggers": all(
         trigger in ci for trigger in ("  workflow_dispatch:\n", "  pull_request:\n", "  schedule:\n")
     ),
@@ -31,4 +42,4 @@ checks = {
 failed = [name for name, passed in checks.items() if not passed]
 if failed:
     raise SystemExit("workflow trigger regression: " + "; ".join(failed))
-print("CI trigger and reusable prototype dispatch checks passed")
+print("CI trigger and reusable report-only audit dispatch checks passed")
