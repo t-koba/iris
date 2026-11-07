@@ -150,7 +150,7 @@ prepare_known_hosts() {
   done
   echo "SFTP server did not provide an SSH host key within ${ready_timeout}s" >&2
   if [[ -s "$scan_error" ]]; then
-    tail -n 5 "$scan_error" >&2
+    tail -c 2048 "$scan_error" >&2
   fi
   return 1
 }
@@ -302,8 +302,8 @@ report_samba_setting() {
   local parameter="$2"
   local value
   if value=$(docker exec "$smb_container" testparm -s \
-      --section-name="$section" --parameter-name="$parameter" 2>/dev/null); then
-    value=$(printf '%s\n' "$value" | tail -n 1 | sed 's/iris/[redacted]/g' | tail -c 512)
+      --section-name="$section" --parameter-name="$parameter" 2>/dev/null \
+      | tail -c 512 | tail -n 1 | sed 's/iris/[redacted]/g' | tail -c 512); then
     [[ -n "$value" ]] || value="<empty>"
   else
     value="<unavailable>"
@@ -317,8 +317,9 @@ report_container() {
     return 0
   fi
   docker inspect --format 'container={{.Name}} state={{.State.Status}} exit_code={{.State.ExitCode}} error={{.State.Error}}' "$name" 2>&1 \
-    | sed 's/iris/[redacted]/g' | tail -c 2048 >&2 || true
-  docker logs --tail 100 "$name" 2>&1 | sed 's/iris/[redacted]/g' | tail -c 8192 >&2 || true
+    | tail -c 2048 | sed 's/iris/[redacted]/g' | tail -c 2048 >&2 || true
+  docker logs --tail 100 "$name" 2>&1 \
+    | tail -c 8192 | sed 's/iris/[redacted]/g' | tail -c 8192 >&2 || true
   if [[ "$name" == "$smb_container" ]]; then
     echo "Samba effective configuration (allowlisted settings):" >&2
     report_samba_setting global 'log level'
@@ -331,7 +332,7 @@ report_container() {
     report_samba_setting bench 'guest ok'
     echo "Samba runtime debug levels:" >&2
     docker exec "$name" smbcontrol smbd debuglevel 2>&1 \
-      | sed 's/iris/[redacted]/g' | tail -c 2048 >&2 || true
+      | tail -c 2048 | sed 's/iris/[redacted]/g' | tail -c 2048 >&2 || true
     echo "Samba log files (last 4096 bytes each; combined output capped at 8192 bytes):" >&2
     docker exec "$name" sh -c 'found=0; count=0; for file in /var/log/samba/log.smbd /var/log/samba/log.*; do
       [ -f "$file" ] || continue
@@ -343,7 +344,7 @@ report_container() {
       printf "\n--- %s ---\n" "$file"
       tail -c 4096 "$file"
     done; [ "$found" -eq 1 ] || echo "no matching /var/log/samba/log.* files found"' \
-      2>&1 | sed 's/iris/[redacted]/g' | tail -c 8192 >&2 || true
+      2>&1 | tail -c 8192 | sed 's/iris/[redacted]/g' | tail -c 8192 >&2 || true
   fi
 }
 
