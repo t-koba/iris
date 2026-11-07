@@ -21,7 +21,7 @@ $pinsTriplet = $pins.triplet
 
 if ($ffmpegCommit -ne "db8537d8cc7962bd3d07254d6ceff21d888817d4") { throw "pins.json ffmpeg commit drifted: $ffmpegCommit" }
 if ($vcpkgBaseline -ne "b8dfe957ec8b5c0ef5c4b31eea594b8486af744f") { throw "pins.json vcpkg baseline drifted: $vcpkgBaseline" }
-if ($ffmpegRepo -ne "https://git.ffmpeg.org/ffmpeg.git") { throw "pins.json ffmpeg repository drifted: $ffmpegRepo" }
+if ($ffmpegRepo -ne "https://github.com/FFmpeg/FFmpeg.git") { throw "pins.json ffmpeg repository drifted: $ffmpegRepo" }
 if ($pinsTriplet -ne "x64-windows") { throw "pins.json triplet base must stay x64-windows (dynamic): $pinsTriplet" }
 if (!(Test-Path -LiteralPath $customTripletFile -PathType Leaf)) { throw "custom dynamic triplet missing: $customTripletFile" }
 $tripletContent = Get-Content -Raw -LiteralPath $customTripletFile
@@ -258,7 +258,7 @@ if ($patchFailures.Count -gt 0) {
 if ($patchResults.Count -eq 0) { throw "baseline ffmpeg port has no patches to validate; refusing to proceed without MSVC patch/config evidence" }
 
 # --- Test-only overlay derived from the pinned baseline port ---
-# Overlay invokes vcpkg_from_git(REF db8537d8cc7962bd3d07254d6ceff21d888817d4) against https://git.ffmpeg.org/ffmpeg.git.
+# Overlay invokes vcpkg_from_git(REF db8537d8cc7962bd3d07254d6ceff21d888817d4) against https://github.com/FFmpeg/FFmpeg.git.
 # Copy the exact baseline port, then rewrite only the source REF to the pinned
 # commit and helper URL while retaining the baseline MSVC patches/config. The overlay is
 # written under target/ (never into the vcpkg checkout or release paths).

@@ -193,6 +193,28 @@ class BundleTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     bundle.verify(first, bundle.record(first / "MANIFEST.json"))
 
+    def test_mirror_pin_and_fetch_guards(self):
+        pins = json.loads((ROOT / "pins.json").read_text())["ffmpeg"]
+        self.assertEqual(pins["repository"], "https://github.com/FFmpeg/FFmpeg.git")
+        self.assertEqual(pins["commit"], "db8537d8cc7962bd3d07254d6ceff21d888817d4")
+        build = (ROOT / "build-windows-ffmpeg-prototype.ps1").read_text()
+        overlay = (ROOT / "derive-ffmpeg-overlay.ps1").read_text()
+        self.assertIn(f'if ($ffmpegRepo -ne "{pins["repository"]}") {{ throw', build)
+        self.assertIn(f'if ($ffmpegCommit -ne "{pins["commit"]}") {{ throw', build)
+        self.assertIn(f"$Repository -ne '{pins['repository']}'", overlay)
+        # The mirror changes transport only: each Git failure must stop before
+        # patches/builds, and a detached checkout must match the immutable pin.
+        for command, failure in (
+            ('git clone --no-checkout $ffmpegRepo $workDir', 'FFmpeg clone failed'),
+            ('git fetch --depth 1 origin $ffmpegCommit', 'FFmpeg fetch of pinned commit $ffmpegCommit failed'),
+            ('git cat-file -e "$ffmpegCommit^{commit}"', 'pinned FFmpeg commit object is missing after fetch'),
+            ('git checkout --detach $ffmpegCommit --quiet', 'FFmpeg checkout of $ffmpegCommit failed'),
+        ):
+            self.assertIn(command + '\nif ($LASTEXITCODE -ne 0) { throw "' + failure + '" }',
+                          build.replace('    ', ''))
+        self.assertIn('$actual = ((git rev-parse HEAD) | Out-String).Trim()', build)
+        self.assertIn('if ($actual -ne $ffmpegCommit) { throw', build)
+
     def test_package_and_evidence_wiring(self):
         build = (ROOT / "build-windows-ffmpeg-prototype.ps1").read_text()
         stage = (ROOT / "stage-windows-prototype-app.ps1").read_text()

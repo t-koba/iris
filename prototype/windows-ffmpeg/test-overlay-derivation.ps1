@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'derive-ffmpeg-overlay.ps1')
 $commit = 'db8537d8cc7962bd3d07254d6ceff21d888817d4'
-$repo = 'https://git.ffmpeg.org/ffmpeg.git'
+$repo = 'https://github.com/FFmpeg/FFmpeg.git'
 $helper = 'cmake_parse_arguments(PARSE_ARGV 0 "arg" "" "OUT_SOURCE_PATH;URL;REF;FETCH_REF;HEAD_REF" "PATCHES")'
 # Representative baseline shape, not a claim to be the exact upstream port.
 $port = @'
@@ -36,7 +36,7 @@ foreach ($inputPort in @($portLf, $quotedPort, $portCrLf)) {
 $patchPort = @'
 vcpkg_from_git(
     OUT_SOURCE_PATH SOURCE_PATH
-    URL https://git.ffmpeg.org/ffmpeg.git
+    URL https://github.com/FFmpeg/FFmpeg.git
     REF db8537d8cc7962bd3d07254d6ceff21d888817d4
     HEAD_REF master
     PATCHES
@@ -74,6 +74,11 @@ foreach ($bad in @($port.Replace('REPO ffmpeg/ffmpeg', 'URL bogus'), $port.Repla
     $rejected = $false
     try { ConvertTo-PrototypeFfmpegPort $bad $helper $repo $commit | Out-Null } catch { $rejected = $true }
     if (!$rejected) { throw 'accepted unsupported baseline fetch' }
+}
+foreach ($badRepo in @('https://git.ffmpeg.org/ffmpeg.git', 'https://github.com/other/FFmpeg.git')) {
+    $rejected = $false
+    try { ConvertTo-PrototypeFfmpegPort $port $helper $badRepo $commit | Out-Null } catch { $rejected = $true }
+    if (!$rejected) { throw 'accepted unpinned source repository' }
 }
 $rejected = $false
 try { ConvertTo-PrototypeFfmpegPort $port ($helper.Replace(';URL;', ';REPO;')) $repo $commit | Out-Null } catch { $rejected = $true }

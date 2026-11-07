@@ -22,8 +22,12 @@ behavior, or licensing conclusions, and it never publishes.
 
 ## Pins (single source of truth: `pins.json`)
 
-- FFmpeg source: `https://git.ffmpeg.org/ffmpeg.git` at
-  `db8537d8cc7962bd3d07254d6ceff21d888817d4`.
+- FFmpeg source: `https://github.com/FFmpeg/FFmpeg.git` at
+  `db8537d8cc7962bd3d07254d6ceff21d888817d4`. The official
+  [FFmpeg download page](https://ffmpeg.org/download.html) lists this GitHub
+  repository as a mirror of its main repository. Fetch and detached-checkout
+  HEAD verification must succeed for that exact commit; an unavailable mirror
+  or commit stops the run, without a source or version fallback.
 - vcpkg / tooling baseline: `b8dfe957ec8b5c0ef5c4b31eea594b8486af744f`
   (`vcpkg.json` `builtin-baseline` and `vcpkg-configuration.json` carry the
   same baseline; the scripts fail closed on drift).
@@ -67,7 +71,7 @@ behavior, or licensing conclusions, and it never publishes.
    must apply after prior patches; any drift stops the run, with no 9.0.2
    fallback. Per-patch evidence is recorded in `ffmpeg-source.json`. It derives
    a test-only overlay from the baseline port (rewrites to
-   `vcpkg_from_git(URL https://git.ffmpeg.org/ffmpeg.git REF
+   `vcpkg_from_git(URL https://github.com/FFmpeg/FFmpeg.git REF
    db8537d8cc7962bd3d07254d6ceff21d888817d4)`, validates the pinned helper
    signature and generated parameters, removes the archive hash, replaces only
    the `0004` PATCHES entry with `0004-dependencies-pinned.patch`, and marks

@@ -1,7 +1,7 @@
 {
   "$comment": "Single source of truth for the isolated Windows preview prototype. Test-only; never a release payload.",
   "ffmpeg": {
-    "repository": "https://git.ffmpeg.org/ffmpeg.git",
+    "repository": "https://github.com/FFmpeg/FFmpeg.git",
     "commit": "db8537d8cc7962bd3d07254d6ceff21d888817d4",
     "note": "Exact later commit under investigation. The pinned vcpkg FFmpeg port targets 9.0.2; only its hash-pinned 0004 dependency patch is adapted for this source, using exact configure contexts."
   },

@@ -2,7 +2,7 @@
 function ConvertTo-PrototypeFfmpegPort {
     param([string]$Portfile, [string]$GitHelper, [string]$Repository, [string]$Commit)
 
-    if ($Repository -ne 'https://git.ffmpeg.org/ffmpeg.git' -or $Commit -notmatch '^[0-9a-f]{40}$') {
+    if ($Repository -ne 'https://github.com/FFmpeg/FFmpeg.git' -or $Commit -notmatch '^[0-9a-f]{40}$') {
         throw 'invalid pinned FFmpeg repository/commit'
     }
     # Inspect the actual pinned helper, not the similarly named GitHub helper.
