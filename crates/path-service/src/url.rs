@@ -97,6 +97,15 @@ fn parse_url_encoded_pairs(encoded: &str) -> HashMap<String, String> {
         .collect()
 }
 
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 pub fn percent_decode(value: &str) -> String {
     let mut out = Vec::with_capacity(value.len());
     let bytes = value.as_bytes();
@@ -104,8 +113,10 @@ pub fn percent_decode(value: &str) -> String {
     while index < bytes.len() {
         match bytes[index] {
             b'%' if index + 2 < bytes.len() => {
-                if let Ok(hex) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
-                    out.push(hex);
+                if let (Some(high), Some(low)) =
+                    (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+                {
+                    out.push((high << 4) | low);
                     index += 3;
                     continue;
                 }
@@ -178,9 +189,13 @@ mod tests {
     }
 
     #[test]
-    fn percent_decode_handles_hex_and_plus() {
+    fn percent_decode_handles_hex_plus_unicode_and_malformed_escapes() {
         assert_eq!(percent_decode("hello%20world"), "hello world");
         assert_eq!(percent_decode("hello+world"), "hello world");
+        assert_eq!(percent_decode("猫%2F犬"), "猫/犬");
+        for malformed in ["%", "%2", "%GG", "%aé"] {
+            assert_eq!(percent_decode(malformed), malformed);
+        }
     }
 
     #[test]
