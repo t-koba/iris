@@ -3,8 +3,9 @@ use iris_backends::smb::connection::SmbConnectionConfig;
 use iris_core_domain::backend_adapter::BackendAdapter;
 use iris_core_domain::types::object::{BackendId, ObjectKey, ObjectRef, StableId};
 use iris_core_domain::types::options::{ConflictResolution, CopyOptions, DeleteMode, MoveOptions};
-use std::io::Cursor;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
+
+const VERIFY_BUFFER_BYTES: usize = 64 * 1024;
 
 #[tokio::main]
 async fn main() {
@@ -43,13 +44,25 @@ async fn run() -> Result<(), String> {
     let source = object_ref(&backend_id, &format!("iris-smoke-{suffix}.bin"));
     let copied = object_ref(&backend_id, &format!("iris-smoke-{suffix}-copied.bin"));
     let renamed = object_ref(&backend_id, &format!("iris-smoke-{suffix}-renamed.bin"));
-    let payload = b"iris native smb integration payload".to_vec();
+    let payload_path = std::env::var("IRIS_SMB_SMOKE_PAYLOAD").map_err(|_| {
+        "IRIS_SMB_SMOKE_PAYLOAD must name the generated transfer payload".to_string()
+    })?;
+    let payload_size = tokio::fs::metadata(&payload_path)
+        .await
+        .map_err(|error| format!("cannot inspect native SMB smoke payload: {error}"))?
+        .len();
+    if payload_size == 0 {
+        return Err("native SMB smoke payload must not be empty".to_string());
+    }
+    let payload_file = tokio::fs::File::open(&payload_path)
+        .await
+        .map_err(|error| format!("cannot open native SMB smoke payload: {error}"))?;
 
     adapter
         .write_from_reader(
             &source,
-            Box::pin(Cursor::new(payload.clone())),
-            Some(payload.len() as u64),
+            Box::pin(payload_file),
+            Some(payload_size),
             ConflictResolution::Fail,
         )
         .await
@@ -59,15 +72,12 @@ async fn run() -> Result<(), String> {
         .read(&source, None)
         .await
         .map_err(|error| error.to_string())?;
-    let mut downloaded = Vec::new();
-    handle
-        .stream
-        .read_to_end(&mut downloaded)
+    let mut expected_payload = tokio::fs::File::open(&payload_path)
         .await
-        .map_err(|error| error.to_string())?;
-    if downloaded != payload {
-        return Err("native SMB read did not match the uploaded payload".to_string());
-    }
+        .map_err(|error| format!("cannot reopen native SMB smoke payload: {error}"))?;
+    verify_streams_match(&mut handle.stream, &mut expected_payload, payload_size)
+        .await
+        .map_err(|error| format!("native SMB read did not match the uploaded payload: {error}"))?;
 
     adapter
         .copy(
@@ -83,15 +93,14 @@ async fn run() -> Result<(), String> {
         .read(&copied, None)
         .await
         .map_err(|error| error.to_string())?;
-    let mut copied_payload = Vec::new();
-    copied_handle
-        .stream
-        .read_to_end(&mut copied_payload)
+    let mut expected_copy = tokio::fs::File::open(&payload_path)
         .await
-        .map_err(|error| error.to_string())?;
-    if copied_payload != payload {
-        return Err("native SMB COPYCHUNK result did not match the source".to_string());
-    }
+        .map_err(|error| format!("cannot reopen native SMB smoke payload: {error}"))?;
+    verify_streams_match(&mut copied_handle.stream, &mut expected_copy, payload_size)
+        .await
+        .map_err(|error| {
+            format!("native SMB COPYCHUNK result did not match the source: {error}")
+        })?;
 
     adapter
         .move_object(
@@ -146,6 +155,55 @@ async fn run() -> Result<(), String> {
     Ok(())
 }
 
+async fn verify_streams_match<A, E>(
+    actual: &mut A,
+    expected: &mut E,
+    expected_len: u64,
+) -> Result<(), String>
+where
+    A: AsyncRead + Unpin,
+    E: AsyncRead + Unpin,
+{
+    let mut actual_buffer = [0; VERIFY_BUFFER_BYTES];
+    let mut expected_buffer = [0; VERIFY_BUFFER_BYTES];
+    let mut remaining = expected_len;
+    while remaining > 0 {
+        let chunk_len = usize::try_from(remaining.min(VERIFY_BUFFER_BYTES as u64))
+            .map_err(|_| "payload chunk length is out of range".to_string())?;
+        actual
+            .read_exact(&mut actual_buffer[..chunk_len])
+            .await
+            .map_err(|error| format!("cannot read SMB output: {error}"))?;
+        expected
+            .read_exact(&mut expected_buffer[..chunk_len])
+            .await
+            .map_err(|error| format!("cannot read expected payload: {error}"))?;
+        if actual_buffer[..chunk_len] != expected_buffer[..chunk_len] {
+            return Err("payload bytes differ".to_string());
+        }
+        remaining -= chunk_len as u64;
+    }
+
+    let mut extra = [0];
+    if actual
+        .read(&mut extra)
+        .await
+        .map_err(|error| format!("cannot check SMB output length: {error}"))?
+        != 0
+    {
+        return Err("SMB output is longer than the expected payload".to_string());
+    }
+    if expected
+        .read(&mut extra)
+        .await
+        .map_err(|error| format!("cannot check expected payload length: {error}"))?
+        != 0
+    {
+        return Err("expected payload changed while the smoke was running".to_string());
+    }
+    Ok(())
+}
+
 fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
 }
@@ -158,5 +216,52 @@ fn object_ref(backend_id: &BackendId, display_path: &str) -> ObjectRef {
         },
         parent_stable_id: None,
         display_path: display_path.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[tokio::test]
+    async fn stream_comparison_handles_multiple_chunks_and_rejects_differences() {
+        let expected = (0..VERIFY_BUFFER_BYTES * 2 + 17)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let mut actual = Cursor::new(expected.clone());
+        let mut expected_stream = Cursor::new(expected.clone());
+        verify_streams_match(&mut actual, &mut expected_stream, expected.len() as u64)
+            .await
+            .expect("matching streams");
+
+        let mut mismatched = expected.clone();
+        mismatched[VERIFY_BUFFER_BYTES] ^= 1;
+        let mut actual = Cursor::new(mismatched);
+        let mut expected_stream = Cursor::new(expected.clone());
+        assert_eq!(
+            verify_streams_match(&mut actual, &mut expected_stream, expected.len() as u64)
+                .await
+                .expect_err("mismatched content must fail"),
+            "payload bytes differ"
+        );
+
+        let mut short = Cursor::new(expected[..expected.len() - 1].to_vec());
+        let mut expected_stream = Cursor::new(expected.clone());
+        assert!(
+            verify_streams_match(&mut short, &mut expected_stream, expected.len() as u64)
+                .await
+                .expect_err("truncated content must fail")
+                .starts_with("cannot read SMB output:")
+        );
+
+        let mut long = Cursor::new([expected.clone(), vec![0]].concat());
+        let mut expected_stream = Cursor::new(expected.clone());
+        assert_eq!(
+            verify_streams_match(&mut long, &mut expected_stream, expected.len() as u64)
+                .await
+                .expect_err("excess content must fail"),
+            "SMB output is longer than the expected payload"
+        );
     }
 }
