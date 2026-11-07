@@ -9,7 +9,14 @@ use std::time::Duration;
 const S3_KEEPALIVE_SECS: u64 = 30;
 
 impl S3Adapter {
-    pub fn new(config: S3Config, backend_id: BackendId) -> Self {
+    pub fn new(mut config: S3Config, backend_id: BackendId) -> Self {
+        config.prefix = config.prefix.map(|prefix| {
+            if prefix.is_empty() {
+                prefix
+            } else {
+                format!("{}/", prefix.trim_end_matches('/'))
+            }
+        });
         Self {
             config,
             backend_id,

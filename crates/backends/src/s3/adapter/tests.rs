@@ -55,6 +55,13 @@ fn response(status: u16, body: &'static str) -> Result<HttpResponse, ConnectorEr
 }
 
 fn adapter(responses: Vec<Result<HttpResponse, ConnectorError>>) -> (S3Adapter, MockHttp) {
+    adapter_with_prefix(responses, None)
+}
+
+fn adapter_with_prefix(
+    responses: Vec<Result<HttpResponse, ConnectorError>>,
+    prefix: Option<&str>,
+) -> (S3Adapter, MockHttp) {
     let http = MockHttp {
         responses: Arc::new(Mutex::new(responses.into())),
         requests: Default::default(),
@@ -78,7 +85,7 @@ fn adapter(responses: Vec<Result<HttpResponse, ConnectorError>>) -> (S3Adapter, 
     let adapter = S3Adapter::new(
         S3Config {
             bucket: "archive".into(),
-            prefix: None,
+            prefix: prefix.map(str::to_owned),
             endpoint_url: Some("https://s3.test".into()),
             custom_endpoint_conditional_writes_confirmed: true,
             region: "us-east-1".into(),
@@ -505,5 +512,94 @@ async fn unconfirmed_custom_endpoint_stops_before_any_request() {
             Err(BackendError::Unsupported { .. })
         ));
         assert!(http.requests.lock().unwrap().is_empty());
+    }
+}
+
+const PREFIX_LIST_RESPONSE: &str = r#"<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>archive</Name><Prefix>foo/</Prefix><KeyCount>2</KeyCount><MaxKeys>1000</MaxKeys>
+  <Delimiter>/</Delimiter><IsTruncated>false</IsTruncated>
+  <Contents><Key>foo/file.txt</Key><ETag>&quot;file-etag&quot;</ETag><Size>7</Size></Contents>
+  <CommonPrefixes><Prefix>foo/team/</Prefix></CommonPrefixes>
+</ListBucketResult>"#;
+
+#[tokio::test]
+async fn configured_prefix_is_a_slash_delimited_root_for_listing_and_keys() {
+    for configured_prefix in ["foo", "foo/"] {
+        let (adapter, http) = adapter_with_prefix(
+            vec![response(200, PREFIX_LIST_RESPONSE)],
+            Some(configured_prefix),
+        );
+        assert_eq!(adapter.config.prefix.as_deref(), Some("foo/"));
+        let page = adapter.list_names(&object(""), None).await.unwrap();
+
+        assert!(http.requests.lock().unwrap()[0].1.contains("prefix=foo%2F"));
+        assert_eq!(page.entries.len(), 2);
+        let paths: Vec<_> = page
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                ListedEntry::WithMeta(entry) => (
+                    entry.name.name.as_str(),
+                    entry.name.object_ref.display_path.as_str(),
+                ),
+                ListedEntry::NameOnly(_) => panic!("S3 list entries include metadata"),
+            })
+            .collect();
+        assert!(paths.contains(&("file.txt", "file.txt")));
+        assert!(paths.contains(&("team", "team/")));
+        assert_eq!(
+            adapter.object_key(&object("team/file.txt")),
+            "foo/team/file.txt"
+        );
+        assert_eq!(
+            adapter.display_path_from_key("foo/team/file.txt").unwrap(),
+            "team/file.txt"
+        );
+    }
+}
+
+#[tokio::test]
+async fn configured_prefix_rejects_sibling_prefix_results() {
+    let sibling_responses = [
+        r#"<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+          <Name>archive</Name><Prefix>foo/</Prefix><KeyCount>1</KeyCount><MaxKeys>1000</MaxKeys>
+          <Delimiter>/</Delimiter><IsTruncated>false</IsTruncated>
+          <CommonPrefixes><Prefix>foobar/</Prefix></CommonPrefixes>
+        </ListBucketResult>"#,
+        r#"<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+          <Name>archive</Name><Prefix>foo/</Prefix><KeyCount>1</KeyCount><MaxKeys>1000</MaxKeys>
+          <Delimiter>/</Delimiter><IsTruncated>false</IsTruncated>
+          <Contents><Key>foobar/private.jpg</Key><Size>10</Size></Contents>
+        </ListBucketResult>"#,
+    ];
+
+    for body in sibling_responses {
+        let (adapter, http) = adapter_with_prefix(vec![response(200, body)], Some("foo"));
+        assert!(matches!(
+            adapter.list_names(&object(""), None).await,
+            Err(BackendError::Internal(_))
+        ));
+        assert!(http.requests.lock().unwrap()[0].1.contains("prefix=foo%2F"));
+    }
+}
+
+#[tokio::test]
+async fn unprefixed_listing_and_keys_remain_unprefixed() {
+    let body = r#"<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+      <Name>archive</Name><Prefix></Prefix><KeyCount>1</KeyCount><MaxKeys>1000</MaxKeys>
+      <Delimiter>/</Delimiter><IsTruncated>false</IsTruncated>
+      <Contents><Key>file.txt</Key><Size>7</Size></Contents>
+    </ListBucketResult>"#;
+    for prefix in [None, Some("")] {
+        let (adapter, http) = adapter_with_prefix(vec![response(200, body)], prefix);
+        let page = adapter.list_names(&object(""), None).await.unwrap();
+
+        assert_eq!(adapter.object_key(&object("file.txt")), "file.txt");
+        assert_eq!(page.entries.len(), 1);
+        assert!(matches!(
+            &page.entries[0],
+            ListedEntry::WithMeta(entry) if entry.name.object_ref.display_path == "file.txt"
+        ));
+        assert!(!http.requests.lock().unwrap()[0].1.contains("prefix=foo"));
     }
 }

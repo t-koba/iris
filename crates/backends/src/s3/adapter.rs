@@ -71,7 +71,7 @@ impl S3Adapter {
 
     fn object_key(&self, object: &ObjectRef) -> String {
         match &self.config.prefix {
-            Some(prefix) => format!("{}/{}", prefix.trim_end_matches('/'), object.display_path),
+            Some(prefix) => format!("{prefix}{}", object.display_path),
             None => object.display_path.clone(),
         }
     }
@@ -87,7 +87,11 @@ impl S3Adapter {
                 ),
             )))
         })?;
-        Ok(stripped.trim_start_matches('/').to_string())
+        if prefix.is_empty() {
+            Ok(stripped.trim_start_matches('/').to_string())
+        } else {
+            Ok(stripped.to_string())
+        }
     }
 
     fn next_ticket(&self, kind: OperationKind) -> OperationTicket {
