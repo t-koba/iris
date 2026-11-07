@@ -36,6 +36,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
+      - name: Fetch locked Rust inputs
+        run: cargo fetch --locked
       - name: Install system dependencies
         run: brew install ffmpeg pkg-config
       - name: Audit temporary default-product package
