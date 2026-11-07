@@ -43,6 +43,7 @@ vcpkg_from_git(
         first.patch
         "0004-dependencies.patch" # retained explanation
         0007-fix-lib-naming.patch
+        0045-use-prebuilt-bin2c.patch
         last.patch
 )
 '@
@@ -57,7 +58,9 @@ foreach ($ending in @("`n", "`r`n")) {
             $expectedPatch = $inputPatch.Replace('0004-dependencies.patch', '0004-dependencies-pinned.patch')
             $replacedNaming = Set-PrototypeFfmpegPatch $replacedPatch.Portfile '0007-fix-lib-naming.patch' '0007-fix-lib-naming-pinned.patch'
             $expectedPatch = $expectedPatch.Replace('0007-fix-lib-naming.patch', '0007-fix-lib-naming-pinned.patch')
-            if ($replacedNaming.Portfile -cne $expectedPatch) { throw 'adapted PATCHES entry/order/comment/line endings were not preserved' }
+            $replacedBin2c = Set-PrototypeFfmpegPatch $replacedNaming.Portfile '0045-use-prebuilt-bin2c.patch' '0045-use-prebuilt-bin2c-pinned.patch'
+            $expectedPatch = $expectedPatch.Replace('0045-use-prebuilt-bin2c.patch', '0045-use-prebuilt-bin2c-pinned.patch')
+            if ($replacedBin2c.Portfile -cne $expectedPatch) { throw 'adapted PATCHES entry/order/comment/line endings were not preserved' }
             $badPatches = [ordered]@{
                 missing = $inputPatch.Replace('0004-dependencies.patch', 'other.patch')
                 duplicateBaseline = $inputPatch.Replace('last.patch', $entry + $comment)

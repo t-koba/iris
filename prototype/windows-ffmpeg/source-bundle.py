@@ -13,7 +13,8 @@ COMMIT = PINS["ffmpeg"]["commit"]
 BASELINE = PINS["vcpkg"]["baseline"]
 DEPENDENCY_PATCH = PINS["vcpkg"]["ffmpeg_dependency_patch"]
 LIB_NAMING_PATCH = PINS["vcpkg"]["ffmpeg_lib_naming_patch"]
-PATCH_ADAPTATIONS = (DEPENDENCY_PATCH, LIB_NAMING_PATCH)
+BIN2C_PATCH = PINS["vcpkg"]["ffmpeg_bin2c_patch"]
+PATCH_ADAPTATIONS = (DEPENDENCY_PATCH, LIB_NAMING_PATCH, BIN2C_PATCH)
 ARCHIVE = f"ffmpeg-{COMMIT}.tar"
 INPUTS = (
     "pins.json", "vcpkg.json", "vcpkg-configuration.json",
@@ -81,10 +82,11 @@ def validate_adapted_patch(path, pin):
     # The generated patch may carry CRLF hunk lines on Windows; normalize
     # only for structural checks while the file manifest hashes exact bytes.
     data = Path(path).read_bytes().replace(b"\r\n", b"\n")
-    header = b"diff --git a/configure b/configure\n"
+    target = b"ffbuild/common.mak" if pin == BIN2C_PATCH else b"configure"
+    header = b"diff --git a/" + target + b" b/" + target + b"\n"
     if not data.startswith(header) or data.count(b"diff --git ") != 1:
-        raise ValueError("adapted patch must change only pinned configure: " + pin["name"])
-    if data.count(b"--- a/configure") != 1 or data.count(b"+++ b/configure") != 1:
+        raise ValueError("adapted patch must change only its pinned source target: " + pin["name"])
+    if data.count(b"--- a/" + target) != 1 or data.count(b"+++ b/" + target) != 1:
         raise ValueError("adapted patch has unexpected file paths: " + pin["name"])
     if pin == DEPENDENCY_PATCH:
         required = (
@@ -101,6 +103,9 @@ def validate_adapted_patch(path, pin):
             b"             -lz)                  echo ${zlib_msvc_lib:-zlib.lib} ;;\n",
             b"+            -lmp3lame)            echo libmp3lame.lib ;;\n",
         )
+    elif pin == BIN2C_PATCH:
+        required = (b"-BIN2CEXE = ", b"-BIN2C = ", b"+BIN2C = bin2c\n",
+                    b"-$(BIN2CEXE): ffbuild/bin2c_host.o\n")
     else:
         raise ValueError("unrecognized pinned patch adaptation")
     if any(token not in data for token in required):
@@ -129,7 +134,7 @@ def validate_patch_manifest(bundle, manifest):
             "baseline": "baseline/ports/ffmpeg/" + item["name"],
             "overlay": "overlay/ffmpeg/" + item["overlay_name"],
             "baseline_sha256": item["sha256"],
-            "kind": "exact-context configure-only adaptation",
+            "kind": "exact-context pinned-source adaptation",
         }
         for item in PATCH_ADAPTATIONS
     ]
@@ -199,7 +204,7 @@ def create(source, vcpkg, overlay, dest):
                     "baseline": "baseline/ports/ffmpeg/" + item["name"],
                     "overlay": "overlay/ffmpeg/" + item["overlay_name"],
                     "baseline_sha256": item["sha256"],
-                    "kind": "exact-context configure-only adaptation",
+                    "kind": "exact-context pinned-source adaptation",
                 }
                 for item in PATCH_ADAPTATIONS
             ],

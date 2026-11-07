@@ -2,6 +2,7 @@
 import difflib
 import hashlib
 import json
+import re
 from pathlib import Path
 import sys
 
@@ -9,6 +10,7 @@ ROOT = Path(__file__).resolve().parent
 PINS = json.loads((ROOT / "pins.json").read_text(encoding="utf-8-sig"))
 PIN = PINS["vcpkg"]["ffmpeg_dependency_patch"]
 LIB_NAMING_PIN = PINS["vcpkg"]["ffmpeg_lib_naming_patch"]
+BIN2C_PIN = PINS["vcpkg"]["ffmpeg_bin2c_patch"]
 
 # Exact pinned-commit configure contexts. These carry the vcpkg 9.0.2 patch's
 # dependency/link changes while accepting only the known newer source shape.
@@ -161,14 +163,59 @@ def generate_lib_naming(configure_path, baseline_patch_path, output_path):
     return hashlib.sha256(patch.encode("utf-8")).hexdigest()
 
 
+def adapt_bin2c(text, baseline_patch):
+    # The caller verifies the patch hash first. Read its exact deletion anchors
+    # rather than duplicating the baseline's assignment values/host-link recipe.
+    removed = [line[1:] for line in baseline_patch.splitlines()
+               if line.startswith("-") and not line.startswith("---") and line != "-"]
+    if (len(removed) != 4 or not removed[0].startswith("BIN2CEXE = ")
+            or not removed[1].startswith("BIN2C = ")
+            or removed[2] != "$(BIN2CEXE): ffbuild/bin2c_host.o"
+            or not removed[3].startswith("\t")):
+        raise ValueError("unexpected pinned bin2c patch deletion anchors")
+    if "\r" in text:
+        raise ValueError("pinned common.mak must use LF line endings")
+    # Also reject partial duplicates: an exact block plus a changed assignment
+    # or rule must not leave competing definitions behind.
+    for pattern in (r"^[ \t]*BIN2CEXE[ \t]*[:?+!]?=", r"^[ \t]*BIN2C[ \t]*[:?+!]?=",
+                    r"^[ \t]*\$\(BIN2CEXE\)[ \t]*:"):
+        if len(re.findall(pattern, text, re.MULTILINE)) != 1:
+            raise ValueError("expected unique pinned bin2c assignment/rule anchors")
+    for lines, replacement in ((removed[:2], "BIN2C = bin2c\n"), (removed[2:], "")):
+        before = "\n".join(lines) + "\n"
+        if lines == removed[2:] and before + "\n" not in text:
+            raise ValueError("pinned bin2c host-link rule changed or has extra recipe lines")
+        if text.count(before) != 1:
+            raise ValueError("expected exactly one pinned bin2c source context")
+        text = text.replace(before, replacement, 1)
+    return text
+
+
+def generate_bin2c(source_path, baseline_patch_path, output_path):
+    validate_baseline_patch(baseline_patch_path, BIN2C_PIN)
+    baseline = Path(baseline_patch_path).read_text(encoding="utf-8")
+    before = Path(source_path).read_bytes().decode("utf-8")
+    after = adapt_bin2c(before, baseline)
+    target = "ffbuild/common.mak"
+    patch = f"diff --git a/{target} b/{target}\n" + "".join(difflib.unified_diff(
+        before.splitlines(keepends=True), after.splitlines(keepends=True),
+        fromfile=f"a/{target}", tofile=f"b/{target}", n=3,
+    ))
+    Path(output_path).write_bytes(patch.encode("utf-8"))
+    return hashlib.sha256(patch.encode("utf-8")).hexdigest()
+
+
 if __name__ == "__main__":
     if len(sys.argv) != 5:
-        raise SystemExit("usage: ffmpeg-dependency-patch.py <adapt|adapt-lib-naming> <configure> <baseline-patch> <output-patch>")
+        raise SystemExit("usage: ffmpeg-dependency-patch.py <adapt|adapt-lib-naming|adapt-bin2c> <source-target> <baseline-patch> <output-patch>")
     if sys.argv[1] == "adapt":
         digest = generate(sys.argv[2], sys.argv[3], sys.argv[4])
         print(f"generated pinned dependency patch sha256={digest}")
     elif sys.argv[1] == "adapt-lib-naming":
         digest = generate_lib_naming(sys.argv[2], sys.argv[3], sys.argv[4])
         print(f"generated pinned library-name patch sha256={digest}")
+    elif sys.argv[1] == "adapt-bin2c":
+        digest = generate_bin2c(sys.argv[2], sys.argv[3], sys.argv[4])
+        print(f"generated pinned prebuilt-bin2c patch sha256={digest}")
     else:
-        raise SystemExit("expected adapt or adapt-lib-naming")
+        raise SystemExit("expected adapt, adapt-lib-naming or adapt-bin2c")

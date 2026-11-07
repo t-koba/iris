@@ -186,7 +186,7 @@ try {
 }
 
 # Derive only the source fetch from the exact baseline. Keep every baseline
-# patch in declared order except the hash-pinned 0004 and 0007 configure
+# patch in declared order except the hash-pinned 0004, 0007 and 0045
 # patches, which receive exact-context replacements for this pinned source.
 $baselinePortfile = Join-Path $baselinePortDir "portfile.cmake"
 $baselinePortfileRaw = Get-Content -Raw -LiteralPath $baselinePortfile
@@ -199,6 +199,7 @@ $adaptations = @(
         baseline = $pins.vcpkg.ffmpeg_dependency_patch.name
         overlay = $pins.vcpkg.ffmpeg_dependency_patch.overlay_name
         pin = $pins.vcpkg.ffmpeg_dependency_patch
+        source = "configure"
         command = "adapt"
         label = "dependency"
     },
@@ -206,12 +207,22 @@ $adaptations = @(
         baseline = $pins.vcpkg.ffmpeg_lib_naming_patch.name
         overlay = $pins.vcpkg.ffmpeg_lib_naming_patch.overlay_name
         pin = $pins.vcpkg.ffmpeg_lib_naming_patch
+        source = "configure"
         command = "adapt-lib-naming"
         label = "library-name"
+    },
+    [pscustomobject]@{
+        baseline = $pins.vcpkg.ffmpeg_bin2c_patch.name
+        overlay = $pins.vcpkg.ffmpeg_bin2c_patch.overlay_name
+        pin = $pins.vcpkg.ffmpeg_bin2c_patch
+        source = "ffbuild/common.mak"
+        command = "adapt-bin2c"
+        label = "prebuilt-bin2c"
     }
 )
 if ($adaptations[0].baseline -cne "0004-dependencies.patch" -or $adaptations[0].overlay -cne "0004-dependencies-pinned.patch") { throw "unsupported pinned dependency patch name" }
 if ($adaptations[1].baseline -cne "0007-fix-lib-naming.patch" -or $adaptations[1].overlay -cne "0007-fix-lib-naming-pinned.patch") { throw "unsupported pinned library-name patch name" }
+if ($adaptations[2].baseline -cne "0045-use-prebuilt-bin2c.patch" -or $adaptations[2].overlay -cne "0045-use-prebuilt-bin2c-pinned.patch") { throw "unsupported pinned prebuilt-bin2c patch name" }
 $overlayRaw = $derived.Portfile
 foreach ($adaptation in $adaptations) {
     if (@($derived.Patches | Where-Object { $_ -ceq $adaptation.baseline }).Count -ne 1) { throw "baseline FFmpeg patch series must contain exactly one pinned patch: $($adaptation.baseline)" }
@@ -232,7 +243,7 @@ try {
         $adaptation = $adaptations | Where-Object { $_.baseline -ceq $name } | Select-Object -First 1
         if ($null -ne $adaptation) {
             $adaptedPatchPath = Join-Path $evidenceDir $adaptation.overlay
-            & python (Join-Path $scriptDir "ffmpeg-dependency-patch.py") $adaptation.command (Join-Path $workDir "configure") $patchPath $adaptedPatchPath
+            & python (Join-Path $scriptDir "ffmpeg-dependency-patch.py") $adaptation.command (Join-Path $workDir $adaptation.source) $patchPath $adaptedPatchPath
             if ($LASTEXITCODE -ne 0) { throw "pinned FFmpeg $($adaptation.label)-patch adaptation failed: $name" }
             if (!(Test-Path -LiteralPath $adaptedPatchPath -PathType Leaf)) { throw "adapted patch missing: $adaptedPatchPath" }
             git apply --check --whitespace=nowarn $adaptedPatchPath
@@ -248,7 +259,7 @@ try {
                 overlay_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $adaptedPatchPath).Hash.ToLowerInvariant()
             }
             $adaptedPatchFiles[$name] = [ordered]@{ path = $adaptedPatchPath; overlay = $adaptation.overlay }
-            Write-Host "pinned configure-context patch applied: $name -> $($adaptation.overlay)"
+            Write-Host "pinned source-context patch applied: $name -> $($adaptation.overlay)"
             continue
         }
         git apply --check --whitespace=nowarn $patchPath

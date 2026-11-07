@@ -3,7 +3,7 @@
   "ffmpeg": {
     "repository": "https://github.com/FFmpeg/FFmpeg.git",
     "commit": "db8537d8cc7962bd3d07254d6ceff21d888817d4",
-    "note": "Exact later commit under investigation. The pinned vcpkg FFmpeg port targets 9.0.2; only its hash-pinned 0004 dependency and 0007 library-name patches are adapted for this source, using exact configure contexts."
+    "note": "Exact later commit under investigation. The pinned vcpkg FFmpeg port targets 9.0.2; only its hash-pinned 0004 dependency, 0007 library-name and 0045 prebuilt-bin2c patches are adapted for this source, using exact sequential-stage source contexts."
   },
   "vcpkg": {
     "repository": "https://github.com/microsoft/vcpkg",
@@ -17,6 +17,11 @@
       "name": "0007-fix-lib-naming.patch",
       "sha256": "1392414bdbbdced1ccb59286c6b0420470bb3f37bbce3d6ee1a2a5f7fb7a5c68",
       "overlay_name": "0007-fix-lib-naming-pinned.patch"
+    },
+    "ffmpeg_bin2c_patch": {
+      "name": "0045-use-prebuilt-bin2c.patch",
+      "sha256": "5510a5d6cc0e6cac881157b8432dcd14672e6618c8b9e8719414e1d3c1804e21",
+      "overlay_name": "0045-use-prebuilt-bin2c-pinned.patch"
     }
   },
   "pdfium": {

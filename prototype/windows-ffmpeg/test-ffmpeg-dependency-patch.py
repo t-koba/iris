@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("ffmpeg_dependency_patch", ROOT / "ffmpeg-dependency-patch.py")
@@ -147,6 +148,83 @@ class DependencyPatchTests(unittest.TestCase):
             path.write_text("not the pinned patch")
             with self.assertRaisesRegex(ValueError, "pinned baseline bytes"):
                 patcher.validate_baseline_patch(path)
+
+
+
+# Synthetic baseline shape; its hash is substituted only for the positive
+# generator fixture. This is not upstream provenance. Production uses BIN2C_PIN.
+BIN2C_ASSIGNMENTS = "BIN2CEXE = ffbuild/bin2c_host$(HOSTEXESUF)\nBIN2C = $(BIN2CEXE)\n"
+BIN2C_RULE = "$(BIN2CEXE): ffbuild/bin2c_host.o\n\t$(HOSTLD) $(HOSTLDFLAGS) $(HOSTLD_O) $^ $(HOSTEXTRALIBS)\n"
+BIN2C_BASELINE_PATCH = ("--- a/ffbuild/common.mak\n+++ b/ffbuild/common.mak\n"
+                        "@@ -1,4 +1,3 @@\n"
+                        + "".join("-" + line for line in BIN2C_ASSIGNMENTS.splitlines(keepends=True))
+                        + "+BIN2C = bin2c\n \n ifndef V\n@@ -20,3 +19,0 @@\n"
+                        + "".join("-" + line for line in BIN2C_RULE.splitlines(keepends=True)) + "-\n")
+BIN2C_COMMENT = "# INSTALL_FILES is used for installation\n"
+BIN2C_FIXTURE = ("# preceding patch already applied\n" + BIN2C_ASSIGNMENTS + "\n"
+                 + BIN2C_COMMENT + "\nifndef V\nQ = @\nendif\n\n"
+                 + BIN2C_RULE + "\nother: other.o\n\t$(HOSTLD) $^\n")
+
+
+class Bin2cPatchTests(unittest.TestCase):
+    def test_exact_transformation_generates_common_mak_patch_at_sequential_stage(self):
+        expected = BIN2C_FIXTURE.replace(BIN2C_ASSIGNMENTS, "BIN2C = bin2c\n").replace(BIN2C_RULE, "")
+        self.assertEqual(patcher.adapt_bin2c(BIN2C_FIXTURE, BIN2C_BASELINE_PATCH), expected)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "core.autocrlf", "false"], check=True)
+            source = root / "ffbuild/common.mak"
+            source.parent.mkdir()
+            source.write_bytes(BIN2C_FIXTURE.encode())
+            baseline = root / patcher.BIN2C_PIN["name"]
+            baseline.write_bytes(BIN2C_BASELINE_PATCH.encode())
+            output = root / "adapt.patch"
+            with patch.dict(patcher.BIN2C_PIN, sha256=hashlib.sha256(baseline.read_bytes()).hexdigest()):
+                digest = patcher.generate_bin2c(source, baseline, output)
+            self.assertEqual(digest, hashlib.sha256(output.read_bytes()).hexdigest())
+            diff = output.read_text()
+            self.assertTrue(diff.startswith("diff --git a/ffbuild/common.mak b/ffbuild/common.mak\n"))
+            self.assertIn("+++ b/ffbuild/common.mak\n", diff)
+            self.assertNotIn("a/configure", diff)
+            self.assertIn(" " + BIN2C_COMMENT, diff)
+            subprocess.run(["git", "-C", str(root), "apply", "--check", str(output)], check=True)
+            subprocess.run(["git", "-C", str(root), "apply", str(output)], check=True)
+            self.assertEqual(source.read_text(), expected)
+
+    def test_missing_duplicate_or_changed_anchors_fail_closed(self):
+        for anchor in (BIN2C_ASSIGNMENTS, BIN2C_RULE, *BIN2C_ASSIGNMENTS.splitlines(keepends=True),
+                       *BIN2C_RULE.splitlines(keepends=True)):
+            for broken in (BIN2C_FIXTURE.replace(anchor, ""), BIN2C_FIXTURE.replace(anchor, anchor + anchor),
+                           BIN2C_FIXTURE.replace(anchor, "changed" + anchor)):
+                with self.subTest(anchor=anchor, broken=broken):
+                    with self.assertRaises(ValueError):
+                        patcher.adapt_bin2c(broken, BIN2C_BASELINE_PATCH)
+        for broken in (BIN2C_FIXTURE + "BIN2C = changed\n",
+                       BIN2C_FIXTURE.replace(BIN2C_RULE, BIN2C_RULE + "\tunexpected recipe\n"),
+                       BIN2C_FIXTURE.replace("\n", "\r\n")):
+            with self.assertRaises(ValueError):
+                patcher.adapt_bin2c(broken, BIN2C_BASELINE_PATCH)
+
+    def test_wrong_baseline_hash_prevents_reading_source_or_writing_patch(self):
+        self.assertEqual(patcher.BIN2C_PIN["sha256"],
+                         "5510a5d6cc0e6cac881157b8432dcd14672e6618c8b9e8719414e1d3c1804e21")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline = root / "0045-use-prebuilt-bin2c.patch"
+            baseline.write_text(BIN2C_BASELINE_PATCH)
+            output = root / "adapt.patch"
+            with self.assertRaisesRegex(ValueError, "pinned baseline bytes"):
+                patcher.generate_bin2c(root / "missing-common.mak", baseline, output)
+            self.assertFalse(output.exists())
+
+    def test_build_routes_third_adaptation_to_common_mak_in_patch_order(self):
+        build = (ROOT / "build-windows-ffmpeg-prototype.ps1").read_text()
+        self.assertIn('source = "ffbuild/common.mak"\n        command = "adapt-bin2c"', build)
+        self.assertIn('$adaptation.command (Join-Path $workDir $adaptation.source)', build)
+        self.assertIn('Set-PrototypeFfmpegPatch $overlayRaw $adaptation.baseline $adaptation.overlay', build)
+        self.assertLess(build.index('foreach ($name in $derived.Patches)'),
+                        build.index('& python (Join-Path $scriptDir "ffmpeg-dependency-patch.py")'))
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ PORT = b'''vcpkg_from_github(
         "0004-dependencies.patch" # pinned dependency patch
         0005-fix-nasm.patch
         0007-fix-lib-naming.patch
+        0045-use-prebuilt-bin2c.patch
         a-second.patch
 )
 '''
@@ -105,6 +106,11 @@ BASELINE_PATCH = BASELINE_PATCH.replace(b" fi\n\n enabled debug", b" fi\n \n ena
 
 class BundleTests(unittest.TestCase):
     def test_archive_material_integrity_and_determinism(self):
+        # Synthetic 0045 baseline; authentic 0004/0007 fixtures stay unchanged.
+        synthetic_hash = hashlib.sha256(dependency_test.BIN2C_BASELINE_PATCH.encode()).hexdigest()
+        pin_patch = patch.dict(bundle.BIN2C_PATCH, sha256=synthetic_hash)
+        pin_patch.start()
+        self.addCleanup(pin_patch.stop)
         self.assertEqual(hashlib.sha256(BASELINE_PATCH).hexdigest(), bundle.DEPENDENCY_PATCH["sha256"])
         with tempfile.TemporaryDirectory() as temp:
             patch_path = Path(temp) / dependency_test.patcher.PIN["name"]
@@ -129,6 +135,7 @@ class BundleTests(unittest.TestCase):
                 "ports/ffmpeg/0004-dependencies.patch": BASELINE_PATCH,
                 "ports/ffmpeg/0005-fix-nasm.patch": b"nasm\n",
                 "ports/ffmpeg/0007-fix-lib-naming.patch": LIB_NAMING_BASELINE_PATCH,
+                "ports/ffmpeg/0045-use-prebuilt-bin2c.patch": dependency_test.BIN2C_BASELINE_PATCH.encode(),
                 "ports/ffmpeg/a-second.patch": b"second\n",
                 bundle.HELPER: b"helper\n",
             }.items():
@@ -146,6 +153,7 @@ class BundleTests(unittest.TestCase):
             overlay_text = overlay_port.read_text().replace("vcpkg_from_github(", "vcpkg_from_git(")
             overlay_text = overlay_text.replace('"0004-dependencies.patch"', '"0004-dependencies-pinned.patch"')
             overlay_text = overlay_text.replace('0007-fix-lib-naming.patch', '0007-fix-lib-naming-pinned.patch')
+            overlay_text = overlay_text.replace("0045-use-prebuilt-bin2c.patch", "0045-use-prebuilt-bin2c-pinned.patch")
             overlay_port.write_text(overlay_text)
             adapted = dependency_test.patcher.patch_text(
                 dependency_test.FIXTURE,
@@ -157,6 +165,12 @@ class BundleTests(unittest.TestCase):
                 dependency_test.patcher.adapt_lib_naming_configure(dependency_test.LIB_NAMING_FIXTURE),
             )
             (overlay / "0007-fix-lib-naming-pinned.patch").write_text(adapted_lib_naming)
+            source = root / "common.mak"
+            source.write_text(dependency_test.BIN2C_FIXTURE)
+            with patch.dict(dependency_test.patcher.BIN2C_PIN, sha256=synthetic_hash):
+                dependency_test.patcher.generate_bin2c(
+                    source, repo / "ports/ffmpeg/0045-use-prebuilt-bin2c.patch",
+                    overlay / "0045-use-prebuilt-bin2c-pinned.patch")
             with patch.multiple(bundle, COMMIT=commit, BASELINE=commit, ARCHIVE=f"ffmpeg-{commit}.tar"):
                 first, second = root / "first", root / "second"
                 bundle.create(repo, repo, overlay, first)
@@ -173,17 +187,21 @@ class BundleTests(unittest.TestCase):
                 self.assertIn("# retained inline comment", manifest["patches"]["baseline"]["block"])
                 self.assertEqual([Path(p).name for p in manifest["patches"]["baseline"]["ordered_files"]],
                                  ["z-first.patch", "0004-dependencies.patch", "0005-fix-nasm.patch",
-                                  "0007-fix-lib-naming.patch", "a-second.patch"])
+                                  "0007-fix-lib-naming.patch", "0045-use-prebuilt-bin2c.patch", "a-second.patch"])
                 self.assertEqual([Path(p).name for p in manifest["patches"]["overlay"]["ordered_files"]],
                                  ["z-first.patch", "0004-dependencies-pinned.patch", "0005-fix-nasm.patch",
-                                  "0007-fix-lib-naming-pinned.patch", "a-second.patch"])
+                                  "0007-fix-lib-naming-pinned.patch", "0045-use-prebuilt-bin2c-pinned.patch", "a-second.patch"])
                 self.assertEqual(manifest["schema"], 3)
-                self.assertEqual(len(manifest["patches"]["adaptations"]), 2)
+                self.assertEqual(len(manifest["patches"]["adaptations"]), 3)
+                self.assertEqual({item["kind"] for item in manifest["patches"]["adaptations"]},
+                                 {"exact-context pinned-source adaptation"})
                 # Hash/size mismatches and missing inputs must all stop staging.
                 for name in [bundle.ARCHIVE, "baseline/ports/ffmpeg/0004-dependencies.patch",
                              "baseline/ports/ffmpeg/0007-fix-lib-naming.patch",
+                             "baseline/ports/ffmpeg/0045-use-prebuilt-bin2c.patch",
                              "overlay/ffmpeg/0004-dependencies-pinned.patch",
                              "overlay/ffmpeg/0007-fix-lib-naming-pinned.patch",
+                             "overlay/ffmpeg/0045-use-prebuilt-bin2c-pinned.patch",
                              "overlay/ffmpeg/portfile.cmake", "build-inputs/pins.json", "MANIFEST.json"]:
                     path = first / name
                     original = path.read_bytes()

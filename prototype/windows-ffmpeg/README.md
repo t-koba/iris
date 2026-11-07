@@ -68,17 +68,24 @@ behavior, or licensing conclusions, and it never publishes.
    FFmpeg commit with repository-local `core.autocrlf=false` so its source
    contexts match vcpkg's LF patch blobs; processes patches sequentially in
    declared portfile order.
-   The pinned vcpkg `0004-dependencies.patch` and `0007-fix-lib-naming.patch`
-   digests are checked; both configure adaptations require exact source
-   contexts and their generated replacements must apply after prior patches.
+   The pinned vcpkg `0004-dependencies.patch`, `0007-fix-lib-naming.patch`
+   and `0045-use-prebuilt-bin2c.patch` digests are checked; all three
+   adaptations require exact source contexts and their generated replacements
+   must apply after prior patches.
    The library-name adaptation preserves FFmpeg's newer dynamic zlib mapping
-   while adding the `libmp3lame.lib` mapping. Drift stops the run, with no 9.0.2
-   fallback. Per-patch evidence is recorded in `ffmpeg-source.json`. It derives
+   while adding the `libmp3lame.lib` mapping. The 0045 adapter reads
+   `ffbuild/common.mak` at its sequential patch stage, replaces the unique exact
+   BIN2CEXE/BIN2C assignments with `BIN2C = bin2c`, and removes the exact
+   BIN2CEXE host-link rule. Its deletion anchors come from the hash-verified
+   baseline patch; the generated diff uses the actual source context, retaining
+   the intervening `INSTALL_FILES` comment (context drift, not line endings).
+   Missing, changed or duplicate anchors stop the run, with no 9.0.2 fallback. Per-patch evidence is recorded in `ffmpeg-source.json`. It derives
    a test-only overlay from the baseline port (rewrites to
    `vcpkg_from_git(URL https://github.com/FFmpeg/FFmpeg.git REF
    db8537d8cc7962bd3d07254d6ceff21d888817d4)`, validates the pinned helper
    signature and generated parameters, removes the archive hash, replaces only
-   the `0004` and `0007` PATCHES entries with their pinned-source replacements,
+   the `0004`, `0007` and `0045` PATCHES entries with their pinned-source
+   replacements,
    and marks the overlay `version-string` as the pinned commit);
    then runs `vcpkg install` with the prototype manifest, `--overlay-ports`
    (generated), `--overlay-triplets triplets/`,
@@ -163,12 +170,15 @@ installing FFmpeg. It contains:
   These are Git blob bytes, not potentially CRLF-converted checkout copies.
 - `overlay/ffmpeg/`: the actual generated port, manifest and patch/config
   files used for the prototype. The ordered baseline patch series is retained;
-  only `0004-dependencies.patch` and `0007-fix-lib-naming.patch` are replaced
-  by their pinned-source configure-only adaptations. Each adapter checks its
+  only `0004-dependencies.patch`, `0007-fix-lib-naming.patch` and
+  `0045-use-prebuilt-bin2c.patch` are replaced by pinned-source adaptations.
+  Each adapter checks its
   exact baseline patch digest and source context. The 0004 adapter preserves
   the newer MSVC zlib probe and applies the dependency/link changes; the 0007
   adapter preserves dynamic zlib library-name detection while adding
-  `libmp3lame.lib`. Missing, duplicate or changed contexts fail before install;
+  `libmp3lame.lib`. The 0045 adapter selects the prebuilt `bin2c` and removes
+  its host-link rule in `ffbuild/common.mak`, retaining the newer comment.
+  Missing, duplicate or changed contexts fail before install;
   there is no fallback to FFmpeg 9.0.2.
 - `build-inputs/`: pins, vcpkg manifest/configuration, custom dynamic triplet,
   source/overlay/build/toolchain scripts, the adapter and its offline
@@ -178,11 +188,12 @@ installing FFmpeg. It contains:
 
 `MANIFEST.json` records SHA-256 and byte count for every included input, the
 source/baseline commits, and separate baseline/overlay PATCHES blocks with
-comments and exact order. It binds both authorized patch replacements to
+comments and exact order. It binds all three authorized patch replacements to
 pinned baseline patch digests; verifies the untouched overlay patches against
 their Git-blob copies (normalizing checkout line endings only); and requires
-each adapted patch to change `configure` alone and retain its intended
-changes, including the dynamic zlib mapping. Staging verifies all required
+each adapted patch to change only its target (`configure` for 0004/0007,
+`ffbuild/common.mak` for 0045) and retain its intended changes, including the
+dynamic zlib mapping. Staging verifies all required
 files, patches and hashes both before and after copying to app
 `doc/ffmpeg-source-bundle/`. The prototype installer
 recursively includes that directory; the evidence artifact retains both the
@@ -207,16 +218,18 @@ require evidence from the Windows prototype run.
 ## Focused offline checks
 
 - `pwsh -File prototype/windows-ffmpeg/test-overlay-derivation.ps1` checks
-  baseline port rewriting, parameter rejection, patch order and both pinned
+  baseline port rewriting, parameter rejection, patch order and all three pinned
   patch replacements without downloading or building native code.
 - `pwsh -File prototype/windows-ffmpeg/test-installed-smoke-lifecycle.ps1`
   checks bounded install/smoke/uninstall/cleanup fault handling.
 - `python prototype/windows-ffmpeg/test-ffmpeg-dependency-patch.py` checks the
-  pinned dependency and library-name configure adaptations, CRLF/LF patch
-  applicability, baseline hashes, and fail-closed source drift using offline
-  fixtures.
+  pinned dependency and library-name configure adaptations (CRLF/LF), and
+  the prebuilt-bin2c adaptation with the intervening comment and a
+  `ffbuild/common.mak`-only applicable diff. It checks baseline hash rejection
+  and fail-closed source drift using offline fixtures; the bin2c positive
+  fixture uses a synthetic baseline, not upstream provenance.
 - `python prototype/windows-ffmpeg/test-source-bundle.py` checks deterministic
-  source bundles, both patch adaptations/order, blob/hash integrity, missing or
+  source bundles, all three patch adaptations/order, blob/hash integrity, missing or
   corrupted material and package/evidence wiring using synthetic local Git
   repositories. The fixtures are not upstream provenance and do not build
   Windows code.
