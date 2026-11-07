@@ -1,0 +1,46 @@
+{
+  "files": [
+    {
+      "notes": "Landscape photograph 'Landscape with clouds', 4000x3000 JPEG, CC0 1.0; author Aammell; Wikimedia Commons source and license: https://commons.wikimedia.org/wiki/File:Landscape_with_clouds.jpg",
+      "sha256": "d266b5bfa1179a6298f1c084e8c539ef81698643f7c45d9adb34d43a30ed2758",
+      "size": 399226,
+      "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Landscape_with_clouds.jpg",
+      "filename": "landscape.jpg"
+    },
+    {
+      "notes": "CC0 1.0 sample JPEG from domdomegg/sample-files; source license: https://github.com/domdomegg/sample-files/blob/main/LICENSE",
+      "sha256": "222b1b549832a367667d5e1188e1f3abcc43dc6576e4a6c09ed89356f66bf146",
+      "size": 2576,
+      "url": "https://raw.githubusercontent.com/domdomegg/sample-files/main/sample.jpg",
+      "filename": "sample.jpg"
+    },
+    {
+      "notes": "CC0 1.0 small PDF from domdomegg/sample-files; source license: https://github.com/domdomegg/sample-files/blob/main/LICENSE",
+      "sha256": "e33f7d78153aeeacb4407c64d09d0cf9471a26e2b4ed9ee5cb048cdd7e7a70cf",
+      "size": 18404,
+      "url": "https://raw.githubusercontent.com/domdomegg/sample-files/main/sample1_small.pdf",
+      "filename": "one-page.pdf"
+    },
+    {
+      "notes": "Big Buck Bunny sample, CC BY 3.0; \u00a9 2008 Blender Foundation / www.bigbuckbunny.org; https://creativecommons.org/licenses/by/3.0/; source license statement: https://github.com/bower-media-samples/big-buck-bunny-480p-30s/blob/master/README.md",
+      "sha256": "521a78e22a4065814066d8a60d53b99472a80d6a8fb0908370df0410298b4b12",
+      "size": 4139823,
+      "url": "https://raw.githubusercontent.com/bower-media-samples/big-buck-bunny-480p-30s/master/video.mp4",
+      "filename": "bunny.mp4"
+    },
+    {
+      "notes": "Canon EOS R CR3, raw.pixls.us sample ID 4611, CC0 1.0 via its photographer; source and licensing statement: https://raw.githubusercontent.com/tellodaniel/revelraw-sample-raw-files/main/README.md",
+      "sha256": "cfd118af4477ef37538eb953421572a7a5c80694e59764049223107cc0c9ae83",
+      "size": 29045112,
+      "url": "https://github.com/tellodaniel/revelraw-sample-raw-files/releases/download/v1/Canon-EOS-R.CR3",
+      "filename": "canon-eos-r.cr3"
+    }
+  ],
+  "allowed_hosts": [
+    "commons.wikimedia.org",
+    "upload.wikimedia.org",
+    "raw.githubusercontent.com",
+    "github.com",
+    "release-assets.githubusercontent.com"
+  ]
+}

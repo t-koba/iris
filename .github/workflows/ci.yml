@@ -170,6 +170,25 @@ jobs:
       - name: Thumb preview RAW smoke
         run: cargo test -p iris-thumb-preview --test golden --locked
 
+      - name: Preview corpus fetch regression
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-fetch-preview-corpus.py
+
+      - name: Default-feature preview corpus correctness smoke
+        env:
+          IRIS_PREVIEW_CORPUS_MAX_BYTES: "40000000"
+          IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS: "60"
+        run: |
+          corpus_parent=$(mktemp -d "$RUNNER_TEMP/iris-preview.XXXXXX")
+          trap 'rm -rf "$corpus_parent"' EXIT
+          python3 scripts/fetch-preview-corpus.py --output "$corpus_parent/corpus"
+          # PDFium loads from the existing pinned AppDir on Linux; macOS uses Core Graphics.
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            cd "$GITHUB_WORKSPACE/dist/linux/Iris.AppDir/usr/lib/iris"
+          fi
+          cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p iris-thumb-preview \
+            --example preview_corpus_smoke --locked -- "$corpus_parent/corpus"
+
       - name: SFTP readiness deadline regression
         run: bash ./scripts/test-perf-transfer-readiness.sh
 

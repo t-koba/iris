@@ -61,3 +61,7 @@ required-features = ["pdf"]
 [[example]]
 name = "video_thumbnail_smoke"
 required-features = ["video"]
+
+[[example]]
+name = "preview_corpus_smoke"
+required-features = ["video", "pdf", "raw-full"]
