@@ -3,7 +3,7 @@
   "ffmpeg": {
     "repository": "https://github.com/FFmpeg/FFmpeg.git",
     "commit": "db8537d8cc7962bd3d07254d6ceff21d888817d4",
-    "note": "Exact later commit under investigation. The pinned vcpkg FFmpeg port targets 9.0.2; only its hash-pinned 0004 dependency, 0007 library-name and 0045 prebuilt-bin2c patches are adapted for this source, using exact sequential-stage source contexts. Hash-pinned 0047 is omitted only after exact-context proof that upstream already checks UTF-8 for both C and C++."
+    "note": "Exact later commit under investigation. The pinned vcpkg FFmpeg port targets 9.0.2; only its hash-pinned 0004 dependency, 0007 library-name and 0045 prebuilt-bin2c patches are adapted for this source, using exact sequential-stage source contexts. Hash-pinned 0047 is omitted only after exact-context proof that upstream already checks UTF-8 for both C and C++. Hash-pinned 0052 is omitted only after pinned-source proof of the changed private format API and unstable-gated swscale Vulkan component."
   },
   "vcpkg": {
     "repository": "https://github.com/microsoft/vcpkg",
@@ -26,6 +26,15 @@
     "ffmpeg_msvc_utf8_patch": {
       "name": "0047-fix-msvc-utf8.patch",
       "sha256": "76e199ae27fc8f8be518ffa45d07c152abc3a0e05e42130ae5d6b54a26bc5683"
+    },
+    "ffmpeg_unstable_swscale_patch": {
+      "name": "0052-fix-disable-unstable-swscale-link.patch",
+      "sha256": "994fda8511b76943b9843764d52926ee8544c58fb337940ac8e617b50cdff879",
+      "source_sha256": {
+        "configure": "b7aef8b590028bd90261b628ad3fdfd2456d1ac282f8b6d65571bbe190ad78cf",
+        "libswscale/format.c": "a2ea5b2093f06eba8af4ca1ad834a4774900695bd435c90f8c3f598002f044f2",
+        "libswscale/graph.c": "c786ffdc4012f71731f05e44126ea456bd6daa39a8eb1c32a7d124eac7a244fe"
+      }
     }
   },
   "pdfium": {

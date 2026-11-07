@@ -121,6 +121,117 @@ class MsvcUtf8Tests(unittest.TestCase):
             self.assertEqual(source.read_bytes(), MSVC_UTF8_FIXTURE)
 
 
+# Synthetic, bounded context fixture, not fetched FFmpeg or native build proof.
+# Tests explicitly override pins only for positive synthetic cases.
+SWSCALE_BASELINE_PATCH = b"synthetic unstable swscale baseline patch\n"
+SWSCALE_FIXTURE = {
+    "configure": MSVC_UTF8_FIXTURE + b'swscale_vulkan_deps="vulkan unstable"\n',
+    "libswscale/format.c": b"""void ff_sws_chroma_pos(int *pos)
+{
+}
+static void linear_mat3(float *mat)
+{
+}
+static void decode_colors(void *colors)
+{
+}
+""",
+    "libswscale/graph.c": b"#if CONFIG_SWSCALE_VULKAN\ncomponent();\n#endif\n",
+    "libswscale/Makefile": b"OBJS = format.o \\\n       graph.o\n",
+    "libswscale/vulkan/Makefile": b"OBJS-$(CONFIG_SWSCALE_VULKAN) += vulkan/ops.o \\\n       vulkan/input.o\n",
+}
+SWSCALE_HASHES = {name: hashlib.sha256(SWSCALE_FIXTURE[name]).hexdigest()
+                  for name in patcher.SWSCALE_PIN["source_sha256"]}
+
+
+class SwscaleTests(unittest.TestCase):
+    def test_pristine_hash_drift_is_not_supersession(self):
+        self.assertEqual(patcher.SWSCALE_PIN["sha256"],
+                         "994fda8511b76943b9843764d52926ee8544c58fb337940ac8e617b50cdff879")
+        with self.assertRaisesRegex(ValueError, "source digest mismatch"):
+            patcher.validate_unstable_swscale(SWSCALE_FIXTURE)
+        with patch.dict(patcher.SWSCALE_PIN, source_sha256=SWSCALE_HASHES):
+            evidence = patcher.validate_unstable_swscale(SWSCALE_FIXTURE)
+            self.assertEqual(evidence["ffmpeg_commit"], "db8537d8cc7962bd3d07254d6ceff21d888817d4")
+            self.assertEqual(evidence["vcpkg_baseline"], "b8dfe957ec8b5c0ef5c4b31eea594b8486af744f")
+            self.assertEqual(evidence["source_sha256"], {
+                name: hashlib.sha256(data).hexdigest() for name, data in SWSCALE_FIXTURE.items()})
+            self.assertEqual(evidence["contexts_sha256"], {
+                name: hashlib.sha256(context.encode()).hexdigest()
+                for name, context in patcher.swscale_contexts(SWSCALE_FIXTURE).items()})
+            self.assertLess(len(json.dumps(evidence)), 5000)
+            for name in SWSCALE_HASHES:
+                for data in (b"", SWSCALE_FIXTURE[name] * 2, SWSCALE_FIXTURE[name] + b"drift"):
+                    with self.subTest(name=name, data=data), self.assertRaisesRegex(ValueError, "source digest mismatch"):
+                        patcher.validate_unstable_swscale({**SWSCALE_FIXTURE, name: data})
+
+    def test_missing_duplicate_and_altered_contexts(self):
+        # Check semantics separately so the hash guard cannot mask a weak context check.
+        for name in SWSCALE_FIXTURE:
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                patcher.swscale_contexts({**SWSCALE_FIXTURE, name: b""})
+        for name in ("configure", "libswscale/format.c", "libswscale/Makefile",
+                     "libswscale/vulkan/Makefile"):
+            with self.subTest(duplicate=name), self.assertRaises(ValueError):
+                patcher.swscale_contexts({**SWSCALE_FIXTURE, name: SWSCALE_FIXTURE[name] * 2})
+        mutations = (
+            ("configure", b"vulkan unstable", b"vulkan"),
+            ("configure", b'swscale_vulkan_deps=', b' swscale_vulkan_deps='),
+            ("libswscale/format.c", b"static void decode_colors", b"void ff_sws_decode_colors"),
+            ("libswscale/format.c", b"static void decode_colors", b"void decode_colors"),
+            ("libswscale/format.c", b"void ff_sws_chroma_pos", b"#if CONFIG_UNSTABLE\nvoid ff_sws_chroma_pos"),
+            ("libswscale/graph.c", b"CONFIG_SWSCALE_VULKAN", b"CONFIG_VULKAN"),
+            ("libswscale/Makefile", b"OBJS =", b"OBJS-$(CONFIG_UNSTABLE) ="),
+            ("libswscale/vulkan/Makefile", b"OBJS-$(CONFIG_SWSCALE_VULKAN)", b"OBJS"),
+        )
+        for name, before, after in mutations:
+            with self.subTest(name=name, after=after), self.assertRaises(ValueError):
+                patcher.swscale_contexts({**SWSCALE_FIXTURE, name: SWSCALE_FIXTURE[name].replace(before, after)})
+        with self.assertRaises(ValueError):
+            patcher.swscale_contexts({**SWSCALE_FIXTURE, "configure": SWSCALE_FIXTURE["configure"] +
+                                     b'swscale_vulkan_deps="vulkan"\n'})
+
+    def test_omission_evidence_and_sequential_stage_guards(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name, data in SWSCALE_FIXTURE.items():
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            baseline, output = root / patcher.SWSCALE_PIN["name"], root / "evidence.json"
+            baseline.write_bytes(SWSCALE_BASELINE_PATCH)
+            with patch.object(patcher.subprocess, "check_output") as git:
+                with self.assertRaisesRegex(ValueError, "pinned baseline bytes"):
+                    patcher.omit_unstable_swscale(root, baseline, output)
+                git.assert_not_called()
+            self.assertFalse(output.exists())
+            def git_blob(args):
+                self.assertEqual(args[:4], ["git", "-C", str(root), "show"])
+                self.assertTrue(args[-1].startswith(patcher.PINS["ffmpeg"]["commit"] + ":"))
+                return SWSCALE_FIXTURE[args[-1].split(":", 1)[1]]
+            with patch.dict(patcher.SWSCALE_PIN, source_sha256=SWSCALE_HASHES,
+                            sha256=hashlib.sha256(SWSCALE_BASELINE_PATCH).hexdigest()), \
+                    patch.object(patcher.subprocess, "check_output", side_effect=git_blob):
+                # Authorized prior configure patches may alter unrelated lines.
+                (root / "configure").write_bytes(b"# earlier dependency adaptation\n" + SWSCALE_FIXTURE["configure"])
+                patcher.omit_unstable_swscale(root, baseline, output)
+                evidence = json.loads(output.read_text())
+                self.assertEqual(evidence["contexts_sha256"], patcher.validate_unstable_swscale(SWSCALE_FIXTURE)["contexts_sha256"])
+                self.assertNotEqual(evidence["sequential_source_sha256"]["configure"], evidence["source_sha256"]["configure"])
+                output.unlink()
+                for name, bad in (("configure", SWSCALE_FIXTURE["configure"].replace(b"vulkan unstable", b"vulkan")),
+                                  ("libswscale/format.c", SWSCALE_FIXTURE["libswscale/format.c"] + b"// drift\n")):
+                    (root / name).write_bytes(bad)
+                    with self.assertRaises(ValueError):
+                        patcher.omit_unstable_swscale(root, baseline, output)
+                    self.assertFalse(output.exists())
+                    (root / name).write_bytes(SWSCALE_FIXTURE[name])
+                baseline.write_bytes(SWSCALE_BASELINE_PATCH + b"drift")
+                with self.assertRaises(ValueError):
+                    patcher.omit_unstable_swscale(root, baseline, output)
+                self.assertFalse(output.exists())
+
+
 LIB_NAMING_FIXTURE = '''            -mfp16-format=*)      ;;
             -lz)                  echo ${zlib_msvc_lib:-zlib.lib} ;;
             -lx264)               echo libx264.lib ;;

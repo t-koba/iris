@@ -17,6 +17,8 @@ DEPENDENCY_PATCH = PINS["vcpkg"]["ffmpeg_dependency_patch"]
 LIB_NAMING_PATCH = PINS["vcpkg"]["ffmpeg_lib_naming_patch"]
 BIN2C_PATCH = PINS["vcpkg"]["ffmpeg_bin2c_patch"]
 MSVC_UTF8_PATCH = PINS["vcpkg"]["ffmpeg_msvc_utf8_patch"]
+SWSCALE_PATCH = PINS["vcpkg"]["ffmpeg_unstable_swscale_patch"]
+SUPERSEDED_PATCHES = (MSVC_UTF8_PATCH, SWSCALE_PATCH)
 _spec = importlib.util.spec_from_file_location("ffmpeg_patch", ROOT / "ffmpeg-dependency-patch.py")
 patch_validator = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(patch_validator)
@@ -70,9 +72,10 @@ def patch_names(series):
 
 def expected_overlay_names(baseline_names):
     replacements = {item["name"]: item["overlay_name"] for item in PATCH_ADAPTATIONS}
-    if baseline_names.count(MSVC_UTF8_PATCH["name"]) != 1:
-        raise ValueError("expected exactly one pinned upstream-superseded patch")
-    result = [replacements.get(name, name) for name in baseline_names if name != MSVC_UTF8_PATCH["name"]]
+    omitted = {item["name"] for item in SUPERSEDED_PATCHES}
+    if any(baseline_names.count(name) != 1 for name in omitted):
+        raise ValueError("expected exactly one of each pinned upstream-superseded patch")
+    result = [replacements.get(name, name) for name in baseline_names if name not in omitted]
     for item in PATCH_ADAPTATIONS:
         if baseline_names.count(item["name"]) != 1 or result.count(item["overlay_name"]) != 1:
             raise ValueError("expected exactly one pinned patch replacement: " + item["name"])
@@ -129,20 +132,26 @@ def validate_adapted_patch(path, pin):
 
 
 def supersession_evidence(bundle):
-    baseline = "baseline/ports/ffmpeg/" + MSVC_UTF8_PATCH["name"]
-    validate_baseline_patch(bundle / baseline, MSVC_UTF8_PATCH)
-    if (bundle / "overlay/ffmpeg" / MSVC_UTF8_PATCH["name"]).exists():
-        raise ValueError("upstream-superseded patch must not be an overlay file")
-    # Read, never extract, exactly one regular pinned configure member. Recheck
-    # semantics even if a caller supplies a newly hashed manifest/archive.
-    member_name = f"ffmpeg-{COMMIT}/configure"
+    for item in SUPERSEDED_PATCHES:
+        validate_baseline_patch(bundle / "baseline/ports/ffmpeg" / item["name"], item)
+        if (bundle / "overlay/ffmpeg" / item["name"]).exists():
+            raise ValueError("upstream-superseded patch must not be an overlay file")
+    # Never extract external-untrusted source. Require one regular member per
+    # evidence target; duplicate names or links cannot supply source proof.
+    sources = {}
     with tarfile.open(bundle / ARCHIVE) as archive:
-        members = [m for m in archive if m.name == member_name]
-        if len(members) != 1 or not members[0].isfile():
-            raise ValueError("expected exactly one archived pinned configure")
-        configure = archive.extractfile(members[0]).read()
-    return [{"baseline": baseline, "archived_source": member_name,
-             **patch_validator.validate_msvc_utf8(configure)}]
+        members = archive.getmembers()
+        for name in patch_validator.SWSCALE_FILES:
+            matches = [m for m in members if m.name == f"ffmpeg-{COMMIT}/{name}"]
+            if len(matches) != 1 or not matches[0].isfile():
+                raise ValueError("expected exactly one archived pinned " + name)
+            sources[name] = archive.extractfile(matches[0]).read()
+    return [{"baseline": "baseline/ports/ffmpeg/" + MSVC_UTF8_PATCH["name"],
+             "archived_source": f"ffmpeg-{COMMIT}/configure",
+             **patch_validator.validate_msvc_utf8(sources["configure"])},
+            {"baseline": "baseline/ports/ffmpeg/" + SWSCALE_PATCH["name"],
+             "archived_sources": [f"ffmpeg-{COMMIT}/{name}" for name in patch_validator.SWSCALE_FILES],
+             **patch_validator.validate_unstable_swscale(sources)}]
 
 
 def validate_patch_manifest(bundle, manifest):
@@ -177,7 +186,7 @@ def validate_patch_manifest(bundle, manifest):
     overlay_files = dict(zip(overlay_names, overlay["ordered_files"]))
     for baseline_file in baseline["ordered_files"]:
         name = PurePosixPath(baseline_file).name
-        if baseline_file in adapted_baselines or name == MSVC_UTF8_PATCH["name"]:
+        if baseline_file in adapted_baselines or name in {item["name"] for item in SUPERSEDED_PATCHES}:
             continue
         overlay_file = overlay_files[name]
         if (bundle / overlay_file).read_bytes().replace(b"\r\n", b"\n") != (bundle / baseline_file).read_bytes().replace(b"\r\n", b"\n"):
@@ -210,7 +219,7 @@ def create(source, vcpkg, overlay, dest):
                     "--", "ports/ffmpeg", HELPER], check=True)
     for name in names:
         put(dest, "baseline/" + name, git(vcpkg, "show", f"{BASELINE}:{name}"))
-    for item in (*PATCH_ADAPTATIONS, MSVC_UTF8_PATCH):
+    for item in (*PATCH_ADAPTATIONS, *SUPERSEDED_PATCHES):
         validate_baseline_patch(dest / "baseline/ports/ffmpeg" / item["name"], item)
     for path in sorted(overlay.rglob("*")):
         if path.is_file():

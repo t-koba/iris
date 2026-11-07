@@ -28,15 +28,22 @@ foreach ($req in @($ffmpegSourceEvidence, $ffmpegBuildEvidence, $ffmpegBuildconf
     }
 }
 $gate = Get-Content -Raw -LiteralPath $ffmpegSourceEvidence | ConvertFrom-Json
-# Only the pinned, proven upstream supersession is a valid non-application.
-# source-bundle.py rechecks its pristine source context and manifest below.
+# Only pinned, proven upstream supersessions are valid non-applications.
+# source-bundle.py rechecks their pristine source contexts and manifest below.
 $failed = @($gate.patches | Where-Object {
     $_.applies -ne $true -and -not (
-        $_.patch -ceq $pins.vcpkg.ffmpeg_msvc_utf8_patch.name -and
         $_.omitted -eq $true -and $_.applied -eq $false -and
-        $_.evidence.baseline_sha256 -ceq $pins.vcpkg.ffmpeg_msvc_utf8_patch.sha256 -and
-        $_.evidence.ffmpeg_commit -ceq $pins.ffmpeg.commit -and
-        $_.evidence.source_sha256 -cmatch '^[0-9a-f]{64}$'
+        $_.evidence.ffmpeg_commit -ceq $pins.ffmpeg.commit -and (
+            ($_.patch -ceq $pins.vcpkg.ffmpeg_msvc_utf8_patch.name -and
+             $_.evidence.baseline_sha256 -ceq $pins.vcpkg.ffmpeg_msvc_utf8_patch.sha256 -and
+             $_.evidence.source_sha256 -cmatch '^[0-9a-f]{64}$') -or
+            ($_.patch -ceq $pins.vcpkg.ffmpeg_unstable_swscale_patch.name -and
+             $_.evidence.baseline_sha256 -ceq $pins.vcpkg.ffmpeg_unstable_swscale_patch.sha256 -and
+             $_.evidence.vcpkg_baseline -ceq $pins.vcpkg.baseline -and
+             $_.evidence.source_sha256.configure -ceq $pins.vcpkg.ffmpeg_unstable_swscale_patch.source_sha256.configure -and
+             $_.evidence.source_sha256.'libswscale/format.c' -ceq $pins.vcpkg.ffmpeg_unstable_swscale_patch.source_sha256.'libswscale/format.c' -and
+             $_.evidence.source_sha256.'libswscale/graph.c' -ceq $pins.vcpkg.ffmpeg_unstable_swscale_patch.source_sha256.'libswscale/graph.c')
+        )
     )
 })
 if ($failed.Count -gt 0) { throw "refusing to stage: $($failed.Count) vcpkg patches do not apply to the pinned FFmpeg commit" }

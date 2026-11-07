@@ -31,6 +31,7 @@ PORT = b'''vcpkg_from_github(
         0007-fix-lib-naming.patch
         0045-use-prebuilt-bin2c.patch
         0047-fix-msvc-utf8.patch # superseded upstream
+        0052-fix-disable-unstable-swscale-link.patch # changed upstream component
         a-second.patch
 )
 '''
@@ -117,6 +118,11 @@ class BundleTests(unittest.TestCase):
             override = patch.dict(pin, sha256=hashlib.sha256(dependency_test.MSVC_UTF8_BASELINE_PATCH).hexdigest())
             override.start()
             self.addCleanup(override.stop)
+        for pin in (bundle.SWSCALE_PATCH, bundle.patch_validator.SWSCALE_PIN):
+            override = patch.dict(pin, sha256=hashlib.sha256(dependency_test.SWSCALE_BASELINE_PATCH).hexdigest(),
+                                  source_sha256=dependency_test.SWSCALE_HASHES)
+            override.start()
+            self.addCleanup(override.stop)
         self.assertEqual(hashlib.sha256(BASELINE_PATCH).hexdigest(), bundle.DEPENDENCY_PATCH["sha256"])
         with tempfile.TemporaryDirectory() as temp:
             patch_path = Path(temp) / dependency_test.patcher.PIN["name"]
@@ -135,7 +141,7 @@ class BundleTests(unittest.TestCase):
             git("config", "core.autocrlf", "true")
             for name, data in {
                 "upstream.c": b"pristine source\n",
-                "configure": dependency_test.MSVC_UTF8_FIXTURE,
+                **dependency_test.SWSCALE_FIXTURE,
                 "ports/ffmpeg/portfile.cmake": PORT,
                 "ports/ffmpeg/vcpkg.json": b'{}\n',
                 "ports/ffmpeg/z-first.patch": b"first\n",
@@ -144,6 +150,7 @@ class BundleTests(unittest.TestCase):
                 "ports/ffmpeg/0007-fix-lib-naming.patch": LIB_NAMING_BASELINE_PATCH,
                 "ports/ffmpeg/0045-use-prebuilt-bin2c.patch": dependency_test.BIN2C_BASELINE_PATCH.encode(),
                 "ports/ffmpeg/0047-fix-msvc-utf8.patch": dependency_test.MSVC_UTF8_BASELINE_PATCH,
+                "ports/ffmpeg/0052-fix-disable-unstable-swscale-link.patch": dependency_test.SWSCALE_BASELINE_PATCH,
                 "ports/ffmpeg/a-second.patch": b"second\n",
                 bundle.HELPER: b"helper\n",
             }.items():
@@ -164,6 +171,8 @@ class BundleTests(unittest.TestCase):
             overlay_text = overlay_text.replace("0045-use-prebuilt-bin2c.patch", "0045-use-prebuilt-bin2c-pinned.patch")
             overlay_text = overlay_text.replace("        0047-fix-msvc-utf8.patch # superseded upstream\n", "")
             (overlay / "0047-fix-msvc-utf8.patch").unlink()
+            overlay_text = overlay_text.replace("        0052-fix-disable-unstable-swscale-link.patch # changed upstream component\n", "")
+            (overlay / "0052-fix-disable-unstable-swscale-link.patch").unlink()
             overlay_port.write_text(overlay_text)
             adapted = dependency_test.patcher.patch_text(
                 dependency_test.FIXTURE,
@@ -198,7 +207,7 @@ class BundleTests(unittest.TestCase):
                 self.assertIn("# retained inline comment", manifest["patches"]["baseline"]["block"])
                 self.assertEqual([Path(p).name for p in manifest["patches"]["baseline"]["ordered_files"]],
                                  ["z-first.patch", "0004-dependencies.patch", "0005-fix-nasm.patch",
-                                  "0007-fix-lib-naming.patch", "0045-use-prebuilt-bin2c.patch", "0047-fix-msvc-utf8.patch", "a-second.patch"])
+                                  "0007-fix-lib-naming.patch", "0045-use-prebuilt-bin2c.patch", "0047-fix-msvc-utf8.patch", "0052-fix-disable-unstable-swscale-link.patch", "a-second.patch"])
                 self.assertEqual([Path(p).name for p in manifest["patches"]["overlay"]["ordered_files"]],
                                  ["z-first.patch", "0004-dependencies-pinned.patch", "0005-fix-nasm.patch",
                                   "0007-fix-lib-naming-pinned.patch", "0045-use-prebuilt-bin2c-pinned.patch", "a-second.patch"])
@@ -206,14 +215,15 @@ class BundleTests(unittest.TestCase):
                 self.assertEqual(len(manifest["patches"]["adaptations"]), 3)
                 self.assertEqual({item["kind"] for item in manifest["patches"]["adaptations"]},
                                  {"exact-context pinned-source adaptation"})
-                self.assertEqual(len(manifest["patches"]["supersessions"]), 1)
+                self.assertEqual(len(manifest["patches"]["supersessions"]), 2)
                 self.assertEqual(manifest["patches"]["supersessions"][0]["source_sha256"],
-                                 hashlib.sha256(dependency_test.MSVC_UTF8_FIXTURE).hexdigest())
+                                 hashlib.sha256(dependency_test.SWSCALE_FIXTURE["configure"]).hexdigest())
                 # Hash/size mismatches and missing inputs must all stop staging.
                 for name in [bundle.ARCHIVE, "baseline/ports/ffmpeg/0004-dependencies.patch",
                              "baseline/ports/ffmpeg/0007-fix-lib-naming.patch",
                              "baseline/ports/ffmpeg/0045-use-prebuilt-bin2c.patch",
                              "baseline/ports/ffmpeg/0047-fix-msvc-utf8.patch",
+                             "baseline/ports/ffmpeg/0052-fix-disable-unstable-swscale-link.patch",
                              "overlay/ffmpeg/0004-dependencies-pinned.patch",
                              "overlay/ffmpeg/0007-fix-lib-naming-pinned.patch",
                              "overlay/ffmpeg/0045-use-prebuilt-bin2c-pinned.patch",
@@ -250,11 +260,15 @@ class BundleTests(unittest.TestCase):
                     (first / "MANIFEST.json").write_text(json.dumps(changed))
                     with self.assertRaises(ValueError):
                         bundle.verify(first, bundle.record(first / "MANIFEST.json"))
-                for key in ("baseline_sha256", "source_sha256", "contexts_sha256", "kind", "ffmpeg_commit"):
-                    changed = json.loads(json.dumps(manifest))
-                    changed["patches"]["supersessions"][0][key] = "wrong"
-                    verify_changed(changed)
+                for index in (0, 1):
+                    for key in ("baseline_sha256", "source_sha256", "contexts_sha256", "kind", "ffmpeg_commit"):
+                        changed = json.loads(json.dumps(manifest))
+                        changed["patches"]["supersessions"][index][key] = "wrong"
+                        verify_changed(changed)
                 for name, data in (
+                    ("overlay/ffmpeg/0052-fix-disable-unstable-swscale-link.patch", dependency_test.SWSCALE_BASELINE_PATCH),
+                    ("baseline/ports/ffmpeg/0052-fix-disable-unstable-swscale-link.patch", b"changed patch"),
+                    ("overlay/ffmpeg/portfile.cmake", overlay_port.read_bytes().replace(b"        a-second.patch", b"        0052-fix-disable-unstable-swscale-link.patch\n        a-second.patch")),
                     ("overlay/ffmpeg/0047-fix-msvc-utf8.patch", dependency_test.MSVC_UTF8_BASELINE_PATCH),
                     ("baseline/ports/ffmpeg/0047-fix-msvc-utf8.patch", b"changed patch"),
                     ("overlay/ffmpeg/portfile.cmake", overlay_port.read_bytes().replace(b"        a-second.patch", b"        0047-fix-msvc-utf8.patch\n        a-second.patch")),
@@ -271,25 +285,25 @@ class BundleTests(unittest.TestCase):
                         path.write_bytes(original)
                 archive_path = first / bundle.ARCHIVE
                 original = archive_path.read_bytes()
-                for source in (dependency_test.MSVC_UTF8_FIXTURE.replace(b"check_allcflags -utf-8", b"check_cflags -utf-8"),
-                               dependency_test.MSVC_UTF8_FIXTURE * 2,
-                               dependency_test.MSVC_UTF8_FIXTURE + b"# changed source identity\n"):
-                    with tarfile.open(archive_path, "w") as archive:
-                        member = tarfile.TarInfo(f"ffmpeg-{commit}/configure")
-                        member.size = len(source)
-                        archive.addfile(member, io.BytesIO(source))
-                    changed = json.loads(json.dumps(manifest))
-                    changed["files"][bundle.ARCHIVE] = bundle.record(archive_path)
-                    verify_changed(changed)
-                for copies in (0, 2):
-                    with tarfile.open(archive_path, "w") as archive:
-                        for _ in range(copies):
-                            member = tarfile.TarInfo(f"ffmpeg-{commit}/configure")
-                            member.size = len(dependency_test.MSVC_UTF8_FIXTURE)
-                            archive.addfile(member, io.BytesIO(dependency_test.MSVC_UTF8_FIXTURE))
-                    changed = json.loads(json.dumps(manifest))
-                    changed["files"][bundle.ARCHIVE] = bundle.record(archive_path)
-                    verify_changed(changed)
+                # Preserve other members so each source mutation reaches its own
+                # guard, rather than failing first on an unrelated missing file.
+                for name, source in dependency_test.SWSCALE_FIXTURE.items():
+                    for copies, data, symlink in ((0, source, False), (2, source, False),
+                                                  (1, source + b"drift", False), (1, source, True)):
+                        target_name = f"ffmpeg-{commit}/{name}"
+                        with tarfile.open(fileobj=io.BytesIO(original)) as old, tarfile.open(archive_path, "w") as archive:
+                            for member in old:
+                                if member.name != target_name:
+                                    archive.addfile(member, old.extractfile(member) if member.isfile() else None)
+                            for _ in range(copies):
+                                member = tarfile.TarInfo(target_name)
+                                member.size = len(data)
+                                if symlink:
+                                    member.type, member.linkname, member.size = tarfile.SYMTYPE, "other", 0
+                                archive.addfile(member, None if symlink else io.BytesIO(data))
+                        changed = json.loads(json.dumps(manifest))
+                        changed["files"][bundle.ARCHIVE] = bundle.record(archive_path)
+                        verify_changed(changed)
                 archive_path.write_bytes(original)
 
     def test_lib_naming_bundle_patch_is_additive_only(self):

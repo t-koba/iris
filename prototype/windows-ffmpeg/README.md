@@ -86,6 +86,19 @@ behavior, or licensing conclusions, and it never publishes.
    both `check_cxxflags` and `check_cflags`, which test and add their flags.
    Baseline digest, configure digest, commit and context digests are recorded
    as upstream-supersession evidence, not as a successful patch application.
+   `0052-fix-disable-unstable-swscale-link.patch` is also omitted only after
+   verifying its baseline SHA-256 (`994fda85…cdff879`) and the pinned pristine
+   `configure`, `libswscale/format.c` and `graph.c` blob hashes in `pins.json`.
+   Unique function/dependency contexts establish the retained chroma/matrix
+   helpers and private `decode_colors`; old `CONFIG_UNSTABLE` and
+   `ff_sws_decode_colors` format contexts are absent. The graph uses
+   `CONFIG_SWSCALE_VULKAN`, not `CONFIG_VULKAN`; Makefile checks retain compiled
+   format/graph objects and component-gated Vulkan objects, while configure
+   requires `swscale_vulkan_deps="vulkan unstable"`. No source text is executed.
+   `unstable-swscale-supersession.json` records patch/source/context hashes,
+   both commits and rationale; it also records sequential-stage file hashes
+   after checking that earlier patches preserved this evidence. A failed patch
+   application alone never authorizes omission.
    Missing, changed or duplicate contexts stop the run, with no 9.0.2 fallback.
    Per-patch evidence is recorded in `ffmpeg-source.json`. It derives
    a test-only overlay from the baseline port (rewrites to
@@ -93,7 +106,7 @@ behavior, or licensing conclusions, and it never publishes.
    db8537d8cc7962bd3d07254d6ceff21d888817d4)`, validates the pinned helper
    signature and generated parameters, removes the archive hash, replaces only
    the `0004`, `0007` and `0045` PATCHES entries with their pinned-source
-   replacements, omits validated 0047 from PATCHES and overlay patch files,
+   replacements, omits validated 0047/0052 from PATCHES and overlay patch files,
    and marks the overlay `version-string` as the pinned commit);
    then runs `vcpkg install` with the prototype manifest, `--overlay-ports`
    (generated), `--overlay-triplets triplets/`,
@@ -180,8 +193,8 @@ installing FFmpeg. It contains:
   files used for the prototype. Baseline order and unrelated bytes are retained;
   only `0004-dependencies.patch`, `0007-fix-lib-naming.patch` and
   `0045-use-prebuilt-bin2c.patch` are replaced by pinned-source adaptations.
-  Superseded 0047 is absent from both the overlay PATCHES and overlay files;
-  its exact Git blob remains in `baseline/ports/ffmpeg/`. Each adapter checks its
+  Superseded 0047/0052 are absent from both overlay PATCHES and overlay files;
+  their exact Git blobs remain in `baseline/ports/ffmpeg/`. Each adapter checks its
   exact baseline patch digest and source context. The 0004 adapter preserves
   the newer MSVC zlib probe and applies the dependency/link changes; the 0007
   adapter preserves dynamic zlib library-name detection while adding
@@ -202,12 +215,12 @@ pinned baseline patch digests; verifies the untouched overlay patches against
 their Git-blob copies (normalizing checkout line endings only); and requires
 each adapted patch to change only its target (`configure` for 0004/0007,
 `ffbuild/common.mak` for 0045) and retain its intended changes, including the
-dynamic zlib mapping. Schema 4 separately records the 0047 supersession,
-including the baseline hash and archived configure/context hashes. Verification
-reads exactly one regular `configure` member from the pristine pinned archive
-(without extracting it), repeats the MSVC/helper checks, and compares the
-recomputed evidence to the manifest. Rehashed metadata cannot substitute for
-that source proof. Staging accepts only the pinned evidenced omission and
+dynamic zlib mapping. Schema 4 separately records both supersessions,
+including baseline hashes and archived source/context hashes. Verification
+reads exactly one regular member per evidence file from the pristine pinned
+archive (without extracting it), repeats MSVC/helper and unstable-swscale
+checks, and compares the recomputed evidence to the manifest. Rehashed metadata cannot substitute for
+that source proof. Staging accepts only the pinned evidenced omissions and
 verifies all required files, patches and hashes both before and after copying to app
 `doc/ffmpeg-source-bundle/`. The prototype installer
 recursively includes that directory; the evidence artifact retains both the
@@ -244,7 +257,7 @@ require evidence from the Windows prototype run.
   fixture uses a synthetic baseline, not upstream provenance. UTF-8 tests cover
   missing/changed/duplicate MSVC and helper contexts and baseline hash rejection.
 - `python prototype/windows-ffmpeg/test-source-bundle.py` checks deterministic
-  source bundles, all three patch adaptations/order, 0047 baseline retention and
+  source bundles, all three patch adaptations/order, 0047/0052 baseline retention and
   overlay omission, rehashed supersession/source-context tampering, blob/hash integrity, missing or
   corrupted material and package/evidence wiring using synthetic local Git
   repositories. The fixtures are not upstream provenance and do not build

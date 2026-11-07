@@ -78,17 +78,19 @@ foreach ($ending in @("`n", "`r`n")) {
 
 # Omissions use the same exact-entry matcher: quotes/comments/CRLF do not
 # change the proof of one entry, nor may they change surrounding patch bytes.
-foreach ($ending in @("`n", "`r`n")) {
-    foreach ($entry in @('0047-fix-msvc-utf8.patch', '"0047-fix-msvc-utf8.patch"')) {
-        foreach ($comment in @('', ' # superseded upstream')) {
-            $line = '        ' + $entry + $comment + $ending
-            $inputPatch = $patchPortLf.Replace("        last.patch`n", ('        ' + $entry + $comment + "`n        last.patch`n")).Replace("`n", $ending)
-            $omitted = Set-PrototypeFfmpegPatch $inputPatch '0047-fix-msvc-utf8.patch' ''
-            if ($omitted.Portfile -cne $inputPatch.Replace($line, '')) { throw 'omission changed other patch bytes/order' }
-            foreach ($badPatch in @($omitted.Portfile, $inputPatch.Replace('last.patch', $entry))) {
-                $rejected = $false
-                try { Set-PrototypeFfmpegPatch $badPatch '0047-fix-msvc-utf8.patch' '' | Out-Null } catch { $rejected = $true }
-                if (!$rejected) { throw 'accepted missing/duplicate superseded patch' }
+foreach ($patchName in @('0047-fix-msvc-utf8.patch', '0052-fix-disable-unstable-swscale-link.patch')) {
+    foreach ($ending in @("`n", "`r`n")) {
+        foreach ($entry in @($patchName, ('"' + $patchName + '"'))) {
+            foreach ($comment in @('', ' # superseded upstream')) {
+                $line = '        ' + $entry + $comment + $ending
+                $inputPatch = $patchPortLf.Replace("        last.patch`n", ('        ' + $entry + $comment + "`n        last.patch`n")).Replace("`n", $ending)
+                $omitted = Set-PrototypeFfmpegPatch $inputPatch $patchName ''
+                if ($omitted.Portfile -cne $inputPatch.Replace($line, '')) { throw 'omission changed other patch bytes/order' }
+                foreach ($badPatch in @($omitted.Portfile, $inputPatch.Replace('last.patch', $entry))) {
+                    $rejected = $false
+                    try { Set-PrototypeFfmpegPatch $badPatch $patchName '' | Out-Null } catch { $rejected = $true }
+                    if (!$rejected) { throw 'accepted missing/duplicate superseded patch' }
+                }
             }
         }
     }
@@ -120,13 +122,18 @@ if ($build -notmatch '(?s)foreach \(\$name in \$derived.Patches\).*ffmpeg-depend
 if ($build -notmatch 'git apply --check --whitespace=nowarn \$patchPath' -or $build -notmatch 'Set-PrototypeFfmpegPatch') { throw 'baseline patch sequence or fail-closed overlay replacement is missing' }
 Write-Host 'prototype overlay/discovery regressions passed (no native build)'
 
-$omission = $build.IndexOf('if ($name -ceq $supersededPatch.name)')
-$validate = $build.IndexOf('omit-msvc-utf8', $omission)
-$remove = $build.IndexOf("Set-PrototypeFfmpegPatch `$overlayRaw `$name ''", $validate)
-$skip = $build.IndexOf('continue', $remove)
-$apply = $build.IndexOf('git apply --check', $skip)
-if ($omission -lt 0 -or $validate -le $omission -or $remove -le $validate -or $skip -le $remove -or $apply -le $skip) { throw 'supersession must validate, remove and skip before patch application' }
-if ($build -notmatch 'Remove-Item -LiteralPath \(Join-Path \$overlayPortDir \$supersededPatch.name\)') { throw 'superseded patch must not be copied into the overlay' }
+foreach ($omissionCase in @(
+    @{ variable = 'supersededPatch'; command = 'omit-msvc-utf8' },
+    @{ variable = 'swscalePatch'; command = 'omit-unstable-swscale' }
+)) {
+    $omission = $build.IndexOf('if ($name -ceq $' + $omissionCase.variable + '.name)')
+    $validate = $build.IndexOf($omissionCase.command, $omission)
+    $remove = $build.IndexOf("Set-PrototypeFfmpegPatch `$overlayRaw `$name ''", $validate)
+    $skip = $build.IndexOf('continue', $remove)
+    $apply = $build.IndexOf('git apply --check', $skip)
+    if ($omission -lt 0 -or $validate -le $omission -or $remove -le $validate -or $skip -le $remove -or $apply -le $skip) { throw 'supersession must validate, remove and skip before patch application' }
+    if (!$build.Contains('Remove-Item -LiteralPath (Join-Path $overlayPortDir $' + $omissionCase.variable + '.name)')) { throw 'superseded patch must not be copied into the overlay' }
+}
 
 # Execute the real staging filter with synthetic records, without staging/builds.
 $filter = [regex]::Match($stage, '(?s)\$failed = @\(\$gate.patches \| Where-Object \{.*?\n\}\)')
@@ -137,15 +144,33 @@ $validOmission = @{
     patch = $pins.vcpkg.ffmpeg_msvc_utf8_patch.name; omitted = $true; applied = $false
     evidence = @{ baseline_sha256 = $pins.vcpkg.ffmpeg_msvc_utf8_patch.sha256; ffmpeg_commit = $pins.ffmpeg.commit; source_sha256 = ('a' * 64) }
 }
-foreach ($record in @(@{ applies = $true }, $validOmission)) {
+$validSwscaleOmission = @{
+    patch = $pins.vcpkg.ffmpeg_unstable_swscale_patch.name; omitted = $true; applied = $false
+    evidence = @{
+        baseline_sha256 = $pins.vcpkg.ffmpeg_unstable_swscale_patch.sha256
+        ffmpeg_commit = $pins.ffmpeg.commit; vcpkg_baseline = $pins.vcpkg.baseline
+        source_sha256 = $pins.vcpkg.ffmpeg_unstable_swscale_patch.source_sha256
+    }
+}
+foreach ($record in @(@{ applies = $true }, $validOmission, $validSwscaleOmission)) {
     $gate = @{ patches = @($record) }
     . $filterCode
     if ($failed.Count -ne 0) { throw 'staging rejected applied patch or verified omission' }
 }
-foreach ($field in @('patch', 'omitted', 'applied', 'evidence')) {
-    $bad = $validOmission.Clone()
-    $bad[$field] = $null
+foreach ($valid in @($validOmission, $validSwscaleOmission)) {
+    foreach ($field in @('patch', 'omitted', 'applied', 'evidence')) {
+        $bad = $valid.Clone()
+        $bad[$field] = $null
+        $gate = @{ patches = @($bad) }
+        . $filterCode
+        if ($failed.Count -ne 1) { throw "staging accepted invalid omission: $field" }
+    }
+}
+foreach ($field in @('baseline_sha256', 'ffmpeg_commit', 'vcpkg_baseline', 'source_sha256')) {
+    $bad = $validSwscaleOmission.Clone()
+    $bad.evidence = $validSwscaleOmission.evidence.Clone()
+    $bad.evidence[$field] = $null
     $gate = @{ patches = @($bad) }
     . $filterCode
-    if ($failed.Count -ne 1) { throw "staging accepted invalid omission: $field" }
+    if ($failed.Count -ne 1) { throw "staging accepted incomplete swscale evidence: $field" }
 }

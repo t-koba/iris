@@ -5,6 +5,7 @@ import json
 import re
 from pathlib import Path
 import sys
+import subprocess
 
 ROOT = Path(__file__).resolve().parent
 PINS = json.loads((ROOT / "pins.json").read_text(encoding="utf-8-sig"))
@@ -12,6 +13,7 @@ PIN = PINS["vcpkg"]["ffmpeg_dependency_patch"]
 LIB_NAMING_PIN = PINS["vcpkg"]["ffmpeg_lib_naming_patch"]
 BIN2C_PIN = PINS["vcpkg"]["ffmpeg_bin2c_patch"]
 MSVC_UTF8_PIN = PINS["vcpkg"]["ffmpeg_msvc_utf8_patch"]
+SWSCALE_PIN = PINS["vcpkg"]["ffmpeg_unstable_swscale_patch"]
 
 # Exact pinned-commit configure contexts. These carry the vcpkg 9.0.2 patch's
 # dependency/link changes while accepting only the known newer source shape.
@@ -134,6 +136,98 @@ def validate_msvc_utf8(configure):
 def omit_msvc_utf8(configure_path, baseline_patch_path, output_path):
     validate_baseline_patch(baseline_patch_path, MSVC_UTF8_PIN)
     evidence = validate_msvc_utf8(Path(configure_path).read_bytes())
+    Path(output_path).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+
+
+# These inputs are read as data, never executed. The three full Git-blob hashes
+# pin the changed APIs and configure semantics, not merely a failed patch hunk.
+SWSCALE_FILES = ("configure", "libswscale/format.c", "libswscale/graph.c",
+                 "libswscale/Makefile", "libswscale/vulkan/Makefile")
+SWSCALE_DEPS = 'swscale_vulkan_deps="vulkan unstable"\n'
+
+
+def swscale_contexts(sources):
+    texts = {name: sources[name].decode("utf-8").replace("\r\n", "\n")
+             for name in SWSCALE_FILES}
+    contexts = {}
+
+    def unique(name, label, pattern):
+        matches = re.findall(pattern, texts[name], re.MULTILINE)
+        if len(matches) != 1 or texts[name].count(matches[0]) != 1:
+            raise ValueError("expected exactly one pinned swscale " + label + " context")
+        contexts[name + ":" + label] = matches[0]
+
+    unique("configure", "unstable dependency", r'^[ \t]*swscale_vulkan_deps[ \t]*[+?]?=[^\n]*\n')
+    if contexts["configure:unstable dependency"] != SWSCALE_DEPS:
+        raise ValueError("pinned swscale Vulkan must depend on vulkan and unstable")
+    fmt = texts["libswscale/format.c"]
+    if "CONFIG_UNSTABLE" in fmt or "ff_sws_decode_colors" in fmt:
+        raise ValueError("old unstable format API/context is present")
+    for symbol, prefix in (("ff_sws_chroma_pos", ""), ("linear_mat3", "static "),
+                           ("decode_colors", "static ")):
+        unique("libswscale/format.c", symbol,
+               r'^' + prefix + r'[^;{}\n]*\b' + symbol + r'\([^;{}]*?\)\s*\{')
+    graph = texts["libswscale/graph.c"]
+    if re.search(r'\bCONFIG_VULKAN\b', graph) or "CONFIG_SWSCALE_VULKAN" not in graph:
+        raise ValueError("pinned graph must use the swscale Vulkan component, not CONFIG_VULKAN")
+    # Multiple component guards are legitimate; their exact layout is bound by
+    # the graph.c blob pin. Retain their ordered lines as one bounded context.
+    contexts["libswscale/graph.c:component guards"] = "".join(
+        line for line in graph.splitlines(keepends=True) if "CONFIG_SWSCALE_VULKAN" in line)
+    # Join continued Make rules before checking the two compiled C objects and
+    # the component gate for every Vulkan object assignment.
+    make = texts["libswscale/Makefile"].replace("\\\n", " ")
+    for obj in ("format.o", "graph.o"):
+        matches = re.findall(r'^OBJS[ \t]*\+?=[^\n]*\b' + re.escape(obj) + r'[^\n]*\n', make, re.MULTILINE)
+        if len(matches) != 1 or len(re.findall(r'(?<![\w/])' + re.escape(obj) + r'\b', make)) != 1:
+            raise ValueError("expected unique compiled swscale object " + obj)
+        contexts["libswscale/Makefile:" + obj] = matches[0]
+    vulkan = texts["libswscale/vulkan/Makefile"].replace("\\\n", " ")
+    rules = re.findall(r'^.*=[^\n]*\.o(?:[ \t]|$)[^\n]*', vulkan, re.MULTILINE)
+    if not rules or any(not re.match(r'^OBJS-\$\(CONFIG_SWSCALE_VULKAN\)[ \t]*\+=', rule) for rule in rules):
+        raise ValueError("Vulkan objects must be gated by CONFIG_SWSCALE_VULKAN")
+    if len(set(rules)) != len(rules):
+        raise ValueError("duplicate swscale Vulkan object context")
+    contexts["libswscale/vulkan/Makefile:component objects"] = "\n".join(rules)
+    return contexts
+
+
+def validate_unstable_swscale(sources):
+    for name, digest in SWSCALE_PIN["source_sha256"].items():
+        if hashlib.sha256(sources[name]).hexdigest() != digest:
+            raise ValueError("pinned swscale source digest mismatch: " + name)
+    contexts = swscale_contexts(sources)
+    return {
+        "kind": "upstream-superseded unstable swscale link patch",
+        "ffmpeg_commit": PINS["ffmpeg"]["commit"],
+        "vcpkg_baseline": PINS["vcpkg"]["baseline"],
+        "baseline_sha256": SWSCALE_PIN["sha256"],
+        "source_sha256": {name: hashlib.sha256(sources[name]).hexdigest() for name in SWSCALE_FILES},
+        "contexts_sha256": {label: hashlib.sha256(context.encode()).hexdigest()
+                            for label, context in contexts.items()},
+        "rationale": "Old format.c CONFIG_UNSTABLE and ff_sws_decode_colors contexts/API names are absent; "
+                     "ff_sws_chroma_pos, linear_mat3 and private decode_colors remain compiled by format.o/graph.o. "
+                     "graph.c uses CONFIG_SWSCALE_VULKAN, whose Vulkan objects are component-gated and whose "
+                     "configure dependencies are vulkan and unstable. Patch failure alone is not supersession proof.",
+    }
+
+
+def omit_unstable_swscale(source_root, baseline_patch_path, output_path):
+    validate_baseline_patch(baseline_patch_path, SWSCALE_PIN)
+    # Read pristine Git blobs as well as the sequential patch-stage checkout:
+    # earlier authorized configure adaptations change its full-file digest.
+    pristine = {name: subprocess.check_output([
+        "git", "-C", str(source_root), "show", PINS["ffmpeg"]["commit"] + ":" + name])
+        for name in SWSCALE_FILES}
+    evidence = validate_unstable_swscale(pristine)
+    stage = {name: (Path(source_root) / name).read_bytes() for name in SWSCALE_FILES}
+    if swscale_contexts(stage) != swscale_contexts(pristine):
+        raise ValueError("sequential-stage swscale contexts differ from pinned source")
+    for name in SWSCALE_FILES[1:]:
+        if stage[name].replace(b"\r\n", b"\n") != pristine[name]:
+            raise ValueError("sequential-stage swscale source changed: " + name)
+    evidence["sequential_source_sha256"] = {
+        name: hashlib.sha256(stage[name]).hexdigest() for name in SWSCALE_FILES}
     Path(output_path).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
 
 
@@ -260,7 +354,7 @@ def generate_bin2c(source_path, baseline_patch_path, output_path):
 
 if __name__ == "__main__":
     if len(sys.argv) != 5:
-        raise SystemExit("usage: ffmpeg-dependency-patch.py <adapt|adapt-lib-naming|adapt-bin2c|omit-msvc-utf8> <source-target> <baseline-patch> <output-patch>")
+        raise SystemExit("usage: ffmpeg-dependency-patch.py <adapt|adapt-lib-naming|adapt-bin2c|omit-msvc-utf8|omit-unstable-swscale> <source-target> <baseline-patch> <output-patch>")
     if sys.argv[1] == "adapt":
         digest = generate(sys.argv[2], sys.argv[3], sys.argv[4])
         print(f"generated pinned dependency patch sha256={digest}")
@@ -272,5 +366,7 @@ if __name__ == "__main__":
         print(f"generated pinned prebuilt-bin2c patch sha256={digest}")
     elif sys.argv[1] == "omit-msvc-utf8":
         omit_msvc_utf8(*sys.argv[2:])
+    elif sys.argv[1] == "omit-unstable-swscale":
+        omit_unstable_swscale(*sys.argv[2:])
     else:
-        raise SystemExit("expected adapt, adapt-lib-naming, adapt-bin2c or omit-msvc-utf8")
+        raise SystemExit("expected adapt, adapt-lib-naming, adapt-bin2c, omit-msvc-utf8 or omit-unstable-swscale")
