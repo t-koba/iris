@@ -4,6 +4,8 @@ on:
   push:
     branches-ignore:
       - mizu
+    tags:
+      - '**'
   pull_request:
   workflow_dispatch:
   schedule:
@@ -34,6 +36,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      - name: Workflow trigger policy regression
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-workflow-triggers.py
 
       - uses: dtolnay/rust-toolchain@master
         with:

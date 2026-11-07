@@ -9,6 +9,8 @@ on:
   push:
     branches-ignore:
       - mizu
+    tags:
+      - '**'
     paths:
       - "prototype/windows-ffmpeg/**"
       - "Cargo.toml"
