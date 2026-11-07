@@ -116,104 +116,260 @@ fn extract_pdf_text_from_reader(reader: impl Read, limits: PdfTextLimits) -> Pdf
     }
 }
 
-// Select the stream dictionary start as the last `<<` outside `%` comments.
+// Select the stream dictionary start as the last `<<` outside PDF comments,
+// literal strings (with nesting/escapes), and hex strings.
 // A valid comment between the closing `>>` and `stream` may hold
 // delimiter-like bytes (`<<`, `>>`) and fake `/Filter`/`/DecodeParms` text;
 // ignoring comment bytes keeps such plain streams extractable while real
 // nested dictionaries still fail closed in `stream_uses_flate`.
 fn last_dict_start(prefix: &[u8]) -> Option<usize> {
     let mut last = None;
-    let mut in_comment = false;
     let mut index = 0;
     while index < prefix.len() {
-        let byte = prefix[index];
-        if in_comment {
-            if byte == b'\r' || byte == b'\n' {
-                in_comment = false;
+        match prefix[index] {
+            b'%' => {
+                index += 1;
+                while index < prefix.len() && prefix[index] != b'\r' && prefix[index] != b'\n' {
+                    index += 1;
+                }
             }
-            index += 1;
-            continue;
+            b'(' => {
+                let Some(next) = skip_dict_literal(prefix, index) else {
+                    break;
+                };
+                index = next;
+            }
+            b'<' => {
+                if prefix.get(index + 1) == Some(&b'<') {
+                    last = Some(index);
+                    index += 2;
+                } else {
+                    let Some(next) = skip_dict_hex(prefix, index) else {
+                        break;
+                    };
+                    index = next;
+                }
+            }
+            _ => index += 1,
         }
-        if byte == b'%' {
-            in_comment = true;
-            index += 1;
-            continue;
+    }
+    last
+}
+
+fn is_pdf_whitespace(byte: u8) -> bool {
+    matches!(byte, 0 | 9 | 10 | 12 | 13 | 32)
+}
+
+fn skip_dict_literal(bytes: &[u8], start: usize) -> Option<usize> {
+    debug_assert_eq!(bytes.get(start), Some(&b'('));
+    let mut depth = 1usize;
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => {
+                index += 1;
+                bytes.get(index)?;
+                index += 1;
+            }
+            b'(' => {
+                depth += 1;
+                index += 1;
+            }
+            b')' => {
+                depth -= 1;
+                index += 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => index += 1,
         }
-        if byte == b'<' && prefix.get(index + 1) == Some(&b'<') {
-            last = Some(index);
+    }
+    None
+}
+
+fn skip_dict_hex(bytes: &[u8], start: usize) -> Option<usize> {
+    debug_assert_eq!(bytes.get(start), Some(&b'<'));
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'>' {
+            return Some(index + 1);
         }
         index += 1;
     }
-    last
+    None
 }
 
 // Only an absent Filter or a single direct /FlateDecode name is supported.
 // Arrays (even single-element ones), indirect values, duplicate keys and decode
 // parameters are not interpreted: a partial decode must never produce a negative
 // search signature. Nested dictionaries are conservatively rejected.
+// Dictionary scanning is lexical: `<<`/`>>` tokens and `/Filter`/`/DecodeParms`
+// keys inside `%` comments, `(...)` literal strings (with nesting/escapes), or
+// `<...>` hex strings never alter decoding.
 fn stream_uses_flate(dict: &[u8]) -> Option<bool> {
-    let dict = dict.trim_ascii_start().strip_prefix(b"<<")?;
-    let end = find_bytes(dict, b">>")?;
-    let mut gap = &dict[end + 2..];
+    let is_boundary = |byte: u8| is_pdf_whitespace(byte) || b"()<>[]{}/%".contains(&byte);
+    let mut pos = 0;
     loop {
-        gap = gap.trim_ascii_start();
-        // NUL is also PDF whitespace, though not ASCII whitespace.
-        if let Some(rest) = gap.strip_prefix(b"\0") {
-            gap = rest;
-        } else if gap.starts_with(b"%") {
-            let end = gap.iter().position(|byte| matches!(byte, b'\r' | b'\n'))?;
-            gap = &gap[end..];
-        } else if gap.is_empty() {
-            break;
-        } else {
-            return None;
+        while pos < dict.len() && is_pdf_whitespace(dict[pos]) {
+            pos += 1;
         }
+        if dict.get(pos) == Some(&b'%') {
+            pos += 1;
+            let mut found = false;
+            while pos < dict.len() {
+                if dict[pos] == b'\r' || dict[pos] == b'\n' {
+                    found = true;
+                    break;
+                }
+                pos += 1;
+            }
+            if !found {
+                return None;
+            }
+            continue;
+        }
+        break;
     }
-    let dict = &dict[..end];
-    // Selection starts at the last << outside comments. Any remaining dictionary delimiter means
-    // that this is not an unambiguous, flat stream dictionary (e.g. DecodeParms
-    // hid the enclosing Filter). Never treat its encoded bytes as plain text.
-    if dict
-        .windows(2)
-        .any(|token| token == b"<<" || token == b">>")
-    {
+    if dict.get(pos) != Some(&b'<') || dict.get(pos + 1) != Some(&b'<') {
         return None;
     }
-    let is_boundary = |byte: u8| byte.is_ascii_whitespace() || b"\0()<>[]{}/%".contains(&byte);
-    if dict
-        .windows(b"/DecodeParms".len())
-        .enumerate()
-        .any(|(pos, token)| {
-            token == b"/DecodeParms"
+    pos += 2;
+    let mut first_filter: Option<usize> = None;
+    let mut duplicate_filter = false;
+    let mut has_decode_parms = false;
+    let close: usize;
+    loop {
+        if pos >= dict.len() {
+            return None;
+        }
+        let byte = dict[pos];
+        if is_pdf_whitespace(byte) {
+            pos += 1;
+            continue;
+        }
+        if byte == b'%' {
+            pos += 1;
+            let mut found = false;
+            while pos < dict.len() {
+                if dict[pos] == b'\r' || dict[pos] == b'\n' {
+                    found = true;
+                    break;
+                }
+                pos += 1;
+            }
+            if !found {
+                return None;
+            }
+            continue;
+        }
+        if byte == b'(' {
+            let next = skip_dict_literal(dict, pos)?;
+            pos = next;
+            continue;
+        }
+        if byte == b'<' {
+            if dict.get(pos + 1) == Some(&b'<') {
+                return None;
+            }
+            let next = skip_dict_hex(dict, pos)?;
+            pos = next;
+            continue;
+        }
+        if byte == b'>' {
+            if dict.get(pos + 1) == Some(&b'>') {
+                close = pos;
+                pos += 2;
+                break;
+            }
+            pos += 1;
+            continue;
+        }
+        if byte == b'/' {
+            if dict[pos..].starts_with(b"/DecodeParms")
                 && dict
                     .get(pos + b"/DecodeParms".len())
                     .is_none_or(|byte| is_boundary(*byte))
-        })
-    {
-        return None;
-    }
-    let mut filters = dict
-        .windows(b"/Filter".len())
-        .enumerate()
-        .filter(|(pos, token)| {
-            *token == b"/Filter"
+            {
+                has_decode_parms = true;
+            }
+            if dict[pos..].starts_with(b"/Filter")
                 && dict
                     .get(pos + b"/Filter".len())
                     .is_none_or(|byte| is_boundary(*byte))
-        });
-    let Some((pos, _)) = filters.next() else {
-        return Some(false);
-    };
-    if filters.next().is_some() {
+            {
+                if first_filter.is_some() {
+                    duplicate_filter = true;
+                } else {
+                    first_filter = Some(pos);
+                }
+            }
+            pos += 1;
+            continue;
+        }
+        pos += 1;
+    }
+    let mut gap = pos;
+    loop {
+        while gap < dict.len() && is_pdf_whitespace(dict[gap]) {
+            gap += 1;
+        }
+        if gap >= dict.len() {
+            break;
+        }
+        if dict[gap] == b'%' {
+            gap += 1;
+            let mut found = false;
+            while gap < dict.len() {
+                if dict[gap] == b'\r' || dict[gap] == b'\n' {
+                    found = true;
+                    break;
+                }
+                gap += 1;
+            }
+            if !found {
+                return None;
+            }
+            continue;
+        }
         return None;
     }
-    let value = dict[pos + b"/Filter".len()..]
-        .trim_ascii_start()
-        .strip_prefix(b"/FlateDecode")?;
-    value
-        .first()
-        .is_none_or(|byte| is_boundary(*byte))
-        .then_some(true)
+    if has_decode_parms || duplicate_filter {
+        return None;
+    }
+    let Some(filter_pos) = first_filter else {
+        return Some(false);
+    };
+    let mut value = filter_pos + b"/Filter".len();
+    loop {
+        while value < close && is_pdf_whitespace(dict[value]) {
+            value += 1;
+        }
+        if value < close && dict[value] == b'%' {
+            value += 1;
+            let mut found = false;
+            while value < close {
+                if dict[value] == b'\r' || dict[value] == b'\n' {
+                    found = true;
+                    break;
+                }
+                value += 1;
+            }
+            if !found {
+                return None;
+            }
+            continue;
+        }
+        break;
+    }
+    if value >= close || !dict[value..close].starts_with(b"/FlateDecode") {
+        return None;
+    }
+    let after = value + b"/FlateDecode".len();
+    if after < close && !is_boundary(dict[after]) {
+        return None;
+    }
+    Some(true)
 }
 
 fn extract_text_operators(stream: &[u8], output: &mut TextOutput) -> bool {
@@ -447,6 +603,43 @@ endobj
             assert!(!result.truncated, "{gap:?}");
             assert_eq!(result.pages_scanned, None);
         }
+    }
+
+    #[test]
+    fn extracts_plain_stream_when_dictionary_literal_holds_dict_close() {
+        // The exact `>>` inside a literal string must not close the dictionary.
+        // A trailing comment may also hold delimiters and fake filters.
+        let pdf = b"%PDF-1.4\n<< /Metadata (a >> b) >> % comment\nstream\n(needle) Tj\nendstream";
+        let result = extract_pdf_text_from_reader(pdf.as_slice(), LIMITS);
+        assert_eq!(result.text, "needle");
+        assert!(!result.truncated);
+        assert_eq!(result.pages_scanned, None);
+    }
+
+    #[test]
+    fn ignores_dictionary_delimiters_and_filters_inside_strings_and_comments() {
+        for dict in [
+            "<< /Metadata (a >> b) >>",
+            "<< /Metadata (nested (a >> b) \\) >> c) >>",
+            "<< /Metadata <48656C6C6F> >>",
+            "<< % << >> /Filter /ASCII85Decode\n /Length 12 >>",
+            "<< /Metadata (/Filter /FlateDecode /DecodeParms) >>",
+            "<< /Metadata (a % not a comment >>) >>",
+            "<< /Metadata <2F46696C746572> >>",
+        ] {
+            let pdf = format!(
+                "%PDF-1.4\n{dict} % trailing << >> /Filter /ASCII85Decode\nstream\n(needle) Tj\nendstream"
+            );
+            let result = extract_pdf_text_from_reader(pdf.as_bytes(), LIMITS);
+            assert_eq!(result.text, "needle", "{dict}");
+            assert!(!result.truncated, "{dict}");
+            assert_eq!(result.pages_scanned, None);
+        }
+        // A real nested dictionary still fails closed even with the lexical scan.
+        let pdf = b"%PDF-1.4\n<< /DecodeParms << /Columns 5 >> >>\nstream\n(needle)\nendstream";
+        let result = extract_pdf_text_from_reader(pdf.as_slice(), LIMITS);
+        assert!(result.truncated);
+        assert_ne!(result.text, "needle");
     }
 
     #[test]

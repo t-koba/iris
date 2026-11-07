@@ -1286,7 +1286,7 @@ mod tests {
         let path = temp.path().join("doc.pdf");
         std::fs::write(
             &path,
-            b"%PDF-1.4\n<< /Length 12 >> % comment\nstream\n(needle) Tj\nendstream",
+            b"%PDF-1.4\n<< /Length 12 /Metadata (a >> b) >> % comment\nstream\n(needle) Tj\nendstream",
         )
         .unwrap();
         let limits = crate::config::PdfTextSearchSettings::default().limits();
