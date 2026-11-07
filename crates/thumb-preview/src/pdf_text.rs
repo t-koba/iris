@@ -79,9 +79,7 @@ fn extract_pdf_text_from_reader(reader: impl Read, limits: PdfTextLimits) -> Pdf
         };
         let end_token = data_start + end_rel;
         let data_end = trim_stream_line_end(&bytes, end_token).max(data_start);
-        let dict_start = bytes[cursor..stream_start_token]
-            .windows(2)
-            .rposition(|window| window == b"<<")
+        let dict_start = last_dict_start(&bytes[cursor..stream_start_token])
             .map_or(stream_start_token, |pos| cursor + pos);
         let dict = &bytes[dict_start..stream_start_token];
         let raw = &bytes[data_start..data_end];
@@ -118,13 +116,61 @@ fn extract_pdf_text_from_reader(reader: impl Read, limits: PdfTextLimits) -> Pdf
     }
 }
 
+// Select the stream dictionary start as the last `<<` outside `%` comments.
+// A valid comment between the closing `>>` and `stream` may hold
+// delimiter-like bytes (`<<`, `>>`) and fake `/Filter`/`/DecodeParms` text;
+// ignoring comment bytes keeps such plain streams extractable while real
+// nested dictionaries still fail closed in `stream_uses_flate`.
+fn last_dict_start(prefix: &[u8]) -> Option<usize> {
+    let mut last = None;
+    let mut in_comment = false;
+    let mut index = 0;
+    while index < prefix.len() {
+        let byte = prefix[index];
+        if in_comment {
+            if byte == b'\r' || byte == b'\n' {
+                in_comment = false;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'%' {
+            in_comment = true;
+            index += 1;
+            continue;
+        }
+        if byte == b'<' && prefix.get(index + 1) == Some(&b'<') {
+            last = Some(index);
+        }
+        index += 1;
+    }
+    last
+}
+
 // Only an absent Filter or a single direct /FlateDecode name is supported.
 // Arrays (even single-element ones), indirect values, duplicate keys and decode
 // parameters are not interpreted: a partial decode must never produce a negative
 // search signature. Nested dictionaries are conservatively rejected.
 fn stream_uses_flate(dict: &[u8]) -> Option<bool> {
-    let dict = dict.trim_ascii().strip_prefix(b"<<")?.strip_suffix(b">>")?;
-    // Selection starts at the last <<. Any remaining dictionary delimiter means
+    let dict = dict.trim_ascii_start().strip_prefix(b"<<")?;
+    let end = find_bytes(dict, b">>")?;
+    let mut gap = &dict[end + 2..];
+    loop {
+        gap = gap.trim_ascii_start();
+        // NUL is also PDF whitespace, though not ASCII whitespace.
+        if let Some(rest) = gap.strip_prefix(b"\0") {
+            gap = rest;
+        } else if gap.starts_with(b"%") {
+            let end = gap.iter().position(|byte| matches!(byte, b'\r' | b'\n'))?;
+            gap = &gap[end..];
+        } else if gap.is_empty() {
+            break;
+        } else {
+            return None;
+        }
+    }
+    let dict = &dict[..end];
+    // Selection starts at the last << outside comments. Any remaining dictionary delimiter means
     // that this is not an unambiguous, flat stream dictionary (e.g. DecodeParms
     // hid the enclosing Filter). Never treat its encoded bytes as plain text.
     if dict
@@ -376,6 +422,34 @@ endobj
     }
 
     #[test]
+    fn extracts_plain_stream_after_dictionary_comments() {
+        for gap in [
+            " % comment\n",
+            "\0\t\x0c % /Filter /ASCII85Decode\r% /DecodeParms\r\n ",
+        ] {
+            let pdf = format!("%PDF-1.4\n<< /Length 12 >>{gap}stream\n(needle) Tj\nendstream");
+            let result = extract_pdf_text_from_reader(pdf.as_bytes(), LIMITS);
+            assert_eq!(result.text, "needle", "{gap:?}");
+            assert!(!result.truncated, "{gap:?}");
+            assert_eq!(result.pages_scanned, None);
+        }
+    }
+
+    #[test]
+    fn extracts_plain_stream_when_trailing_comment_holds_delimiters_and_fake_filters() {
+        for gap in [
+            " % << >> /Filter /ASCII85Decode /DecodeParms 2 0 R\n",
+            " % /DecodeParms << /Columns 5 >> << >> /Filter /ASCII85Decode\r% /DecodeParms 2 0 R\n ",
+        ] {
+            let pdf = format!("%PDF-1.4\n<< /Length 12 >>{gap}stream\n(needle) Tj\nendstream");
+            let result = extract_pdf_text_from_reader(pdf.as_bytes(), LIMITS);
+            assert_eq!(result.text, "needle", "{gap:?}");
+            assert!(!result.truncated, "{gap:?}");
+            assert_eq!(result.pages_scanned, None);
+        }
+    }
+
+    #[test]
     fn extracts_text_from_flate_stream() {
         use flate2::{write::ZlibEncoder, Compression};
         use std::io::Write;
@@ -427,11 +501,13 @@ endobj
             "/Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns 5 >>",
             "/DecodeParms << /Columns 5 >> /Filter /ASCII85Decode",
             "/DecodeParms << /Columns 5 >>",
+            "/Other << /Columns 5 >>",
             "/Filter /FlateDecode /DecodeParms 2 0 R",
         ] {
-            let mut pdf =
-                format!("%PDF-1.4\n<< {dictionary} >>\nstream\n(must not extract)\nendstream\n")
-                    .into_bytes();
+            let mut pdf = format!(
+                "%PDF-1.4\n<< {dictionary} >> % comment\nstream\n(must not extract)\nendstream\n"
+            )
+            .into_bytes();
             pdf.extend_from_slice(&stream_pdf(&[(b"(later text)", false)]));
             let result = extract_pdf_text_from_reader(pdf.as_slice(), LIMITS);
             assert!(result.truncated, "{dictionary}");

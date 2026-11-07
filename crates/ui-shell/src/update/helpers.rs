@@ -1281,6 +1281,24 @@ mod tests {
     }
 
     #[test]
+    fn pdf_content_search_reads_stream_after_dictionary_comment() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("doc.pdf");
+        std::fs::write(
+            &path,
+            b"%PDF-1.4\n<< /Length 12 >> % comment\nstream\n(needle) Tj\nendstream",
+        )
+        .unwrap();
+        let limits = crate::config::PdfTextSearchSettings::default().limits();
+        let signature = pdf_content_signature(&path, limits).expect("text signature");
+        assert!(signature.might_contain_query("needle"));
+        assert_eq!(
+            pdf_content_snippet(&path, "needle", limits, &PdfScanLabels::localized()),
+            Some("needle".to_string())
+        );
+    }
+
+    #[test]
     fn pdf_content_signature_reads_text_layer() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("doc.pdf");
