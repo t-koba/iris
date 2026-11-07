@@ -82,7 +82,9 @@ Write-Host "Rust vcpkg discovery: $env:VCPKG_ROOT/installed/$env:VCPKGRS_TRIPLET
 
 Set-Location $repoRoot
 # Product defaults only: no --no-default-features, no minimal variant.
-cargo build --locked --release -p iris-ui-shell --bin Iris
+# The helper applies only the pinned binding override, verifies the temporary
+# dependency graph, and restores the original Cargo.lock bytes in finally.
+& python (Join-Path $scriptDir "prototype-binding-build.py")
 if ($LASTEXITCODE -ne 0) { throw "default-feature Iris build failed" }
 $irisExe = Join-Path $repoRoot "target/release/Iris.exe"
 if (!(Test-Path -LiteralPath $irisExe -PathType Leaf)) { throw "default-feature Iris.exe missing: $irisExe" }
@@ -112,6 +114,7 @@ $bundleRecord = $build.source_bundle_manifest
 if (!$bundleRecord -or !$bundleRecord.sha256 -or !$bundleRecord.bytes) { throw "refusing to stage: source bundle manifest identity missing" }
 & python (Join-Path $scriptDir "source-bundle.py") stage (Join-Path $ffmpegDir "source-bundle") (Join-Path $docDir "ffmpeg-source-bundle") $bundleRecord.sha256 $bundleRecord.bytes
 if ($LASTEXITCODE -ne 0) { throw "refusing to stage: source bundle missing or hash/byte mismatch" }
+Copy-Item -LiteralPath (Join-Path $ffmpegDir "binding-override.json") -Destination (Join-Path $docDir "binding-override.json") -Force
 Copy-Item -LiteralPath $pinsPath -Destination (Join-Path $docDir "pins.json") -Force
 Copy-Item -LiteralPath (Join-Path $scriptDir "vcpkg.json") -Destination (Join-Path $docDir "vcpkg.json") -Force
 Copy-Item -LiteralPath (Join-Path $scriptDir "vcpkg-configuration.json") -Destination (Join-Path $docDir "vcpkg-configuration.json") -Force

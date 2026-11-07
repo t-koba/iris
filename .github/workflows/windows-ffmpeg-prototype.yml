@@ -49,6 +49,10 @@ jobs:
         shell: pwsh
         run: python ./prototype/windows-ffmpeg/test-prototype-audit-report.py
 
+      - name: Test prototype binding override transaction
+        shell: pwsh
+        run: python ./prototype/windows-ffmpeg/test-prototype-binding-build.py
+
       - name: Check source bundle requirements (offline, no native build)
         shell: pwsh
         run: python ./prototype/windows-ffmpeg/test-source-bundle.py

@@ -16,6 +16,7 @@ INPUTS = (
     ("pe_import_closure", "target/prototype-windows-app/IMPORT-CLOSURE.json", "json"),
     ("prototype_app_manifest", "target/prototype-windows-app/PROTOTYPE-APP.json", "json"),
     ("installed_smoke", "target/prototype-windows-installer/smoke-result.json", "json"),
+    ("binding_override", "target/prototype-windows-ffmpeg/binding-override.json", "json"),
 )
 PRIVATE_KEYS = {"path", "root", "dumpbin", "app_dir", "install_dir", "video_tool", "workspace"}
 ABSOLUTE_PATH = re.compile(r"(^|[\s\"'=])((?:[A-Za-z]:[\\/]|\\\\|/(?!/))[^\s\"',;]+)")

@@ -45,5 +45,11 @@
     "sha256": "8d48973e3eb472dda0f5f2435e595ac043f9f2219dd71883392f549445afa8a5",
     "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8138/pdfium-win-x64.tgz"
   },
-  "triplet": "x64-windows"
+  "triplet": "x64-windows",
+  "ffmpeg_sys_next": {
+    "repository": "https://github.com/zmwangx/rust-ffmpeg-sys",
+    "commit": "5aa9dc312e0ab9b762bae7ca367d17761d0c9447",
+    "version": "9.1.0",
+    "note": "Test-only Cargo CLI source override for the staged default-feature app. Pinned, unsigned upstream commit adds CUDA header types required by the pinned FFmpeg source. Not a production dependency update or release approval."
+  }
 }

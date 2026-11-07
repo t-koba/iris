@@ -16,8 +16,8 @@ behavior, or licensing conclusions, and it never publishes.
   `scripts/fetch-pdfium-runtime.sh`, `scripts/release-audit.py`).
 - The product builds keep their defaults. The prototype stages a separate
   test-only app directory under `target/`; nothing under `dist/` is written.
-- Runner, vcpkg, FFmpeg, and PDFium pins live in `pins.json` (single source
-  of truth). Every script fails closed on drift and never falls back to
+- Runner, vcpkg, FFmpeg, Rust binding, and PDFium pins live in `pins.json`
+  (single source of truth). Every script fails closed on drift and never falls back to
   FFmpeg 9.0.2, an unknown runtime, or a minimal build.
 
 ## Pins (single source of truth: `pins.json`)
@@ -28,6 +28,16 @@ behavior, or licensing conclusions, and it never publishes.
   repository as a mirror of its main repository. Fetch and detached-checkout
   HEAD verification must succeed for that exact commit; an unavailable mirror
   or commit stops the run, without a source or version fallback.
+- Test-only `ffmpeg-sys-next` source override: version `9.1.0` from
+  `https://github.com/zmwangx/rust-ffmpeg-sys` at immutable commit
+  `5aa9dc312e0ab9b762bae7ca367d17761d0c9447`. This is a pinned, **unsigned**
+  upstream commit, not a signature-verified source or release approval. Its
+  CUDA type declarations fix the 9.0.1 wrapper's mismatch with the pinned
+  FFmpeg headers (`CUarray` and by-value `CUDA_ARRAY3D_DESCRIPTOR`).
+  Only the staged prototype app build receives Cargo CLI `patch.crates-io`
+  configuration; production manifests, lockfile and default features stay
+  unchanged. The detached preview-smoke build is a separate dependency graph;
+  this override does not establish its compatibility or a passing native build.
 - vcpkg / tooling baseline: `b8dfe957ec8b5c0ef5c4b31eea594b8486af744f`
   (`vcpkg.json` `builtin-baseline` and `vcpkg-configuration.json` carry the
   same baseline; the scripts fail closed on drift).
@@ -144,7 +154,18 @@ behavior, or licensing conclusions, and it never publishes.
    `vcpkg-install.log`, `ffmpeg-tool.path`), resolves the actual prototype
    `VCPKG_INSTALLED_DIR`/`x64-windows-prototype-dynamic/bin` closure, sets
    `VCPKGRS_DYNAMIC=1` and the triplet env, builds `iris-ui-shell` with
-   product defaults (no `minimal` variant), stages the complete FFmpeg DLL
+   product defaults (no `minimal` variant) through `prototype-binding-build.py`
+   (Python 3.11+ for `tomllib`).
+   The helper retains the original root `Cargo.lock` bytes in memory, runs a
+   targeted Cargo update with the exact binding override, and refuses any
+   unrelated package, dependency-edge or lock-metadata change before building
+   with `--locked`. It restores the original bytes in `finally` on both success
+   and failure. No Git override config or temporary lock is persisted. Abrupt
+   process termination cannot run cleanup; use only the isolated CI checkout.
+   `binding-override.json` records the exact unsigned source, original/temporary/
+   restored lock hashes, build status and restoration result in the bounded
+   audit report, and is copied into the app docs. This is test evidence, not
+   release provenance approval. The staging script stages the complete FFmpeg DLL
    closure plus the pinned `pdfium.dll`, and emits hashes plus copied
    source/license/notice material and tested config evidence
    (`ffmpeg-buildconf.txt`, `ffmpeg-version.txt`, `overlay.json`,
