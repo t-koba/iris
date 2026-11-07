@@ -165,8 +165,9 @@ def swscale_contexts(sources):
         raise ValueError("old unstable format API/context is present")
     for symbol, prefix in (("ff_sws_chroma_pos", ""), ("linear_mat3", "static "),
                            ("decode_colors", "static ")):
+        # C declarators may put the function name on a line after its return type.
         unique("libswscale/format.c", symbol,
-               r'^' + prefix + r'[^;{}\n]*\b' + symbol + r'\([^;{}]*?\)\s*\{')
+               r'^' + prefix + r'[^;{}]*\b' + symbol + r'\([^;{}]*?\)\s*\{')
     graph = texts["libswscale/graph.c"]
     if re.search(r'\bCONFIG_VULKAN\b', graph) or "CONFIG_SWSCALE_VULKAN" not in graph:
         raise ValueError("pinned graph must use the swscale Vulkan component, not CONFIG_VULKAN")

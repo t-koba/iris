@@ -129,7 +129,9 @@ SWSCALE_FIXTURE = {
     "libswscale/format.c": b"""void ff_sws_chroma_pos(int *pos)
 {
 }
-static void linear_mat3(float *mat)
+static inline SwsLinearOp
+linear_mat3(const SwsPixelType type,
+            const AVRational m00)
 {
 }
 static void decode_colors(void *colors)
