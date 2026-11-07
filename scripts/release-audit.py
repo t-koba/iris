@@ -235,7 +235,7 @@ class Audit:
             manifest = Path("crates/ui-shell/Cargo.toml")
             metadata_argv = ["cargo", "metadata", "--format-version", "1", "--locked", "--offline",
                     "--filter-platform", hosts[0], "--manifest-path", str(manifest), *flags]
-            tree_argv = ["cargo", "tree", "-p", "iris-ui-shell", "--target", hosts[0],
+            tree_argv = ["cargo", "tree", "--color", "never", "-p", "iris-ui-shell", "--target", hosts[0],
                     "--offline", "--locked", "--prefix", "indent", "--charset", "ascii",
                     "--format", "{p}|{f}", "-e", "normal,build", *flags]
             catalog_error = None

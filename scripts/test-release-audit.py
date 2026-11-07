@@ -115,7 +115,8 @@ class Reports(unittest.TestCase):
             with self.subTest(platform=platform):
                 report = audit(platform=platform)
                 minimal = platform == "windows"
-                with patch.object(report, "cargo_metadata", return_value=metadata(minimal)) as meta_cmd, \
+                with patch.dict(os.environ, CARGO_TERM_COLOR="always"), \
+                     patch.object(report, "cargo_metadata", return_value=metadata(minimal)) as meta_cmd, \
                      patch.object(report, "cargo_tree", return_value=tree_text(minimal)) as tree_cmd:
                     report.cargo_graph(f"rustc version\nhost: {host}\n")
                 meta_argv = meta_cmd.call_args.args[0]
@@ -123,7 +124,7 @@ class Reports(unittest.TestCase):
                             "--filter-platform", host, "--manifest-path", "crates/ui-shell/Cargo.toml"]
                 self.assertEqual(meta_argv, expected_meta + (["--no-default-features", "--features", "minimal"] if minimal else []))
                 tree_argv = tree_cmd.call_args.args[0]
-                expected_tree = ["cargo", "tree", "-p", "iris-ui-shell", "--target", host,
+                expected_tree = ["cargo", "tree", "--color", "never", "-p", "iris-ui-shell", "--target", host,
                                  "--offline", "--locked", "--prefix", "indent", "--charset", "ascii",
                                  "--format", "{p}|{f}", "-e", "normal,build"]
                 self.assertEqual(tree_argv, expected_tree + (["--no-default-features", "--features", "minimal"] if minimal else []))
