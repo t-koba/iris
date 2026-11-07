@@ -3565,6 +3565,8 @@ dependencies = [
  "jxl-oxide",
  "kamadak-exif",
  "pdfium-render",
+ "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tokio-util",

@@ -41,6 +41,8 @@ pdfium-render = { workspace = true, optional = true }
 iris-thumb-preview = { path = ".", features = ["test-fixtures"] }
 criterion = { workspace = true }
 image = { workspace = true, features = ["avif"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 
 [[bench]]
 name = "raw_cr3_decode"

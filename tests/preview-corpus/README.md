@@ -13,7 +13,9 @@ parent=$(mktemp -d)
 trap 'rm -rf "$parent"' EXIT
 IRIS_PREVIEW_CORPUS_MAX_BYTES=40000000 python3 scripts/fetch-preview-corpus.py \
   --output "$parent/corpus"
-cargo run -p iris-thumb-preview --example preview_corpus_smoke --locked -- "$parent/corpus"
+IRIS_PREVIEW_LATENCY_WARMUPS=2 IRIS_PREVIEW_LATENCY_SAMPLES=21 \
+  cargo run --release -p iris-thumb-preview --example preview_corpus_smoke \
+  --locked -- "$parent/corpus"
 ```
 
 The helper requires `IRIS_PREVIEW_CORPUS_MAX_BYTES` (no implicit download budget).
@@ -37,11 +39,24 @@ existing pinned AppDir's `usr/lib/iris` directory, using an absolute Cargo manif
 path. macOS uses Core Graphics. FFmpeg is linked from each CI host's normal system
 runtime (Ubuntu packages or Homebrew); this is decoder correctness only, not
 shipped-runtime provenance, licensing, or package-runtime evidence. This does not
-change release packaging.
+change release packaging. For a Linux product-profile match, set
+`CARGO_PROFILE_RELEASE_OPT_LEVEL=s`; CI uses that setting on Ubuntu and the workspace
+default optimization level on macOS.
 
-Elapsed times are single-run diagnostics, including validation overhead: they
-are **not latency gates or evidence of runtime parity**. Native comparable
-baseline/candidate measurements, broader format coverage, and Windows default
-preview evidence remain separate work. This smoke is not license approval.
+After correctness checks, the smoke verifies the pinned JPEG and CR3 bytes and emits
+exactly two `PREVIEW_LATENCY` JSON records to stdout. Required environment settings
+`IRIS_PREVIEW_LATENCY_WARMUPS` and `IRIS_PREVIEW_LATENCY_SAMPLES` bound the diagnostic
+work; CI configures two warmups and 21 measurements. Each record reports
+min/median/p90/median absolute deviation/max nanoseconds and
+includes source/run identifiers when supplied by CI, verbose Rust compiler/target,
+runner/CPU identity, release optimization level, Cargo.lock digest, feature flags,
+and fixture digest. Timings cover crate-level local-file extraction, not UI/end-to-end
+latency; CR3 measures embedded-preview extraction, not sensor demosaicing. The
+iteration counts are explicit environment configuration; fixture verification uses a
+fixed 64 KiB streaming buffer. No report or fixture is uploaded as an artifact. These are
+**diagnostics, not latency gates or parity evidence**: they are not matched against a
+comparable baseline or candidate, and do not represent video, PDF, or Windows latency.
+Native comparable baseline/candidate measurements and Windows default-preview evidence
+remain separate work. This smoke is not license approval.
 
 Offline fetch-helper regressions: `python3 scripts/test-fetch-preview-corpus.py`.
