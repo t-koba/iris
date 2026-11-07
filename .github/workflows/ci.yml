@@ -260,7 +260,7 @@ jobs:
         run: cargo build --release -p iris-ui-shell --no-default-features --features minimal --locked
 
       - name: Windows local filesystem mutation regressions
-        run: cargo test -p iris-backends --lib common::tests:: --locked
+        run: "cargo test -p iris-backends --lib common::tests:: --locked"
 
       - name: UI shell integration smoke
         run: cargo test -p iris-ui-shell --test integration_smoke --no-default-features --features minimal --locked
