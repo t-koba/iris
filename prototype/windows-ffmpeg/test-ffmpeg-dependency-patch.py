@@ -58,6 +58,9 @@ class DependencyPatchTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 subprocess.run(["git", "init", "-q", str(root)], check=True)
+                # Test the exact fixture bytes, independent of a Windows user's
+                # global core.autocrlf setting.
+                subprocess.run(["git", "-C", str(root), "config", "core.autocrlf", "false"], check=True)
                 path = root / "configure"
                 path.write_bytes(original.encode("utf-8"))
                 patch = root / "adapt.patch"
