@@ -269,10 +269,14 @@ pub fn object(path: &str) -> iris_core_domain::types::object::ObjectRef {
 }
 
 /// Serves `bytes` as every object, with range reads, and records the range of each read.
+#[derive(Default)]
 pub struct MemoryBackend {
     pub bytes: Vec<u8>,
     pub reads: std::sync::Arc<std::sync::Mutex<Vec<Option<ByteRange>>>>,
     pub content_type: Option<String>,
+    /// Override the response length (including an unknown length) independently of its bytes.
+    pub content_length: Option<Option<u64>>,
+    pub bytes_read: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 use iris_core_domain::backend_adapter::BackendAdapter;
@@ -338,8 +342,11 @@ impl BackendAdapter for MemoryBackend {
         };
         let data = self.bytes[start..end].to_vec();
         Ok(ReadHandle {
-            content_length: Some(data.len() as u64),
-            stream: Box::pin(std::io::Cursor::new(data)) as Pin<Box<dyn AsyncRead + Send>>,
+            content_length: self.content_length.unwrap_or(Some(data.len() as u64)),
+            stream: Box::pin(CountedReader {
+                reader: std::io::Cursor::new(data),
+                bytes_read: self.bytes_read.clone(),
+            }),
             content_range: range,
         })
     }
@@ -410,5 +417,26 @@ impl BackendAdapter for MemoryBackend {
             can_range_read: true,
             ..CapabilitySet::default()
         }
+    }
+}
+
+struct CountedReader {
+    reader: std::io::Cursor<Vec<u8>>,
+    bytes_read: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl AsyncRead for CountedReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let result = Pin::new(&mut self.reader).poll_read(cx, buf);
+        self.bytes_read.fetch_add(
+            buf.filled().len() - before,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        result
     }
 }

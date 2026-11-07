@@ -65,6 +65,7 @@ async fn extracts_remote_jpeg_metadata_via_range_reads() {
         bytes: jpeg_with_exif_model(160, 90, "IRIS-CAM"),
         reads: reads.clone(),
         content_type: Some("image/jpeg".to_string()),
+        ..MemoryBackend::default()
     });
 
     let metadata = extract_image_metadata_from_backend(backend, object("photo.jpg"))
@@ -93,6 +94,7 @@ async fn extracts_remote_raw_tiff_metadata_via_range_reads() {
         bytes: dng_with_tiff_metadata(4000, 3000, "REMOTE-DNG"),
         reads: reads.clone(),
         content_type: Some("image/x-adobe-dng".to_string()),
+        ..MemoryBackend::default()
     });
 
     let metadata = extract_image_metadata_from_backend(backend, object("sample.dng"))

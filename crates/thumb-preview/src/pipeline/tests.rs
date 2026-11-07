@@ -85,6 +85,7 @@ async fn generate_does_not_redownload_a_complete_short_remote_probe() {
         bytes: png_bytes,
         reads: reads.clone(),
         content_type: None,
+        ..MemoryBackend::default()
     };
     let object = object("image.png");
     let hint = ThumbnailHint {
@@ -128,6 +129,7 @@ async fn generate_requests_only_the_tail_after_a_large_remote_probe() {
         bytes: image_bytes,
         reads: reads.clone(),
         content_type: None,
+        ..MemoryBackend::default()
     };
     let object = object("image.bmp");
     let hint = ThumbnailHint {
@@ -168,6 +170,7 @@ async fn generate_raw_thumbnail_via_structured_range_reads() {
         bytes: raw_bytes,
         reads: reads.clone(),
         content_type: Some("image/x-adobe-dng".to_string()),
+        ..MemoryBackend::default()
     };
     let object = object("sample.dng");
     let hint = ThumbnailHint {
@@ -203,6 +206,7 @@ async fn generate_raw_without_embedded_preview_returns_unsupported() {
         bytes: jpeg(96, 64),
         reads: reads.clone(),
         content_type: Some("image/x-adobe-dng".to_string()),
+        ..MemoryBackend::default()
     };
     let object = object("missing-preview.dng");
     let hint = ThumbnailHint {
