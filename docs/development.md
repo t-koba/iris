@@ -154,9 +154,9 @@ fuzz 用のクレートは各 `fuzz/` ディレクトリで同じ操作をしま
 
 ### 公開しないパッケージ監査
 
-`Release` の **Run workflow** で `source_ref` に監査対象のブランチ・タグ・commit SHA を指定できます。
-監査機能を含む revision を選んでください。最初に解決した SHA を全 OS で checkout し、
-そのワークスペースのバージョンで通常と同じパッケージ・チェックサム・インストール検証を実行します。
+`Release` の **Run workflow** で監査機能を含む workflow revision を選択します。
+監査対象はその `workflow_dispatch` run の `github.sha` に固定され、全 OS の package job が同じ SHA を checkout します。
+独立した revision 指定欄はなく、実行後に監査対象を別の commit へ差し替えることはできません。
 手動実行はタグを選んでも `publish` を実行せず、macOS の署名・公証 secret も使いません（ad-hoc 署名）。
 read-only GitHub token も渡さないため、手動 run は PDFium の固定サイズ・digest のみ確認し、upstream attestation は未検証と JSON に記録します。
 タグ push は従来どおり PDFium attestation を検証します。タグ push の `main` 到達性・バージョン一致チェックと公開ファイル名・チェックサム形式は変わりません。
@@ -224,5 +224,5 @@ patch 適用状況やライセンス互換性をこのレポートだけで保�
 | ワークフロー | いつ | 内容 |
 |---|---|---|
 | `ci.yml` | push・プルリクエスト・週 1 回 | 整形、lint、依存の監査、ビルド、バイナリサイズの上限、テスト、SFTP / SMB の結合テスト、fuzz の短時間実行。Windows は minimal 構成 |
-| `release.yml` | `main` 上の version 一致 `v<version>` タグ / 手動 `source_ref` | 3 OS のパッケージ・チェックサムと別 artifact の監査レポート。Release 公開はタグ push のみ |
+| `release.yml` | `main` 上の version 一致 `v<version>` タグ / 選択した run ref での手動監査 | 3 OS のパッケージ・チェックサムと別 artifact の監査レポート。Release 公開はタグ push のみ |
 | `fuzz-long.yml` | 週 1 回 | fuzz を長時間実行 |
