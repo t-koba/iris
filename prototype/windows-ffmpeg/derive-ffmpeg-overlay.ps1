@@ -68,10 +68,12 @@ function Set-PrototypeFfmpegDependencyPatch {
     if ($BaselinePatch -ceq $OverlayPatch) { throw 'dependency patch replacement must use a distinct filename' }
     $fetches = [regex]::Matches($Portfile, '(?ms)^vcpkg_from_(?:github|git)\(.*?\bPATCHES\s*\n.*?^\)')
     if ($fetches.Count -ne 1) { throw 'expected exactly one FFmpeg PATCHES block for replacement' }
-    $pattern = '(?m)^(?<indent>[ \t]*)(?<quote>")?' + [regex]::Escape($BaselinePatch) + '(?(quote)")(?<suffix>[ \t]*(?:#.*)?)$'
+    # Match before CRLF or LF without consuming the line ending; comments must
+    # not accidentally make CRLF entries behave differently from bare entries.
+    $pattern = '(?m)^(?<indent>[ \t]*)(?<quote>")?' + [regex]::Escape($BaselinePatch) + '(?(quote)")(?<suffix>[ \t]*(?:#[^\r\n]*)?)(?=\r?$)'
     $matches = [regex]::Matches($fetches[0].Value, $pattern)
     if ($matches.Count -ne 1) { throw "expected exactly one $BaselinePatch entry in PATCHES" }
-    $overlayPattern = '(?m)^[ \t]*(?<quote>")?' + [regex]::Escape($OverlayPatch) + '(?(quote)")(?:[ \t]*(?:#.*)?)$'
+    $overlayPattern = '(?m)^[ \t]*(?<quote>")?' + [regex]::Escape($OverlayPatch) + '(?(quote)")(?:[ \t]*(?:#[^\r\n]*)?)(?=\r?$)'
     if ([regex]::IsMatch($fetches[0].Value, $overlayPattern)) { throw "PATCHES already contains $OverlayPatch" }
     $evaluator = [System.Text.RegularExpressions.MatchEvaluator]{
         param($match)

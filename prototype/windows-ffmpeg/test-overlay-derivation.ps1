@@ -45,21 +45,29 @@ vcpkg_from_git(
         last.patch
 )
 '@
-$replacedPatch = Set-PrototypeFfmpegDependencyPatch $patchPort '0004-dependencies.patch' '0004-dependencies-pinned.patch'
-# The here-string inherits the checkout's line endings; compare the entry text
-# without changing the returned Portfile or making the assertion OS-dependent.
-$normalizedReplacedPatch = $replacedPatch.Portfile.Replace("`r`n", "`n").Replace("`r", "")
-if ($normalizedReplacedPatch -notmatch '(?m)^        "0004-dependencies-pinned\.patch" # retained explanation$') { throw 'quoted adapted PATCHES entry/order/comment was not preserved' }
-$unquotedPatchPort = $patchPort.Replace('"0004-dependencies.patch" # retained explanation', '0004-dependencies.patch # retained explanation')
-$replacedUnquotedPatch = Set-PrototypeFfmpegDependencyPatch $unquotedPatchPort '0004-dependencies.patch' '0004-dependencies-pinned.patch'
-$normalizedReplacedUnquotedPatch = $replacedUnquotedPatch.Portfile.Replace("`r`n", "`n").Replace("`r", "")
-if ($normalizedReplacedUnquotedPatch -notmatch '(?m)^        0004-dependencies-pinned\.patch # retained explanation$') { throw 'unquoted adapted PATCHES entry/order/comment was not preserved' }
-$duplicateQuotedOverlay = $patchPort.Replace('last.patch', '"0004-dependencies-pinned.patch"')
-$duplicateUnquotedOverlay = $unquotedPatchPort.Replace('last.patch', '0004-dependencies-pinned.patch')
-foreach ($badPatch in @($patchPort.Replace('0004-dependencies.patch', 'other.patch'), $duplicateQuotedOverlay, $duplicateUnquotedOverlay)) {
-    $rejected = $false
-    try { Set-PrototypeFfmpegDependencyPatch $badPatch '0004-dependencies.patch' '0004-dependencies-pinned.patch' | Out-Null } catch { $rejected = $true }
-    if (!$rejected) { throw 'accepted missing/duplicate dependency patch entry' }
+# Exercise both line endings explicitly, independently of the checkout. A CRLF
+# duplicate without a comment used to evade the overlay-entry regex's `$` anchor.
+$patchPortLf = $patchPort.Replace("`r`n", "`n").Replace("`r", "")
+foreach ($ending in @("`n", "`r`n")) {
+    foreach ($entry in @('"0004-dependencies.patch"', '0004-dependencies.patch')) {
+        foreach ($comment in @('', ' # retained explanation')) {
+            $inputPatch = $patchPortLf.Replace('"0004-dependencies.patch" # retained explanation', $entry + $comment).Replace("`n", $ending)
+            $replacedPatch = Set-PrototypeFfmpegDependencyPatch $inputPatch '0004-dependencies.patch' '0004-dependencies-pinned.patch'
+            $expectedPatch = $inputPatch.Replace('0004-dependencies.patch', '0004-dependencies-pinned.patch')
+            if ($replacedPatch.Portfile -cne $expectedPatch) { throw 'adapted PATCHES entry/order/comment/line endings were not preserved' }
+            $badPatches = [ordered]@{
+                missing = $inputPatch.Replace('0004-dependencies.patch', 'other.patch')
+                duplicateBaseline = $inputPatch.Replace('last.patch', $entry + $comment)
+                duplicateQuotedOverlay = $inputPatch.Replace('last.patch', '"0004-dependencies-pinned.patch"')
+                duplicateUnquotedOverlay = $inputPatch.Replace('last.patch', '0004-dependencies-pinned.patch')
+            }
+            foreach ($case in $badPatches.Keys) {
+                $rejected = $false
+                try { Set-PrototypeFfmpegDependencyPatch $badPatches[$case] '0004-dependencies.patch' '0004-dependencies-pinned.patch' | Out-Null } catch { $rejected = $true }
+                if (!$rejected) { throw "accepted $case dependency patch entry (CRLF=$($ending.Length -eq 2), entry=$entry, comment=$comment)" }
+            }
+        }
+    }
 }
 
 foreach ($bad in @($port.Replace('REPO ffmpeg/ffmpeg', 'URL bogus'), $port.Replace('z-first.patch', '../escape.patch'), $port.Replace('HEAD_REF master', 'UNKNOWN argument'), ($port + "`nvcpkg_from_git(`n)`n"))) {
