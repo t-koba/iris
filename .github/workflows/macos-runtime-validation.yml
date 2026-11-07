@@ -1,0 +1,54 @@
+name: macOS runtime validation
+
+# Report-only inventory of the default product's staged native closure and
+# Homebrew metadata, not licensing approval, runtime parity, or notarization.
+# Called only by manual CI at its exact source ref; never dispatch Release.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: macos-latest
+    env:
+      CARGO_TERM_COLOR: always
+      IRIS_BUILD_VARIANT: product
+      IRIS_MACOS_SIGN_IDENTITY: '-'
+      IRIS_MACOS_NOTARY_PROFILE: ''
+      IRIS_MACOS_DEPLOYMENT_TARGET: "14.0"
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+      IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES || 2097152 }}
+      IRIS_RELEASE_AUDIT_MAX_COMMAND_BYTES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_COMMAND_BYTES || 32768 }}
+      IRIS_RELEASE_AUDIT_MAX_METADATA_BYTES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_METADATA_BYTES || 8388608 }}
+      IRIS_RELEASE_AUDIT_MAX_CARGO_PACKAGES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_CARGO_PACKAGES || 1024 }}
+      IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES || 256 }}
+      IRIS_RELEASE_AUDIT_COMMAND_SECONDS: ${{ vars.IRIS_RELEASE_AUDIT_COMMAND_SECONDS || 30 }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - name: Install system dependencies
+        run: brew install ffmpeg pkg-config
+      - name: Audit temporary default-product package
+        shell: bash
+        run: |
+          # No cache or package retention: delete staged/runtime/build files even
+          # on failure, before the only artifact upload below can run.
+          trap 'rm -rf dist/macos target/package-macos' EXIT
+          ./scripts/package-macos-app.sh
+          python3 scripts/release-audit.py macos --output audit/macos.json
+      - name: Retain JSON evidence only
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-runtime-audit
+          if-no-files-found: error
+          path: audit/macos.json

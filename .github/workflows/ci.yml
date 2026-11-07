@@ -298,3 +298,9 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/windows-ffmpeg-prototype.yml
+
+  macos-runtime-validation:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/macos-runtime-validation.yml
