@@ -62,14 +62,22 @@ permissions:
           ref: ${{ github.sha }}
           persist-credentials: false
 """ in macos,
-    "macOS runtime audit uploads only its JSON report": macos_uploads == ["""          name: macos-runtime-audit
+    "macOS runtime audit uploads only its JSON reports": macos_uploads == ["""          name: macos-runtime-audit
           if-no-files-found: error
-          path: audit/macos.json
-"""] and macos.count("actions/upload-artifact@") == 1,
-    "macOS runtime audit cleans temporary packages before retaining evidence": """          trap 'rm -rf dist/macos target/package-macos' EXIT
+          path: |
+            audit/macos.json
+            audit/macos-candidate.json
+"""] and macos.count("actions/upload-artifact@") == 1 and "audit/macos-candidate.json" in macos,
+    "macOS current audit keeps release report beside candidate": """          trap 'rm -rf dist/macos target/package-macos' EXIT
           ./scripts/package-macos-app.sh
-          python3 scripts/release-audit.py macos --output audit/macos.json
+          python3 scripts/release-audit.py macos --output audit/macos.json""" in macos
+    and """          trap 'rm -rf dist/macos target/macos-runtime-validation' EXIT
+          python3 scripts/macos-ffmpeg.py validate audit/macos-candidate.json""" in macos,
+    "macOS validation cleans temporary apps before retaining evidence": """      - name: Clean temporary bytes even after interruption
+        if: always()
+        run: rm -rf dist/macos target/package-macos target/macos-runtime-validation
       - name: Retain JSON evidence only
+        if: always()
         uses: actions/upload-artifact@v4
 """ in macos,
     "CI manual, pull-request, and scheduled triggers": all(

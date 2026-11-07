@@ -17,6 +17,16 @@ sign_identity="${IRIS_MACOS_SIGN_IDENTITY:--}"
 notary_profile="${IRIS_MACOS_NOTARY_PROFILE:-}"
 deployment_target="${IRIS_MACOS_DEPLOYMENT_TARGET:-14.0}"
 export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
+candidate="${IRIS_MACOS_FFMPEG_CANDIDATE:-}"
+if [[ -n "$candidate" ]]; then
+    # Isolated report-only path: never alter release runtime selection or reuse
+    # a Cargo target that may contain system-FFmpeg build-script results.
+    [[ "${IRIS_MACOS_REPORT_ONLY:-}" == 1 && "$build_variant" == product &&
+       "$sign_identity" == - && -z "$notary_profile" && -n "${CARGO_TARGET_DIR:-}" &&
+       "$FFMPEG_DIR" == "$candidate" && "$PKG_CONFIG_PATH" == "$candidate/lib/pkgconfig" &&
+       "$PKG_CONFIG_LIBDIR" == "$candidate/lib/pkgconfig" ]] || exit 1
+    target_dir="$CARGO_TARGET_DIR"
+fi
 version=$(sed -n '/^\[workspace.package\]$/,/^\[/{s/^version = "\([^" ]*\)".*/\1/p;}' "$repo_root/Cargo.toml" | head -n 1)
 
 if [[ -z "$version" ]]; then
@@ -159,6 +169,16 @@ EOF
 
 chmod +x "$macos_dir/$binary_name"
 chmod u+w "$macos_dir/$binary_name"
+
+if [[ -n "$candidate" ]]; then
+    cp "$target_dir/release/examples/video_thumbnail_smoke" "$macos_dir/"
+    python3 "$script_dir/macos-ffmpeg.py" stage "$candidate" "$app_root"
+    # Nested candidate dylibs/helpers are already signed and hash-bound. Do not
+    # --deep re-sign them; the final audit checks those exact bytes.
+    codesign --force --sign - --timestamp=none "$app_root"
+    echo "created temporary report-only $app_root"
+    exit 0
+fi
 
 rewrite_binary_dependencies "$macos_dir/$binary_name"
 assert_no_unbundled_dependencies "$macos_dir/$binary_name"

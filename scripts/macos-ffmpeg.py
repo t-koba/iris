@@ -1,0 +1,453 @@
+#!/usr/bin/env python3
+"""Report-only Darwin candidate. Reuse the Linux source policy, never its ELF mechanics."""
+import ctypes
+import importlib.util
+import json
+import os
+import signal
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("ffmpeg_policy", ROOT / "scripts/linux-ffmpeg.py")
+common = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(common)
+POLICY, require, digest = common.POLICY, common.require, common.digest
+MACOS_POLICY = {
+    'platform': 'macOS',
+    'source': {key: POLICY[key] for key in (
+        'version', 'url', 'sha256', 'signature_url', 'key_url', 'fingerprint',
+        'configure_flags', 'libraries', 'avcodec_version', 'security_reference',
+        'security_scope', 'required_decoders',
+    )},
+}
+
+
+def setting(name, default):
+    value = int(os.environ.get(name, default))
+    require(value > 0, f"{name} must be positive")
+    return value
+
+
+def clean(text):
+    # Neither diagnostics nor retained JSON disclose private build/SDK paths.
+    for path, label in sorted(REDACTIONS.items(), key=lambda item: -len(item[0])):
+        text = text.replace(path, label)
+    return text
+
+
+REDACTIONS = {str(ROOT): '<source>', str(Path.home()): '<home>'}
+
+
+def run(*args, cwd=None, env=None, seconds=None):
+    with tempfile.TemporaryFile() as log:
+        process = subprocess.Popen([str(a) for a in args], cwd=cwd, env=env,
+                                   stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            code = process.wait(timeout=seconds or setting('IRIS_FFMPEG_COMMAND_SECONDS', 60))
+        except BaseException:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            raise ValueError(f"{Path(args[0]).name} interrupted or exceeded command deadline")
+        size = log.tell()
+        limit = setting('IRIS_FFMPEG_COMMAND_BYTES', 32768)
+        log.seek(max(0, size - limit))
+        text = log.read(limit).decode('utf-8', 'replace')
+    require(code == 0, f"{Path(args[0]).name} failed: {clean(text)}")
+    # Long successful build logs are discarded. Inspection commands fail on truncation.
+    if seconds is None:
+        require(size <= limit, f"{Path(args[0]).name} output exceeds command budget")
+    return text.strip()
+
+
+def generated_config(text, components):
+    common.config(text)
+    for name in ('PIC', 'ZLIB', 'BZLIB', 'LZMA', 'ICONV'):
+        require(re.search(rf'^#define CONFIG_{name} 1$', text, re.M), f"missing CONFIG_{name}")
+    return common.codecs(components)
+
+
+def selected_flags(text):
+    flags = shlex.split(text)
+    selected = [f for f in flags if not f.startswith(('--prefix=', '--libdir='))]
+    require(selected == POLICY['configure_flags'], 'unexpected native configure flags')
+    return selected
+
+
+def macho(path):
+    """Use load commands, not otool -L (which also prints a dylib's own ID)."""
+    deps, rpaths, identity = [], [], None
+    for block in run('otool', '-l', path).split('Load command ')[1:]:
+        cmd = re.search(r'^\s*cmd (\S+)$', block, re.M)
+        require(cmd is not None, 'malformed Mach-O load command')
+        cmd = cmd[1]
+        if cmd == 'LC_RPATH':
+            match = re.search(r'^\s*path (.+) \(offset \d+\)$', block, re.M)
+            require(match is not None, 'malformed LC_RPATH')
+            rpaths.append(match[1])
+        elif cmd.endswith('DYLIB'):
+            match = re.search(r'^\s*name (.+) \(offset \d+\)$', block, re.M)
+            require(match is not None, 'malformed dylib command')
+            if cmd == 'LC_ID_DYLIB':
+                require(identity is None, 'multiple dylib IDs')
+                identity = match[1]
+            else:
+                require(cmd in ('LC_LOAD_DYLIB', 'LC_LOAD_WEAK_DYLIB', 'LC_REEXPORT_DYLIB',
+                                'LC_LOAD_UPWARD_DYLIB', 'LC_LAZY_LOAD_DYLIB'), 'unknown dylib command')
+                deps.append(match[1])
+    require(deps, 'no Mach-O dependencies')
+    return deps, rpaths, identity
+
+
+def expand(token, loader, executable):
+    for prefix, directory in (('@loader_path', loader.parent), ('@executable_path', executable.parent)):
+        if token.startswith(prefix + '/'):
+            return Path(os.path.normpath(str(directory / token[len(prefix) + 1:])))
+    require(token.startswith('/'), 'unsupported Mach-O path token')
+    return Path(os.path.normpath(token))
+
+
+def system(path, sdk):
+    """A system prefix alone is insufficient: require the selected Apple SDK stub.
+
+    Modern macOS keeps many OS dylibs only in the dyld shared cache. SDK .tbd
+    evidence verifies OS ownership without misclassifying missing external files.
+    The stub filename is not assumed to match the versioned install name
+    (for example ``libz.tbd`` provides ``/usr/lib/libz.1.dylib``), so the exact
+    install name is matched inside bounded non-recursive stub directories:
+    the install-name parent directory plus any enclosing ``.framework`` root.
+    System internals are supplied/updated by macOS, not copied into the app.
+    """
+    name = str(path)
+    if not name.startswith(('/usr/lib/', '/System/Library/')):
+        return None
+    sdk_root = sdk.resolve()
+    rel = Path(name.lstrip('/'))
+    pending = [sdk_root / rel.parent]
+    for index, part in enumerate(rel.parts):
+        if part.endswith('.framework'):
+            pending.append(sdk_root.joinpath(*rel.parts[:index + 1]))
+    seen, unique = set(), []
+    for directory in pending:
+        try:
+            resolved = directory.resolve()
+        except Exception:
+            raise ValueError('SDK stub escapes SDK')
+        require(resolved.is_relative_to(sdk_root), 'SDK stub escapes SDK')
+        if resolved not in seen:
+            seen.add(resolved)
+            unique.append(resolved)
+    candidates = []
+    for directory in unique:
+        if not directory.is_dir():
+            continue
+        candidates.extend(sorted(directory.glob('*.tbd')))
+    stubs = sorted({candidate.resolve() for candidate in candidates})
+    matches = []
+    for stub in stubs:
+        require(stub.is_file() and stub.is_relative_to(sdk_root), 'SDK stub escapes SDK')
+        install_names = re.findall(r'''^\s*install-name:\s*['"]?([^'"\s]+)''', stub.read_text(), re.M)
+        if name in install_names:
+            matches.append(stub)
+    require(matches, 'unverified system dependency')
+    require(len(matches) == 1, 'ambiguous system stub')
+    stub = matches[0]
+    return dict(system=name, sdk_stub=str(stub.relative_to(sdk_root)), sdk_stub_sha256=digest(stub))
+
+
+def closure(executable, allowed, sdk, root=None):
+    """Resolve each edge with its loader and inherited dyld run-path stack.
+
+    First existing resolution wins, as with dyld; an external first match is
+    rejected rather than skipped in favour of a later acceptable candidate.
+    """
+    allowed = {p.resolve() for p in allowed}
+    edges, names, visited = [], {}, set()
+    def walk(loader, inherited, ancestry):
+        deps, rpaths, _ = macho(loader)
+        stack = tuple(expand(p, loader, executable) for p in rpaths) + inherited
+        key = (loader, stack)
+        if key in visited:
+            return
+        visited.add(key)
+        require(len(visited) <= setting('IRIS_FFMPEG_MAX_NATIVE_FILES', 256), 'closure exceeds traversal budget')
+        for dep in deps:
+            if dep.startswith('@rpath/'):
+                options = [p / dep[len('@rpath/'):] for p in stack]
+            else:
+                options = [expand(dep, loader, executable)]
+            found = None
+            for option in options:
+                option = Path(os.path.normpath(str(option)))
+                os_record = system(option, sdk)
+                if os_record is not None or option.is_file():
+                    found = (option, os_record)
+                    break
+            require(found is not None, 'unresolved Mach-O edge: ' + clean(dep))
+            target, os_record = found
+            if os_record is not None:
+                edges.append((loader, dep, os_record))
+                continue
+            target = target.resolve()
+            require(target in allowed, 'dependency outside exact candidate/app: ' + clean(str(target)))
+            require(target.name not in names or names[target.name] == target, 'dylib basename collision')
+            names[target.name] = target
+            edges.append((loader, dep, target))
+            if target not in ancestry:
+                walk(target, stack, ancestry | {target})
+    executable = executable.resolve()
+    root = root.resolve() if root is not None else executable
+    inherited = () if root == executable else tuple(expand(p, executable, executable)
+                                                   for p in macho(executable)[1])
+    walk(root, inherited, {root})
+    return edges
+
+
+def libraries(prefix):
+    libdir = prefix / 'lib'
+    result = {}
+    for name in POLICY['libraries']:
+        path = (libdir / f'lib{name}.dylib').resolve()
+        require(path.is_file() and path.parent == libdir.resolve(), 'missing/escaped candidate dylib')
+        require(re.fullmatch(rf'lib{name}\.\d+(?:\.\d+)*\.dylib', path.name), 'unexpected dylib identity')
+        result[name] = path
+    require({p.resolve() for p in libdir.glob('*.dylib')} == set(result.values()), 'unknown candidate dylib')
+    require(not list(libdir.glob('*.a')), 'unexpected static candidate library')
+    return result
+
+
+def runtime(paths):
+    records = []
+    for name, path in paths.items():
+        library = ctypes.CDLL(str(path))
+        values = {}
+        for field in ('configuration', 'license', 'version'):
+            fn = getattr(library, f'{name}_{field}')
+            fn.restype = ctypes.c_uint if field == 'version' else ctypes.c_char_p
+            value = fn()
+            values[field] = value if field == 'version' else value.decode()
+        values['configuration'] = selected_flags(values['configuration'])
+        require(values['license'] == 'LGPL version 2.1 or later', 'unexpected native license')
+        value = values['version']
+        values['version'] = [value >> 16, (value >> 8) & 255, value & 255]
+        if name == 'avcodec':
+            require(values['version'] == POLICY['avcodec_version'], 'unexpected avcodec ABI')
+        records.append(dict(library=path.name, sha256=digest(path), **values))
+    return records
+
+
+def build(prefix, sdk):
+    require(not prefix.exists(), 'candidate prefix must be fresh (no native cache reuse)')
+    work = prefix.parent
+    env = dict(os.environ, GNUPGHOME=str(work / 'gnupg'), SDKROOT=str(sdk),
+               CC=run('xcrun', '-f', 'clang'), CFLAGS=f'-isysroot {sdk}', LDFLAGS=f'-isysroot {sdk}')
+    Path(env['GNUPGHOME']).mkdir(mode=0o700)
+    # Probe the compiler/SDK compression and iconv support before downloading/building.
+    probe = work / 'probe.c'
+    probe.write_text('#include <zlib.h>\n#include <bzlib.h>\n#include <lzma.h>\n#include <iconv.h>\n'
+                     'int main(void) { return !zlibVersion() || !BZ2_bzlibVersion() || '
+                     '!lzma_version_number() || iconv_open("UTF-8", "UTF-8") == (iconv_t)-1; }\n')
+    run(env['CC'], '-isysroot', sdk, probe, '-lz', '-lbz2', '-llzma', '-liconv', '-o', work / 'probe', env=env)
+    run(work / 'probe')
+    for field, filename in (('url', 'source.tar.xz'), ('signature_url', 'source.tar.xz.asc'),
+                            ('key_url', 'signing-key.asc')):
+        run('curl', '--fail', '--location', '--silent', '--show-error', '--proto', '=https',
+            '--proto-redir', '=https', '--tlsv1.2', POLICY[field], '-o', work / filename,
+            seconds=setting('IRIS_FFMPEG_FETCH_SECONDS', 300))
+    require(digest(work / 'source.tar.xz') == POLICY['sha256'], 'source hash mismatch')
+    run('gpg', '--batch', '--import', work / 'signing-key.asc', env=env)
+    keys = run('gpg', '--batch', '--with-colons', '--fingerprint', '--list-keys', POLICY['fingerprint'], env=env)
+    require(f"fpr:::::::::{POLICY['fingerprint']}:" in keys.splitlines(), 'missing primary signing identity')
+    status = run('gpg', '--batch', '--status-fd', '1', '--verify', work / 'source.tar.xz.asc',
+                 work / 'source.tar.xz', env=env)
+    common.signature(status)
+    (work / 'signature.status').write_text(status + '\n')
+    run('tar', '-xJf', work / 'source.tar.xz', '-C', work)
+    source = work / f"ffmpeg-{POLICY['version']}"
+    run('./configure', f'--prefix={prefix}', f'--libdir={prefix}/lib', *POLICY['configure_flags'],
+        cwd=source, env=env, seconds=setting('IRIS_FFMPEG_BUILD_SECONDS', 3600))
+    codecs = generated_config((source / 'config.h').read_text(), (source / 'config_components.h').read_text())
+    run('make', f"-j{setting('IRIS_FFMPEG_JOBS', 2)}", cwd=source, env=env,
+        seconds=setting('IRIS_FFMPEG_BUILD_SECONDS', 3600))
+    run('make', 'install', cwd=source, env=env, seconds=setting('IRIS_FFMPEG_BUILD_SECONDS', 3600))
+    docs = prefix / 'share/iris-ffmpeg'
+    docs.mkdir(parents=True)
+    for filename in ('source.tar.xz', 'source.tar.xz.asc', 'signing-key.asc', 'signature.status'):
+        shutil.copy2(work / filename, docs)
+    for filename in ('COPYING.LGPLv2.1', 'config.h', 'config_components.h', 'ffbuild/config.mak'):
+        shutil.copy2(source / filename, docs / Path(filename).name)
+    shutil.copy2(ROOT / 'packaging/macos/ffmpeg-README.md', docs / 'README.md')
+    shutil.copy2(ROOT / 'scripts/macos-ffmpeg.py', docs / 'macos-ffmpeg.py')
+    paths = libraries(prefix)
+    for path in paths.values():
+        closure(path, paths.values(), sdk)
+    manifest = dict(policy=MACOS_POLICY, signature_verified=True, enabled_codecs=codecs,
+                    libraries={p.name: digest(p) for p in paths.values()},
+                    documents={p.name: digest(p) for p in docs.iterdir()},
+                    tools=dict(clang=run(env['CC'], '--version').splitlines()[0],
+                               sdk=run('xcrun', '--show-sdk-version'), os=run('sw_vers', '-productVersion'),
+                               architecture=run('uname', '-m'), rustc=run('rustc', '--version')))
+    (docs / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    # Runtime queries happen in a separate process after staging, never mixing two
+    # dylibs with identical install names in this Python process.
+
+
+def stage(prefix, app, sdk):
+    require(os.environ.get('IRIS_MACOS_REPORT_ONLY') == '1', 'candidate is report-only')
+    paths = libraries(prefix)
+    docs = prefix / 'share/iris-ffmpeg'
+    manifest = json.loads((docs / 'manifest.json').read_text())
+    require(manifest['policy'] == MACOS_POLICY and manifest['signature_verified'] is True, 'candidate policy mismatch')
+    require(digest(docs / 'source.tar.xz') == POLICY['sha256'], 'source hash mismatch')
+    common.signature((docs / 'signature.status').read_text())
+    codecs = generated_config((docs / 'config.h').read_text(), (docs / 'config_components.h').read_text())
+    require(manifest['enabled_codecs'] == codecs, 'candidate codec manifest mismatch')
+    require(manifest['documents'] == {p.name: digest(p) for p in docs.iterdir() if p.name != 'manifest.json'},
+            'candidate documents changed')
+    require(manifest['libraries'] == {p.name: digest(p) for p in paths.values()}, 'candidate bytes changed')
+    frameworks = app / 'Contents/Frameworks'
+    require(not list(frameworks.iterdir()), 'stale app frameworks')
+    executables = list((app / 'Contents/MacOS').iterdir())
+    all_edges = []
+    for executable in executables:
+        all_edges.extend(closure(executable, paths.values(), sdk))
+    for path in paths.values():
+        all_edges.extend(closure(app / 'Contents/MacOS/Iris', paths.values(), sdk, root=path))
+    for path in paths.values():
+        shutil.copy2(path, frameworks / path.name)
+        require(digest(frameworks / path.name) == manifest['libraries'][path.name], 'copy identity mismatch')
+    # Resolve BEFORE copying/rewriting; loader-relative source contexts are not
+    # interchangeable with the destination's context.
+    rewrites = {}
+    for loader, dep, target in all_edges:
+        if isinstance(target, dict):
+            continue
+        replacement = ('@executable_path/../Frameworks/' if loader in executables else '@loader_path/') + target.name
+        key = (loader, dep)
+        require(key not in rewrites or rewrites[key] == replacement, 'context-dependent dependency collision')
+        rewrites[key] = replacement
+    for (loader, dep), replacement in rewrites.items():
+        dest = frameworks / loader.name if loader in paths.values() else loader
+        run('install_name_tool', '-change', dep, replacement, dest)
+    for path in paths.values():
+        dest = frameworks / path.name
+        run('install_name_tool', '-id', '@loader_path/' + path.name, dest)
+        run('codesign', '--force', '--sign', '-', '--timestamp=none', dest)
+    for executable in executables:
+        if executable.name != 'Iris':
+            run('codesign', '--force', '--sign', '-', '--timestamp=none', executable)
+    staged_docs = app / 'Contents/Resources/ffmpeg'
+    shutil.copytree(docs, staged_docs)
+    manifest['staged_libraries'] = {p.name: digest(frameworks / p.name) for p in paths.values()}
+    (staged_docs / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+
+def check(app, sdk):
+    docs = app / 'Contents/Resources/ffmpeg'
+    manifest = json.loads((docs / 'manifest.json').read_text())
+    require(manifest['policy'] == MACOS_POLICY and manifest['signature_verified'] is True,
+            'staged candidate policy mismatch')
+    frameworks = app / 'Contents/Frameworks'
+    require(set(manifest['staged_libraries']) == set(manifest['libraries'])
+            and set(manifest['staged_libraries']) == {p.name for p in frameworks.iterdir()},
+            'unexpected staged library set')
+    paths = {name: frameworks / path for name, path in
+             ((n, next(p for p in manifest['staged_libraries'] if p.startswith(f'lib{n}.'))) for n in POLICY['libraries'])}
+    require(manifest['staged_libraries'] == {p.name: digest(p) for p in frameworks.iterdir()}, 'final staged bytes changed')
+    for path in paths.values():
+        require(macho(path)[2] == '@loader_path/' + path.name, 'unexpected staged dylib ID')
+    edges = []
+    roots = [(p, None) for p in (app / 'Contents/MacOS').iterdir()]
+    roots.extend((app / 'Contents/MacOS/Iris', p) for p in paths.values())
+    for executable, root in roots:
+        for loader, dep, target in closure(executable, paths.values(), sdk, root=root):
+            edges.append(dict(loader=str(loader.relative_to(app)), load_name=dep,
+                              target=target if isinstance(target, dict) else str(target.relative_to(app))))
+    iris_edges = closure(app / 'Contents/MacOS/Iris', paths.values(), sdk)
+    require(any(isinstance(t, Path) and t == paths['avcodec'] for _, _, t in iris_edges), 'Iris is not linked to candidate')
+    codecs = generated_config((docs / 'config.h').read_text(), (docs / 'config_components.h').read_text())
+    require(manifest['enabled_codecs'] == codecs, 'staged candidate codec manifest mismatch')
+    require(manifest['documents'] == {p.name: digest(p) for p in docs.iterdir() if p.name != 'manifest.json'},
+            'staged source/notice evidence changed')
+    common.signature((docs / 'signature.status').read_text())
+    require(digest(docs / 'source.tar.xz') == POLICY['sha256'], 'staged source mismatch')
+    return dict(source_sha=os.environ.get('GITHUB_SHA', run('git', '-C', ROOT, 'rev-parse', 'HEAD')),
+                scope='Report-only pinned candidate inventory (not the current release runtime); not legal approval, latency parity or release approval.',
+                policy=manifest['policy'], signature_verified=True, tools=manifest['tools'],
+                enabled_codecs=manifest['enabled_codecs'], documents=manifest['documents'],
+                build_libraries=manifest['libraries'], runtime=runtime(paths), closure=edges,
+                executables={p.name: digest(p) for p in (app / 'Contents/MacOS').iterdir()})
+
+
+def validate(output):
+    require(sys.platform == 'darwin', 'native macOS required')
+    require(not any(k.startswith('DYLD_') for k in os.environ), 'ambient DYLD overrides forbidden')
+    app = ROOT / 'dist/macos/Iris.app'
+    require(not app.parent.exists(), 'temporary macOS output must be fresh')
+    report = dict(scope='Report-only pinned candidate (not the current release runtime); not legal approval or release approval.', status='failed')
+    scratch = ROOT / 'target/macos-runtime-validation'
+    require(not scratch.exists(), 'candidate scratch must be fresh')
+    scratch.mkdir(parents=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix='native-', dir=scratch) as temporary:
+            work = Path(temporary).resolve()
+            REDACTIONS[str(work)] = '<temporary>'
+            sdk = Path(run('xcrun', '--sdk', 'macosx', '--show-sdk-path')).resolve()
+            REDACTIONS[str(sdk)] = '<sdk>'
+            prefix, target = work / 'candidate', work / 'cargo'
+            build(prefix, sdk)
+            env = dict(os.environ, IRIS_MACOS_REPORT_ONLY='1', IRIS_MACOS_FFMPEG_CANDIDATE=str(prefix),
+                       FFMPEG_DIR=str(prefix), PKG_CONFIG_PATH=str(prefix / 'lib/pkgconfig'),
+                       PKG_CONFIG_LIBDIR=str(prefix / 'lib/pkgconfig'), CARGO_TARGET_DIR=str(target),
+                       IRIS_BUILD_VARIANT='product', IRIS_MACOS_SIGN_IDENTITY='-', IRIS_MACOS_NOTARY_PROFILE='')
+            run('cargo', 'build', '--release', '-p', 'iris-thumb-preview', '--example', 'video_thumbnail_smoke',
+                '--locked', '--offline', cwd=ROOT, env=env, seconds=setting('IRIS_FFMPEG_BUILD_SECONDS', 3600))
+            run(ROOT / 'scripts/package-macos-app.sh', cwd=ROOT, env=env,
+                seconds=setting('IRIS_FFMPEG_BUILD_SECONDS', 3600))
+            run('codesign', '--verify', '--deep', '--strict', app)
+            report = check(app, sdk)
+            # No downloaded fixtures; generate tiny built-in MPEG-4/PNG inputs.
+            for filename, options in (('video.avi', ['-t', '1', '-c:v', 'mpeg4', '-an']),
+                                      ('still.png', ['-frames:v', '1', '-c:v', 'png'])):
+                run(prefix / 'bin/ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i',
+                    'testsrc2=size=64x48:rate=4', *options, work / filename, env=env)
+            smoke = app / 'Contents/MacOS/video_thumbnail_smoke'
+            run(smoke, work / 'video.avi', env=env)
+            run(smoke, work / 'still.png', '--still', env=env)
+            require(report['executables'] == {p.name: digest(p) for p in (app / 'Contents/MacOS').iterdir()},
+                    'executable bytes changed during smoke')
+            require({r['library']: r['sha256'] for r in report['runtime']} ==
+                    {p.name: digest(p) for p in (app / 'Contents/Frameworks').iterdir()},
+                    'library bytes changed during smoke')
+            report.update(status='passed', smoke=dict(video_mpeg4=True, still_png_file_and_bytes=True,
+                          pdf_and_full_raw='Default features retained; not exercised by this bounded smoke.'))
+    except Exception as error:
+        report['status'] = 'failed'
+        report['failure'] = clean(str(error))
+        raise
+    finally:
+        shutil.rmtree(app.parent, ignore_errors=True)
+        shutil.rmtree(scratch, ignore_errors=True)
+        data = clean(json.dumps(report, indent=2)) + '\n'
+        require(len(data.encode()) <= setting('IRIS_FFMPEG_MAX_REPORT_BYTES', 266240), 'report exceeds byte budget')
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(data)
+
+
+if __name__ == '__main__':
+    try:
+        if sys.argv[1] == 'validate' and len(sys.argv) == 3:
+            validate(Path(sys.argv[2]))
+        elif sys.argv[1] == 'stage' and len(sys.argv) == 4:
+            stage(Path(sys.argv[2]).resolve(), Path(sys.argv[3]).resolve(),
+                  Path(run('xcrun', '--sdk', 'macosx', '--show-sdk-path')).resolve())
+        else:
+            raise ValueError('expected validate OUTPUT or stage PREFIX APP')
+    except Exception as error:
+        sys.exit(clean(str(error)))

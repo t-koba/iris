@@ -1,7 +1,7 @@
 name: macOS runtime validation
 
-# Report-only inventory of the default product's staged native closure and
-# Homebrew metadata, not licensing approval, runtime parity, or notarization.
+# Report-only inventory of the current release runtime and the pinned
+# candidate, not legal approval, runtime parity, or notarization.
 # Called only by manual CI at its exact source ref; never dispatch Release.
 on:
   workflow_call:
@@ -25,6 +25,13 @@ jobs:
       IRIS_RELEASE_AUDIT_MAX_CARGO_PACKAGES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_CARGO_PACKAGES || 1024 }}
       IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES || 256 }}
       IRIS_RELEASE_AUDIT_COMMAND_SECONDS: ${{ vars.IRIS_RELEASE_AUDIT_COMMAND_SECONDS || 30 }}
+      IRIS_FFMPEG_JOBS: ${{ vars.IRIS_FFMPEG_JOBS || 2 }}
+      IRIS_FFMPEG_BUILD_SECONDS: ${{ vars.IRIS_FFMPEG_BUILD_SECONDS || 3600 }}
+      IRIS_FFMPEG_FETCH_SECONDS: ${{ vars.IRIS_FFMPEG_FETCH_SECONDS || 300 }}
+      IRIS_FFMPEG_COMMAND_SECONDS: ${{ vars.IRIS_FFMPEG_COMMAND_SECONDS || 60 }}
+      IRIS_FFMPEG_COMMAND_BYTES: ${{ vars.IRIS_FFMPEG_COMMAND_BYTES || 32768 }}
+      IRIS_FFMPEG_MAX_NATIVE_FILES: ${{ vars.IRIS_FFMPEG_MAX_NATIVE_FILES || 256 }}
+      IRIS_FFMPEG_MAX_REPORT_BYTES: ${{ vars.IRIS_FFMPEG_MAX_REPORT_BYTES || 266240 }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -38,19 +45,37 @@ jobs:
           toolchain: 1.97.1
       - name: Fetch locked Rust inputs
         run: cargo fetch --locked
-      - name: Install system dependencies
-        run: brew install ffmpeg pkg-config
-      - name: Audit temporary default-product package
+      - name: Install current runtime and candidate build tools
+        run: brew install ffmpeg pkg-config gnupg nasm
+      - name: Check candidate contracts
+        run: python3 scripts/test-macos-ffmpeg.py
+      - name: Audit current default-product package
         shell: bash
         run: |
-          # No cache or package retention: delete staged/runtime/build files even
-          # on failure, before the only artifact upload below can run.
+          # Report-only inventory of the runtime the unchanged release workflow
+          # still packages. Homebrew FFmpeg documents that existing release path;
+          # only the JSON below is retained.
           trap 'rm -rf dist/macos target/package-macos' EXIT
           ./scripts/package-macos-app.sh
           python3 scripts/release-audit.py macos --output audit/macos.json
+      - name: Validate pinned candidate
+        shell: bash
+        run: |
+          # Pinned shared-library candidate bound to its fresh prefix. Cargo is
+          # pointed at that prefix and never at Homebrew FFmpeg. The driver owns
+          # unique native/Cargo/fixture scratch and removes it on success/failure.
+          # No caches, archives, installers or Release calls.
+          trap 'rm -rf dist/macos target/macos-runtime-validation' EXIT
+          python3 scripts/macos-ffmpeg.py validate audit/macos-candidate.json
+      - name: Clean temporary bytes even after interruption
+        if: always()
+        run: rm -rf dist/macos target/package-macos target/macos-runtime-validation
       - name: Retain JSON evidence only
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: macos-runtime-audit
           if-no-files-found: error
-          path: audit/macos.json
+          path: |
+            audit/macos.json
+            audit/macos-candidate.json
