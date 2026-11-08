@@ -34,10 +34,13 @@ behavior, or licensing conclusions, and it never publishes.
   upstream commit, not a signature-verified source or release approval. Its
   CUDA type declarations fix the 9.0.1 wrapper's mismatch with the pinned
   FFmpeg headers (`CUarray` and by-value `CUDA_ARRAY3D_DESCRIPTOR`).
-  Only the staged prototype app build receives Cargo CLI `patch.crates-io`
-  configuration; production manifests, lockfile and default features stay
-  unchanged. The detached preview-smoke build is a separate dependency graph;
-  this override does not establish its compatibility or a passing native build.
+  Both staged app and detached preview-smoke builds receive the same Cargo CLI
+  `patch.crates-io` configuration and explicit `ffmpeg-next/non-exhaustive-enums`
+  feature through the transaction helper. Product manifests, the root workspace
+  Cargo.lock and default features stay unchanged; the detached prototype lock
+  records its explicit direct wrapper dependency. Neither graph is proven
+  compatible without
+  an exact-source native build and smoke; unknown enum values may still panic.
 - vcpkg / tooling baseline: `b8dfe957ec8b5c0ef5c4b31eea594b8486af744f`
   (`vcpkg.json` `builtin-baseline` and `vcpkg-configuration.json` carry the
   same baseline; the scripts fail closed on drift).
@@ -155,15 +158,21 @@ behavior, or licensing conclusions, and it never publishes.
    `VCPKG_INSTALLED_DIR`/`x64-windows-prototype-dynamic/bin` closure, sets
    `VCPKGRS_DYNAMIC=1` and the triplet env, builds `iris-ui-shell` with
    product defaults (no `minimal` variant) through `prototype-binding-build.py`
-   (Python 3.11+ for `tomllib`).
-   The helper retains the original root `Cargo.lock` bytes in memory, runs a
-   targeted Cargo update with the exact binding override, and refuses any
+   (Python 3.11+ for `tomllib`). For the staged app command, the helper
+   selects `iris-thumb-preview` too and enables upstream
+   `ffmpeg-next/non-exhaustive-enums` so new FFmpeg enum constants do not stop
+   compilation. Its unknown-value fallback is `unimplemented!()` and can panic;
+   this is only a bounded fixture-smoke probe, not arbitrary-media compatibility
+   or a production workaround. The default video/PDF/full-RAW Iris features stay
+   enabled. The helper retains the original root `Cargo.lock` bytes in memory,
+   prepares only the exact binding source/version/checksum transition, and refuses any
    unrelated package, dependency-edge or lock-metadata change before building
    with `--locked`. It restores the original bytes in `finally` on both success
    and failure. No Git override config or temporary lock is persisted. Abrupt
    process termination cannot run cleanup; use only the isolated CI checkout.
-   `binding-override.json` records the exact unsigned source, original/temporary/
-   restored lock hashes, build status and restoration result in the bounded
+   `binding-override.json` records the exact unsigned source, the CLI-only enum
+   compatibility feature and its panic limitation, original/temporary/restored
+   lock hashes, build status and restoration result in the bounded
    audit report, and is copied into the app docs. This is test evidence, not
    release provenance approval. The staging script stages the complete FFmpeg DLL
    closure plus the pinned `pdfium.dll`, and emits hashes plus copied
@@ -185,7 +194,18 @@ behavior, or licensing conclusions, and it never publishes.
    prototype `ffmpeg.exe` tool path, builds a fresh Inno Setup installer
    from the prototype ISS, builds the detached smoke with the same prototype
    env (`VCPKGRS_DYNAMIC=1`, triplet, `VCPKG_INSTALLED_DIR`,
-   `IRIS_PROTOTYPE_FFMPEG_EXE`), silently installs to a fresh unique
+   `IRIS_PROTOTYPE_FFMPEG_EXE`) through `prototype-binding-build.py --preview-smoke`.
+   This separate workspace exposes its existing `ffmpeg-next` wrapper as a direct
+   dependency solely for explicit CLI compatibility-feature selection; the baseline
+   lock adds that edge, not a new wrapper version. The helper validates only the
+   pinned binding transition in this workspace's own `Cargo.lock`, builds with
+   `--locked`, and restores original bytes on success, failure, or Python interruption.
+   It emits separate `preview-smoke-binding-override.json` lock hashes, target,
+   feature/limitation, build status and restoration evidence into the bounded audit
+   report. No temporary lock or Cargo patch config is retained; forced process
+   termination cannot run `finally`, so use an isolated checkout. The enum fallback
+   can panic and does not establish arbitrary-media compatibility.
+   The script silently installs to a fresh unique
    directory (refuses pre-existing dirs), verifies staged vs installed
    `Iris.exe`/`pdfium.dll` hashes and the DLL closure, runs the smoke from
    inside the installed dir with the installed `pdfium.dll` beside the exe

@@ -10,4 +10,7 @@ edition = "2021"
 
 [dependencies]
 iris-thumb-preview = { path = "../../../crates/thumb-preview", features = ["test-fixtures", "video", "pdf", "raw-full"] }
+# Expose the existing wrapper to the helper's explicit CLI compatibility feature.
+# No extra FFmpeg defaults; the product preview dependency still selects video.
+ffmpeg-next = { version = "=9.0.0", default-features = false }
 tokio-util = "0.7"

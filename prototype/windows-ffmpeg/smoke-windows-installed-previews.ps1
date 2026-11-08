@@ -95,7 +95,9 @@ try {
     $env:VCPKG_INSTALLED_DIR = $installedDirEnv
     $env:IRIS_PROTOTYPE_FFMPEG_EXE = $prototypeFfmpegExe
     Write-Host "smoke build vcpkg discovery: $vcpkgRoot/installed/$env:VCPKGRS_TRIPLET (dynamic)"
-    cargo build --locked --release --manifest-path $smokeManifest
+    # The detached workspace has its own lock: use the same pinned binding and
+    # explicit enum compatibility feature as the staged app, then restore its lock.
+    & python (Join-Path $scriptDir "prototype-binding-build.py") --preview-smoke
     if ($LASTEXITCODE -ne 0) { throw "prototype preview-smoke build failed" }
     $smokeExe = Join-Path $scriptDir "preview-smoke/target/release/iris-windows-prototype-preview-smoke.exe"
     if (!(Test-Path -LiteralPath $smokeExe -PathType Leaf)) {

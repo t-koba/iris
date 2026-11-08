@@ -1,5 +1,6 @@
 """Offline transaction regressions; not a native Windows/bindgen build."""
 import importlib.util
+from itertools import product
 import json
 from pathlib import Path
 import re
@@ -14,6 +15,7 @@ binding = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(binding)
 PINS = json.loads((HERE / "pins.json").read_text())
 ORIGINAL = (HERE.parents[1] / "Cargo.lock").read_bytes()
+SMOKE_ORIGINAL = (HERE / "preview-smoke/Cargo.lock").read_bytes()
 
 
 def overridden(raw):
@@ -39,7 +41,8 @@ class BindingBuildTests(unittest.TestCase):
     def test_pin_and_single_allowed_lock_transition(self):
         self.assertEqual(binding.COMMIT, "5aa9dc312e0ab9b762bae7ca367d17761d0c9447")
         binding.validate_pin(PINS["ffmpeg_sys_next"])
-        binding.validate_lock(ORIGINAL, overridden(ORIGINAL))
+        for original in (ORIGINAL, SMOKE_ORIGINAL):
+            binding.validate_lock(original, overridden(original))
 
     def test_override_and_validation_normalize_double_crlf(self):
         raw = binding.lock_text(ORIGINAL).encode("utf-8").replace(b"\n", b"\r\r\n")
@@ -109,13 +112,13 @@ class BindingBuildTests(unittest.TestCase):
             binding.validate_lock(ORIGINAL, changed)
 
     def test_restore_bytes_on_success_and_each_failure_path(self):
-        for outcome in ("success", "lock_drift", "dependency_drift", "build_failure",
-                        "build_lock_write", "interrupt"):
-            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
+        for preview_smoke, outcome in product((False, True), (
+                "success", "lock_drift", "dependency_drift", "build_failure", "build_lock_write", "interrupt")):
+            with self.subTest(preview_smoke=preview_smoke, outcome=outcome), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 lock = root / "Cargo.lock"
                 # Noncanonical newlines prove restoration is byte-exact, not reserialization.
-                original = binding.lock_text(ORIGINAL).encode("utf-8").replace(b"\n", b"\r\n")
+                original = binding.lock_text(SMOKE_ORIGINAL if preview_smoke else ORIGINAL).encode("utf-8-sig").replace(b"\n", b"\r\n")
                 lock.write_bytes(original)
                 manifest = root / "Cargo.toml"
                 manifest.write_bytes(b"# production manifest must not be edited\r\n")
@@ -131,8 +134,10 @@ class BindingBuildTests(unittest.TestCase):
                     self.assertEqual(cwd, root)
                     self.assertTrue(check)
                     calls.append(command)
-                    self.assertEqual(command, ["cargo", "build", "--locked", "--release",
-                                               "-p", "iris-ui-shell", "--bin", "Iris", *binding.CONFIG])
+                    packages = (["-p", "iris-windows-prototype-preview-smoke"] if preview_smoke else
+                                ["-p", "iris-ui-shell", "-p", "iris-thumb-preview", "--bin", "Iris"])
+                    self.assertEqual(command, ["cargo", "build", "--locked", "--release", *packages,
+                                               "--features", "ffmpeg-next/non-exhaustive-enums", *binding.CONFIG])
                     self.assertEqual(lock.read_bytes(), overridden(original))
                     if outcome == "build_failure":
                         raise subprocess.CalledProcessError(1, command)
@@ -144,20 +149,33 @@ class BindingBuildTests(unittest.TestCase):
                 with patch.object(binding.subprocess, "run", side_effect=cargo), \
                         patch.object(binding, "override_lock", return_value=temporary):
                     if outcome == "success":
-                        binding.build(root, PINS["ffmpeg_sys_next"], evidence)
+                        binding.build(root, PINS["ffmpeg_sys_next"], evidence, preview_smoke=preview_smoke)
                     else:
                         with self.assertRaises((ValueError, subprocess.CalledProcessError, KeyboardInterrupt)):
-                            binding.build(root, PINS["ffmpeg_sys_next"], evidence)
+                            binding.build(root, PINS["ffmpeg_sys_next"], evidence, preview_smoke=preview_smoke)
                 self.assertEqual(lock.read_bytes(), original)
                 self.assertEqual(manifest.read_bytes(), b"# production manifest must not be edited\r\n")
                 self.assertEqual(len(calls), 0 if outcome in ("lock_drift", "dependency_drift") else 1)
                 record = json.loads(evidence.read_text())
                 self.assertTrue(record["lock_restored"])
+                self.assertEqual(record["build_target"], "preview-smoke" if preview_smoke else "app")
                 self.assertEqual(record["status"], "build_passed" if outcome == "success" else "failed")
+                self.assertEqual(record["compat_feature"], binding.COMPAT_FEATURE)
+                self.assertIn("may panic", record["compat_note"])
                 self.assertEqual(record["original_lock_sha256"], record["restored_lock_sha256"])
                 self.assertIn("unsigned", record["note"])
                 self.assertLess(evidence.stat().st_size, 2048)
                 self.assertEqual(sorted(p.name for p in root.iterdir()), ["Cargo.lock", "Cargo.toml", "target"])
+
+    def test_smoke_entry_point_uses_detached_lock_and_separate_report(self):
+        with patch("sys.argv", [str(HERE / "prototype-binding-build.py"), "--preview-smoke"]), \
+                patch.object(binding, "build") as build:
+            binding.main()
+        build.assert_called_once_with(
+            HERE / "preview-smoke", PINS["ffmpeg_sys_next"],
+            HERE.parents[1] / "target/prototype-windows-ffmpeg/preview-smoke-binding-override.json",
+            preview_smoke=True,
+        )
 
     def test_stage_and_report_use_override_without_production_configuration(self):
         stage = (HERE / "stage-windows-prototype-app.ps1").read_text()

@@ -3,6 +3,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import unittest
+import tomllib
 
 ROOT = Path(__file__).resolve().parent
 SMOKE = (ROOT / "smoke-windows-installed-previews.ps1").read_text()
@@ -33,6 +34,21 @@ class SmokeEvidenceTests(unittest.TestCase):
         self.assertIn('Join-Path $vcpkgRoot "installed"', BUILD)
         self.assertIn('Join-Path (Resolve-Path $env:VCPKG_ROOT).Path "installed"', STAGE)
         self.assertIn('Join-Path $vcpkgRoot "installed"', SMOKE)
+
+    def test_detached_build_uses_binding_transaction_before_install(self):
+        invocation = '& python (Join-Path $scriptDir "prototype-binding-build.py") --preview-smoke'
+        self.assertEqual(SMOKE.count(invocation), 1)
+        build = SMOKE.index(invocation)
+        check = SMOKE.index('if ($LASTEXITCODE -ne 0) { throw "prototype preview-smoke build failed" }')
+        self.assertLess(build, check)
+        self.assertLess(check, SMOKE.index("Invoke-PrototypeInstalledSmoke -InstallDir"))
+        self.assertNotIn("cargo build", SMOKE)
+        manifest = tomllib.loads((ROOT / "preview-smoke/Cargo.toml").read_text())
+        deps = manifest["dependencies"]
+        preview = deps["iris-thumb-preview"]
+        self.assertTrue(preview.get("default-features", True))
+        self.assertEqual(set(preview["features"]), {"video", "pdf", "raw-full", "test-fixtures"})
+        self.assertEqual(deps["ffmpeg-next"], {"version": "=9.0.0", "default-features": False})
 
     def test_cleanup_does_not_hide_uninstall_failure(self):
         self.assertIn("} finally {", LIFECYCLE)

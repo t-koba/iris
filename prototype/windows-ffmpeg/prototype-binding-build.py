@@ -1,4 +1,5 @@
-"""Transactional source override for the test-only default-feature Windows app."""
+"""Transactional binding override for the test-only Windows app and detached smoke."""
+import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -15,6 +16,7 @@ REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
 CHECKSUM = "c6f932d8c1cede016c65d4f1435f323369c99c74df55143b18676aa10e7603f9"
 CONFIG = ["--config", f'patch.crates-io.{NAME}.git="{REPOSITORY}"',
           "--config", f'patch.crates-io.{NAME}.rev="{COMMIT}"']
+COMPAT_FEATURE = "ffmpeg-next/non-exhaustive-enums"
 
 
 def validate_pin(pin):
@@ -107,12 +109,15 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def build(root, pin, evidence):
+def build(root, pin, evidence, *, preview_smoke=False):
     lock = root / "Cargo.lock"
     original = lock.read_bytes()  # Memory only: never leave a backup or changed lock behind.
     record = {
         "schema": 1, "package": NAME, "repository": REPOSITORY,
         "commit": COMMIT, "version": VERSION, "source": SOURCE,
+        "build_target": "preview-smoke" if preview_smoke else "app",
+        "compat_feature": COMPAT_FEATURE,
+        "compat_note": "Test-only enum fallback may panic on unknown values; fixture smoke is not broad compatibility.",
         "note": "Test-only pinned, unsigned upstream commit; no signature claim or release approval.",
         "original_lock_sha256": digest(original), "status": "started", "lock_restored": False,
     }
@@ -126,11 +131,13 @@ def build(root, pin, evidence):
         lock.write_bytes(temporary)
         record["temporary_lock_sha256"] = digest(temporary)
         record["status"] = "lock_validated"
-        # `--locked` verifies the precise source override without re-resolving
-        # unrelated dependencies. No feature flags keep product defaults enabled;
-        # CLI config does not persist into manifests or Cargo configuration.
-        subprocess.run(["cargo", "build", "--locked", "--release", "-p", "iris-ui-shell",
-                        "--bin", "Iris", *CONFIG], cwd=root, check=True)
+        # Explicit CLI feature selection in each workspace; defaults stay enabled.
+        # The detached manifest exposes ffmpeg-next directly for this CLI feature.
+        # The fallback can panic on unknown enums: this is only a fixture probe.
+        packages = (["-p", "iris-windows-prototype-preview-smoke"] if preview_smoke else
+                    ["-p", "iris-ui-shell", "-p", "iris-thumb-preview", "--bin", "Iris"])
+        subprocess.run(["cargo", "build", "--locked", "--release", *packages,
+                        "--features", COMPAT_FEATURE, *CONFIG], cwd=root, check=True)
         if lock.read_bytes() != temporary:
             raise ValueError("locked build changed Cargo.lock")
         record["status"] = "build_passed"
@@ -150,10 +157,16 @@ def build(root, pin, evidence):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--preview-smoke", action="store_true", help="build the detached preview smoke instead of Iris")
+    args = parser.parse_args()
     here = Path(__file__).resolve().parent
     pins = json.loads((here / "pins.json").read_text(encoding="utf-8-sig"))
     root = here.parents[1]
-    build(root, pins["ffmpeg_sys_next"], root / "target/prototype-windows-ffmpeg/binding-override.json")
+    workspace = here / "preview-smoke" if args.preview_smoke else root
+    report = "preview-smoke-binding-override.json" if args.preview_smoke else "binding-override.json"
+    build(workspace, pins["ffmpeg_sys_next"], root / "target/prototype-windows-ffmpeg" / report,
+          preview_smoke=args.preview_smoke)
 
 
 if __name__ == "__main__":

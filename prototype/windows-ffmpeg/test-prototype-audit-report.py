@@ -44,6 +44,27 @@ class PrototypeAuditReportTests(unittest.TestCase):
             self.assertIn("https://example.invalid/source.tar.xz", text)
             self.assertIn("avcodec-61.dll", text)
 
+    def test_detached_binding_transaction_is_separate_bounded_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_all_inputs(root)
+            relative = "target/prototype-windows-ffmpeg/preview-smoke-binding-override.json"
+            record = {
+                "build_target": "preview-smoke", "commit": "5aa9dc312e0ab9b762bae7ca367d17761d0c9447",
+                "compat_feature": "ffmpeg-next/non-exhaustive-enums", "lock_restored": True,
+                "original_lock_sha256": "b" * 64, "temporary_lock_sha256": "c" * 64,
+                "restored_lock_sha256": "b" * 64, "status": "failed", "error_type": "KeyboardInterrupt",
+            }
+            (root / relative).write_text(json.dumps(record), encoding="utf-8")
+            report, encoded = reporter.build_report(root, 262144)
+            entry = report["reports"]["preview_smoke_binding_override"]
+            self.assertEqual(entry["status"], "included")
+            self.assertEqual(entry["data"], record)
+            self.assertIn("binding_override", report["reports"])
+            self.assertLessEqual(len(encoded), 262144)
+            # Report completeness means input presence, never native build success.
+            self.assertEqual(entry["data"]["status"], "failed")
+
     def test_missing_and_oversize_inputs_are_explicit_and_bounded(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
