@@ -25,6 +25,11 @@ jobs:
       IRIS_RELEASE_AUDIT_MAX_CARGO_PACKAGES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_CARGO_PACKAGES || 1024 }}
       IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES || 256 }}
       IRIS_RELEASE_AUDIT_COMMAND_SECONDS: ${{ vars.IRIS_RELEASE_AUDIT_COMMAND_SECONDS || 30 }}
+      # Shared corpus is fetched once by the driver; only JSON leaves the job.
+      IRIS_PREVIEW_CORPUS_MAX_BYTES: ${{ vars.IRIS_PREVIEW_CORPUS_MAX_BYTES || 40000000 }}
+      IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS: ${{ vars.IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS || 60 }}
+      IRIS_PREVIEW_LATENCY_WARMUPS: ${{ vars.IRIS_PREVIEW_LATENCY_WARMUPS || 2 }}
+      IRIS_PREVIEW_LATENCY_SAMPLES: ${{ vars.IRIS_PREVIEW_LATENCY_SAMPLES || 21 }}
       IRIS_FFMPEG_JOBS: ${{ vars.IRIS_FFMPEG_JOBS || 2 }}
       IRIS_FFMPEG_BUILD_SECONDS: ${{ vars.IRIS_FFMPEG_BUILD_SECONDS || 3600 }}
       IRIS_FFMPEG_FETCH_SECONDS: ${{ vars.IRIS_FFMPEG_FETCH_SECONDS || 300 }}
@@ -67,8 +72,9 @@ jobs:
         run: |
           # Pinned shared-library candidate bound to its fresh prefix. Cargo is
           # pointed at that prefix and never at Homebrew FFmpeg. The driver owns
-          # unique native/Cargo/fixture scratch and removes it on success/failure.
-          # No caches, archives, installers or Release calls.
+          # unique native/Cargo/corpus scratch and removes it on success/failure.
+          # Separate fresh default-feature targets measure Homebrew and the staged
+          # candidate against the same verified corpus. No caches or Release calls.
           trap 'rm -rf dist/macos target/macos-runtime-validation' EXIT
           python3 scripts/macos-ffmpeg.py validate audit/macos-candidate.json
       - name: Clean temporary bytes even after interruption

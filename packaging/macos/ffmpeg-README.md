@@ -82,15 +82,22 @@ app signature and does not preserve the original distribution trust claims.
 
 Only bounded JSON leaves this validation job: the current release runtime as
 audit/macos.json and this candidate as audit/macos-candidate.json. Downloaded
-sources, signatures, keys, generated fixtures, staged apps, static/shared libraries,
-Cargo targets and build scratch are
-temporary and cleaned even on failure. No ZIP, installer, source bundle or
+sources, signatures, keys, generated and downloaded fixtures, staged apps,
+static/shared libraries, Cargo targets and build scratch are temporary and
+cleaned on success, failure and interruption. No ZIP, installer, source bundle or
 Release dispatch is retained. The tagged release workflow is unchanged and
 remains on hold; this candidate is not a release and its inventory is not legal
 approval.
-PDF/raw-full product features stay enabled but this job's tiny generated
-MPEG-4 and PNG FFmpeg fallback smokes do not establish PDF, sensor RAW,
-HDR/HEIF correctness, representative corpus coverage or latency parity.
+Both default-feature runtime smokes use the same once-fetched, digest-pinned
+[preview corpus](../../tests/preview-corpus/README.md), reverified before extraction.
+Fresh separate Cargo targets prevent reuse of FFmpeg discovery. The candidate
+smoke is rewritten/signed into the temporary app and its staged closure checked
+before execution. The report retains correctness and JPEG/CR3/H.264 timings for
+both runtimes; paired differences require matching input, output, build, source
+and runner/CPU identities. Only H.264 timing exercises FFmpeg; JPEG/CR3 use Iris
+Rust code. PDF correctness uses Core Graphics. Existing generated MPEG-4/PNG
+fallback smokes remain additional candidate checks. There is no latency threshold
+or claim of runtime parity, sensor demosaic, HDR/HEIF coverage or legal approval.
 
 Policy defaults (all positive, configurable via job variables): IRIS_FFMPEG_JOBS
 2, IRIS_FFMPEG_BUILD_SECONDS 3600 per build command, IRIS_FFMPEG_FETCH_SECONDS

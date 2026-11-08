@@ -209,6 +209,7 @@ class CandidateContracts(unittest.TestCase):
             with patch.object(m, 'ROOT', root), patch.object(m.sys, 'platform', 'darwin'), \
                     patch.object(m, 'run', return_value=str(root / 'sdk')), \
                     patch.object(m, 'build', side_effect=failed_build), \
+                    patch.object(m, 'parse_preview', return_value={}), \
                     patch.dict(m.REDACTIONS), self.assertRaisesRegex(ValueError, 'synthetic'):
                 m.validate(output)
             self.assertFalse(app.parent.exists())
@@ -406,6 +407,256 @@ Load command 2
         self.assertIn('shutil.rmtree(app.parent', source)
         self.assertIn('not the current release runtime', source)
         self.assertIn('not legal approval', source)
+
+
+class PreviewComparison(unittest.TestCase):
+    def setUp(self):
+        self.env = patch.dict(m.os.environ, IRIS_PREVIEW_LATENCY_WARMUPS='2', IRIS_PREVIEW_LATENCY_SAMPLES='21')
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.identity = dict.fromkeys((
+            'source_revision', 'workflow_run_id', 'cargo_lock_sha256', 'rustc', 'target_arch',
+            'runner_name', 'runner_os', 'runner_arch', 'runner_image_os', 'runner_image_version',
+            'cpu_model', 'available_parallelism', 'release_opt_level', 'crate', 'crate_version'), 'synthetic')
+        self.identity.update(target_os='macos', build_profile='release',
+                             features=dict(video=True, pdf=True, raw_full=True))
+        pins = json.loads((ROOT / 'tests/preview-corpus/fixtures.json').read_text())['files']
+        self.correct = dict(record='iris.preview_correctness.v1', passed=True, identity=self.identity,
+                            fixtures=[dict(filename=p['filename'], sha256=p['sha256'], size_bytes=p['size'],
+                                           output=dict(width=256, height=144, format='jpeg', source='synthetic')) for p in pins])
+        fixtures = {f['filename']: f for f in self.correct['fixtures']}
+        self.timings = [dict(record='iris.preview_latency.v1', operation=op, uses_ffmpeg=ffmpeg,
+                            input={k: fixtures[name][k] for k in ('filename', 'sha256', 'size_bytes')},
+                            output=dict(fixtures[name]['output'], bytes=123), identity=self.identity,
+                            timing=dict(unit='nanoseconds', warmup_iterations=2, sample_count=21,
+                                        min=1, median=2, p90=3, max=4, median_absolute_deviation=1))
+                        for op, (name, ffmpeg) in m.PREVIEW_OPERATIONS.items()]
+
+    def text(self):
+        return ('discarded correctness diagnostics\nPREVIEW_CORRECTNESS ' + json.dumps(self.correct) + '\n' +
+                '\n'.join('PREVIEW_LATENCY ' + json.dumps(t) for t in self.timings))
+
+    def parsed(self):
+        return m.parse_preview(self.text(), 'synthetic')
+
+    def test_records_pair_by_operation_not_order_without_threshold(self):
+        baseline = self.parsed()
+        self.timings.reverse()
+        for timing in self.timings:
+            timing['timing'].update(median=200, p90=300, max=400)
+        candidate = self.parsed()
+        pairs = m.paired_preview(baseline, candidate)
+        self.assertEqual(len(pairs), 3)
+        self.assertEqual(sum(p['uses_ffmpeg'] for p in pairs), 1)
+        self.assertTrue(all(p['candidate_minus_baseline_ns'] == 198 for p in pairs))
+        self.assertNotIn('discarded', json.dumps(baseline))
+        self.assertNotIn('threshold', json.dumps(pairs))
+        # A representative retained comparison is well below the existing cap.
+        self.assertLess(len(m.report_bytes(dict(baseline=baseline, candidate=candidate, pairs=pairs))), 266240)
+
+    def test_parse_rejects_incomplete_duplicate_malformed_and_oversized_records(self):
+        text = self.text()
+        for bad in ('', text.rsplit('\n', 1)[0], text + '\n' + text,
+                    text.replace('PREVIEW_LATENCY {', 'PREVIEW_LATENCY !{', 1)):
+            with self.subTest(bad=bad[:40]), self.assertRaises(ValueError):
+                m.parse_preview(bad, 'synthetic')
+        with patch.dict(m.os.environ, IRIS_FFMPEG_COMMAND_BYTES=str(len(text.encode()) - 1)):
+            with self.assertRaisesRegex(ValueError, 'budget'):
+                self.parsed()
+
+    def test_parse_rejects_unpinned_or_invalid_measurements(self):
+        mutations = [
+            (self.correct, 'passed', False),
+            (self.correct['fixtures'][0], 'sha256', '0' * 64),
+            (self.correct['fixtures'][0], 'size_bytes', 1),
+            (self.correct['fixtures'][0]['output'], 'width', 257),
+            (self.timings[0]['input'], 'sha256', '0' * 64),
+            (self.timings[0], 'operation', 'unknown'),
+            (self.timings[0], 'uses_ffmpeg', True),
+            (self.timings[0]['output'], 'height', 1),
+            (self.timings[0]['timing'], 'sample_count', 22),
+            (self.timings[0]['timing'], 'warmup_iterations', 3),
+            (self.timings[0]['timing'], 'median', -1),
+            (self.timings[0]['timing'], 'max', float('nan')),
+            (self.timings[0]['timing'], 'max', 1 << 64),
+            (self.identity, 'source_revision', 'other-source'),
+            (self.identity, 'cpu_model', None),
+            (self.identity['features'], 'video', False),
+        ]
+        for obj, key, bad in mutations:
+            good = obj[key]
+            obj[key] = bad
+            with self.subTest(key=key, bad=bad), self.assertRaises(ValueError):
+                self.parsed()
+            obj[key] = good
+
+    def test_pair_rejects_each_experiment_identity_mismatch(self):
+        baseline = self.parsed()
+        # These records can each be valid independently, but not paired.
+        for key in self.identity:
+            if key in ('target_os', 'build_profile', 'features', 'source_revision'):
+                continue  # Independently rejected above; source is also checked below.
+            old = self.identity[key]
+            self.identity[key] = 'different'
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'identity mismatch'):
+                m.paired_preview(baseline, self.parsed())
+            self.identity[key] = old
+        import copy
+        for section, key, bad in (('input', 'sha256', '0' * 64), ('input', 'size_bytes', 0),
+                                  ('output', 'width', 128), ('output', 'height', 128),
+                                  ('output', 'source', 'different'), ('identity', 'source_revision', 'other'),
+                                  ('identity', 'features', {}), ('timing', 'sample_count', 1)):
+            candidate = copy.deepcopy(baseline)
+            candidate['timings'][0][section][key] = bad
+            with self.subTest(section=section, key=key), self.assertRaises(ValueError):
+                m.paired_preview(baseline, candidate)
+        candidate = copy.deepcopy(baseline)
+        candidate['timings'][0]['operation'] = 'other'
+        with self.assertRaises(ValueError):
+            m.paired_preview(baseline, candidate)
+
+    def test_existing_report_cap_and_nonfinite_rejection(self):
+        data = m.report_bytes({'synthetic': 'evidence'})
+        with patch.dict(m.os.environ, IRIS_FFMPEG_MAX_REPORT_BYTES=str(len(data.encode()))):
+            self.assertEqual(m.report_bytes({'synthetic': 'evidence'}), data)
+        with patch.dict(m.os.environ, IRIS_FFMPEG_MAX_REPORT_BYTES=str(len(data.encode()) - 1)):
+            with self.assertRaisesRegex(ValueError, 'budget'):
+                m.report_bytes({'synthetic': 'evidence'})
+        with self.assertRaises(ValueError):
+            m.report_bytes({'bad': float('nan')})
+
+    def test_fresh_default_feature_builds_and_pinned_discovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline = m.preview_env(root / 'brew', root / 'cargo-baseline', 'synthetic')
+            candidate = m.preview_env(root / 'candidate', root / 'cargo-candidate', 'synthetic')
+            self.assertNotEqual(baseline['CARGO_TARGET_DIR'], candidate['CARGO_TARGET_DIR'])
+            for env in (baseline, candidate):
+                with patch.object(m, 'run', side_effect=[env['FFMPEG_DIR'], '']) as run:
+                    m.build_preview(env)
+                    args = run.call_args[0]
+                    self.assertIn('--locked', args)
+                    self.assertIn('--offline', args)
+                    self.assertNotIn('--no-default-features', args)
+                    self.assertEqual(run.call_args.kwargs['env'], env)
+                with patch.object(m, 'run', return_value=str(root / 'wrong')):
+                    with self.assertRaisesRegex(ValueError, 'another runtime'):
+                        m.build_preview(env)
+            (root / 'cargo-baseline').mkdir()
+            with self.assertRaisesRegex(ValueError, 'fresh'):
+                m.preview_env(root / 'brew', root / 'cargo-baseline', 'synthetic')
+
+
+    def test_single_shared_fetch_and_cleanup_on_success_failure_and_interruption(self):
+        for failure in (None, ValueError, KeyboardInterrupt, InterruptedError):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                pins = root / 'tests/preview-corpus/fixtures.json'
+                pins.parent.mkdir(parents=True)
+                pins.write_bytes((ROOT / 'tests/preview-corpus/fixtures.json').read_bytes())
+                app = root / 'dist/macos/Iris.app'
+                output = root / 'audit/candidate.json'
+                fetches, measurements, builds = [], [], []
+
+                def run(*args, **kwargs):
+                    command = str(args[0])
+                    env = kwargs.get('env', {})
+                    if command == 'xcrun':
+                        return str(root / 'sdk')
+                    if command == 'brew':
+                        return str(root / 'brew')
+                    if command == 'pkg-config':
+                        return env['FFMPEG_DIR']
+                    if command.endswith('fetch-preview-corpus.py') or (
+                            len(args) > 1 and str(args[1]).endswith('fetch-preview-corpus.py')):
+                        corpus = Path(args[-1])
+                        corpus.mkdir()
+                        (corpus / 'synthetic-fixture').write_text('must be removed')
+                        fetches.append(corpus)
+                    if command == 'cargo' and 'preview_corpus_smoke' in args:
+                        target = Path(env['CARGO_TARGET_DIR'])
+                        self.assertFalse(target.exists())
+                        (target / 'release/examples').mkdir(parents=True)
+                        (target / 'release/examples/preview_corpus_smoke').touch()
+                        builds.append(env)
+                    if command.endswith('package-macos-app.sh'):
+                        for directory in ('MacOS', 'Frameworks'):
+                            (app / 'Contents' / directory).mkdir(parents=True)
+                        (app / 'Contents/MacOS/Iris').touch()
+                        (app / 'Contents/MacOS/video_thumbnail_smoke').touch()
+                    if command.endswith('preview_corpus_smoke'):
+                        self.assertTrue((Path(args[1]) / 'synthetic-fixture').is_file())
+                        measurements.append(Path(args[1]))
+                        if len(measurements) == 2 and failure:
+                            raise failure('synthetic smoke interruption/failure')
+                        return self.text()
+                    return ''
+
+                def build(prefix, sdk):
+                    prefix.mkdir()
+                    (prefix / 'synthetic-native-build').touch()
+
+                def stage(executable, prefix, app, sdk):
+                    dest = app / 'Contents/MacOS/preview_corpus_smoke'
+                    dest.touch()
+                    return dest
+
+                def check(app, sdk):
+                    return dict(runtime=[], executables={p.name: m.digest(p) for p in (app / 'Contents/MacOS').iterdir()})
+
+                with patch.object(m, 'ROOT', root), patch.object(m.sys, 'platform', 'darwin'), \
+                        patch.object(m, 'run', side_effect=run), patch.object(m, 'build', side_effect=build), \
+                        patch.object(m, 'stage_preview', side_effect=stage), patch.object(m, 'check', side_effect=check), \
+                        patch.dict(m.os.environ, GITHUB_SHA='synthetic'), patch.dict(m.REDACTIONS):
+                    if failure:
+                        with self.assertRaises(failure):
+                            m.validate(output)
+                    else:
+                        m.validate(output)
+                self.assertEqual(len(fetches), 1)
+                self.assertEqual(measurements, fetches * 2)
+                self.assertEqual(len(builds), 2)
+                self.assertNotEqual(builds[0]['CARGO_TARGET_DIR'], builds[1]['CARGO_TARGET_DIR'])
+                self.assertEqual(builds[0]['FFMPEG_DIR'], str(root / 'brew'))
+                self.assertTrue(builds[1]['FFMPEG_DIR'].endswith('/candidate'))
+                self.assertFalse(app.parent.exists())
+                self.assertFalse((root / 'target/macos-runtime-validation').exists())
+                report = json.loads(output.read_text())
+                self.assertEqual(report['status'], 'failed' if failure else 'passed')
+                self.assertIn('baseline', report['preview'])
+                if not failure:
+                    self.assertEqual(len(report['preview']['paired_comparisons']), 3)
+                self.assertEqual({p.relative_to(root).as_posix() for p in root.rglob('*') if p.is_file()},
+                                 {'tests/preview-corpus/fixtures.json', 'audit/candidate.json'})
+
+    def test_corpus_executable_rewrite_is_checked_against_staged_closure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            executable = root / 'cargo/release/examples/preview_corpus_smoke'
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            app = root / 'Iris.app'
+            for name in ('MacOS', 'Frameworks'):
+                (app / 'Contents' / name).mkdir(parents=True)
+            lib = root / 'candidate/lib/libavcodec.62.dylib'
+            staged = app / 'Contents/Frameworks' / lib.name
+            staged.touch()
+            dest = app / 'Contents/MacOS/preview_corpus_smoke'
+            with patch.object(m, 'libraries', return_value={'avcodec': lib}), \
+                    patch.object(m, 'closure', side_effect=[[(executable, str(lib), lib)], []]) as closure, \
+                    patch.object(m, 'run') as run:
+                self.assertEqual(m.stage_preview(executable, root / 'candidate', app, root / 'sdk'), dest)
+                closure.assert_called_with(dest, [staged], root / 'sdk')
+                self.assertEqual(run.call_args_list[0].args,
+                                 ('install_name_tool', '-change', str(lib),
+                                  '@executable_path/../Frameworks/' + lib.name, dest))
+                self.assertEqual(run.call_args_list[-1].args[-1], app)
+            with patch.object(m, 'libraries', return_value={'avcodec': lib}), \
+                    patch.object(m, 'closure', side_effect=ValueError('outside exact candidate')), \
+                    patch.object(m, 'run') as run:
+                with self.assertRaises(ValueError):
+                    m.stage_preview(executable, root / 'candidate', app, root / 'sdk')
+                run.assert_not_called()
 
 
 if __name__ == '__main__':

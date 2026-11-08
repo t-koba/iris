@@ -486,6 +486,144 @@ def check(app, sdk):
                 executables={p.name: digest(p) for p in (app / 'Contents/MacOS').iterdir()})
 
 
+# Fixed by the smoke's three operations, not an operator scan/count policy.
+PREVIEW_OPERATIONS = {
+    'image_generic::extract_image_thumbnail': ('landscape.jpg', False),
+    'raw::extract_raw_thumbnail': ('canon-eos-r.cr3', False),
+    'video::extract_video_thumbnail': ('bunny.mp4', True),
+}
+
+
+def report_bytes(report):
+    data = clean(json.dumps(report, indent=2, allow_nan=False)) + '\n'
+    require(len(data.encode()) <= setting('IRIS_FFMPEG_MAX_REPORT_BYTES', 266240),
+            'report exceeds byte budget')
+    return data
+
+
+def parse_preview(text, source):
+    """Accept only complete, bounded smoke records; never retain command logs."""
+    require(len(text.encode()) <= setting('IRIS_FFMPEG_COMMAND_BYTES', 32768),
+            'preview output exceeds command budget')
+    correctness, timings = [], []
+    for line in text.splitlines():
+        for marker, records in (('PREVIEW_CORRECTNESS ', correctness), ('PREVIEW_LATENCY ', timings)):
+            if line.startswith(marker):
+                records.append(json.loads(line[len(marker):]))
+    require(len(correctness) == 1 and len(timings) == len(PREVIEW_OPERATIONS),
+            'missing or duplicate preview records')
+    correct = correctness[0]
+    require(correct['record'] == 'iris.preview_correctness.v1' and correct['passed'] is True,
+            'preview correctness failed')
+    identity = correct['identity']
+    for key in ('source_revision', 'workflow_run_id', 'cargo_lock_sha256', 'rustc',
+                'target_os', 'target_arch', 'runner_name', 'runner_os', 'runner_arch', 'runner_image_os',
+                'runner_image_version', 'cpu_model', 'available_parallelism', 'build_profile',
+                'release_opt_level', 'crate', 'crate_version'):
+        require(identity.get(key) not in (None, ''), f'missing preview identity: {key}')
+    require(identity['source_revision'] == source and identity['target_os'] == 'macos'
+            and identity['features'] == dict(video=True, pdf=True, raw_full=True)
+            and identity['build_profile'] == 'release', 'preview source/features/profile mismatch')
+    pins = {p['filename']: p for p in json.loads((ROOT / 'tests/preview-corpus/fixtures.json').read_text())['files']}
+    fixtures = correct['fixtures']
+    require(len(fixtures) == len(pins) and {f['filename'] for f in fixtures} == set(pins),
+            'preview correctness fixture set mismatch')
+    for fixture in fixtures:
+        pin = pins[fixture['filename']]
+        require(fixture['sha256'] == pin['sha256'] and fixture['size_bytes'] == pin['size'],
+                'preview fixture pin mismatch')
+        validate_preview_output(fixture['output'])
+    by_name = {f['filename']: f for f in fixtures}
+    require({t['operation'] for t in timings} == set(PREVIEW_OPERATIONS),
+            'preview operation set mismatch')
+    warmups, samples = int(os.environ['IRIS_PREVIEW_LATENCY_WARMUPS']), int(os.environ['IRIS_PREVIEW_LATENCY_SAMPLES'])
+    require(warmups >= 0 and samples > 0, 'invalid preview iteration budget')
+    for timing in timings:
+        name, uses_ffmpeg = PREVIEW_OPERATIONS[timing['operation']]
+        fixture = by_name[name]
+        require(timing['record'] == 'iris.preview_latency.v1' and timing['identity'] == identity
+                and timing['uses_ffmpeg'] is uses_ffmpeg, 'preview timing identity mismatch')
+        require(timing['input'] == dict(filename=name, sha256=fixture['sha256'], size_bytes=fixture['size_bytes']),
+                'preview timing fixture mismatch')
+        require({k: timing['output'][k] for k in fixture['output']} == fixture['output'],
+                'preview timing output mismatch')
+        stats = timing['timing']
+        require(stats['unit'] == 'nanoseconds' and stats['warmup_iterations'] == warmups
+                and stats['sample_count'] == samples, 'preview timing budget mismatch')
+        values = [stats[k] for k in ('min', 'median', 'p90', 'max', 'median_absolute_deviation')]
+        require(all(type(v) is int and 0 <= v <= (1 << 64) - 1 for v in values)
+                and values[:4] == sorted(values[:4]), 'invalid preview timing statistics')
+    return dict(correctness=correct, timings=timings)
+
+
+def validate_preview_output(output):
+    require(output['format'] == 'jpeg' and isinstance(output['source'], str) and output['source']
+            and all(type(output[k]) is int and 0 < output[k] <= 256 for k in ('width', 'height')),
+            'invalid preview output dimensions/format/source')
+
+
+def paired_preview(baseline, candidate):
+    """Fail closed instead of comparing measurements from differing experiments."""
+    left, right = baseline['correctness'], candidate['correctness']
+    require(left['identity'] == right['identity'], 'paired preview identity mismatch')
+    require(sorted(left['fixtures'], key=lambda f: f['filename']) ==
+            sorted(right['fixtures'], key=lambda f: f['filename']), 'paired preview correctness mismatch')
+    left = {t['operation']: t for t in baseline['timings']}
+    right = {t['operation']: t for t in candidate['timings']}
+    require(set(left) == set(right) == set(PREVIEW_OPERATIONS), 'paired preview operations mismatch')
+    pairs = []
+    for operation, baseline_record in left.items():
+        candidate_record = right[operation]
+        for key in ('input', 'identity', 'uses_ffmpeg'):
+            require(baseline_record[key] == candidate_record[key], f'paired preview {key} mismatch')
+        for key in ('format', 'width', 'height', 'source'):
+            require(baseline_record['output'][key] == candidate_record['output'][key],
+                    'paired preview output mismatch')
+        for key in ('unit', 'warmup_iterations', 'sample_count'):
+            require(baseline_record['timing'][key] == candidate_record['timing'][key],
+                    'paired preview timing budget mismatch')
+        b, c = baseline_record['timing']['median'], candidate_record['timing']['median']
+        pairs.append(dict(operation=operation, input=baseline_record['input'],
+                          uses_ffmpeg=baseline_record['uses_ffmpeg'],
+                          output_dimensions=[baseline_record['output'][k] for k in ('width', 'height')],
+                          baseline_median_ns=b, candidate_median_ns=c, candidate_minus_baseline_ns=c-b))
+    return pairs
+
+
+def preview_env(prefix, target, source):
+    require(not target.exists(), 'preview Cargo target must be fresh')
+    # Same build settings, but no ambient native discovery overrides for either runtime.
+    env = {k: v for k, v in os.environ.items() if not k.startswith(('FFMPEG_', 'PKG_CONFIG_', 'IRIS_MACOS_FFMPEG_'))
+           and k not in ('CPATH', 'C_INCLUDE_PATH', 'CPLUS_INCLUDE_PATH', 'LIBRARY_PATH',
+                        'CMAKE_PREFIX_PATH', 'CMAKE_TOOLCHAIN_FILE')}
+    return dict(env, FFMPEG_DIR=str(prefix), PKG_CONFIG_PATH=str(prefix / 'lib/pkgconfig'),
+                PKG_CONFIG_LIBDIR=str(prefix / 'lib/pkgconfig'), CARGO_TARGET_DIR=str(target), GITHUB_SHA=source)
+
+
+def build_preview(env):
+    prefix = Path(env['FFMPEG_DIR']).resolve()
+    require(Path(run('pkg-config', '--variable=prefix', 'libavcodec', env=env)).resolve() == prefix,
+            'preview pkg-config selected another runtime')
+    run('cargo', 'build', '--release', '-p', 'iris-thumb-preview', '--example', 'preview_corpus_smoke',
+        '--locked', '--offline', cwd=ROOT, env=env, seconds=setting('IRIS_FFMPEG_BUILD_SECONDS', 3600))
+    return Path(env['CARGO_TARGET_DIR']) / 'release/examples/preview_corpus_smoke'
+
+
+def stage_preview(executable, prefix, app, sdk):
+    paths = libraries(prefix)
+    edges = closure(executable, paths.values(), sdk)
+    dest = app / 'Contents/MacOS/preview_corpus_smoke'
+    shutil.copy2(executable, dest)
+    for loader, dep, target in edges:
+        if loader == executable and isinstance(target, Path):
+            run('install_name_tool', '-change', dep, '@executable_path/../Frameworks/' + target.name, dest)
+    staged = list((app / 'Contents/Frameworks').iterdir())
+    closure(dest, staged, sdk)  # Reject a remaining prefix/Homebrew edge before execution.
+    run('codesign', '--force', '--sign', '-', '--timestamp=none', dest)
+    run('codesign', '--force', '--sign', '-', '--timestamp=none', app)
+    return dest
+
+
 def validate(output):
     require(sys.platform == 'darwin', 'native macOS required')
     require(not any(k.startswith('DYLD_') for k in os.environ), 'ambient DYLD overrides forbidden')
@@ -501,19 +639,36 @@ def validate(output):
             REDACTIONS[str(work)] = '<temporary>'
             sdk = Path(run('xcrun', '--sdk', 'macosx', '--show-sdk-path')).resolve()
             REDACTIONS[str(sdk)] = '<sdk>'
-            prefix, target = work / 'candidate', work / 'cargo'
+            source = os.environ.get('GITHUB_SHA') or run('git', '-C', ROOT, 'rev-parse', 'HEAD')
+            corpus = work / 'corpus'
+            # One fetch, one caller-owned directory, reused unchanged for both runtimes.
+            run(sys.executable, ROOT / 'scripts/fetch-preview-corpus.py', '--output', corpus, cwd=ROOT,
+                seconds=setting('IRIS_FFMPEG_FETCH_SECONDS', 300))
+            baseline_prefix = Path(run('brew', '--prefix', 'ffmpeg')).resolve()
+            baseline_env = preview_env(baseline_prefix, work / 'cargo-baseline', source)
+            baseline_exe = build_preview(baseline_env)
+            preview = dict(scope='Paired sequential crate-level diagnostics, no threshold, parity claim or legal approval.',
+                           baseline_runtime='Existing Homebrew FFmpeg selection (not a compatible-runtime approval)',
+                           candidate_runtime='Pinned prefix, smoke executed against staged native closure')
+            report['preview'] = preview
+            preview['baseline'] = parse_preview(run(baseline_exe, corpus, env=baseline_env), source)
+            prefix, target = work / 'candidate', work / 'cargo-candidate'
             build(prefix, sdk)
-            env = dict(os.environ, IRIS_MACOS_REPORT_ONLY='1', IRIS_MACOS_FFMPEG_CANDIDATE=str(prefix),
+            env = dict(preview_env(prefix, target, source), IRIS_MACOS_REPORT_ONLY='1', IRIS_MACOS_FFMPEG_CANDIDATE=str(prefix),
                        FFMPEG_DIR=str(prefix), PKG_CONFIG_PATH=str(prefix / 'lib/pkgconfig'),
                        PKG_CONFIG_LIBDIR=str(prefix / 'lib/pkgconfig'), CARGO_TARGET_DIR=str(target),
                        IRIS_BUILD_VARIANT='product', IRIS_MACOS_SIGN_IDENTITY='-', IRIS_MACOS_NOTARY_PROFILE='')
+            candidate_exe = build_preview(env)
             run('cargo', 'build', '--release', '-p', 'iris-thumb-preview', '--example', 'video_thumbnail_smoke',
                 '--locked', '--offline', cwd=ROOT, env=env, seconds=setting('IRIS_FFMPEG_BUILD_SECONDS', 3600))
             run(ROOT / 'scripts/package-macos-app.sh', cwd=ROOT, env=env,
                 seconds=setting('IRIS_FFMPEG_BUILD_SECONDS', 3600))
+            candidate_smoke = stage_preview(candidate_exe, prefix, app, sdk)
             run('codesign', '--verify', '--deep', '--strict', app)
-            report = check(app, sdk)
-            # No downloaded fixtures; generate tiny built-in MPEG-4/PNG inputs.
+            report.update(check(app, sdk))
+            preview['candidate'] = parse_preview(run(candidate_smoke, corpus, env=env), source)
+            preview['paired_comparisons'] = paired_preview(preview['baseline'], preview['candidate'])
+            # Retain the existing additional MPEG-4/PNG candidate checks.
             for filename, options in (('video.avi', ['-t', '1', '-c:v', 'mpeg4', '-an']),
                                       ('still.png', ['-frames:v', '1', '-c:v', 'png'])):
                 run(prefix / 'bin/ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i',
@@ -527,16 +682,15 @@ def validate(output):
                     {p.name: digest(p) for p in (app / 'Contents/Frameworks').iterdir()},
                     'library bytes changed during smoke')
             report.update(status='passed', smoke=dict(video_mpeg4=True, still_png_file_and_bytes=True,
-                          pdf_and_full_raw='Default features retained; not exercised by this bounded smoke.'))
-    except Exception as error:
+                          corpus_correctness=True, raw_scope='Embedded-preview extraction, not sensor demosaic.'))
+    except BaseException as error:
         report['status'] = 'failed'
         report['failure'] = clean(str(error))
         raise
     finally:
         shutil.rmtree(app.parent, ignore_errors=True)
         shutil.rmtree(scratch, ignore_errors=True)
-        data = clean(json.dumps(report, indent=2)) + '\n'
-        require(len(data.encode()) <= setting('IRIS_FFMPEG_MAX_REPORT_BYTES', 266240), 'report exceeds byte budget')
+        data = report_bytes(report)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(data)
 
@@ -544,6 +698,11 @@ def validate(output):
 if __name__ == '__main__':
     try:
         if sys.argv[1] == 'validate' and len(sys.argv) == 3:
+            # GitHub cancellation sends TERM before KILL. Unwind owned scratch
+            # and active process groups; the workflow's always cleanup is a backstop.
+            def interrupted(signum, frame):
+                raise InterruptedError('runtime validation interrupted')
+            signal.signal(signal.SIGTERM, interrupted)
             validate(Path(sys.argv[2]))
         elif sys.argv[1] == 'stage' and len(sys.argv) == 4:
             stage(Path(sys.argv[2]).resolve(), Path(sys.argv[3]).resolve(),

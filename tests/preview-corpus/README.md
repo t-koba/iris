@@ -43,20 +43,47 @@ change release packaging. For a Linux product-profile match, set
 `CARGO_PROFILE_RELEASE_OPT_LEVEL=s`; CI uses that setting on Ubuntu and the workspace
 default optimization level on macOS.
 
-After correctness checks, the smoke verifies the pinned JPEG and CR3 bytes and emits
-exactly two `PREVIEW_LATENCY` JSON records to stdout. Required environment settings
-`IRIS_PREVIEW_LATENCY_WARMUPS` and `IRIS_PREVIEW_LATENCY_SAMPLES` bound the diagnostic
-work; CI configures two warmups and 21 measurements. Each record reports
-min/median/p90/median absolute deviation/max nanoseconds and
-includes source/run identifiers when supplied by CI, verbose Rust compiler/target,
-runner/CPU identity, release optimization level, Cargo.lock digest, feature flags,
-and fixture digest. Timings cover crate-level local-file extraction, not UI/end-to-end
-latency; CR3 measures embedded-preview extraction, not sensor demosaicing. The
-iteration counts are explicit environment configuration; fixture verification uses a
-fixed 64 KiB streaming buffer. No report or fixture is uploaded as an artifact. These are
-**diagnostics, not latency gates or parity evidence**: they are not matched against a
-comparable baseline or candidate, and do not represent video, PDF, or Windows latency.
-Native comparable baseline/candidate measurements and Windows default-preview evidence
-remain separate work. This smoke is not license approval.
+Before extraction, the smoke streams all five inputs through a fixed 64 KiB
+buffer and verifies their pinned sizes and hashes. After correctness checks it
+emits one `PREVIEW_CORRECTNESS` and three `PREVIEW_LATENCY` JSON records to stdout.
+The correctness record binds every fixture to its checked output dimensions,
+format and extraction source. Latency records measure JPEG resize, CR3 embedded
+preview extraction, and **FFmpeg-dependent H.264 video extraction**. `uses_ffmpeg`
+is false for JPEG/CR3: those operations use Iris Rust code, not FFmpeg or PDFium.
+PDF correctness is checked, but PDF latency is not measured.
 
-Offline fetch-helper regressions: `python3 scripts/test-fetch-preview-corpus.py`.
+Required settings `IRIS_PREVIEW_LATENCY_WARMUPS` and `IRIS_PREVIEW_LATENCY_SAMPLES`
+bound the diagnostic work; CI defaults to two warmups and 21 measurements. Each
+latency record reports min/median/p90/median absolute deviation/max nanoseconds,
+source/run identifiers when supplied by CI, compiler/target, runner/CPU identity,
+release optimization level, Cargo.lock digest, features, and fixture digest.
+Timings cover crate-level local-file extraction, not UI/end-to-end latency;
+CR3 measures embedded-preview extraction, not sensor demosaicing.
+
+The report-only macOS runtime-validation driver fetches this corpus **once** with
+the allowlisted, size-bounded helper. It builds default-feature smoke executables
+in separate fresh Cargo targets for Homebrew FFmpeg and the pinned prefix. The
+candidate smoke runs against its rewritten, signed and verified staged native
+closure. Both runs use the same corpus directory and verify it before measurement.
+Its existing `macos-candidate.json` retains both correctness/timing sets and paired
+median differences only when fixture hashes/sizes, operations, output dimensions,
+format/source, Cargo lock/features, build/compiler, runner/CPU and source identities
+match. Any mismatch rejects pairing. Samples/warmups must also match.
+
+The driver keeps the existing `IRIS_FFMPEG_MAX_REPORT_BYTES` cap (266,240 bytes)
+and command-output/deadline bounds. The workflow configures the corpus budget
+(default 40,000,000 bytes), network timeout (60 seconds), and latency iterations
+through the corresponding repository variables. Corpus, build targets, native
+sources, logs and temporary apps are removed on completion or failure; TERM/INT
+unwind active commands and owned scratch, with workflow cleanup as a backstop.
+Only the two existing audit JSON artifacts are retained, never fixtures or packages.
+Other CI corpus runs retain no fixture/report artifact.
+
+These are **diagnostics, not latency gates, parity evidence or legal approval**.
+There is no performance threshold; sequential runs may reflect cache/order effects.
+No production runtime or release packaging selection changes. Native macOS results
+must still be collected on the exact source; Windows default-preview evidence
+remains separate work.
+
+Offline contracts: `python3 scripts/test-fetch-preview-corpus.py` and
+`python3 scripts/test-macos-ffmpeg.py`.

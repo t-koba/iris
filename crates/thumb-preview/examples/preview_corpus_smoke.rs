@@ -1,4 +1,4 @@
-//! Correctness smoke plus bounded fixture-backed JPEG/CR3 latency diagnostics.
+//! Correctness smoke plus bounded fixture-backed JPEG/CR3/FFmpeg video diagnostics.
 
 use iris_core_domain::types::thumbnail::{
     ImageFormat, ThumbnailHint, ThumbnailResult, ThumbnailSource,
@@ -187,6 +187,7 @@ fn runtime_identity() -> Result<serde_json::Value, Box<dyn Error>> {
         "rustc": rustc,
         "target_os": std::env::consts::OS,
         "target_arch": std::env::consts::ARCH,
+        "runner_name": std::env::var("RUNNER_NAME").ok(),
         "runner_os": std::env::var("RUNNER_OS").ok(),
         "runner_arch": std::env::var("RUNNER_ARCH").ok(),
         "runner_image_os": std::env::var("ImageOS").ok(),
@@ -219,6 +220,7 @@ struct MeasurementSpec<'a> {
     fixture_size: u64,
     output: &'a ThumbnailResult,
     identity: &'a serde_json::Value,
+    uses_ffmpeg: bool,
 }
 
 fn latency_report<F>(
@@ -256,6 +258,7 @@ where
     Ok(serde_json::json!({
         "record": "iris.preview_latency.v1",
         "operation": spec.operation,
+        "uses_ffmpeg": spec.uses_ffmpeg,
         "input": {
             "filename": spec.filename,
             "sha256": spec.fixture_digest,
@@ -280,7 +283,7 @@ where
         },
         "identity": spec.identity,
         "measurement_scope": "crate-level local-file extraction, not UI/end-to-end latency; CR3 measures embedded-preview extraction, not sensor demosaic",
-        "comparison": "none; diagnostic only, not runtime parity evidence",
+        "comparison": "diagnostic only; pairing requires matching input, output dimensions and build/runner/source identity",
     }))
 }
 
@@ -313,8 +316,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         preferred_formats: vec![ImageFormat::Jpeg],
     };
 
+    // Verify every input before correctness or timing work, including video/PDF.
+    let filenames = [
+        "landscape.jpg",
+        "sample.jpg",
+        "canon-eos-r.cr3",
+        "bunny.mp4",
+        "one-page.pdf",
+    ];
+    let pins = filenames
+        .iter()
+        .map(|name| verify_pinned_fixture(dir, name))
+        .collect::<Result<Vec<_>, _>>()?;
+    let jpeg_pin = &pins[0];
+    let cr3_pin = &pins[2];
+    let video_pin = &pins[3];
     let jpeg = dir.join("landscape.jpg");
-    let jpeg_pin = verify_pinned_fixture(dir, "landscape.jpg")?;
     let info = encoded::probe_encoded_image_path(&jpeg).ok_or("missing JPEG dimensions")?;
     assert_eq!((info.width, info.height), (4000, 3000));
     let start = Instant::now();
@@ -328,18 +345,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let small_jpeg = dir.join("sample.jpg");
     let start = Instant::now();
-    let thumb = check(
+    let small_thumb = check(
         "small JPEG passthrough",
         image_generic::extract_image_thumbnail(&small_jpeg, &hint),
         start,
         false,
     );
-    assert_eq!((thumb.width, thumb.height), (200, 200));
-    assert_eq!(thumb.source, ThumbnailSource::OriginalEncoded);
-    assert_eq!(thumb.data, std::fs::read(&small_jpeg)?);
+    assert_eq!((small_thumb.width, small_thumb.height), (200, 200));
+    assert_eq!(small_thumb.source, ThumbnailSource::OriginalEncoded);
+    assert_eq!(small_thumb.data, std::fs::read(&small_jpeg)?);
 
     let cr3 = dir.join("canon-eos-r.cr3");
-    let cr3_pin = verify_pinned_fixture(dir, "canon-eos-r.cr3")?;
     let start = Instant::now();
     let cr3_thumb = check(
         "CR3",
@@ -349,20 +365,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     assert_eq!(cr3_thumb.source, ThumbnailSource::EmbeddedPreview);
 
+    let video = dir.join("bunny.mp4");
     let start = Instant::now();
-    let thumb = check(
+    let video_thumb = check(
         "H.264 MP4",
-        video::extract_video_thumbnail(&dir.join("bunny.mp4"), MAX_DIMENSION),
+        video::extract_video_thumbnail(&video, MAX_DIMENSION),
         start,
         false, // The pinned clip's first keyframe is an intentional black fade-in.
     );
-    assert_eq!((thumb.width, thumb.height), (256, 144));
-    assert_eq!(thumb.source, ThumbnailSource::PartialDecode);
+    assert_eq!((video_thumb.width, video_thumb.height), (256, 144));
+    assert_eq!(video_thumb.source, ThumbnailSource::PartialDecode);
 
     let path = dir.join("one-page.pdf");
     assert_eq!(pdf::pdf_page_count(&path), Some(1));
     let start = Instant::now();
-    check(
+    let pdf_thumb = check(
         "PDF",
         pdf::extract_pdf_thumbnail(&path, MAX_DIMENSION),
         start,
@@ -370,6 +387,33 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let identity = runtime_identity()?;
+    let outputs = [
+        &jpeg_thumb,
+        &small_thumb,
+        &cr3_thumb,
+        &video_thumb,
+        &pdf_thumb,
+    ];
+    let fixtures: Vec<_> = filenames
+        .iter()
+        .zip(&pins)
+        .zip(outputs)
+        .map(|((filename, pin), thumb)| {
+            serde_json::json!({
+                "filename": filename, "sha256": pin.0, "size_bytes": pin.1,
+                "output": {"width": thumb.width, "height": thumb.height, "format": "jpeg",
+                           "source": format!("{:?}", thumb.source)},
+            })
+        })
+        .collect();
+    println!(
+        "PREVIEW_CORRECTNESS {}",
+        serde_json::json!({
+            "record": "iris.preview_correctness.v1", "passed": true,
+            "fixtures": fixtures, "identity": identity,
+            "scope": "JPEG resize/passthrough, CR3 embedded preview, H.264 decode, PDF page count/render; decoded JPEG dimensions and nonuniform photo/RAW/PDF pixels checked; not sensor demosaic or UI parity",
+        })
+    );
     let jpeg_report = latency_report(
         &MeasurementSpec {
             operation: "image_generic::extract_image_thumbnail",
@@ -378,6 +422,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             fixture_size: jpeg_pin.1,
             output: &jpeg_thumb,
             identity: &identity,
+            uses_ffmpeg: false,
         },
         config,
         || image_generic::extract_image_thumbnail(&jpeg, &hint),
@@ -390,12 +435,27 @@ fn main() -> Result<(), Box<dyn Error>> {
             fixture_size: cr3_pin.1,
             output: &cr3_thumb,
             identity: &identity,
+            uses_ffmpeg: false,
         },
         config,
         || raw::extract_raw_thumbnail(&cr3, MAX_DIMENSION, &CancellationToken::new()),
     )?;
+    let video_report = latency_report(
+        &MeasurementSpec {
+            operation: "video::extract_video_thumbnail",
+            filename: "bunny.mp4",
+            fixture_digest: &video_pin.0,
+            fixture_size: video_pin.1,
+            output: &video_thumb,
+            identity: &identity,
+            uses_ffmpeg: true,
+        },
+        config,
+        || video::extract_video_thumbnail(&video, MAX_DIMENSION),
+    )?;
     println!("PREVIEW_LATENCY {}", serde_json::to_string(&jpeg_report)?);
     println!("PREVIEW_LATENCY {}", serde_json::to_string(&cr3_report)?);
+    println!("PREVIEW_LATENCY {}", serde_json::to_string(&video_report)?);
     println!("Corpus correctness smoke passed; latency reports are bounded diagnostics, not parity evidence.");
     Ok(())
 }
