@@ -58,6 +58,10 @@ run_builder
 grep -Fq 'Built local Samba test image sha256:' "$test_root/err"
 grep -Fq 'https://snapshot.debian.org/archive/debian/20261108T000000Z' "$test_root/err"
 grep -Fq 'samba=2:4.25.1+dfsg-1' "$test_root/err"
+expected_smbd_version='Version 4.25.1-Debian-4.25.1+dfsg-1'
+for script in build-test-samba.sh test-samba-entrypoint.sh; do
+  grep -Fqx "expected_smbd_version='$expected_smbd_version'" "$script_dir/$script"
+done
 [[ -z "$(ls -A "$TMPDIR")" ]]
 grep -Fxq 'https://snapshot.debian.org/archive/debian/20261108T000000Z' "$CAPTURE/bootstrap"
 grep -Fxq -- '--force-check-gpg' "$CAPTURE/bootstrap"

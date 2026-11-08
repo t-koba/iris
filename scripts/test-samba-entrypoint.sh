@@ -3,10 +3,9 @@
 set -eu
 [ "$(dpkg-query -W '-f=${Version}' samba)" = '2:4.25.1+dfsg-1' ] \
   || { echo 'unexpected Samba package version in test image' >&2; exit 1; }
-case "$(smbd --version)" in
-  'Version 4.25.1'|'Version 4.25.1-Debian') ;;
-  *) echo 'unexpected smbd version in test image' >&2; exit 1 ;;
-esac
+expected_smbd_version='Version 4.25.1-Debian-4.25.1+dfsg-1'
+[ "$(smbd --version)" = "$expected_smbd_version" ] \
+  || { echo 'unexpected smbd version in test image' >&2; exit 1; }
 # Keep the effective config on disk so testparm failure diagnostics see it.
 sed '/^\[bench\]/,$d' /etc/samba/smb.conf >/etc/samba/smb.conf.tmp
 while [ "$#" -gt 0 ]; do
