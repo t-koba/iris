@@ -175,7 +175,14 @@ mod exact_items {
                 let error = || PlatformError::Trash {
                     message: format!("Cannot normalize a unique Trash path: {}", path.display()),
                 };
-                if path.as_os_str().is_empty() {
+                // A terminal `..` has no file name; the fallback below would
+                // select its parent instead of the directory the caller named.
+                if path.as_os_str().is_empty()
+                    || matches!(
+                        path.components().next_back(),
+                        Some(std::path::Component::ParentDir)
+                    )
+                {
                     return Err(error());
                 }
                 let absolute = if path.is_relative() {
@@ -362,6 +369,33 @@ mod exact_items {
             }
             std::fs::rename(&path, dir.path().join("simulated-trash")).unwrap();
             assert_normalized_binding(path, normalized);
+        }
+
+        #[test]
+        fn terminal_parent_rejects_entire_batch_without_mutation() {
+            let dir = tempfile::tempdir().unwrap();
+            let parent = dir.path().join("a");
+            let child = parent.join("b");
+            std::fs::create_dir_all(&child).unwrap();
+            let valid = parent.join("file");
+            let child_file = child.join("retained");
+            std::fs::write(&valid, "selected").unwrap();
+            std::fs::write(&child_file, "untouched").unwrap();
+
+            // Call preflight directly: even a regression must never touch OS Trash.
+            let result = normalize_paths(&[valid.clone(), child.join("..")]);
+            assert!(matches!(result, Err(PlatformError::Trash { .. })));
+            assert!(parent.is_dir());
+            assert!(child.is_dir());
+            assert_eq!(std::fs::read(&valid).unwrap(), b"selected");
+            assert_eq!(std::fs::read(&child_file).unwrap(), b"untouched");
+
+            // Internal parent components still resolve via parent canonicalization.
+            let normalized = normalize_paths(&[child.join("..").join("file")]).unwrap();
+            let expected = parent.canonicalize().unwrap().join("file");
+            #[cfg(target_os = "windows")]
+            let expected = shell_path(expected);
+            assert_eq!(normalized, [expected]);
         }
 
         #[cfg(unix)] // Symlinks need no privileges here; no process-global cwd changes.
