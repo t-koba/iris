@@ -136,12 +136,30 @@ run_harness
 ! kill -0 "$(cat "$CAPTURE/pid")" 2>/dev/null
 [[ ! -e "$(cat "$CAPTURE/native-dir")" ]]
 config="$CAPTURE/config"
+assert_config_setting() {
+  local setting="$1"
+  if ! grep -Fxq "$setting" "$config"; then
+    # Report only the setting name: values may contain private paths or credentials.
+    printf 'missing required Samba config field: %s\n' "${setting%% =*}" >&2
+    return 1
+  fi
+}
+# The diagnostic is part of this regression: a failed path assertion reports only
+# its key, never the temporary root or other config values.
+printf 'security = user\n' >"$test_root/partial-config"
+config="$test_root/partial-config"
+if assert_config_setting "path = $IRIS_PERF_WORK_ROOT/samba-share" 2>"$test_root/config-diagnostic"; then
+  exit 1
+fi
+grep -Fxq 'missing required Samba config field: path' "$test_root/config-diagnostic"
+! grep -Fq "$IRIS_PERF_WORK_ROOT" "$test_root/config-diagnostic"
+config="$CAPTURE/config"
 for setting in 'security = user' 'server role = standalone server' 'map to guest = Never' \
     'guest ok = no' 'valid users = benchuser' 'read only = no' 'interfaces = 127.0.0.1' \
     'bind interfaces only = yes' 'disable netbios = yes' 'smb ports = 1445' \
     'server min protocol = SMB2_10' 'server max protocol = SMB3_11' \
     'server signing = mandatory' 'smb encrypt = required' "path = $IRIS_PERF_WORK_ROOT/samba-share"; do
-  grep -Fxq "$setting" "$config"
+  assert_config_setting "$setting"
 done
 native=$(cat "$CAPTURE/native-dir")
 for setting in "private dir = $native/private" "state directory = $native/state" \
@@ -149,7 +167,7 @@ for setting in "private dir = $native/private" "state directory = $native/state"
     "pid directory = $native/pid" "ncalrpc dir = $native/ncalrpc" \
     "winbindd socket directory = $native/winbind" "log file = $native/logs/log.%m" \
     "passdb backend = smbpasswd:$native/private/smbpasswd"; do
-  grep -Fxq "$setting" "$config"
+  assert_config_setting "$setting"
 done
 grep -Eq '^benchuser:501:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX:A224A29E508493ECD70572422203EC18:\[U          \]:LCT-[0-9A-F]{8}:$' "$CAPTURE/passdb"
 # Failures still stop the daemon; retention keeps only the private on-disk state.
