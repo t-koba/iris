@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import sys
 import time
 import urllib.error
@@ -70,6 +71,8 @@ def transient_fetch_error(error):
     if isinstance(error, urllib.error.HTTPError):
         return error.code in {408, 429, 500, 502, 503, 504}
     reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, socket.gaierror):
+        return reason.errno == socket.EAI_AGAIN
     return isinstance(reason, (TimeoutError, ConnectionError))
 
 

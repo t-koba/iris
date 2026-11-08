@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import socket
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -98,6 +99,27 @@ class FetchTests(unittest.TestCase):
                          retries=2, retry_delay=0)
         self.assertEqual(opener.open.call_count, 1)
         self.assertFalse(self.output.exists())
+
+    def test_temporary_dns_resolution_retries_but_permanent_dns_fails_fast(self):
+        opener = Mock()
+        opener.open.side_effect = [
+            urllib.error.URLError(socket.gaierror(socket.EAI_AGAIN, 'temporary resolver failure')),
+            Response(self.body),
+        ]
+        helper.fetch(self.manifest, self.output, len(self.body), 1, opener,
+                     retries=1, retry_delay=0)
+        self.assertEqual(opener.open.call_count, 2)
+        self.assertEqual((self.output / 'test.jpg').read_bytes(), self.body)
+
+        permanent = Path(self.temp.name) / 'permanent-corpus'
+        opener = Mock()
+        opener.open.side_effect = urllib.error.URLError(
+            socket.gaierror(socket.EAI_NONAME, 'permanent resolver failure'))
+        with self.assertRaises(urllib.error.URLError):
+            helper.fetch(self.manifest, permanent, len(self.body), 1, opener,
+                         retries=2, retry_delay=0)
+        self.assertEqual(opener.open.call_count, 1)
+        self.assertFalse(permanent.exists())
 
     def test_invalid_retry_settings_fail_before_output_creation(self):
         for retries, delay in ((-1, 0), (1.5, 0), (0, -1), (0, float('inf'))):
