@@ -15,6 +15,10 @@ ready_timeout="${IRIS_PERF_READY_TIMEOUT_SECONDS:-60}"
 ssh_keyscan_timeout="${IRIS_PERF_SSH_KEYSCAN_TIMEOUT_SECONDS:-5}"
 smb_image="${IRIS_PERF_SAMBA_IMAGE:-}"
 owned_smb_image=""
+native_smb_dir=""
+native_smb_pid=""
+use_native_smb=0
+smb_user=iris
 smb_port="${IRIS_PERF_SMB_PORT:-1445}"
 smb_mount="${IRIS_PERF_SMB_MOUNT:-}"
 smb_paging_files="${IRIS_PERF_SMB_PAGING_FILES:-0}"
@@ -38,7 +42,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/perf-transfer-containers.sh
 
-Runs the v0.5 P0 transfer benchmark harness against local containers.
+Runs the v0.5 P0 transfer benchmark harness against local test servers.
 The script prints measurements to stdout and keeps all generated payloads under
 a temporary directory unless IRIS_PERF_WORK_ROOT is set.
 
@@ -51,7 +55,13 @@ Environment:
   IRIS_PERF_READY_TIMEOUT_SECONDS Readiness deadline (default: 60).
   IRIS_PERF_SSH_KEYSCAN_TIMEOUT_SECONDS Per-scan timeout (default: 5).
   IRIS_PERF_SAMBA_IMAGE      Local Samba sha256 image ID (never a registry tag).
-                             If unset, build a signed Debian snapshot test rootfs
+                             If unset on macOS, use Homebrew Samba >= 4.25.1:
+                             brew install samba (brew upgrade samba if older).
+                             Uses samba-dot-org-smbd, current Unix user, private
+                             per-run state, no sudo; native server stops on exit.
+                             Uses /tmp by default to keep Unix socket paths short;
+                             choose a short IRIS_PERF_WORK_ROOT if overriding.
+                             Else build a signed Debian snapshot test rootfs
                              (requires Linux, sudo, debootstrap, archive keyring).
   IRIS_PERF_DEBIAN_KEYRING   Host archive keyring for that build (default:
                              /usr/share/keyrings/debian-archive-keyring.gpg).
@@ -64,6 +74,9 @@ Environment:
   IRIS_PERF_SMB_MAX_PROTOCOL Samba server maximum protocol (for example SMB3_00).
   IRIS_PERF_SMB_SERVER_SIGNING Samba server signing policy (for example mandatory).
   IRIS_PERF_SMB_ENCRYPTION   Samba encryption policy (off or required).
+                             Native macOS requires mandatory signing/encryption;
+                             protocol overrides must stay within SMB2_10..SMB3_11.
+                             Its SMB port must be unprivileged (1024-65535).
   IRIS_PERF_SMB_LOG_LEVEL    Samba log level (default: 2);
                              numeric prefix must be 0-10 and sets smbd's base level.
   IRIS_PERF_SMB_AUTH_AUDIT_LEVEL
@@ -110,10 +123,11 @@ wait_for_port() {
 
 make_payloads() {
   mkdir -p "$payload_root/small-files"
-  truncate -s "$bytes" "$payload_root/large.bin"
+  # POSIX sparse allocation also works on macOS, which has no truncate tool.
+  dd if=/dev/zero of="$payload_root/large.bin" bs=1 count=0 seek="$bytes" 2>/dev/null
   local index
   for index in $(seq 1 "$small_files"); do
-    truncate -s "$small_bytes" "$payload_root/small-files/file-$(printf '%04d' "$index").bin"
+    dd if=/dev/zero of="$payload_root/small-files/file-$(printf '%04d' "$index").bin" bs=1 count=0 seek="$small_bytes" 2>/dev/null
   done
 }
 
@@ -189,15 +203,99 @@ run_sftp_benchmarks() {
   )
 }
 
-start_samba() {
-  if [[ -z "$smb_image" ]]; then
-    smb_image="$(bash "$script_dir/build-test-samba.sh")"
-    owned_smb_image="$smb_image"
-  fi
-  if [[ ! "$smb_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-    echo "IRIS_PERF_SAMBA_IMAGE must be a local sha256 image ID" >&2
+start_native_samba() {
+  require_cmd brew
+  local prefix smbd version uid
+  prefix="$(brew --prefix samba)"
+  smbd="$prefix/sbin/samba-dot-org-smbd"
+  require_cmd "$smbd"
+  require_cmd "$prefix/bin/testparm"
+  version="$("$smbd" --version)"
+  # Match the patched upstream baseline used by the Linux test-server builder.
+  if [[ ! "$version" =~ ^Version\ ([0-9]+)\.([0-9]+)\.([0-9]+)($|[-+]) ]] ||
+      ! (( 10#${BASH_REMATCH[1]} > 4 ||
+          (10#${BASH_REMATCH[1]} == 4 && 10#${BASH_REMATCH[2]} > 25) ||
+          (10#${BASH_REMATCH[1]} == 4 && 10#${BASH_REMATCH[2]} == 25 && 10#${BASH_REMATCH[3]} >= 1) )); then
+    echo "Homebrew Samba >= 4.25.1 required; run brew upgrade samba" >&2
     return 2
   fi
+  uid="$(id -u)"
+  smb_user="$(id -un)"
+  if [[ "$uid" == 0 || ! "$smb_user" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+    echo "native Samba requires an unprivileged Unix account with a simple short name" >&2
+    return 2
+  fi
+  if [[ ! "$smb_port" =~ ^[0-9]{4,5}$ ]] || ! (( 10#$smb_port >= 1024 && 10#$smb_port <= 65535 )); then
+    echo "native Samba requires an SMB port in 1024-65535" >&2
+    return 2
+  fi
+  case "${smb_min_protocol:-SMB2_10}:${smb_max_protocol:-SMB3_11}" in
+    SMB2_10:SMB2_10|SMB2_10:SMB3_00|SMB2_10:SMB3_02|SMB2_10:SMB3_11|SMB3_00:SMB3_00|SMB3_00:SMB3_02|SMB3_00:SMB3_11|SMB3_02:SMB3_02|SMB3_02:SMB3_11|SMB3_11:SMB3_11) ;;
+    *) echo "native Samba protocols must stay within SMB2_10..SMB3_11 in order" >&2; return 2 ;;
+  esac
+  if [[ "${smb_server_signing:-mandatory}" != mandatory || "${smb_encryption:-required}" != required ]]; then
+    echo "native Samba requires mandatory signing and required encryption" >&2
+    return 2
+  fi
+  # smb.conf expands percent substitutions; never interpret paths or log levels
+  # as extra config lines. All other interpolated values are validated above.
+  case "$work_root" in
+    *$'\n'*|*$'\r'*|*%*) echo "unsupported native Samba config path" >&2; return 2 ;;
+  esac
+  if [[ ! "$smb_log_config" =~ ^(10|[0-9])([[:space:]]+auth_audit:(10|[0-9]))?$ ]]; then
+    echo "native Samba log level must be numeric with optional auth_audit level" >&2
+    return 2
+  fi
+  native_smb_dir="$(mktemp -d "$work_root/samba-native.XXXXXX")"
+  chmod 700 "$native_smb_dir"
+  mkdir -m 700 "$native_smb_dir"/{private,state,cache,lock,pid,logs,ncalrpc,winbind}
+  cat >"$native_smb_dir/smb.conf" <<EOF
+[global]
+workgroup = WORKGROUP
+server role = standalone server
+security = user
+map to guest = Never
+disable netbios = yes
+interfaces = 127.0.0.1
+bind interfaces only = yes
+smb ports = $smb_port
+server min protocol = ${smb_min_protocol:-SMB2_10}
+server max protocol = ${smb_max_protocol:-SMB3_11}
+server signing = mandatory
+smb encrypt = required
+private dir = $native_smb_dir/private
+state directory = $native_smb_dir/state
+cache directory = $native_smb_dir/cache
+lock directory = $native_smb_dir/lock
+pid directory = $native_smb_dir/pid
+ncalrpc dir = $native_smb_dir/ncalrpc
+winbindd socket directory = $native_smb_dir/winbind
+passdb backend = smbpasswd:$native_smb_dir/private/smbpasswd
+log file = $native_smb_dir/logs/log.%m
+log level = $smb_log_config
+load printers = no
+printcap name = /dev/null
+disable spoolss = yes
+[bench]
+path = $work_root/samba-share
+read only = no
+guest ok = no
+valid users = $smb_user
+EOF
+  # Private smbpasswd-format entry for the synthetic password "iris" (NT hash
+  # MD4(UTF-16LE("iris"))). Writing this per-run file avoids smbpasswd -a's root
+  # requirement and never modifies the user's system account or Samba database.
+  (umask 077; printf '%s:%s:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX:A224A29E508493ECD70572422203EC18:[U          ]:LCT-%08X:\n' \
+    "$smb_user" "$uid" "$(date +%s)" >"$native_smb_dir/private/smbpasswd")
+  "$prefix/bin/testparm" -s "$native_smb_dir/smb.conf" >"$native_smb_dir/logs/testparm.log" 2>&1
+  "$smbd" --foreground --no-process-group --configfile="$native_smb_dir/smb.conf" \
+    >"$native_smb_dir/logs/daemon.log" 2>&1 &
+  native_smb_pid=$!
+  wait_for_port 127.0.0.1 "$smb_port" "Native Samba"
+  kill -0 "$native_smb_pid"
+}
+
+start_samba() {
   mkdir -p "$work_root/samba-share"
   if (( smb_paging_files > 0 )); then
     local suffix
@@ -205,6 +303,18 @@ start_samba() {
     for ((index = 0; index < smb_paging_files; index++)); do
       : >"$work_root/samba-share/paging-$(printf '%06d' "$index")-$suffix"
     done
+  fi
+  if [[ "$use_native_smb" == 1 ]]; then
+    start_native_samba
+    return
+  fi
+  if [[ -z "$smb_image" ]]; then
+    smb_image="$(bash "$script_dir/build-test-samba.sh")"
+    owned_smb_image="$smb_image"
+  fi
+  if [[ ! "$smb_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "IRIS_PERF_SAMBA_IMAGE must be a local sha256 image ID" >&2
+    return 2
   fi
   docker rm -f "$smb_container" >/dev/null 2>&1 || true
   local samba_args=(
@@ -234,7 +344,7 @@ start_samba() {
 
 mount_smb_if_possible() {
   if [[ -n "$smb_mount" ]]; then
-    echo "$smb_mount"
+    smb_mount_result="$smb_mount"
     return 0
   fi
 
@@ -242,9 +352,13 @@ mount_smb_if_possible() {
   mkdir -p "$mount_dir"
   case "$(uname -s)" in
     Darwin)
-      mount_smbfs "//iris:iris@127.0.0.1:$smb_port/bench" "$mount_dir"
+      # Only synthetic benchmark credentials; don't echo mount errors/URLs.
+      if ! mount_smbfs "//$smb_user:iris@127.0.0.1:$smb_port/bench" "$mount_dir" >"$work_root/smb-mount.log" 2>&1; then
+        echo "SMB mount failed; native smoke completed, skipping mounted measurements" >&2
+        return 1
+      fi
       mounted_by_script="$mount_dir"
-      echo "$mount_dir"
+      smb_mount_result="$mount_dir"
       ;;
     Linux)
       cat >&2 <<EOF
@@ -272,7 +386,7 @@ run_smb_benchmarks() {
     IRIS_SMB_HOST=127.0.0.1 \
       IRIS_SMB_PORT="$smb_port" \
       IRIS_SMB_SHARE=bench \
-      IRIS_SMB_USER=iris \
+      IRIS_SMB_USER="$smb_user" \
       IRIS_SMB_PASSWORD=iris \
       IRIS_SMB_SMOKE_PAYLOAD="$payload_root/smb-smoke.bin" \
       IRIS_SMB_SMOKE_BYTES="$bytes" \
@@ -280,9 +394,10 @@ run_smb_benchmarks() {
       cargo run -p iris-backends --release --example smb_native_smoke
   )
   local mount_dir
-  if ! mount_dir="$(mount_smb_if_possible)"; then
+  if ! mount_smb_if_possible; then
     return 0
   fi
+  mount_dir="$smb_mount_result"
 
   cp "$payload_root/large.bin" "$mount_dir/large.bin"
   rm -rf "$mount_dir/small-files"
@@ -364,14 +479,33 @@ cleanup() {
   local status=$?
   if (( status != 0 )); then
     echo "Container diagnostics after transfer smoke failure:" >&2
-    report_container "$sftp_container"
-    report_container "$smb_container"
+    if [[ "$skip_sftp" != 1 ]]; then report_container "$sftp_container"; fi
+    if [[ "$skip_smb" != 1 ]]; then
+      if [[ "$use_native_smb" == 1 ]]; then
+        echo "Native Samba daemon diagnostics (last 4096 bytes):" >&2
+        if [[ -n "$native_smb_dir" ]]; then
+          tail -c 4096 "$native_smb_dir/logs/daemon.log" 2>/dev/null | sed 's/iris/[redacted]/g' | tail -c 4096 >&2 || true
+        fi
+      else
+        report_container "$smb_container"
+      fi
+    fi
+  fi
+  if [[ -n "${mounted_by_script:-}" && ( "$keep" != 1 || "$use_native_smb" == 1 ) ]]; then
+    umount "$mounted_by_script" >/dev/null 2>&1 || true
+  fi
+  # Native servers are never left running after the harness exits, even when
+  # payload/state retention is requested. Stop before removing their private DB.
+  if [[ -n "$native_smb_pid" ]]; then
+    kill "$native_smb_pid" 2>/dev/null || true
+    wait "$native_smb_pid" 2>/dev/null || true
   fi
   if [[ "$keep" != "1" ]]; then
-    if [[ -n "${mounted_by_script:-}" ]]; then
-      umount "$mounted_by_script" >/dev/null 2>&1 || true
+    if [[ "$skip_sftp" != 1 ]]; then docker rm -f "$sftp_container" >/dev/null 2>&1 || true; fi
+    if [[ -z "$native_smb_dir" && "$skip_smb" != 1 && -n "$smb_image" ]]; then
+      docker rm -f "$smb_container" >/dev/null 2>&1 || true
     fi
-    docker rm -f "$sftp_container" "$smb_container" >/dev/null 2>&1 || true
+    if [[ -n "$native_smb_dir" ]]; then rm -rf "$native_smb_dir"; fi
     if [[ -n "$owned_smb_image" ]]; then
       docker image rm "$owned_smb_image" >/dev/null 2>&1 || true
     fi
@@ -395,7 +529,12 @@ if [[ "$skip_smb" != "1" && -n "$smb_auth_audit_level" && ! "$smb_auth_audit_lev
   exit 2
 fi
 
-require_cmd docker
+if [[ "$skip_smb" != 1 && "$(uname -s)" == Darwin && -z "$smb_image" ]]; then
+  use_native_smb=1
+fi
+if [[ "$skip_sftp" != 1 || ( "$skip_smb" != 1 && "$use_native_smb" != 1 ) ]]; then
+  require_cmd docker
+fi
 require_cmd nc
 require_cmd cargo
 if [[ "$skip_sftp" != "1" ]]; then
@@ -403,18 +542,24 @@ if [[ "$skip_sftp" != "1" ]]; then
 fi
 
 if [[ -z "$work_root" ]]; then
-  work_root="$(mktemp -d "${TMPDIR:-/tmp}/iris-perf-transfer.XXXXXX")"
+  # macOS TMPDIR is often too long for Samba's Unix-domain socket paths.
+  temp_root="${TMPDIR:-/tmp}"
+  if [[ "$use_native_smb" == 1 ]]; then temp_root=/tmp; fi
+  work_root="$(mktemp -d "$temp_root/iris-perf-transfer.XXXXXX")"
   created_work_root="$work_root"
 else
   mkdir -p "$work_root"
 fi
 
+work_root="$(cd "$work_root" && pwd)"
 payload_root="$work_root/payloads"
 sftp_container="iris-perf-sftp-$$"
 smb_container="iris-perf-samba-$$"
 mounted_by_script=""
 
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 make_payloads
 if [[ "$skip_sftp" != "1" ]]; then
