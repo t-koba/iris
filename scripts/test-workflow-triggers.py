@@ -106,6 +106,19 @@ permissions:
         if: always()
         uses: actions/upload-artifact@v4
 """ in macos,
+    "preview corpus network smoke follows local and native integration tests": all(
+        ci.index(f"      - name: {step}")
+        < ci.index("      - name: Default-feature preview corpus correctness and bounded latency smoke")
+        for step in (
+            "Samba failure log selection regression",
+            "Darwin native Samba startup regression",
+            "Samba test-server policy regression",
+            "Native SFTP and SMB container integration",
+            "Native SMB 3.0 AES-CCM compatibility",
+            "Native SMB 2.1 signed compatibility",
+            "Fuzz smoke",
+        )
+    ),
     "CI manual, pull-request, and scheduled triggers": all(
         trigger in ci for trigger in ("  workflow_dispatch:\n", "  pull_request:\n", "  schedule:\n")
     ),

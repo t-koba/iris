@@ -174,24 +174,6 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/test-fetch-preview-corpus.py
 
-      - name: Default-feature preview corpus correctness and bounded latency smoke
-        env:
-          IRIS_PREVIEW_CORPUS_MAX_BYTES: "40000000"
-          IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS: "60"
-          IRIS_PREVIEW_LATENCY_WARMUPS: "2"
-          IRIS_PREVIEW_LATENCY_SAMPLES: "21"
-          CARGO_PROFILE_RELEASE_OPT_LEVEL: ${{ runner.os == 'Linux' && 's' || '3' }}
-        run: |
-          corpus_parent=$(mktemp -d "$RUNNER_TEMP/iris-preview.XXXXXX")
-          trap 'rm -rf "$corpus_parent"' EXIT
-          python3 scripts/fetch-preview-corpus.py --output "$corpus_parent/corpus"
-          # PDFium loads from the existing pinned AppDir on Linux; macOS uses Core Graphics.
-          if [[ "$RUNNER_OS" == Linux ]]; then
-            cd "$GITHUB_WORKSPACE/dist/linux/Iris.AppDir/usr/lib/iris"
-          fi
-          cargo run --release --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" \
-            -p iris-thumb-preview --example preview_corpus_smoke --locked -- "$corpus_parent/corpus"
-
       - name: SFTP readiness deadline regression
         run: bash ./scripts/test-perf-transfer-readiness.sh
 
@@ -274,6 +256,24 @@ jobs:
       - name: Fuzz smoke
         if: matrix.os == 'ubuntu-latest'
         run: FUZZ_RUNS=1000 bash ./scripts/fuzz-all.sh
+
+      - name: Default-feature preview corpus correctness and bounded latency smoke
+        env:
+          IRIS_PREVIEW_CORPUS_MAX_BYTES: "40000000"
+          IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS: "60"
+          IRIS_PREVIEW_LATENCY_WARMUPS: "2"
+          IRIS_PREVIEW_LATENCY_SAMPLES: "21"
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: ${{ runner.os == 'Linux' && 's' || '3' }}
+        run: |
+          corpus_parent=$(mktemp -d "$RUNNER_TEMP/iris-preview.XXXXXX")
+          trap 'rm -rf "$corpus_parent"' EXIT
+          python3 scripts/fetch-preview-corpus.py --output "$corpus_parent/corpus"
+          # PDFium loads from the existing pinned AppDir on Linux; macOS uses Core Graphics.
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            cd "$GITHUB_WORKSPACE/dist/linux/Iris.AppDir/usr/lib/iris"
+          fi
+          cargo run --release --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" \
+            -p iris-thumb-preview --example preview_corpus_smoke --locked -- "$corpus_parent/corpus"
 
   windows-minimal:
     runs-on: windows-latest
