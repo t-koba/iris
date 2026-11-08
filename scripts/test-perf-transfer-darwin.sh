@@ -50,11 +50,11 @@ case "${0##*/}" in
     echo benchmark >>"$CAPTURE/benchmarks"
     ;;
   mount_smbfs)
-    [[ "$1" == '//benchuser:iris@127.0.0.1:1445/bench' && "$2" == "$IRIS_PERF_WORK_ROOT/smb-mount" ]]
+    [[ "$1" == '//benchuser:iris@127.0.0.1:1445/bench' && "$2" == "$expected_work_root/smb-mount" ]]
     echo mounted >>"$CAPTURE/lifecycle"
     ;;
   umount)
-    [[ "$1" == "$IRIS_PERF_WORK_ROOT/smb-mount" ]]
+    [[ "$1" == "$expected_work_root/smb-mount" ]]
     echo unmounted >>"$CAPTURE/lifecycle"
     ;;
 esac
@@ -67,7 +67,13 @@ ln -s "$test_root/bin/mock" "$test_root/brew/sbin/samba-dot-org-smbd"
 ln -s "$test_root/bin/mock" "$test_root/brew/bin/testparm"
 ln -s "$test_root/bin/mock" "$test_root/repo/scripts/build-test-samba.sh"
 export TEST_ROOT="$test_root" CAPTURE="$test_root/capture" PATH="$test_root/bin:$PATH"
-export IRIS_PERF_WORK_ROOT="$test_root/work with spaces"
+mkdir -p "$test_root/real work"
+ln -s "$test_root/real work" "$test_root/work alias"
+# The trailing dot forces normalization even where pwd preserves symlink names.
+export IRIS_PERF_WORK_ROOT="$test_root/work alias/."
+expected_work_root="$(cd "$IRIS_PERF_WORK_ROOT" && pwd)"
+export expected_work_root
+[[ "$expected_work_root" != "$IRIS_PERF_WORK_ROOT" ]]
 export IRIS_PERF_SKIP_SFTP=1 IRIS_PERF_SKIP_SMB=0 IRIS_PERF_SAMBA_IMAGE=''
 export IRIS_PERF_BYTES=1 IRIS_PERF_SMALL_FILES=1 IRIS_PERF_SMALL_BYTES=1
 export IRIS_PERF_SMB_PORT=1445 IRIS_PERF_READY_TIMEOUT_SECONDS=2
@@ -148,17 +154,18 @@ assert_config_setting() {
 # its key, never the temporary root or other config values.
 printf 'security = user\n' >"$test_root/partial-config"
 config="$test_root/partial-config"
-if assert_config_setting "path = $IRIS_PERF_WORK_ROOT/samba-share" 2>"$test_root/config-diagnostic"; then
+if assert_config_setting "path = $expected_work_root/samba-share" 2>"$test_root/config-diagnostic"; then
   exit 1
 fi
 grep -Fxq 'missing required Samba config field: path' "$test_root/config-diagnostic"
 ! grep -Fq "$IRIS_PERF_WORK_ROOT" "$test_root/config-diagnostic"
+! grep -Fq "$expected_work_root" "$test_root/config-diagnostic"
 config="$CAPTURE/config"
 for setting in 'security = user' 'server role = standalone server' 'map to guest = Never' \
     'guest ok = no' 'valid users = benchuser' 'read only = no' 'interfaces = 127.0.0.1' \
     'bind interfaces only = yes' 'disable netbios = yes' 'smb ports = 1445' \
     'server min protocol = SMB2_10' 'server max protocol = SMB3_11' \
-    'server signing = mandatory' 'smb encrypt = required' "path = $IRIS_PERF_WORK_ROOT/samba-share"; do
+    'server signing = mandatory' 'smb encrypt = required' "path = $expected_work_root/samba-share"; do
   assert_config_setting "$setting"
 done
 native=$(cat "$CAPTURE/native-dir")
