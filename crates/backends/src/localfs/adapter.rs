@@ -173,17 +173,32 @@ impl LocalFsAdapter {
         display_path: &str,
         resolution: &ConflictResolution,
     ) -> Result<(), BackendError> {
+        Self::early_conflict_using(dst_path, display_path, resolution, |path| {
+            std::fs::symlink_metadata(path)
+        })
+    }
+
+    fn early_conflict_using(
+        dst_path: &Path,
+        display_path: &str,
+        resolution: &ConflictResolution,
+        inspect: impl FnOnce(&Path) -> std::io::Result<std::fs::Metadata>,
+    ) -> Result<(), BackendError> {
+        if !matches!(
+            resolution,
+            ConflictResolution::Fail | ConflictResolution::Skip
+        ) {
+            return Ok(());
+        }
         // Inexpensive pre-check so existing Fail/Skip targets never stage payloads.
         // Uses symlink_metadata so directories and dangling links count as occupied.
         // The final no-replace install remains the authority and closes races.
-        if matches!(
-            resolution,
-            ConflictResolution::Fail | ConflictResolution::Skip
-        ) && std::fs::symlink_metadata(dst_path).is_ok()
-        {
-            return Err(conflict_for(display_path));
+        match inspect(dst_path) {
+            Ok(_) => Err(conflict_for(display_path)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            // An uncertain existence check must not consume or stage the payload.
+            Err(error) => Err(BackendError::Internal(Box::new(error))),
         }
-        Ok(())
     }
 
     fn next_ticket(&self, kind: OperationKind) -> OperationTicket {
@@ -1189,6 +1204,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn early_fail_skip_conflicts_fail_closed_on_metadata_errors() {
+        let temp = TempDir::new().expect("tempdir");
+        let dst = temp.path().join("destination");
+        for mode in [ConflictResolution::Fail, ConflictResolution::Skip] {
+            let result = LocalFsAdapter::early_conflict_using(&dst, "destination", &mode, |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected metadata failure",
+                ))
+            });
+            assert!(matches!(result, Err(BackendError::Internal(_))));
+        }
+        assert!(std::fs::read_dir(temp.path())
+            .expect("list")
+            .next()
+            .is_none());
     }
 
     #[test]
