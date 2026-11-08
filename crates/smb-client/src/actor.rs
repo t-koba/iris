@@ -984,7 +984,10 @@ fn validate_response_segment(
         }
         let Some(signing_key) = pending_signing_key.or(state.signing_key.as_ref()) else {
             if response_signed && expected_command == Smb2Command::SessionSetup {
-                return Err(SmbConnectionError::SignatureVerificationFailed);
+                return Err(SmbConnectionError::SignatureVerificationFailed {
+                    command: response_header.command,
+                    status: response_header.status().0,
+                });
             }
             return Ok(());
         };
@@ -996,7 +999,10 @@ fn validate_response_segment(
             });
         }
         if !signing_key.verify_packet(response_packet)? {
-            return Err(SmbConnectionError::SignatureVerificationFailed);
+            return Err(SmbConnectionError::SignatureVerificationFailed {
+                command: response_header.command,
+                status: response_header.status().0,
+            });
         }
     }
     Ok(())
@@ -1158,10 +1164,20 @@ mod tests {
         assert!(validate(&header, &state, true).is_ok());
         assert!(matches!(
             validate(&header, &state, false),
-            Err(SmbConnectionError::SignatureVerificationFailed)
+            Err(SmbConnectionError::SignatureVerificationFailed {
+                command: Smb2Command::SessionSetup,
+                status,
+            }) if status == SmbNtStatus::MORE_PROCESSING_REQUIRED.0
+        ));
+        header.status_or_channel_sequence = SmbNtStatus::SUCCESS.0;
+        assert!(matches!(
+            validate(&header, &state, false),
+            Err(SmbConnectionError::SignatureVerificationFailed {
+                command: Smb2Command::SessionSetup,
+                status,
+            }) if status == SmbNtStatus::SUCCESS.0
         ));
         header.flags &= !SMB2_FLAGS_SIGNED;
-        header.status_or_channel_sequence = SmbNtStatus::SUCCESS.0;
         assert!(matches!(
             validate(&header, &state, false),
             Err(SmbConnectionError::UnsignedResponse { status: 0, .. })
@@ -1721,7 +1737,10 @@ mod tests {
         .expect_err("bad signature");
         assert!(matches!(
             error,
-            SmbConnectionError::SignatureVerificationFailed
+            SmbConnectionError::SignatureVerificationFailed {
+                command: Smb2Command::Echo,
+                status: 0,
+            }
         ));
     }
 

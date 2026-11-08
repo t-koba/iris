@@ -24,8 +24,8 @@ pub enum SmbConnectionError {
     #[error("SMB response message id was not pending: {actual}")]
     UnexpectedMessageId { actual: u64 },
 
-    #[error("SMB response signature verification failed")]
-    SignatureVerificationFailed,
+    #[error("SMB {command:?} response signature verification failed with status 0x{status:08x}")]
+    SignatureVerificationFailed { command: Smb2Command, status: u32 },
 
     #[error(
         "SMB {command:?} response with status 0x{status:08x} was not signed after signing became mandatory"
