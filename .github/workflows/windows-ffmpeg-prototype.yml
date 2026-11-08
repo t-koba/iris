@@ -1,11 +1,38 @@
 name: Windows FFmpeg prototype
 
-# Reusable, non-publishing prototype for the Windows default-preview
-# investigation. The registered CI workflow calls it only on workflow_dispatch,
-# allowing exact-ref validation without registering another top-level workflow.
-# Never publishes or touches release packaging.
+# Non-publishing Windows default-preview prototype: run the full investigation
+# for relevant PRs targeting dev and pushes to dev. Keep workflow_call for CI's
+# manual exact-ref validation route. Never publishes or touches release packaging.
 on:
   workflow_call:
+  pull_request:
+    branches: [dev]
+    paths:
+      - 'prototype/windows-ffmpeg/**'
+      - '.github/workflows/windows-ffmpeg-prototype.yml'
+      - '.github/workflows/ci.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - 'rust-toolchain.toml'
+      - 'assets/**'
+      - 'crates/**'
+      - 'scripts/**'
+      - 'packaging/**'
+  push:
+    branches: [dev]
+    paths:
+      - 'prototype/windows-ffmpeg/**'
+      - '.github/workflows/windows-ffmpeg-prototype.yml'
+      - '.github/workflows/ci.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - 'rust-toolchain.toml'
+      - 'assets/**'
+      - 'crates/**'
+      - 'scripts/**'
+      - 'packaging/**'
 
 permissions:
   contents: read

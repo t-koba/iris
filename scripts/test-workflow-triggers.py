@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Guard CI triggers and reusable report-only validation routes."""
 
+from fnmatch import fnmatchcase
 from pathlib import Path
 import re
 
@@ -23,6 +24,48 @@ macos_uploads = re.findall(
     r"        with:\n((?:          [^\n]*\n)+)", macos, re.MULTILINE
 )
 
+
+# Match the deliberately simple trigger shape without a YAML dependency. These
+# examples use only literal paths and /** directory suffixes (no GitHub-only globs).
+prototype_triggers = prototype.split("on:\n", 1)[1].split("\npermissions:", 1)[0]
+prototype_paths = {
+    "prototype/windows-ffmpeg/**", ".github/workflows/windows-ffmpeg-prototype.yml",
+    ".github/workflows/ci.yml", "Cargo.toml", "Cargo.lock", ".cargo/**",
+    "rust-toolchain.toml", "assets/**", "crates/**", "scripts/**", "packaging/**",
+}
+positive_paths = (
+    "prototype/windows-ffmpeg/preview-smoke/src/main.rs",
+    ".github/workflows/windows-ffmpeg-prototype.yml", ".github/workflows/ci.yml",
+    "Cargo.toml", "Cargo.lock", ".cargo/config.toml", "rust-toolchain.toml", "assets/icons/iris-icon.ico",
+    "crates/ui-shell/src/main.rs", "scripts/test-workflow-triggers.py",
+    "packaging/windows/app.manifest",
+)
+negative_paths = (
+    "README.md", "docs/development.md", ".github/workflows/release.yml",
+    "prototype/other/main.rs", "Cargo.toml.bak", "crates-other/main.rs",
+)
+
+
+def prototype_event_contract(event):
+    block = re.search(
+        rf"^  {event}:\n(.*?)(?=^  [a-z_]+:|\Z)",
+        prototype_triggers, re.MULTILINE | re.DOTALL,
+    )
+    if not block:
+        return False
+    filters = re.fullmatch(
+        r"    branches: \[dev\]\n    paths:\n((?:      - '[^'\n]+'\n)+)\n?",
+        block[1],
+    )
+    if not filters:
+        return False
+    paths = re.findall(r"      - '([^']+)'", filters[1])
+    return (
+        set(paths) == prototype_paths
+        and all(any(fnmatchcase(path, pattern) for pattern in paths) for path in positive_paths)
+        and not any(fnmatchcase(path, pattern) for path in negative_paths for pattern in paths)
+    )
+
 checks = {
     "CI mizu exclusion and all-tag filter": """  push:
     branches-ignore:
@@ -36,10 +79,13 @@ checks = {
       contents: read
     uses: ./.github/workflows/windows-ffmpeg-prototype.yml
 """ in ci,
-    "prototype is reusable, not an independently registered workflow": """on:
-  workflow_call:
-""" in prototype
-    and all(trigger not in prototype for trigger in ("  workflow_dispatch:", "  pull_request:", "  push:")),
+    "prototype retains workflow_call without standalone manual dispatch": (
+        "  workflow_call:\n" in prototype_triggers
+        and re.findall(r"^  ([a-z_]+):", prototype_triggers, re.MULTILINE)
+        == ["workflow_call", "pull_request", "push"]
+    ),
+    "prototype PRs target only dev with relevant paths": prototype_event_contract("pull_request"),
+    "prototype pushes target only dev (not mizu/main) with relevant paths": prototype_event_contract("push"),
     "prototype vcpkg retries are configurable and timeout-specific": all(
         text in prototype for text in (
             "IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRIES: ${{ vars.IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRIES || 1 }}",
