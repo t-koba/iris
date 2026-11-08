@@ -157,7 +157,17 @@ def system(path, sdk):
         install_names = re.findall(r'''^\s*install-name:\s*['"]?([^'"\s]+)''', stub.read_text(), re.M)
         if name in install_names:
             matches.append(stub)
+    # Apple SDKs may include sanitizer variants such as libSystem.B_asan.tbd
+    # that advertise the ordinary install name as well. They are not evidence
+    # for the ordinary dylib. Prefer the exact basename match after validating
+    # its install name; retain ambiguity failures for other duplicate aliases.
+    if not rel.stem.endswith('_asan'):
+        matches = [stub for stub in matches if not stub.stem.endswith('_asan')]
     require(matches, f'unverified system dependency {json.dumps(name)}: no matching SDK stub')
+    canonical_name = rel.name[:-len('.dylib')] + '.tbd' if rel.name.endswith('.dylib') else None
+    canonical = (sdk_root / rel.parent / canonical_name).resolve() if canonical_name else None
+    if canonical in matches:
+        matches = [canonical]
     require(len(matches) == 1,
             f'ambiguous system stub for {json.dumps(name)}: '
             f'{json.dumps([str(stub.relative_to(sdk_root)) for stub in matches])}')

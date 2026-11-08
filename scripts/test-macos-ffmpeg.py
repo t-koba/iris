@@ -252,6 +252,26 @@ Load command 2
             with self.assertRaises(ValueError):
                 m.system(Path('/usr/lib/libz.1.dylib'), sdk)
 
+    def test_system_prefers_exact_sdk_stub_over_sanitizer_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk = Path(tmp)
+            libdir = sdk / 'usr/lib'
+            libdir.mkdir(parents=True)
+            canonical = libdir / 'libSystem.B.tbd'
+            sanitizer = libdir / 'libSystem.B_asan.tbd'
+            install = 'install-name: /usr/lib/libSystem.B.dylib\n'
+            sanitizer.write_text(install)
+            canonical.write_text(install)
+
+            record = m.system(Path('/usr/lib/libSystem.B.dylib'), sdk)
+
+            self.assertEqual(record['sdk_stub'], 'usr/lib/libSystem.B.tbd')
+            self.assertEqual(record['sdk_stub_sha256'], m.digest(canonical))
+
+            canonical.unlink()
+            with self.assertRaisesRegex(ValueError, 'no matching SDK stub'):
+                m.system(Path('/usr/lib/libSystem.B.dylib'), sdk)
+
     def test_system_framework_stub_and_ambiguous_or_missing_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             sdk = Path(tmp)
