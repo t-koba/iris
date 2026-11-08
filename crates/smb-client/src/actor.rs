@@ -797,9 +797,13 @@ fn dispatch_response(
         Some(_) => return Err(crate::SmbClientError::ExpectedEncryptedTransform.into()),
         None => response_packet,
     };
-    let responses = decode_compound_responses(&response_packet)?;
+    let responses = decode_compound_response_segments(&response_packet)?;
     let mut granted_credits = 0u16;
-    for response in responses {
+    for decoded in responses {
+        let DecodedSmbResponse {
+            response,
+            wire_packet,
+        } = decoded;
         let message_id = response.header.message_id;
         let Some(pending_request) = pending.remove(&message_id) else {
             return Err(SmbConnectionError::UnexpectedMessageId { actual: message_id });
@@ -815,7 +819,7 @@ fn dispatch_response(
                 ..
             } => {
                 let result = validate_response_segment(
-                    &response.to_packet(),
+                    wire_packet,
                     &response.header,
                     command,
                     message_id,
@@ -828,11 +832,7 @@ fn dispatch_response(
                             state.signing_key = Some(key);
                         }
                     }
-                    state.update_preauth_response(
-                        command,
-                        response.header.status(),
-                        &response.to_packet(),
-                    );
+                    state.update_preauth_response(command, response.header.status(), wire_packet);
                     apply_response_state_update(state, &response.header, response_state_update);
                     response
                 });
@@ -845,7 +845,7 @@ fn dispatch_response(
                 ..
             } => {
                 validate_response_segment(
-                    &response.to_packet(),
+                    wire_packet,
                     &response.header,
                     command,
                     message_id,
@@ -887,6 +887,20 @@ fn credit_request_for_state(state: &ActorState) -> u16 {
 }
 
 pub fn decode_compound_responses(packet: &[u8]) -> Result<Vec<SmbResponse>, SmbConnectionError> {
+    Ok(decode_compound_response_segments(packet)?
+        .into_iter()
+        .map(|decoded| decoded.response)
+        .collect())
+}
+
+struct DecodedSmbResponse<'a> {
+    response: SmbResponse,
+    wire_packet: &'a [u8],
+}
+
+fn decode_compound_response_segments(
+    packet: &[u8],
+) -> Result<Vec<DecodedSmbResponse<'_>>, SmbConnectionError> {
     let mut responses = Vec::new();
     let mut offset = 0usize;
     loop {
@@ -915,9 +929,12 @@ pub fn decode_compound_responses(packet: &[u8]) -> Result<Vec<SmbResponse>, SmbC
             }
             offset + next_command
         };
-        responses.push(SmbResponse {
-            header,
-            body: packet[offset + SMB2_HEADER_BYTES..segment_end].to_vec(),
+        responses.push(DecodedSmbResponse {
+            response: SmbResponse {
+                header,
+                body: packet[offset + SMB2_HEADER_BYTES..segment_end].to_vec(),
+            },
+            wire_packet: &packet[offset..segment_end],
         });
         if next_command == 0 {
             break;
@@ -1576,6 +1593,23 @@ mod tests {
         let response = echo_with_hmac_signing(signed_echo_response)
             .await
             .expect("signed response");
+        assert_eq!(response.body, b"pong");
+    }
+
+    #[tokio::test]
+    async fn actor_verifies_signature_over_original_response_bytes() {
+        let response = echo_with_hmac_signing(|request, key| {
+            let mut header = Smb2Header::new(request.command, request.message_id);
+            header.flags |= SMB2_FLAGS_SIGNED;
+            let mut response = response_packet(header, b"pong");
+            // The semantic header does not model these reserved bytes, but the
+            // signed wire message must remain byte-exact through verification.
+            response[32..36].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+            sign_smb2_packet_hmac_sha256(key, &mut response).expect("sign response");
+            response
+        })
+        .await
+        .expect("signature over original response bytes");
         assert_eq!(response.body, b"pong");
     }
 

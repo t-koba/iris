@@ -811,7 +811,7 @@ mod tests {
                 Smb2Header::new(Smb2Command::SessionSetup, first_header.message_id);
             challenge_header.status_or_channel_sequence = SmbNtStatus::MORE_PROCESSING_REQUIRED.0;
             challenge_header.session_id = session_id;
-            let challenge_response = response_packet(
+            let mut challenge_response = response_packet(
                 challenge_header,
                 &[
                     session_setup_response_body(&challenge_spnego).as_slice(),
@@ -819,6 +819,9 @@ mod tests {
                 ]
                 .concat(),
             );
+            // The preauthentication transcript hashes the exact received bytes,
+            // including header bytes that the semantic model does not expose.
+            challenge_response[32..36].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
             transport
                 .send_packet(&challenge_response)
                 .await
@@ -860,10 +863,11 @@ mod tests {
                 Smb2Header::new(Smb2Command::SessionSetup, second_header.message_id);
             mic_header.session_id = session_id;
             mic_header.status_or_channel_sequence = SmbNtStatus::MORE_PROCESSING_REQUIRED.0;
-            let mic_response = response_packet(
+            let mut mic_response = response_packet(
                 mic_header,
                 &[session_setup_response_body(&mic_spnego), mic_spnego].concat(),
             );
+            mic_response[32..36].copy_from_slice(&[0x55, 0x66, 0x77, 0x88]);
             // Samba sends this leg unsigned, even after successful NTLM AUTHENTICATE.
             transport.send_packet(&mic_response).await.unwrap();
             let third = transport

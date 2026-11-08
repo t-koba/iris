@@ -61,6 +61,8 @@ pub struct SmbResponse {
 }
 
 impl SmbResponse {
+    /// Re-encodes this decoded response's semantic fields; this is not a byte-exact
+    /// copy of the received wire packet. Integrity checks must use the original bytes.
     pub fn to_packet(&self) -> Vec<u8> {
         let mut packet = Vec::with_capacity(SMB2_HEADER_BYTES + self.body.len());
         packet.extend_from_slice(&self.header.encode());
