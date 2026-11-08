@@ -66,21 +66,39 @@ permissions:
           if-no-files-found: error
           path: |
             audit/macos.json
+            audit/macos-product.json
             audit/macos-candidate.json
 """] and macos.count("actions/upload-artifact@") == 1 and "audit/macos-candidate.json" in macos,
-    "macOS current audit keeps release report beside candidate": """          trap 'rm -rf dist/macos target/package-macos' EXIT
+    "macOS Homebrew baseline is explicitly report-only": """      - name: Audit report-only Homebrew baseline
+        shell: bash
+        run: |
+          # Historical Homebrew comparison only; never the production selector.
+          # Only JSON is retained, not the temporary app/ZIP/PKG.
+          trap 'rm -rf dist/macos target/package-macos' EXIT
+          IRIS_MACOS_REPORT_ONLY=1 IRIS_MACOS_FFMPEG_BASELINE=1 ./scripts/package-macos-app.sh
+          python3 scripts/release-audit.py macos --output audit/macos.json
+""" in macos,
+    "macOS production audit is independent and requires successful prerequisites": """      - name: Audit pinned production package
+        if: ${{ !cancelled() && steps.candidate_contracts.outcome == 'success' }}
+        shell: bash
+        run: |
+          # Exercise the same default-product runtime/staging/sign/archive path
+          # without credentials or publication. Retain only bounded JSON evidence.
+          trap 'rm -rf dist/macos target/package-macos' EXIT
           ./scripts/package-macos-app.sh
-          python3 scripts/release-audit.py macos --output audit/macos.json""" in macos
-    and """          trap 'rm -rf dist/macos target/macos-runtime-validation' EXIT
-          python3 scripts/macos-ffmpeg.py validate audit/macos-candidate.json""" in macos,
-    "macOS candidate runs after current-audit failure only when its prerequisites passed": """      - name: Check candidate contracts
+          python3 scripts/macos-ffmpeg.py check dist/macos/Iris.app
+          python3 scripts/release-audit.py macos --output audit/macos-product.json
+""" in macos,
+    "macOS candidate runs after baseline failure only when its prerequisites passed": """      - name: Check candidate contracts
         id: candidate_contracts
 """ in macos
     and """      - name: Validate pinned candidate
-        # Run after a current-runtime failure when candidate prerequisites passed;
+        # Run after a baseline failure when candidate prerequisites passed;
         # never continue after cancellation or a failed candidate-contract step.
         if: ${{ !cancelled() && steps.candidate_contracts.outcome == 'success' }}
-""" in macos,
+""" in macos
+    and """          trap 'rm -rf dist/macos target/macos-runtime-validation' EXIT
+          python3 scripts/macos-ffmpeg.py validate audit/macos-candidate.json""" in macos,
     "macOS validation cleans temporary apps before retaining evidence": """      - name: Clean temporary bytes even after interruption
         if: always()
         run: rm -rf dist/macos target/package-macos target/macos-runtime-validation
