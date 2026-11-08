@@ -115,6 +115,7 @@ pub(crate) fn perform_undo(state: &mut AppState, op: UndoableOp) -> Task<Message
                 .map(|item| iris_platform_integration::trash::TrashReceipt {
                     original_path: item.source_path.clone(),
                     trashed_path: item.trashed_path.clone(),
+                    trash_id: item.trash_id.clone(),
                 })
                 .collect();
             Task::perform(
@@ -398,26 +399,32 @@ async fn restore_trash_receipts(
 }
 
 pub(crate) async fn trash_paths_for_undo(paths: Vec<PathBuf>) -> Result<Vec<UndoItem>, String> {
-    let mut items = Vec::with_capacity(paths.len());
-    for path in paths {
-        let metadata = tokio::fs::metadata(&path)
-            .await
-            .map_err(|error| format!("{} is no longer valid: {error}", path.display()))?;
-        let receipt = tokio::task::spawn_blocking({
-            let path = path.clone();
-            move || iris_platform_integration::trash::trash_file_with_receipt(&path)
-        })
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())?;
-        items.push(UndoItem {
+    let mut metadata = Vec::with_capacity(paths.len());
+    for path in &paths {
+        metadata.push(
+            tokio::fs::metadata(path)
+                .await
+                .map_err(|error| format!("{} is no longer valid: {error}", path.display()))?,
+        );
+    }
+    let receipts = tokio::task::spawn_blocking(move || {
+        iris_platform_integration::trash::trash_files_with_receipts(&paths)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    let items = receipts
+        .into_iter()
+        .zip(metadata)
+        .map(|(receipt, metadata)| UndoItem {
+            destination_path: receipt.original_path.clone(),
             source_path: receipt.original_path,
-            destination_path: path,
             size: Some(metadata.len()),
             mtime: metadata.modified().ok(),
             trashed_path: receipt.trashed_path,
-        });
-    }
+            trash_id: receipt.trash_id,
+        })
+        .collect();
     Ok(items)
 }
 
@@ -467,6 +474,7 @@ mod tests {
                 size: None,
                 mtime: None,
                 trashed_path: None,
+                trash_id: None,
             }],
         )
         .await;

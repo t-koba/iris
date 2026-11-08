@@ -20,6 +20,7 @@ pub struct UndoItem {
     pub size: Option<u64>,
     pub mtime: Option<SystemTime>,
     pub trashed_path: Option<PathBuf>,
+    pub trash_id: Option<std::ffi::OsString>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,6 +166,7 @@ mod tests {
                 size: None,
                 mtime: None,
                 trashed_path: None,
+                trash_id: None,
             }],
             performed_at: SystemTime::UNIX_EPOCH,
         }
