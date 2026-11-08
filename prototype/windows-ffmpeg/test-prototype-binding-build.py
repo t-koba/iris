@@ -21,8 +21,31 @@ def overridden(raw):
            f'source = "{binding.REGISTRY}"\nchecksum = "{binding.CHECKSUM}"')
     new = f'name = "{binding.NAME}"\nversion = "9.1.0"\nsource = "{binding.SOURCE}"'
     text = raw.decode().replace('\r\n', '\n')
-    if text.count(old) != 1:
-        raise AssertionError("production binding identity changed")
+    matches = text.count(old)
+    if matches != 1:
+        identities = []
+        lines = text.splitlines()
+        marker = f'name = "{binding.NAME}"'
+        for index, line in enumerate(lines):
+            if line != marker:
+                continue
+            fields = {}
+            for candidate in lines[index + 1:index + 4]:
+                key, separator, value = candidate.partition(" = ")
+                if separator:
+                    fields[key] = value
+            source = fields.get("source", "")
+            source_kind = ("registry" if '"registry+' in source else
+                           "git" if '"git+' in source else "other" if source else "missing")
+            identities.append({
+                "version": fields.get("version", "missing"),
+                "source_kind": source_kind,
+                "checksum_matches": fields.get("checksum") == f'"{binding.CHECKSUM}"',
+            })
+        raise AssertionError(
+            "production binding identity changed "
+            f"(exact_matches={matches}, observed={identities[:2]!r})"
+        )
     return text.replace(old, new).encode()
 
 
@@ -31,6 +54,17 @@ class BindingBuildTests(unittest.TestCase):
         self.assertEqual(binding.COMMIT, "5aa9dc312e0ab9b762bae7ca367d17761d0c9447")
         binding.validate_pin(PINS["ffmpeg_sys_next"])
         binding.validate_lock(ORIGINAL, overridden(ORIGINAL))
+
+    def test_override_drift_reports_only_bounded_identity(self):
+        changed = ORIGINAL.replace(b'version = "9.0.1"', b'version = "9.2.0"', 1)
+        with self.assertRaises(AssertionError) as caught:
+            overridden(changed)
+        message = str(caught.exception)
+        self.assertIn("exact_matches=0", message)
+        self.assertIn("9.2.0", message)
+        self.assertIn("source_kind", message)
+        self.assertNotIn(binding.CHECKSUM, message)
+        self.assertNotIn(binding.REPOSITORY, message)
 
     def test_pin_drift_rejected_before_cargo(self):
         for key, value in (("commit", "master"), ("version", "9.0.1"),
