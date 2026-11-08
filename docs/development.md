@@ -148,7 +148,7 @@ fuzz 用のクレートは各 `fuzz/` ディレクトリで同じ操作をしま
 
 | OS | コマンド | できるもの |
 |---|---|---|
-| macOS | `./scripts/package-macos-app.sh` | `Iris.app` と zip。`IRIS_MACOS_SIGN_IDENTITY` と `IRIS_MACOS_NOTARY_PROFILE` を設定すると署名と公証も行う |
+| macOS | `./scripts/package-macos-app.sh` | pinned FFmpeg/liblzma をビルドした `Iris.app` と ZIP/PKG（[runtime/source/notice](../packaging/macos/ffmpeg-README.md) 同梱）。`IRIS_MACOS_SIGN_IDENTITY` と `IRIS_MACOS_NOTARY_PROFILE` を設定すると署名と公証も行う |
 | Linux | `./scripts/package-linux-appdir.sh` | `Iris.AppDir`（`appimagetool` があれば AppImage にできる） |
 | Windows | `./scripts/package-windows.ps1` | `Iris.exe` を含む zip（`IRIS_BUILD_VARIANT=minimal`） |
 
@@ -167,9 +167,10 @@ read-only GitHub token も渡さないため、手動 run は PDFium の固定�
 監査追加はリリース保留の解除やライセンス・脆弱性対応の承認ではありません。
 
 - macOS: staged `Iris.app` の実行ファイル・dylib の SHA-256 と `otool` load commands、
-  解決できた依存を記録します。Homebrew の formula/version/license、bottle/source metadata、
-  install receipt と formula 定義は候補元の証拠です。install-name 書換え・署名後の bytes と
-  元の bytes の同一性は主張せず、複数候補や不明な shared-cache / rpath は明記します。
+  解決できた依存を記録します。製品の pinned FFmpeg の source/signature/configuration と
+  署名後 dylib の hash・SDK closure・必須 preview corpus 結果はアプリ内の
+  `Contents/Resources/ffmpeg/` と `ffmpeg-runtime.json` に同梱します。
+  別の report-only 比較で採取する Homebrew metadata は製品 runtime の証明ではありません。
 - Linux: staged Iris と PDFium から `readelf` / `ldd` で辿った依存の SHA-256、
   所有 Debian package の正確な installed/source version、APT origin 情報と copyright を記録します。
   APT 設定は過去のダウンロード元の証明ではありません。bundled PDFium の PROVENANCE、

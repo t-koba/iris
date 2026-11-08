@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report-only Darwin candidate. Reuse the Linux source policy, never its ELF mechanics."""
+"""Pinned Darwin release runtime and report-only comparison; no ELF mechanics."""
 import ctypes
 import importlib.util
 import json
@@ -379,7 +379,7 @@ def build(prefix, sdk):
     for filename in ('source.tar.xz', 'source.tar.xz.asc', 'signing-key.asc', 'signature.status'):
         shutil.copy2(work / filename, docs)
     for filename in ('COPYING.LGPLv2.1', 'config.h', 'config_components.h', 'ffbuild/config.mak'):
-        shutil.copy2(source / filename, docs / Path(filename).name)
+        (docs / Path(filename).name).write_text(clean((source / filename).read_text()))
     shutil.copy2(ROOT / 'packaging/macos/ffmpeg-README.md', docs / 'README.md')
     shutil.copy2(ROOT / 'scripts/macos-ffmpeg.py', docs / 'macos-ffmpeg.py')
     paths = libraries(prefix)
@@ -398,7 +398,6 @@ def build(prefix, sdk):
 
 
 def stage(prefix, app, sdk):
-    require(os.environ.get('IRIS_MACOS_REPORT_ONLY') == '1', 'candidate is report-only')
     paths = libraries(prefix)
     docs = prefix / 'share/iris-ffmpeg'
     manifest = json.loads((docs / 'manifest.json').read_text())
@@ -481,7 +480,7 @@ def check(app, sdk):
     require(all(manifest['liblzma'].get(k) == v for k, v in evidence.items()), 'liblzma evidence mismatch')
     require(digest(docs / 'source.tar.xz') == POLICY['sha256'], 'staged source mismatch')
     return dict(source_sha=os.environ.get('GITHUB_SHA', run('git', '-C', ROOT, 'rev-parse', 'HEAD')),
-                scope='Report-only pinned candidate inventory (not the current release runtime); not legal approval, latency parity or release approval.',
+                scope='Pinned macOS runtime inventory; not legal approval, latency parity or release approval.',
                 policy=manifest['policy'], signature_verified=True, tools=manifest['tools'], liblzma=manifest['liblzma'],
                 enabled_codecs=manifest['enabled_codecs'], documents=manifest['documents'],
                 build_libraries=manifest['libraries'], runtime=runtime(paths), closure=edges,
@@ -630,6 +629,68 @@ def stage_preview(executable, prefix, app, sdk):
     return dest
 
 
+def sign_runtime(app, identity):
+    """Only rebind hashes across our own signing of the already-verified bytes."""
+    docs = app / 'Contents/Resources/ffmpeg'
+    manifest = json.loads((docs / 'manifest.json').read_text())
+    frameworks = app / 'Contents/Frameworks'
+    require(manifest['staged_libraries'] == {p.name: digest(p) for p in frameworks.iterdir()},
+            'runtime changed before signing')
+    for name in manifest['staged_libraries']:
+        path = frameworks / name
+        args = ['codesign', '--force', '--sign', identity, '--timestamp=none']
+        if identity != '-':
+            args += ['--options', 'runtime']
+        run(*args, path)
+        run('codesign', '--verify', '--strict', path)
+        manifest['staged_libraries'][name] = digest(path)
+    (docs / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+
+def product(app, sdk):
+    """Build, stage and exercise the release runtime; no Homebrew fallback."""
+    require(sys.platform == 'darwin', 'native macOS required')
+    require(not any(k.startswith('DYLD_') for k in os.environ), 'ambient DYLD overrides forbidden')
+    require(not os.environ.get('IRIS_MACOS_REPORT_ONLY'), 'product cannot be report-only')
+    # Native and Cargo discovery inputs are never reused from another runtime.
+    scratch = ROOT / 'target'
+    scratch.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='macos-product-', dir=scratch) as temporary:
+        work = Path(temporary).resolve()
+        REDACTIONS[str(work)] = '<temporary>'
+        REDACTIONS[str(sdk)] = '<sdk>'
+        prefix = work / 'runtime'
+        build(prefix, sdk)
+        source = os.environ.get('GITHUB_SHA') or run('git', '-C', ROOT, 'rev-parse', 'HEAD')
+        env = preview_env(prefix, work / 'cargo', source)
+        preview = build_preview(env)
+        run('cargo', 'build', '--locked', '--offline', '--release', '-p', 'iris-ui-shell', '--bin', 'Iris',
+            cwd=ROOT, env=env, seconds=setting('IRIS_FFMPEG_BUILD_SECONDS', 3600))
+        macos = app / 'Contents/MacOS'
+        shutil.copy2(Path(env['CARGO_TARGET_DIR']) / 'release/Iris', macos / 'Iris')
+        smoke = macos / 'preview_corpus_smoke'
+        shutil.copy2(preview, smoke)
+        stage(prefix, app, sdk)
+        staged = list((app / 'Contents/Frameworks').iterdir())
+        for executable in (macos / 'Iris', smoke):
+            edges = closure(executable, staged, sdk)
+            require(any(isinstance(t, Path) and t.name.startswith('libavcodec.') for _, _, t in edges),
+                    'product executable is not linked to staged libavcodec')
+        corpus = work / 'corpus'
+        run(sys.executable, ROOT / 'scripts/fetch-preview-corpus.py', '--output', corpus, cwd=ROOT,
+            seconds=setting('IRIS_FFMPEG_FETCH_SECONDS', 300))
+        # This is mandatory correctness, not the optional paired latency experiment.
+        correctness = parse_preview(run(smoke, corpus, env=env), source)
+        smoke.unlink()  # Test tooling is not part of the distributed product.
+        sign_runtime(app, os.environ.get('IRIS_MACOS_SIGN_IDENTITY', '-'))
+        report = check(app, sdk)
+        # The outer app signature is applied later. Do not label pre-sign main
+        # executable hashes as final artifact bytes; nested dylib hashes are final.
+        del report['executables']
+        report['preview'] = correctness
+        (app / 'Contents/Resources/ffmpeg-runtime.json').write_text(report_bytes(report))
+
+
 def validate(output):
     require(sys.platform == 'darwin', 'native macOS required')
     require(not any(k.startswith('DYLD_') for k in os.environ), 'ambient DYLD overrides forbidden')
@@ -680,7 +741,7 @@ def validate(output):
                 seconds=setting('IRIS_FFMPEG_BUILD_SECONDS', 3600))
             candidate_smoke = stage_preview(candidate_exe, prefix, app, sdk)
             run('codesign', '--verify', '--deep', '--strict', app)
-            report.update(check(app, sdk))
+            report.update(check(app, sdk), scope=report['scope'])
             if corpus_available:
                 preview['candidate'] = parse_preview(run(candidate_smoke, corpus, env=env), source)
                 if 'baseline' in preview:
@@ -715,17 +776,22 @@ def validate(output):
 
 if __name__ == '__main__':
     try:
-        if sys.argv[1] == 'validate' and len(sys.argv) == 3:
+        if sys.argv[1] in ('validate', 'product'):
             # GitHub cancellation sends TERM before KILL. Unwind owned scratch
             # and active process groups; the workflow's always cleanup is a backstop.
             def interrupted(signum, frame):
                 raise InterruptedError('runtime validation interrupted')
             signal.signal(signal.SIGTERM, interrupted)
+        if sys.argv[1] == 'validate' and len(sys.argv) == 3:
             validate(Path(sys.argv[2]))
+        elif sys.argv[1] in ('product', 'check') and len(sys.argv) == 3:
+            sdk = Path(run('xcrun', '--sdk', 'macosx', '--show-sdk-path')).resolve()
+            REDACTIONS[str(sdk)] = '<sdk>'
+            (product if sys.argv[1] == 'product' else check)(Path(sys.argv[2]).resolve(), sdk)
         elif sys.argv[1] == 'stage' and len(sys.argv) == 4:
             stage(Path(sys.argv[2]).resolve(), Path(sys.argv[3]).resolve(),
                   Path(run('xcrun', '--sdk', 'macosx', '--show-sdk-path')).resolve())
         else:
-            raise ValueError('expected validate OUTPUT or stage PREFIX APP')
+            raise ValueError('expected validate OUTPUT, stage PREFIX APP, product APP or check APP')
     except Exception as error:
         sys.exit(clean(str(error)))

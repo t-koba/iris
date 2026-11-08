@@ -80,6 +80,17 @@ jobs:
     needs: release-preflight
     env:
       IRIS_RELEASE_VERSION: ${{ needs.release-preflight.outputs.version }}
+      IRIS_FFMPEG_JOBS: ${{ vars.IRIS_FFMPEG_JOBS || 2 }}
+      IRIS_FFMPEG_BUILD_SECONDS: ${{ vars.IRIS_FFMPEG_BUILD_SECONDS || 3600 }}
+      IRIS_FFMPEG_FETCH_SECONDS: ${{ vars.IRIS_FFMPEG_FETCH_SECONDS || 300 }}
+      IRIS_FFMPEG_COMMAND_SECONDS: ${{ vars.IRIS_FFMPEG_COMMAND_SECONDS || 60 }}
+      IRIS_FFMPEG_COMMAND_BYTES: ${{ vars.IRIS_FFMPEG_COMMAND_BYTES || 32768 }}
+      IRIS_FFMPEG_MAX_NATIVE_FILES: ${{ vars.IRIS_FFMPEG_MAX_NATIVE_FILES || 256 }}
+      IRIS_FFMPEG_MAX_REPORT_BYTES: ${{ vars.IRIS_FFMPEG_MAX_REPORT_BYTES || 266240 }}
+      IRIS_PREVIEW_CORPUS_MAX_BYTES: ${{ vars.IRIS_PREVIEW_CORPUS_MAX_BYTES || 40000000 }}
+      IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS: ${{ vars.IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS || 60 }}
+      IRIS_PREVIEW_LATENCY_WARMUPS: ${{ vars.IRIS_PREVIEW_LATENCY_WARMUPS || 2 }}
+      IRIS_PREVIEW_LATENCY_SAMPLES: ${{ vars.IRIS_PREVIEW_LATENCY_SAMPLES || 21 }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -95,8 +106,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-macos-cargo
+          cache-targets: false
       - name: Install system dependencies
-        run: brew install ffmpeg pkg-config
+        run: brew install pkg-config gnupg nasm cmake
+      - name: Fetch locked Rust inputs before offline packaging
+        run: cargo fetch --locked
+      - name: Validate pinned macOS runtime contracts
+        run: python3 scripts/test-macos-ffmpeg.py
       - name: Package macOS app
         env:
           IRIS_MACOS_SIGN_IDENTITY: ${{ github.event_name == 'push' && secrets.IRIS_MACOS_SIGN_IDENTITY || '-' }}
@@ -106,6 +122,10 @@ jobs:
       - name: Verify macOS artifact
         run: |
           test -x dist/macos/Iris.app/Contents/MacOS/Iris
+          test -s dist/macos/Iris.app/Contents/Resources/ffmpeg-runtime.json
+          test -s dist/macos/Iris.app/Contents/Resources/ffmpeg/source.tar.xz
+          test -s dist/macos/Iris.app/Contents/Resources/ffmpeg/xz-source.tar.xz
+          python3 scripts/macos-ffmpeg.py check dist/macos/Iris.app
           plutil -extract CFBundleShortVersionString raw -o - dist/macos/Iris.app/Contents/Info.plist | grep -Fx "$IRIS_RELEASE_VERSION"
           zipinfo -1 dist/macos/Iris-macos.zip | grep -Fx "Iris.app/Contents/MacOS/Iris"
           codesign --verify --deep --strict --verbose=2 dist/macos/Iris.app

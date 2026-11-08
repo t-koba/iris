@@ -396,16 +396,20 @@ Load command 2
 
     def test_report_only_workflow_keeps_current_and_candidate_json_only(self):
         workflow = (ROOT / '.github/workflows/macos-runtime-validation.yml').read_text()
-        # The current release path still uses Homebrew FFmpeg only to document
-        # the unchanged release runtime; the candidate never uses Homebrew.
+        # Historical Homebrew comparison remains explicitly report-only.
+        self.assertIn('IRIS_MACOS_REPORT_ONLY=1 IRIS_MACOS_FFMPEG_BASELINE=1', workflow)
         self.assertIn('brew install ffmpeg pkg-config gnupg nasm cmake', workflow)
         self.assertIn('./scripts/package-macos-app.sh', workflow)
+        self.assertIn('Audit pinned production package', workflow)
+        self.assertIn('python3 scripts/macos-ffmpeg.py check dist/macos/Iris.app', workflow)
+        self.assertIn('python3 scripts/release-audit.py macos --output audit/macos-product.json', workflow)
         self.assertIn('python3 scripts/release-audit.py macos --output audit/macos.json', workflow)
         self.assertIn('macos-ffmpeg.py validate audit/macos-candidate.json', workflow)
         self.assertNotIn('actions/cache', workflow)
         self.assertNotIn('GH_TOKEN', workflow)
         self.assertEqual(workflow.count('actions/upload-artifact@'), 1)
         self.assertIn('audit/macos.json', workflow)
+        self.assertIn('audit/macos-product.json', workflow)
         self.assertIn('audit/macos-candidate.json', workflow)
         self.assertIn("trap 'rm -rf dist/macos target/package-macos' EXIT", workflow)
         self.assertIn("trap 'rm -rf dist/macos target/macos-runtime-validation' EXIT", workflow)
@@ -419,6 +423,176 @@ Load command 2
         self.assertIn('shutil.rmtree(app.parent', source)
         self.assertIn('not the current release runtime', source)
         self.assertIn('not legal approval', source)
+
+
+class ProductRuntime(unittest.TestCase):
+    def test_release_selector_and_archive_signing_order(self):
+        release = (ROOT / '.github/workflows/release.yml').read_text().split('  package-linux:')[0]
+        self.assertNotIn('brew install ffmpeg', release)
+        self.assertIn('brew install pkg-config gnupg nasm cmake', release)
+        self.assertIn('cargo fetch --locked', release)
+        self.assertIn('cache-targets: false', release)
+        for name in ('IRIS_PREVIEW_CORPUS_MAX_BYTES', 'IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS',
+                     'IRIS_PREVIEW_LATENCY_WARMUPS', 'IRIS_PREVIEW_LATENCY_SAMPLES'):
+            self.assertIn(name, release)
+        self.assertIn('macos-ffmpeg.py check dist/macos/Iris.app', release)
+        shell = (ROOT / 'scripts/package-macos-app.sh').read_text()
+        self.assertIn('"$baseline" == 1 && "${IRIS_MACOS_REPORT_ONLY:-}" == 1', shell)
+        self.assertIn('"$sign_identity" == - && -z "$notary_profile"', shell)
+        steps = ['macos-ffmpeg.py" product', 'codesign "${codesign_args[@]}"',
+                 'macos-ffmpeg.py" check', 'ditto -c', 'notarytool submit', 'stapler staple', 'pkgbuild --component']
+        self.assertEqual(sorted(shell.index(step) for step in steps), [shell.index(step) for step in steps])
+        self.assertNotIn('--deep', shell.split('codesign_args=(')[1].split(')')[0])
+
+    def test_signing_rebinds_only_verified_bytes_and_fails_closed(self):
+        for identity, failure in (('-', None), ('Developer ID synthetic', None),
+                                  ('-', 'tamper'), ('-', 'sign'), ('-', 'verify')):
+            with self.subTest(identity=identity, failure=failure), tempfile.TemporaryDirectory() as tmp:
+                app = Path(tmp)
+                docs, frameworks = app / 'Contents/Resources/ffmpeg', app / 'Contents/Frameworks'
+                docs.mkdir(parents=True)
+                frameworks.mkdir()
+                lib = frameworks / 'libavcodec.1.dylib'
+                lib.write_text('verified bytes')
+                manifest = docs / 'manifest.json'
+                original = json.dumps(dict(staged_libraries={lib.name: m.digest(lib)}))
+                manifest.write_text(original)
+                if failure == 'tamper':
+                    lib.write_text('unverified replacement')
+                def run(*args):
+                    if (failure == 'sign' and '--sign' in args) or (failure == 'verify' and '--verify' in args):
+                        raise ValueError('synthetic signing failure')
+                    if '--sign' in args:
+                        lib.write_text('signed bytes')
+                with patch.object(m, 'run', side_effect=run) as command:
+                    if failure:
+                        with self.assertRaises(ValueError):
+                            m.sign_runtime(app, identity)
+                        self.assertEqual(manifest.read_text(), original)
+                        if failure == 'tamper':
+                            command.assert_not_called()
+                    else:
+                        m.sign_runtime(app, identity)
+                        self.assertEqual(json.loads(manifest.read_text())['staged_libraries'], {lib.name: m.digest(lib)})
+                        self.assertEqual('--options' in command.call_args_list[0].args, identity != '-')
+
+    def test_product_requires_corpus_staged_closure_and_audit_and_cleans_scratch(self):
+        for failure in (None, 'build', 'closure', 'fetch', 'smoke', 'sign', 'audit', 'interrupt'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                app = root / 'Iris.app'
+                macos = app / 'Contents/MacOS'
+                macos.mkdir(parents=True)
+                (app / 'Contents/Frameworks').mkdir()
+                (app / 'Contents/Resources').mkdir()
+                envs, calls = [], []
+                def build(prefix, sdk):
+                    if failure == 'build':
+                        raise ValueError('bad source/signature/config')
+                def preview(env):
+                    envs.append(env)
+                    path = Path(env['CARGO_TARGET_DIR']) / 'release/examples/preview_corpus_smoke'
+                    path.parent.mkdir(parents=True)
+                    path.write_text('smoke')
+                    return path
+                def run(*args, **kwargs):
+                    calls.append(tuple(str(a) for a in args))
+                    if args[0] == 'cargo':
+                        self.assertNotIn('--no-default-features', args)
+                        self.assertIn('--offline', args)
+                        (Path(kwargs['env']['CARGO_TARGET_DIR']) / 'release/Iris').write_text('product')
+                    elif len(args) > 1 and str(args[1]).endswith('fetch-preview-corpus.py'):
+                        if failure == 'fetch':
+                            raise ValueError('corpus unavailable')
+                    elif args[0] == macos / 'preview_corpus_smoke':
+                        if failure == 'interrupt':
+                            raise InterruptedError('cancelled')
+                        if failure == 'smoke':
+                            raise ValueError('incorrect preview')
+                        return 'synthetic preview records'
+                    return ''
+                def edges(*args, **kwargs):
+                    if failure == 'closure':
+                        raise ValueError('external Homebrew edge')
+                    return [(macos / 'Iris', '@loader_path/libavcodec.1.dylib',
+                             app / 'Contents/Frameworks/libavcodec.1.dylib')]
+                with patch.object(m, 'ROOT', root), patch.object(m.sys, 'platform', 'darwin'), \
+                        patch.dict(m.os.environ, {'GITHUB_SHA': 'synthetic', 'FFMPEG_DIR': '/untrusted',
+                                                 'IRIS_MACOS_SIGN_IDENTITY': '-'}, clear=True), \
+                        patch.object(m, 'build', side_effect=build), patch.object(m, 'build_preview', side_effect=preview), \
+                        patch.object(m, 'run', side_effect=run), patch.object(m, 'stage') as stage, \
+                        patch.object(m, 'closure', side_effect=edges), \
+                        patch.object(m, 'parse_preview', return_value={'correctness': True}), \
+                        patch.object(m, 'sign_runtime', side_effect=ValueError('sign failed') if failure == 'sign' else None), \
+                        patch.object(m, 'check', side_effect=ValueError('audit failed') if failure == 'audit' else None,
+                                     return_value={'executables': {}, 'runtime': []}) as check:
+                    if failure:
+                        with self.assertRaises((ValueError, InterruptedError)):
+                            m.product(app, root / 'sdk')
+                        self.assertFalse((app / 'Contents/Resources/ffmpeg-runtime.json').exists())
+                    else:
+                        m.product(app, root / 'sdk')
+                        report = json.loads((app / 'Contents/Resources/ffmpeg-runtime.json').read_text())
+                        self.assertEqual(report['preview'], {'correctness': True})
+                        self.assertNotIn('executables', report)
+                        self.assertFalse((macos / 'preview_corpus_smoke').exists())
+                        self.assertTrue((macos / 'Iris').exists())
+                        stage.assert_called_once()
+                        check.assert_called_once()
+                        self.assertTrue(any('fetch-preview-corpus.py' in ' '.join(c) for c in calls))
+                        self.assertNotEqual(envs[0]['FFMPEG_DIR'], '/untrusted')
+                        self.assertEqual(envs[0]['PKG_CONFIG_LIBDIR'], envs[0]['FFMPEG_DIR'] + '/lib/pkgconfig')
+                    self.assertEqual(list((root / 'target').iterdir()), [])
+
+    def test_stage_refuses_changed_provenance_before_copying(self):
+        for failure in (None, 'policy', 'source', 'notice', 'library', 'external'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                prefix, app = Path(tmp) / 'prefix', Path(tmp) / 'app'
+                docs = prefix / 'share/iris-ffmpeg'
+                docs.mkdir(parents=True)
+                library = prefix / 'libavcodec.1.dylib'
+                library.write_text('synthetic native library')
+                (docs / 'source.tar.xz').write_text('synthetic pinned source')
+                (docs / 'signature.status').write_text('synthetic signature fixture')
+                (docs / 'config.h').write_text('synthetic generated configuration')
+                (docs / 'config_components.h').write_text('synthetic generated codecs')
+                (docs / 'COPYING.LGPLv2.1').write_text('synthetic notice')
+                manifest = dict(policy=m.MACOS_POLICY, signature_verified=True, liblzma={}, enabled_codecs=[],
+                                documents={p.name: m.digest(p) for p in docs.iterdir()},
+                                libraries={library.name: m.digest(library)})
+                pin = dict(m.POLICY, sha256=m.digest(docs / 'source.tar.xz'))
+                if failure == 'policy':
+                    manifest['policy'] = {}
+                elif failure in ('source', 'notice'):
+                    (docs / ('source.tar.xz' if failure == 'source' else 'COPYING.LGPLv2.1')).write_text('changed')
+                elif failure == 'library':
+                    library.write_text('unverified bytes')
+                (docs / 'manifest.json').write_text(json.dumps(manifest))
+                frameworks = app / 'Contents/Frameworks'
+                frameworks.mkdir(parents=True)
+                (app / 'Contents/MacOS').mkdir()
+                (app / 'Contents/MacOS/Iris').touch()
+                with patch.object(m, 'POLICY', pin), patch.object(m, 'libraries', return_value={'avcodec': library}), \
+                        patch.object(m.common, 'signature'), patch.object(m, 'lzma_evidence', return_value={}), \
+                        patch.object(m, 'generated_config', return_value=[]), patch.object(m, 'run'), \
+                        patch.object(m, 'closure', return_value=[],
+                                     side_effect=ValueError('external dependency') if failure == 'external' else None):
+                    if failure:
+                        with self.assertRaises(ValueError):
+                            m.stage(prefix, app, Path(tmp) / 'sdk')
+                        self.assertEqual(list(frameworks.iterdir()), [])
+                    else:
+                        m.stage(prefix, app, Path(tmp) / 'sdk')
+                        self.assertEqual((frameworks / library.name).read_bytes(), library.read_bytes())
+                        self.assertTrue((app / 'Contents/Resources/ffmpeg/source.tar.xz').is_file())
+
+    def test_product_refuses_non_native_and_dyld_or_report_only_overrides(self):
+        for platform, env in (('linux', {}), ('darwin', {'DYLD_LIBRARY_PATH': '/external'}),
+                              ('darwin', {'IRIS_MACOS_REPORT_ONLY': '1'})):
+            with patch.object(m.sys, 'platform', platform), patch.dict(m.os.environ, env, clear=True), \
+                    patch.object(m, 'build') as build, self.assertRaises(ValueError):
+                m.product(Path('/synthetic/app'), Path('/synthetic/sdk'))
+            build.assert_not_called()
 
 
 class PreviewComparison(unittest.TestCase):

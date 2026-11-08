@@ -17,7 +17,14 @@ sign_identity="${IRIS_MACOS_SIGN_IDENTITY:--}"
 notary_profile="${IRIS_MACOS_NOTARY_PROFILE:-}"
 deployment_target="${IRIS_MACOS_DEPLOYMENT_TARGET:-14.0}"
 export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
+baseline="${IRIS_MACOS_FFMPEG_BASELINE:-}"
 candidate="${IRIS_MACOS_FFMPEG_CANDIDATE:-}"
+if [[ -n "$baseline" ]]; then
+    # Homebrew is allowed only in the isolated comparison, never a release.
+    [[ "$baseline" == 1 && "${IRIS_MACOS_REPORT_ONLY:-}" == 1 &&
+       -z "$candidate" && "$build_variant" == product &&
+       "$sign_identity" == - && -z "$notary_profile" ]] || exit 1
+fi
 if [[ -n "$candidate" ]]; then
     # Isolated report-only path: never alter release runtime selection or reuse
     # a Cargo target that may contain system-FFmpeg build-script results.
@@ -122,12 +129,16 @@ case "$build_variant" in
         exit 1
         ;;
 esac
-CARGO_TARGET_DIR="$target_dir" "${build_args[@]}"
+if [[ "$build_variant" != product || -n "$candidate$baseline" ]]; then
+    CARGO_TARGET_DIR="$target_dir" "${build_args[@]}"
+fi
 
 rm -rf "$app_root"
 mkdir -p "$macos_dir" "$resources_dir" "$frameworks_dir"
 
-cp -f "$target_dir/release/$binary_name" "$macos_dir/$binary_name"
+if [[ "$build_variant" != product || -n "$candidate$baseline" ]]; then
+    cp -f "$target_dir/release/$binary_name" "$macos_dir/$binary_name"
+fi
 cp -f "$repo_root/assets/icons/iris-icon.icns" "$resources_dir/Iris.icns"
 
 cat > "$contents_dir/Info.plist" <<EOF
@@ -167,6 +178,9 @@ cat > "$contents_dir/Info.plist" <<EOF
 </plist>
 EOF
 
+if [[ "$build_variant" == product && -z "$candidate$baseline" ]]; then
+    python3 "$script_dir/macos-ffmpeg.py" product "$app_root"
+fi
 chmod +x "$macos_dir/$binary_name"
 chmod u+w "$macos_dir/$binary_name"
 
@@ -180,17 +194,28 @@ if [[ -n "$candidate" ]]; then
     exit 0
 fi
 
-rewrite_binary_dependencies "$macos_dir/$binary_name"
-assert_no_unbundled_dependencies "$macos_dir/$binary_name"
-for dylib in "$frameworks_dir"/*.dylib(N); do
-    assert_no_unbundled_dependencies "$dylib"
-done
+if [[ "$build_variant" != product || -n "$baseline" ]]; then
+    rewrite_binary_dependencies "$macos_dir/$binary_name"
+    assert_no_unbundled_dependencies "$macos_dir/$binary_name"
+    for dylib in "$frameworks_dir"/*.dylib(N); do
+        assert_no_unbundled_dependencies "$dylib"
+    done
+fi
 
-codesign_args=(--force --deep --sign "$sign_identity" --timestamp=none)
+codesign_args=(--force --sign "$sign_identity" --timestamp=none)
 if [[ "$sign_identity" != "-" ]]; then
     codesign_args+=(--options runtime)
 fi
+if [[ "$build_variant" != product || -n "$baseline" ]]; then
+    codesign_args+=(--deep)
+fi
 codesign "${codesign_args[@]}" "$app_root"
+if [[ "$build_variant" == product && -z "$baseline" ]]; then
+    # Outer signing must not change the hash-bound nested runtime.
+    python3 "$script_dir/macos-ffmpeg.py" check "$app_root"
+fi
+
+codesign --verify --deep --strict "$app_root"
 
 rm -f "$zip_path"
 ditto -c -k --sequesterRsrc --keepParent "$app_root" "$zip_path"

@@ -1,115 +1,86 @@
-# Temporary macOS FFmpeg candidate
+# macOS FFmpeg runtime
 
-The pinned candidate report inventories an FFmpeg source archive that includes
-COPYING.LGPLv2.1, the requested shared/non-GPL/nonfree-disabled build flags, and
-each staged libav*/libsw* version, configuration, license-function result and
-hash. These are source/configuration/runtime evidence, not a licensing
-determination or approval, and they do not state Iris's project license. This
-inventory describes only the pinned macOS candidate, not the current release
-runtime inventoried separately as audit/macos.json. The manifest identifies the
-macOS build and its shared source pin, signature identity and verification,
-generated decoder inventory, build tools, source and staged dylib hashes. Its
-liblzma record includes the XZ source pin, verified primary/signing fingerprints,
-source-license digests, CMake version/flags and static archive hash. It does
-not report Linux system-package or SONAME policy as macOS evidence. config.h,
-config_components.h and config.mak retain the generated build configuration.
-The final candidate JSON resolves all Mach-O load edges, including weak loads
-and rpath contexts; system edges require an exact Apple SDK stub install-name
-match and are never classified by basename or path prefix alone.
+Product packaging (`scripts/package-macos-app.sh`) builds the pinned shared
+FFmpeg runtime with static/PIC liblzma in fresh native and Cargo scratch. It
+never selects Homebrew FFmpeg or falls back to it. Default Iris features remain
+enabled. ZIP and PKG contain this app, its runtime and the evidence below.
 
-The exact corresponding source, detached signature and public signing key are
-adjacent as source.tar.xz, source.tar.xz.asc and signing-key.asc. The source
-archive contains upstream copyright notices and the complete build system.
-Verify the archive digest and GnuPG signature against the manifest's required
-primary fingerprint before extraction. The policy includes the upstream security
-reference and its narrow CVE scope; no broader vulnerability review is claimed.
-Update the shared source pin when evaluating an FFmpeg update. System-edge
-records identify SDK stubs; they do not inventory live OS dyld shared-cache
-bytes.
+`Contents/Resources/ffmpeg/manifest.json` identifies the exact FFmpeg source pin,
+verified signing identity, configure policy, generated decoder inventory, build
+tools, source hashes and pre/post-signing dylib hashes. `liblzma-build.json`
+records the XZ source pin, signature identity, source-license digests, CMake
+flags/version and static archive hash. `config.h`, `config_components.h` and
+`config.mak` retain generated configuration, with private build paths redacted.
+`Contents/Resources/ffmpeg-runtime.json` records actual libav*/libsw* version,
+configuration, license-function result and signed-library hash, the complete
+resolved Mach-O closure, and mandatory default-feature preview-corpus results.
+The outer app signature is applied afterwards; this inventory does not claim
+final main-executable hashes. Packaging rechecks the nested bytes and closure
+after signing, before archiving.
 
-## Rebuilding and replacing
+These are source/configuration/runtime evidence, not a licensing determination,
+legal approval, latency parity or release approval, nor a statement of Iris's
+project license. The policy includes an upstream security reference and its
+narrow CVE scope; no broader vulnerability review is claimed. System edges
+require matching install names in the selected Apple SDK's stubs, not just an
+OS path prefix. OS shared-cache bytes and updates are supplied by macOS.
+Unknown non-system libraries, dynamic liblzma, changed evidence, GPL/version3/
+nonfree configuration, missing required decoders or failed correctness abort
+packaging; no Homebrew dependency closure is accepted for the product.
 
-Install Xcode command-line tools, Python 3, GnuPG, pkg-config, CMake, make and
-nasm (nasm is used on x86). The selected Apple SDK must supply zlib, bzip2 and
-iconv headers and linker stubs; liblzma is **not** taken from the SDK or Homebrew.
+## Source, notices and rebuilding
 
-`packaging/macos/liblzma.json` pins the official XZ Utils v5.8.4 release asset
-`xz-5.8.4.tar.xz`, its SHA-256, detached `.sig`, Lasse Collin's public-key URL
-and required primary fingerprint `3690C240CE51B4670D30AD1C38EE757D69184620`.
-The driver checks the archive hash, imported primary identity and GnuPG signature
-before extraction. `xz-COPYING` records upstream's liblzma-specific 0BSD
-statement; `xz-COPYING.0BSD` must match the pinned source-license digest. This is
-source licensing evidence for **liblzma**, not a license claim for all XZ tools,
-Iris, the current release runtime or the complete candidate. It is not legal
-approval. The temporary documents include `xz-source.tar.xz`, its `.sig`,
-`xz-signing-key.asc`, `xz-signature.status` and `liblzma-build.json`.
+Adjacent `source.tar.xz`, `source.tar.xz.asc` and `signing-key.asc` are the exact
+corresponding FFmpeg source, detached signature and public key. The archive
+contains upstream copyrights and the complete build system; COPYING.LGPLv2.1
+is also adjacent. Verify the archive hash and signature against the manifest's
+pinned primary fingerprint before extraction. There are no source patches.
 
-The driver configures XZ in a fresh, separate scratch prefix with every pinned
-`cmake_flags` entry: static/PIC, tests/NLS/tools/docs off. It builds with
-`cmake --build` and installs only `liblzma_Development` with `cmake --install`.
-The SDK and xcrun compiler are selected explicitly. It then sets FFmpeg CFLAGS
-to the SDK plus that prefix's include directory, LDFLAGS to the SDK plus that
-prefix's lib directory, and both PKG_CONFIG_PATH and PKG_CONFIG_LIBDIR to only
-that prefix's lib/pkgconfig. Ambient compiler and pkg-config search overrides
-are removed; the pkg-config version and libdir must match the pin/prefix.
-The preflight links that exact static archive. FFmpeg receives the unchanged
-`policy.source.configure_flags` (including `--enable-lzma`), then make/build and
-install run; generated `CONFIG_LZMA=1` remains mandatory. There are no patches.
-Shared FFmpeg/PIC are enabled, static FFmpeg/GPL/version3/nonfree and optional
-autodetection disabled; built-in decoders are not pruned. The static liblzma
-code is linked into FFmpeg, never copied into candidate `/lib` or app Frameworks.
-Dynamic liblzma edges (even SDK ones), extra dylibs and static archives in
-candidate `/lib` fail closed. The final closure remains the exact FFmpeg
-candidate dylibs plus verified Apple SDK edges.
+`packaging/macos/liblzma.json` pins XZ Utils 5.8.4, its archive hash, detached
+signature, key URL and required primary fingerprint. `xz-source.tar.xz`, its
+`.sig`, `xz-signing-key.asc` and `xz-signature.status` accompany the runtime.
+`xz-COPYING` records upstream's liblzma-specific 0BSD declaration;
+`xz-COPYING.0BSD` must match the pinned license digest. This is evidence for
+liblzma, not a licensing claim for all XZ tools or Iris. The build installs only
+`liblzma_Development`, static/PIC with tests, tools, NLS and docs disabled.
+FFmpeg links that archive, never Homebrew/SDK liblzma. zlib, bzip2 and iconv
+headers/stubs come from the explicitly selected Apple SDK.
 
-The exact-source Iris checkout automates this with
-`python3 scripts/macos-ffmpeg.py validate audit/macos-candidate.json`; it
-intentionally requires fresh output and targets and deletes all native/source/app
-bytes. The staged helper source documents install-name rewriting: copy the
-versioned candidate dylibs to Contents/Frameworks, change their IDs and
-inter-library loads to @loader_path/basename and executable loads to
-@executable_path/../Frameworks/basename. Use install_name_tool, then ad-hoc
-codesign each dylib and helper before codesign of the outer app (timestamp=none).
-For engineering tests, ABI-compatible replacements can be staged without
-rebuilding Iris; this describes packaging mechanics only, not any license
-condition. Re-sign nested libraries then the app with
-`codesign --force --deep --sign - --timestamp=none Iris.app` for local use.
-The report gate's pin does not itself restrict local replacement, and the
-workflow does not validate user-supplied replacements. Re-signing changes the
-app signature and does not preserve the original distribution trust claims.
+Use the exact-source Iris checkout, Xcode command-line tools, Python 3, GnuPG,
+pkg-config, CMake, make and nasm (x86). Run `cargo fetch --locked`, then
+`./scripts/package-macos-app.sh`. The source policy is shared with
+`packaging/linux/ffmpeg.json`, but no Linux ELF mechanics or package evidence is
+used for macOS. Shared FFmpeg/PIC are enabled; static FFmpeg, GPL, version3,
+nonfree and optional autodetection are disabled; built-in decoders are not
+pruned. The builder clears ambient compiler/include/linker/pkg-config discovery
+and requires the pinned prefix. Update the source pin when evaluating updates.
 
-## Evidence boundaries
+For local engineering use, ABI-compatible replacements can be installed in
+`Contents/Frameworks` without rebuilding Iris. IDs and inter-library loads use
+`@loader_path/basename`; executable loads use
+`@executable_path/../Frameworks/basename`. Re-sign nested libraries then the app
+(e.g. `codesign --force --deep --sign - --timestamp=none Iris.app`). This changes
+the distribution signature and invalidates its recorded hashes, not a license
+condition or a claim that user replacements passed the distribution audit.
 
-Only bounded JSON leaves this validation job: the current release runtime as
-audit/macos.json and this candidate as audit/macos-candidate.json. Downloaded
-sources, signatures, keys, generated and downloaded fixtures, staged apps,
-static/shared libraries, Cargo targets and build scratch are temporary and
-cleaned on success, failure and interruption. No ZIP, installer, source bundle or
-Release dispatch is retained. The tagged release workflow is unchanged and
-remains on hold; this candidate is not a release and its inventory is not legal
-approval.
-Both default-feature runtime smokes use the same once-fetched, digest-pinned
-[preview corpus](../../tests/preview-corpus/README.md), reverified before extraction.
-Fresh separate Cargo targets prevent reuse of FFmpeg discovery. The candidate
-smoke is rewritten/signed into the temporary app; its resolved build and staged
-closures must link the pinned libavcodec before execution. Both preview builds
-clear ambient compiler/linker/include and pkg-config search overrides. The report
-retains correctness and JPEG/CR3/H.264 timings for both runtimes; paired differences require matching input, output, build, source
-and runner/CPU identities. Only H.264 timing exercises FFmpeg; JPEG/CR3 use Iris
-Rust code. PDF correctness uses Core Graphics. Existing generated MPEG-4/PNG
-fallback smokes and native inventory remain mandatory candidate checks even if
-the corpus fetch or Homebrew discovery/build/smoke fails. Such failures record a
-bounded, path-redacted `preview.status=unavailable` reason and omit paired
-comparisons. A failed fetch sets `smoke.corpus_correctness=false`; candidate
-corpus correctness (when fetched), closure and generated-smoke failures still fail
-validation. Cancellation is not treated as an optional failure. There is no
-latency threshold or claim of runtime parity, sensor demosaic, HDR/HEIF coverage
-or legal approval.
+## Report-only comparison
 
-Policy defaults (all positive, configurable via job variables): IRIS_FFMPEG_JOBS
-2, IRIS_FFMPEG_BUILD_SECONDS 3600 per build command, IRIS_FFMPEG_FETCH_SECONDS
-300 per fetch, IRIS_FFMPEG_COMMAND_SECONDS 60 per inspection/smoke,
-IRIS_FFMPEG_COMMAND_BYTES 32768 per captured diagnostic/inspection,
-IRIS_FFMPEG_MAX_NATIVE_FILES 256 traversal contexts per root, and
-IRIS_FFMPEG_MAX_REPORT_BYTES 266240. Exceeding a budget fails closed, never
-truncates a successful inventory. No candidate prefix or Cargo target is cached.
+`python3 scripts/macos-ffmpeg.py validate audit/macos-candidate.json` remains a
+separate experiment: temporary Homebrew and pinned default-feature smokes use
+fresh targets and the same pinned corpus. The historical Homebrew app inventory
+is `audit/macos.json`, explicitly selected with `IRIS_MACOS_REPORT_ONLY=1` and
+`IRIS_MACOS_FFMPEG_BASELINE=1`; it cannot use release signing or notarization.
+Only bounded JSON leaves that workflow. Apps, archives, sources, fixtures and
+native/Cargo scratch are deleted; it never dispatches Release. Optional baseline
+or corpus-fetch failure there records unavailable comparison evidence without
+suppressing the candidate's generated MPEG-4/PNG checks. In production, corpus
+fetch and correctness are mandatory. No comparison claims parity, sensor
+RAW demosaic, HDR/HEIF coverage or legal approval.
+
+Both paths use positive configurable budgets: IRIS_FFMPEG_JOBS 2,
+IRIS_FFMPEG_BUILD_SECONDS 3600, IRIS_FFMPEG_FETCH_SECONDS 300,
+IRIS_FFMPEG_COMMAND_SECONDS 60, IRIS_FFMPEG_COMMAND_BYTES 32768,
+IRIS_FFMPEG_MAX_NATIVE_FILES 256 and IRIS_FFMPEG_MAX_REPORT_BYTES 266240.
+Budgets fail closed rather than truncate successful evidence. Product scratch
+is removed on success, failure and handled interruption; sources/notices remain
+inside the distributed app. No native runtime or Cargo discovery target is cached.
