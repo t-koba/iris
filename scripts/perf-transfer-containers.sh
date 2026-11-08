@@ -157,14 +157,18 @@ import time
 
 budget, ceiling, port, output, error = sys.argv[1:]
 deadline = time.monotonic() + int(budget)
+ceiling_seconds = int(ceiling)
 while True:
     with open(output, "wb") as stdout, open(error, "wb") as stderr:
         # Start the timer after local file setup so its timeout is not stale.
         remaining = deadline - time.monotonic()
-        # ssh-keyscan accepts only whole seconds. Never round the budget up.
-        scan_timeout = min(int(ceiling), int(remaining))
-        if scan_timeout < 1:
+        if remaining <= 0:
             break
+        # ssh-keyscan accepts only whole seconds: keep the integer argument
+        # at least 1 but never above the configured ceiling, and enforce the
+        # exact fractional remainder via the subprocess timeout so slow scans
+        # still stop at the monotonic deadline.
+        scan_timeout = min(ceiling_seconds, max(1, int(remaining)))
         try:
             result = subprocess.run(
                 ["ssh-keyscan", "-T", str(scan_timeout), "-p", port, "127.0.0.1"],

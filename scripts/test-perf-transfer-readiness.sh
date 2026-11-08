@@ -88,7 +88,7 @@ source = pathlib.Path(sys.argv[1]).read_text().split("<<'PY'\n", 1)[1].split("\n
 root = pathlib.Path(sys.argv[2])
 
 
-def check_case(name, duration, budget, ceiling, success=False, stalled=False):
+def check_case(name, duration, budget, ceiling, success=False, stalled=False, succeed_first=False):
     now = 0.0
     scans = []
     delays = []
@@ -98,13 +98,19 @@ def check_case(name, duration, budget, ceiling, success=False, stalled=False):
     def scan(args, *, stdout, stderr, timeout, check):
         nonlocal now
         requested = int(args[args.index("-T") + 1])
-        assert 1 <= requested <= min(ceiling, budget - now), (name, requested, now)
-        assert 0 < timeout <= budget - now, (name, timeout, now)
+        remaining = budget - now
+        assert remaining > 0, (name, remaining, now)
+        assert 1 <= requested <= ceiling, (name, requested, now)
+        assert requested == min(ceiling, max(1, int(remaining))), (name, requested, remaining)
+        assert timeout == remaining, (name, timeout, remaining)
         scans.append(requested)
         if stalled:
             now += timeout
             raise subprocess.TimeoutExpired(args, timeout)
         now += duration
+        if succeed_first and len(scans) == 1:
+            stdout.write(b"synthetic-host-key\n")
+            return subprocess.CompletedProcess(args, 0)
         if success and len(scans) == 2:
             stdout.write(b"synthetic-host-key\n")
             return subprocess.CompletedProcess(args, 0)
@@ -124,7 +130,7 @@ def check_case(name, duration, budget, ceiling, success=False, stalled=False):
         try:
             exec(compile(source, "readiness-helper", "exec"), {})
         except SystemExit as result:
-            assert result.code == (0 if success else 1), (name, result.code)
+            assert result.code == (0 if (success or succeed_first) else 1), (name, result.code)
         else:
             raise AssertionError("helper must return a status")
     assert now <= budget, (name, now)
@@ -133,8 +139,11 @@ def check_case(name, duration, budget, ceiling, success=False, stalled=False):
 
 # A quick failure late in the budget leaves only a fractional retry delay.
 assert check_case("short-delay", 0.25, 1, 3) == ([1], [0.75])
-# After the retry, 0.75s remains: even a one-second scan cannot fit.
-assert check_case("no-rounded-scan", 0.25, 2, 3) == ([2], [1])
+# The final fractional second still gets a scan: the integer -T stays at
+# least 1 while the fractional deadline is enforced via the subprocess timeout.
+assert check_case("fractional-retry", 0.25, 2, 3, success=True) == ([2, 1], [1])
+# A one-second budget still allows an immediate success.
+assert check_case("immediate", 0.1, 1, 3, succeed_first=True) == ([1], [])
 # Retain transient success, the per-scan ceiling, and an outer scan deadline.
 assert check_case("transient", 0.25, 4, 1, success=True) == ([1, 1], [1])
 assert check_case("stalled", 0, 2, 3, stalled=True) == ([2], [])
