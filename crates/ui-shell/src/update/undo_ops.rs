@@ -187,26 +187,33 @@ pub(crate) fn perform_redo(state: &mut AppState, op: UndoableOp) -> Task<Message
             if let Err(error) = validate_undo_op(&op, UndoValidationTarget::Source) {
                 return redo_failure_task(op, error);
             }
-            let op_for_task = op.clone();
-            Task::perform(
-                async move {
-                    delete_paths(
-                        op_for_task
-                            .items
-                            .iter()
-                            .map(|item| item.source_path.clone())
-                            .collect(),
-                        true,
-                    )
-                    .await
-                },
-                move |result| Message::RedoCompleted {
-                    op: op.clone(),
-                    undo_op: Some(op),
-                    result,
-                },
-            )
+            let paths = op
+                .items
+                .iter()
+                .map(|item| item.source_path.clone())
+                .collect();
+            Task::perform(trash_paths_for_undo(paths), move |result| {
+                trash_redo_completed(op, result)
+            })
         }
+    }
+}
+
+fn trash_redo_completed(op: UndoableOp, result: Result<Vec<UndoItem>, String>) -> Message {
+    match result {
+        Ok(items) => Message::RedoCompleted {
+            undo_op: Some(UndoableOp {
+                items,
+                ..op.clone()
+            }),
+            op,
+            result: Ok(()),
+        },
+        Err(error) => Message::RedoCompleted {
+            op,
+            undo_op: None,
+            result: Err(error),
+        },
     }
 }
 
@@ -458,6 +465,72 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    // Receipt injection keeps this regression deterministic and avoids mutating OS/user Trash.
+    #[test]
+    fn trash_redo_passes_fresh_receipts_to_next_undo() {
+        let old_items: Vec<_> = ["first.txt", "second.txt"]
+            .into_iter()
+            .map(|name| UndoItem {
+                source_path: PathBuf::from(name),
+                destination_path: PathBuf::from(name),
+                size: Some(7),
+                mtime: Some(std::time::SystemTime::UNIX_EPOCH),
+                trashed_path: Some(PathBuf::from("trash").join(name)),
+                trash_id: Some(name.into()),
+            })
+            .collect();
+        let op = UndoableOp {
+            kind: UndoOpKind::TrashDelete,
+            items: old_items.clone(),
+            performed_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+        let mut journal = crate::undo::UndoJournal::default();
+        journal.record(op.clone());
+        // Model the first undo, then a redo whose old IDs are now occupied by other items.
+        let undone_op = journal.pop_undo().unwrap();
+        journal.push_redo(undone_op);
+        let fresh_items: Vec<_> = old_items
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                let name = format!("{}.2", item.source_path.display());
+                item.trashed_path = Some(PathBuf::from("trash").join(&name));
+                item.trash_id = Some(name.into());
+                item
+            })
+            .collect();
+        let message = trash_redo_completed(journal.pop_redo().unwrap(), Ok(fresh_items.clone()));
+        let Message::RedoCompleted {
+            op: completed_op,
+            undo_op,
+            result,
+        } = message
+        else {
+            panic!("expected redo completion");
+        };
+        assert_eq!(completed_op, op);
+        assert_eq!(result, Ok(()));
+        // This is the operation the RedoCompleted handler pushes, not the original operation.
+        journal.push_undo_from_redo(undo_op.unwrap());
+        let next_undo = journal.pop_undo().unwrap();
+        assert_eq!(next_undo.items, fresh_items);
+        assert_ne!(next_undo.items, old_items);
+        assert_eq!(next_undo.kind, op.kind);
+        assert_eq!(next_undo.performed_at, op.performed_at);
+
+        let Message::RedoCompleted {
+            op: failed_op,
+            undo_op,
+            result,
+        } = trash_redo_completed(next_undo.clone(), Err("delete failed".into()))
+        else {
+            panic!("expected redo completion");
+        };
+        assert_eq!(failed_op, next_undo);
+        assert!(undo_op.is_none());
+        assert_eq!(result, Err("delete failed".into()));
+    }
 
     #[tokio::test]
     async fn undo_metadata_enrichment_and_validation_rejects_changes() {
