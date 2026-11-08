@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import tomllib
 
@@ -21,9 +22,19 @@ def validate_pin(pin):
         raise ValueError("prototype binding pin drifted")
 
 
+def lock_text(raw):
+    # Keep lock identity independent of checkout line endings; callers still
+    # retain and restore the original bytes exactly.
+    return re.sub(r"\r+\n|\r", "\n", raw.decode("utf-8-sig"))
+
+
+def parse_lock(raw):
+    return tomllib.loads(lock_text(raw))
+
+
 def validate_lock(original, temporary):
-    before = tomllib.loads(original.decode("utf-8"))
-    after = tomllib.loads(temporary.decode("utf-8"))
+    before = parse_lock(original)
+    after = parse_lock(temporary)
     old = [p for p in before["package"] if p["name"] == NAME]
     new = [p for p in after["package"] if p["name"] == NAME]
     if len(old) != 1 or len(new) != 1:

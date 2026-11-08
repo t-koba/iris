@@ -2,6 +2,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -16,37 +17,63 @@ ORIGINAL = (HERE.parents[1] / "Cargo.lock").read_bytes()
 
 
 def overridden(raw):
-    # Exact production identity only; leave dependency edges and other packages alone.
-    old = (f'name = "{binding.NAME}"\nversion = "9.0.1"\n'
-           f'source = "{binding.REGISTRY}"\nchecksum = "{binding.CHECKSUM}"')
-    new = f'name = "{binding.NAME}"\nversion = "9.1.0"\nsource = "{binding.SOURCE}"'
-    text = raw.decode().replace('\r\n', '\n')
-    matches = text.count(old)
-    if matches != 1:
+    # Lockfile formatting and table-field order are not package identity.
+    text = binding.lock_text(raw)
+    packages = [package for package in binding.parse_lock(raw).get("package", [])
+                if package.get("name") == binding.NAME]
+    exact = [package for package in packages
+             if (package.get("version"), package.get("source"), package.get("checksum"))
+             == ("9.0.1", binding.REGISTRY, binding.CHECKSUM)]
+    if len(packages) != 1 or len(exact) != 1:
         identities = []
-        lines = text.splitlines()
-        marker = f'name = "{binding.NAME}"'
-        for index, line in enumerate(lines):
-            if line != marker:
-                continue
-            fields = {}
-            for candidate in lines[index + 1:index + 4]:
-                key, separator, value = candidate.partition(" = ")
-                if separator:
-                    fields[key] = value
-            source = fields.get("source", "")
-            source_kind = ("registry" if '"registry+' in source else
-                           "git" if '"git+' in source else "other" if source else "missing")
+        for package in packages[:2]:
+            source = package.get("source", "")
+            source_kind = ("registry" if isinstance(source, str) and source.startswith("registry+") else
+                           "git" if isinstance(source, str) and source.startswith("git+") else
+                           "other" if source else "missing")
             identities.append({
-                "version": fields.get("version", "missing"),
+                "version": package.get("version", "missing"),
                 "source_kind": source_kind,
-                "checksum_matches": fields.get("checksum") == f'"{binding.CHECKSUM}"',
+                "registry_matches": source == binding.REGISTRY,
+                "checksum_matches": package.get("checksum") == binding.CHECKSUM,
             })
         raise AssertionError(
             "production binding identity changed "
-            f"(exact_matches={matches}, observed={identities[:2]!r})"
+            f"(package_count={len(packages)}, exact_matches={len(exact)}, observed={identities!r})"
         )
-    return text.replace(old, new).encode()
+
+    names = list(re.finditer(
+        rf'(?m)^[ \t]*name[ \t]*=[ \t]*{re.escape(json.dumps(binding.NAME))}[ \t]*$', text
+    ))
+    if len(names) != 1:
+        raise AssertionError("could not locate unique production binding package name")
+    start = text.rfind("[[package]]", 0, names[0].start())
+    end = text.find("[[package]]", names[0].end())
+    if start < 0:
+        raise AssertionError("could not locate production binding package table")
+    if end < 0:
+        end = len(text)
+    section = text[start:end]
+
+    def replace_field(block, key, before, after):
+        pattern = re.compile(
+            rf'(?m)^(?P<prefix>[ \t]*{re.escape(key)}[ \t]*=[ \t]*)'
+            rf'{re.escape(json.dumps(before))}[ \t]*$'
+        )
+        block, count = pattern.subn(lambda match: match.group("prefix") + json.dumps(after), block, count=1)
+        if count != 1:
+            raise AssertionError(f"expected one pinned {key} field in binding package table")
+        return block
+
+    section = replace_field(section, "version", "9.0.1", "9.1.0")
+    section = replace_field(section, "source", binding.REGISTRY, binding.SOURCE)
+    checksum = re.compile(
+        rf'(?m)^[ \t]*checksum[ \t]*=[ \t]*{re.escape(json.dumps(binding.CHECKSUM))}[ \t]*(?:\n|$)'
+    )
+    section, count = checksum.subn("", section, count=1)
+    if count != 1:
+        raise AssertionError("expected one pinned checksum field in binding package table")
+    return (text[:start] + section + text[end:]).encode("utf-8")
 
 
 class BindingBuildTests(unittest.TestCase):
@@ -54,6 +81,20 @@ class BindingBuildTests(unittest.TestCase):
         self.assertEqual(binding.COMMIT, "5aa9dc312e0ab9b762bae7ca367d17761d0c9447")
         binding.validate_pin(PINS["ffmpeg_sys_next"])
         binding.validate_lock(ORIGINAL, overridden(ORIGINAL))
+
+    def test_override_and_validation_normalize_double_crlf(self):
+        raw = binding.lock_text(ORIGINAL).encode("utf-8").replace(b"\n", b"\r\r\n")
+        binding.validate_lock(raw, overridden(raw))
+
+    def test_override_uses_semantic_identity_across_field_layouts(self):
+        old = (f'version = "9.0.1"\nsource = "{binding.REGISTRY}"\n'
+               f'checksum = "{binding.CHECKSUM}"')
+        reordered = (f'source  = "{binding.REGISTRY}"\n'
+                    f'checksum = "{binding.CHECKSUM}"\nversion   = "9.0.1"')
+        source = binding.lock_text(ORIGINAL)
+        changed = source.replace(old, reordered, 1)
+        self.assertNotEqual(changed, source)
+        binding.validate_lock(ORIGINAL, overridden(changed.encode("utf-8")))
 
     def test_override_drift_reports_only_bounded_identity(self):
         changed = ORIGINAL.replace(b'version = "9.0.1"', b'version = "9.2.0"', 1)
@@ -104,7 +145,7 @@ class BindingBuildTests(unittest.TestCase):
                 root = Path(directory)
                 lock = root / "Cargo.lock"
                 # Noncanonical newlines prove restoration is byte-exact, not reserialization.
-                original = ORIGINAL.replace(b'\n', b'\r\n')
+                original = binding.lock_text(ORIGINAL).encode("utf-8").replace(b"\n", b"\r\n")
                 lock.write_bytes(original)
                 manifest = root / "Cargo.toml"
                 manifest.write_bytes(b"# production manifest must not be edited\r\n")
