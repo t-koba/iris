@@ -176,6 +176,9 @@ class RuntimeContracts(unittest.TestCase):
         self.assertIn('--max-time "$fetch_seconds"', build)
         self.assertIn('--retry-all-errors --retry "$fetch_retries"', build)
         self.assertIn('--retry-delay "$fetch_retry_delay"', build)
+        readme = (ROOT / "packaging/linux/ffmpeg-README.md").read_text()
+        self.assertIn("`0` is passed", readme)
+        self.assertIn("selects its default exponential backoff, not immediate retries.", readme)
         self.assertIn('echo "$(get sha256)', build)
         self.assertIn('--verify "$work/source.tar.xz.asc" "$work/source.tar.xz"', build)
         for workflow in ("ci.yml", "linux-ffmpeg-validation.yml", "release.yml"):

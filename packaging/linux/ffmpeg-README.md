@@ -44,7 +44,9 @@ with `scripts/build-linux-ffmpeg.sh`; `IRIS_FFMPEG_PREFIX` chooses an absolute
 prefix and `IRIS_FFMPEG_JOBS` chooses parallelism (default 2). Each pinned-source
 transfer has a per-request maximum duration (`IRIS_FFMPEG_FETCH_SECONDS`, default
 300 seconds) and retries (`IRIS_FFMPEG_FETCH_RETRIES`, default 1; set to 0 to
-disable) separated by `IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS` (default 2 seconds).
+disable), with a delay controlled by `IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS`
+(default 2 seconds). A positive value requests that fixed delay; `0` is passed
+to curl and selects its default exponential backoff, not immediate retries.
 These bounded transport retries do not relax the pinned source digest, signing-key
 fingerprint, or detached-signature checks. A completed prefix is revalidated on
 reuse; delete it when intentionally rebuilding or updating.
