@@ -4,10 +4,14 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import shutil
+import sys
+import time
+import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
@@ -62,15 +66,20 @@ def validate_manifest(manifest, budget):
     return hosts, files
 
 
-def fetch(manifest, output, budget, timeout, opener=None):
-    hosts, files = validate_manifest(manifest, budget)
-    opener = opener or urllib.request.build_opener(SafeRedirects(hosts))
-    # Refuse reuse, including symlinks: never truncate an existing caller file.
-    output.mkdir(mode=0o700)
-    try:
-        for entry in files:
-            request = urllib.request.Request(entry['url'], headers={
-                'User-Agent': 'Iris-preview-corpus-smoke/1.0', 'Accept-Encoding': 'identity'})
+def transient_fetch_error(error):
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in {408, 429, 500, 502, 503, 504}
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    return isinstance(reason, (TimeoutError, ConnectionError))
+
+
+def fetch_entry(opener, entry, output, hosts, timeout, retries, retry_delay):
+    destination = output / entry['filename']
+    for attempt in range(retries + 1):
+        partial = output / f".{entry['filename']}.{attempt}.part"
+        request = urllib.request.Request(entry['url'], headers={
+            'User-Agent': 'Iris-preview-corpus-smoke/1.0', 'Accept-Encoding': 'identity'})
+        try:
             with opener.open(request, timeout=timeout) as response:
                 validate_url(response.geturl(), hosts)
                 if response.status != 200:
@@ -80,7 +89,7 @@ def fetch(manifest, output, budget, timeout, opener=None):
                     raise ValueError("fixture Content-Length differs from pinned size")
                 digest = hashlib.sha256()
                 size = 0
-                with (output / entry['filename']).open('xb') as dest:
+                with partial.open('xb') as dest:
                     while True:
                         # One unretained probe byte detects an oversized response.
                         chunk = response.read(min(64 * 1024, entry['size'] - size + 1))
@@ -93,6 +102,32 @@ def fetch(manifest, output, budget, timeout, opener=None):
                         digest.update(chunk)
                 if size != entry['size'] or digest.hexdigest() != entry['sha256']:
                     raise ValueError("fixture size or SHA-256 mismatch")
+            os.replace(partial, destination)
+            return size
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            partial.unlink(missing_ok=True)
+            if isinstance(error, urllib.error.HTTPError):
+                error.close()
+            if not transient_fetch_error(error) or attempt == retries:
+                raise
+            print(f"transient preview fixture fetch failure; retry {attempt + 1} of {retries}", file=sys.stderr)
+            if retry_delay:
+                time.sleep(retry_delay)
+
+
+def fetch(manifest, output, budget, timeout, opener=None, retries=0, retry_delay=0):
+    hosts, files = validate_manifest(manifest, budget)
+    if type(retries) is not int or retries < 0:
+        raise ValueError("retries must be a non-negative integer")
+    if (not isinstance(retry_delay, (int, float)) or isinstance(retry_delay, bool)
+            or not math.isfinite(retry_delay) or retry_delay < 0):
+        raise ValueError("retry delay must be finite and non-negative")
+    opener = opener or urllib.request.build_opener(SafeRedirects(hosts))
+    # Refuse reuse, including symlinks: never truncate an existing caller file.
+    output.mkdir(mode=0o700)
+    try:
+        for entry in files:
+            size = fetch_entry(opener, entry, output, hosts, timeout, retries, retry_delay)
             print(f"verified {entry['filename']}: {size} bytes")
     except BaseException:
         shutil.rmtree(output)
@@ -107,9 +142,12 @@ def main():
     # No implicit download allowance. CI/operator must choose the total budget.
     budget = int(os.environ['IRIS_PREVIEW_CORPUS_MAX_BYTES'])
     timeout = float(os.environ.get('IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS', '30'))
+    retries = int(os.environ.get('IRIS_PREVIEW_CORPUS_RETRIES', '0'))
+    retry_delay = float(os.environ.get('IRIS_PREVIEW_CORPUS_RETRY_DELAY_SECONDS', '2'))
     if not 0 < timeout < float('inf'):
         raise ValueError("timeout must be finite and positive")
-    fetch(json.loads(args.manifest.read_text(encoding='utf-8')), args.output, budget, timeout)
+    fetch(json.loads(args.manifest.read_text(encoding='utf-8')), args.output, budget, timeout,
+          retries=retries, retry_delay=retry_delay)
 
 
 if __name__ == '__main__':

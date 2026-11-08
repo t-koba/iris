@@ -81,6 +81,12 @@ Both paths use positive configurable budgets: IRIS_FFMPEG_JOBS 2,
 IRIS_FFMPEG_BUILD_SECONDS 3600, IRIS_FFMPEG_FETCH_SECONDS 300,
 IRIS_FFMPEG_COMMAND_SECONDS 60, IRIS_FFMPEG_COMMAND_BYTES 32768,
 IRIS_FFMPEG_MAX_NATIVE_FILES 256 and IRIS_FFMPEG_MAX_REPORT_BYTES 266240.
-Budgets fail closed rather than truncate successful evidence. Product scratch
-is removed on success, failure and handled interruption; sources/notices remain
-inside the distributed app. No native runtime or Cargo discovery target is cached.
+Direct invocations default to zero source-fetch retries; CI and release workflow
+configuration defaults to one retry with a two-second delay, controlled by the
+`IRIS_FFMPEG_FETCH_RETRIES` and `IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS` repository
+variables. Curl retries only its transient errors, retains the existing fetch
+process deadline, removes failed partial output, and every accepted archive still
+must pass the pinned hash and signature checks. Other budgets fail closed rather
+than truncate successful evidence. Product scratch is removed on success, failure
+and handled interruption; sources/notices remain inside the distributed app. No
+native runtime or Cargo discovery target is cached.

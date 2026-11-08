@@ -22,10 +22,16 @@ The helper requires `IRIS_PREVIEW_CORPUS_MAX_BYTES` (no implicit download budget
 It validates all entries and the total before network access, checks each HTTPS
 redirect, streams with a per-file size bound, and verifies actual size and SHA-256.
 `IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS` defaults to 30 seconds per blocking network
-operation (CI chooses 60); urllib also rejects redirect loops. The output directory
-must not exist; existing files and symlinks are never reused. Failed downloads
-remove the directory the helper created. After success, the caller owns removal;
-CI always removes its temporary parent, including on smoke failure.
+operation (CI chooses 60); urllib also rejects redirect loops. Direct invocations
+default to zero retries. CI/release workflows default to one retry after transient
+HTTP/network failures, with a two-second delay; repository variables
+`IRIS_PREVIEW_CORPUS_RETRIES` and `IRIS_PREVIEW_CORPUS_RETRY_DELAY_SECONDS` configure
+those values. The retry policy never retries redirect/policy, status, size or digest
+validation failures, and each attempt uses a new private partial file before the
+verified fixture is atomically installed. The output directory must not exist;
+existing files and symlinks are never reused. Failed downloads remove the directory
+the helper created. After success, the caller owns removal; CI always removes its
+temporary parent, including on smoke failure.
 
 The smoke requires `video`, `pdf`, and `raw-full`, all enabled by default. It
 checks the 4000x3000 JPEG resize, small JPEG passthrough, structured CR3 embedded

@@ -37,6 +37,18 @@ def setting(name, default):
     return value
 
 
+def download_pinned(url, output):
+    retries = int(os.environ.get('IRIS_FFMPEG_FETCH_RETRIES', '0'))
+    delay = int(os.environ.get('IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS', '2'))
+    require(retries >= 0, 'IRIS_FFMPEG_FETCH_RETRIES must be non-negative')
+    require(delay >= 0, 'IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS must be non-negative')
+    args = ['curl', '--fail', '--location', '--silent', '--show-error', '--proto', '=https',
+            '--proto-redir', '=https', '--tlsv1.2', '--remove-on-error']
+    if retries:
+        args += ['--retry', str(retries), '--retry-delay', str(delay)]
+    run(*args, url, '-o', output, seconds=setting('IRIS_FFMPEG_FETCH_SECONDS', 300))
+
+
 def clean(text):
     # Neither diagnostics nor retained JSON disclose private build/SDK paths.
     for path, label in sorted(REDACTIONS.items(), key=lambda item: -len(item[0])):
@@ -290,9 +302,7 @@ def build_lzma(work, sdk, env, docs):
     require(not any(p.exists() for p in (prefix, source, target)), 'liblzma scratch must be fresh')
     for field, filename in (('url', 'xz-source.tar.xz'), ('signature_url', 'xz-source.tar.xz.sig'),
                             ('key_url', 'xz-signing-key.asc')):
-        run('curl', '--fail', '--location', '--silent', '--show-error', '--proto', '=https',
-            '--proto-redir', '=https', '--tlsv1.2', LZMA[field], '-o', docs / filename,
-            seconds=setting('IRIS_FFMPEG_FETCH_SECONDS', 300))
+        download_pinned(LZMA[field], docs / filename)
     require(digest(docs / 'xz-source.tar.xz') == LZMA['sha256'], 'liblzma source hash mismatch')
     run('gpg', '--batch', '--import', docs / 'xz-signing-key.asc', env=env)
     keys = run('gpg', '--batch', '--with-colons', '--fingerprint', '--list-keys', LZMA['fingerprint'], env=env)
@@ -357,9 +367,7 @@ def build(prefix, sdk):
     run(work / 'probe')
     for field, filename in (('url', 'source.tar.xz'), ('signature_url', 'source.tar.xz.asc'),
                             ('key_url', 'signing-key.asc')):
-        run('curl', '--fail', '--location', '--silent', '--show-error', '--proto', '=https',
-            '--proto-redir', '=https', '--tlsv1.2', POLICY[field], '-o', work / filename,
-            seconds=setting('IRIS_FFMPEG_FETCH_SECONDS', 300))
+        download_pinned(POLICY[field], work / filename)
     require(digest(work / 'source.tar.xz') == POLICY['sha256'], 'source hash mismatch')
     run('gpg', '--batch', '--import', work / 'signing-key.asc', env=env)
     keys = run('gpg', '--batch', '--with-colons', '--fingerprint', '--list-keys', POLICY['fingerprint'], env=env)

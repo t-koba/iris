@@ -9,7 +9,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+import urllib.error
 import urllib.request
 
 spec = importlib.util.spec_from_file_location('fetch_corpus', Path(__file__).with_name('fetch-preview-corpus.py'))
@@ -48,6 +49,62 @@ class FetchTests(unittest.TestCase):
         self.fetch(self.body)
         self.assertEqual((self.output / 'test.jpg').read_bytes(), self.body)
         self.assertEqual([p.name for p in self.output.iterdir()], ['test.jpg'])
+
+    def test_transient_gateway_and_stream_errors_retry_without_partial_bytes(self):
+        interrupted = Response(self.body)
+        original_read = interrupted.read
+        reads = 0
+
+        def fail_after_partial(size=-1):
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return original_read(4)
+            if reads == 2:
+                raise ConnectionResetError('synthetic disconnect')
+            return original_read(size)
+
+        interrupted.read = fail_after_partial
+        opener = Mock()
+        opener.open.side_effect = [
+            urllib.error.HTTPError(self.manifest['files'][0]['url'], 504, 'gateway timeout', {}, io.BytesIO()),
+            interrupted,
+            Response(self.body),
+        ]
+        with patch.object(helper.time, 'sleep') as sleep:
+            helper.fetch(self.manifest, self.output, len(self.body), 1, opener,
+                         retries=2, retry_delay=3)
+        self.assertEqual(opener.open.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [unittest.mock.call(3), unittest.mock.call(3)])
+        self.assertEqual((self.output / 'test.jpg').read_bytes(), self.body)
+        self.assertEqual([p.name for p in self.output.iterdir()], ['test.jpg'])
+
+    def test_permanent_http_error_and_integrity_mismatch_are_not_retried(self):
+        for error in (
+            urllib.error.HTTPError(self.manifest['files'][0]['url'], 404, 'not found', {}, io.BytesIO()),
+        ):
+            with self.subTest(code=error.code):
+                opener = Mock()
+                opener.open.side_effect = error
+                with self.assertRaises(urllib.error.HTTPError):
+                    helper.fetch(self.manifest, self.output, len(self.body), 1, opener,
+                                 retries=2, retry_delay=0)
+                self.assertEqual(opener.open.call_count, 1)
+                self.assertFalse(self.output.exists())
+        opener = Mock()
+        opener.open.return_value = Response(b'corrupt body')
+        with self.assertRaises(ValueError):
+            helper.fetch(self.manifest, self.output, len(self.body), 1, opener,
+                         retries=2, retry_delay=0)
+        self.assertEqual(opener.open.call_count, 1)
+        self.assertFalse(self.output.exists())
+
+    def test_invalid_retry_settings_fail_before_output_creation(self):
+        for retries, delay in ((-1, 0), (1.5, 0), (0, -1), (0, float('inf'))):
+            with self.subTest(retries=retries, delay=delay), self.assertRaises(ValueError):
+                helper.fetch(self.manifest, self.output, len(self.body), 1, Mock(),
+                             retries=retries, retry_delay=delay)
+            self.assertFalse(self.output.exists())
 
     def test_corrupt_responses_remove_owned_output(self):
         for body, changes in [

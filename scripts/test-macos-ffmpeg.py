@@ -16,6 +16,26 @@ spec.loader.exec_module(m)
 
 
 class CandidateContracts(unittest.TestCase):
+    def test_pinned_download_retries_are_configurable_and_bounded(self):
+        with patch.dict(m.os.environ, {
+            'IRIS_FFMPEG_FETCH_RETRIES': '1',
+            'IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS': '3',
+        }), patch.object(m, 'run') as run:
+            m.download_pinned('https://example.invalid/pinned.tar.xz', Path('/tmp/pinned.tar.xz'))
+        args = run.call_args.args
+        self.assertIn('--remove-on-error', args)
+        self.assertEqual(args[args.index('--retry') + 1], '1')
+        self.assertEqual(args[args.index('--retry-delay') + 1], '3')
+        self.assertIn('https://example.invalid/pinned.tar.xz', args)
+        self.assertEqual(run.call_args.kwargs['seconds'], m.setting('IRIS_FFMPEG_FETCH_SECONDS', 300))
+        with patch.dict(m.os.environ, {'IRIS_FFMPEG_FETCH_RETRIES': '0'}), patch.object(m, 'run') as run:
+            m.download_pinned('https://example.invalid/pinned.tar.xz', Path('/tmp/pinned.tar.xz'))
+        self.assertNotIn('--retry', run.call_args.args)
+        for name, value in (('IRIS_FFMPEG_FETCH_RETRIES', '-1'),
+                            ('IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS', '-1')):
+            with patch.dict(m.os.environ, {name: value}), self.assertRaises(ValueError):
+                m.download_pinned('https://example.invalid/pinned.tar.xz', Path('/tmp/pinned.tar.xz'))
+
     def test_command_cancellation_is_not_an_optional_comparison_failure(self):
         for error in (InterruptedError('TERM'), KeyboardInterrupt(), m.subprocess.TimeoutExpired('synthetic', 1)):
             with self.subTest(error=type(error).__name__), patch.object(m.subprocess, 'Popen') as popen, \
