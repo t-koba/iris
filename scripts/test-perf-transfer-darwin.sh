@@ -75,6 +75,37 @@ export IRIS_PERF_KEEP_CONTAINERS=0 IRIS_PERF_SMB_MOUNT=''
 export IRIS_PERF_SMB_MIN_PROTOCOL='' IRIS_PERF_SMB_MAX_PROTOCOL=''
 export IRIS_PERF_SMB_SERVER_SIGNING='' IRIS_PERF_SMB_ENCRYPTION=''
 export IRIS_PERF_SMB_LOG_LEVEL=2 IRIS_PERF_SMB_AUTH_AUDIT_LEVEL=''
+report_harness_failure() {
+  local stream file
+  for stream in stdout stderr; do
+    file="$test_root/out"
+    [[ "$stream" == stdout ]] || file="$test_root/err"
+    [[ -s "$file" ]] || continue
+    echo "--- Darwin harness $stream (last at most 4096 bytes) ---" >&2
+    tail -c 4096 "$file" | sed \
+      -e 's/benchuser:iris/[redacted]/g' \
+      -e 's/benchuser/[redacted]/g' \
+      -e 's/iris/[redacted]/g' \
+      -e 's/A224A29E508493ECD70572422203EC18/[redacted]/g' >&2
+  done
+}
+
+# Exercise the diagnostic reader itself with oversized byte streams.
+python3 - "$test_root/out" "$test_root/err" <<'PY'
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_bytes(b"x" * 6000 + b" benchuser:iris\n")
+Path(sys.argv[2]).write_bytes(b"y" * 7000 + b" A224A29E508493ECD70572422203EC18\n")
+PY
+report_harness_failure >"$test_root/bounded-report" 2>&1
+[[ "$(wc -c <"$test_root/bounded-report")" -le 9000 ]]
+grep -Fq 'stdout (last at most 4096 bytes)' "$test_root/bounded-report"
+grep -Fq 'stderr (last at most 4096 bytes)' "$test_root/bounded-report"
+! grep -Fq 'benchuser:iris' "$test_root/bounded-report"
+! grep -Fq 'benchuser' "$test_root/bounded-report"
+! grep -Fq 'iris' "$test_root/bounded-report"
+! grep -Fq 'A224A29E508493ECD70572422203EC18' "$test_root/bounded-report"
+
 run_harness() {
   # A process-group deadline also bounds regressions in daemon cleanup.
   local status=0
@@ -90,6 +121,10 @@ with open(sys.argv[2] + '/out', 'w') as out, open(sys.argv[2] + '/err', 'w') as 
         sys.exit('Darwin harness exceeded 10s test deadline')
 PY
   cat "$test_root/out" "$test_root/err" >>"$test_root/all-output"
+  if (( status != 0 )); then
+    echo "Darwin harness failed (exit=$status); bounded sanitized output follows:" >&2
+    report_harness_failure
+  fi
   return "$status"
 }
 run_harness
@@ -119,8 +154,13 @@ grep -Eq '^benchuser:501:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX:A224A29E508493ECD70572
 rm -f "$CAPTURE"/{pid,smoke,lifecycle,benchmarks}
 export TEST_SMOKE_STATUS=42 IRIS_PERF_KEEP_CONTAINERS=1
 status=0
-run_harness || status=$?
+run_harness >"$test_root/failure-report" 2>&1 || status=$?
 [[ "$status" == 42 && ! -e "$CAPTURE/forbidden" ]]
+grep -Fq 'Darwin harness failed (exit=42)' "$test_root/failure-report"
+grep -Fq 'synthetic [redacted] credential diagnostic' "$test_root/failure-report"
+! grep -Fq 'synthetic iris credential diagnostic' "$test_root/failure-report"
+! grep -Fq 'A224A29E508493ECD70572422203EC18' "$test_root/failure-report"
+[[ "$(wc -c <"$test_root/failure-report")" -le 9000 ]]
 [[ "$(cat "$CAPTURE/lifecycle")" == $'started\nstopped' ]]
 ! kill -0 "$(cat "$CAPTURE/pid")" 2>/dev/null
 [[ -d "$(cat "$CAPTURE/native-dir")" ]]
@@ -135,7 +175,9 @@ for setting in 'TEST_VERSION=4.25.0' 'TEST_VERSION=unknown' 'IRIS_PERF_SMB_PORT=
     'IRIS_PERF_SMB_SERVER_SIGNING=auto' 'IRIS_PERF_SMB_ENCRYPTION=off' \
     'IRIS_PERF_SMB_MIN_PROTOCOL=NT1' 'IRIS_PERF_SMB_LOG_LEVEL=2;guest ok = yes' \
     $'IRIS_PERF_SMB_LOG_LEVEL=2\nguest ok = yes'; do
-  if (export "$setting"; run_harness); then echo "accepted invalid native setting" >&2; exit 1; fi
+  if (export "$setting"; run_harness >"$test_root/expected-failure" 2>&1); then
+    echo "accepted invalid native setting" >&2; exit 1
+  fi
   [[ ! -e "$CAPTURE/pid" && ! -e "$CAPTURE/smoke" && ! -e "$CAPTURE/forbidden" ]]
 done
 if grep -E 'benchuser:iris|A224A29E508493ECD70572422203EC18' "$test_root/all-output"; then
