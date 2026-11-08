@@ -699,7 +699,7 @@ class PreviewComparison(unittest.TestCase):
             dest = app / 'Contents/MacOS/preview_corpus_smoke'
             with patch.object(m, 'libraries', return_value={'avcodec': lib}), \
                     patch.object(m, 'closure', side_effect=[[(executable, str(lib), lib)],
-                                                          [(dest, '@executable_path/../Frameworks/' + lib.name, staged)]]) as closure, \
+                                                          [(dest, '@executable_path/../Frameworks/' + lib.name, staged.resolve())]]) as closure, \
                     patch.object(m, 'run') as run:
                 self.assertEqual(m.stage_preview(executable, root / 'candidate', app, root / 'sdk'), dest)
                 closure.assert_called_with(dest, [staged], root / 'sdk')
