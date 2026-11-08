@@ -28,6 +28,8 @@ jobs:
       VCPKGRS_TRIPLET: x64-windows-prototype-dynamic
       VCPKGRS_DYNAMIC: "1"
       IRIS_PROTOTYPE_TRIPLET: x64-windows-prototype-dynamic
+      IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRIES: ${{ vars.IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRIES || 1 }}
+      IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRY_DELAY_SECONDS: ${{ vars.IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRY_DELAY_SECONDS || 2 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -77,8 +79,27 @@ jobs:
           if (!(Test-Path -LiteralPath $root -PathType Container)) { throw "pinned vcpkg checkout missing: $root" }
           $bootstrap = Join-Path $root "bootstrap-vcpkg.bat"
           if (!(Test-Path -LiteralPath $bootstrap -PathType Leaf)) { throw "bootstrap-vcpkg.bat missing: $bootstrap" }
-          & $bootstrap
-          if ($LASTEXITCODE -ne 0) { throw "pinned vcpkg bootstrap failed: $LASTEXITCODE" }
+          $retryText = if ([string]::IsNullOrWhiteSpace($env:IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRIES)) { "1" } else { $env:IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRIES }
+          $delayText = if ([string]::IsNullOrWhiteSpace($env:IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRY_DELAY_SECONDS)) { "2" } else { $env:IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRY_DELAY_SECONDS }
+          if ($retryText -notmatch '^[0-9]+$') { throw "vcpkg bootstrap retries must be a non-negative integer" }
+          if ($delayText -notmatch '^[0-9]+$') { throw "vcpkg bootstrap retry delay must be a non-negative integer" }
+          $retryCount = [int]$retryText
+          $retryDelay = [int]$delayText
+          for ($attempt = 0; ; $attempt++) {
+            $bootstrapOutput = & $bootstrap 2>&1
+            $bootstrapExit = $LASTEXITCODE
+            $bootstrapOutput | ForEach-Object { Write-Host $_ }
+            if ($bootstrapExit -eq 0) { break }
+            $diagnostic = ($bootstrapOutput | ForEach-Object { "$_" }) -join " "
+            $downloadTimeout = $diagnostic -match '(?i)Downloading .*vcpkg(?:-arm64)?\.exe' -and
+                              $diagnostic -match '(?i)WinHttpReceiveResponse' -and
+                              $diagnostic -match '(?i)(?:timed out|0x00002EE2)'
+            if (!$downloadTimeout -or $attempt -ge $retryCount) {
+              throw "pinned vcpkg bootstrap failed: $bootstrapExit"
+            }
+            Write-Host "Retrying pinned vcpkg bootstrap after the observed WinHTTP download timeout ($($attempt + 1)/$retryCount retries used)"
+            Start-Sleep -Seconds $retryDelay
+          }
           $exe = Join-Path $root "vcpkg.exe"
           if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw "vcpkg.exe missing after bootstrap: $exe" }
           & $exe --version

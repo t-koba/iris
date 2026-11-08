@@ -11,6 +11,11 @@ linux = (root / ".github/workflows/linux-ffmpeg-validation.yml").read_text(encod
 
 macos = (root / ".github/workflows/macos-runtime-validation.yml").read_text(encoding="utf-8")
 macos_call = "uses: ./.github/workflows/macos-runtime-validation.yml"
+bootstrap_timeout = (
+    "Downloading https://github.com/microsoft/vcpkg-tool/releases/download/2026-10-29/vcpkg.exe "
+    "-> <work>...While calling Windows API function WinHttpReceiveResponse got error "
+    "0x00002EE2: The operation timed out"
+)
 # Capture the entire upload configuration: extra paths, globs, or a second
 # uploader must not quietly turn this evidence-only route into package retention.
 macos_uploads = re.findall(
@@ -35,6 +40,23 @@ checks = {
   workflow_call:
 """ in prototype
     and all(trigger not in prototype for trigger in ("  workflow_dispatch:", "  pull_request:", "  push:")),
+    "prototype vcpkg retries are configurable and timeout-specific": all(
+        text in prototype for text in (
+            "IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRIES: ${{ vars.IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRIES || 1 }}",
+            "IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRY_DELAY_SECONDS: ${{ vars.IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRY_DELAY_SECONDS || 2 }}",
+            "$diagnostic -match '(?i)Downloading .*vcpkg(?:-arm64)?\\.exe'",
+            "$diagnostic -match '(?i)WinHttpReceiveResponse'",
+            "$diagnostic -match '(?i)(?:timed out|0x00002EE2)'",
+            "if (!$downloadTimeout -or $attempt -ge $retryCount)",
+            '& $exe --version',
+        )
+    ) and all(
+        re.search(pattern, bootstrap_timeout) for pattern in (
+            r"(?i)Downloading .*vcpkg(?:-arm64)?\.exe",
+            r"(?i)WinHttpReceiveResponse",
+            r"(?i)(?:timed out|0x00002EE2)",
+        )
+    ),
     "CI invokes the Linux runtime audit only on manual dispatch": """  linux-ffmpeg-validation:
     if: github.event_name == 'workflow_dispatch'
     permissions:

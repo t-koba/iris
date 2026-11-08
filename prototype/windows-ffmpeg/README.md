@@ -43,7 +43,12 @@ behavior, or licensing conclusions, and it never publishes.
   an exact-source native build and smoke; unknown enum values may still panic.
 - vcpkg / tooling baseline: `b8dfe957ec8b5c0ef5c4b31eea594b8486af744f`
   (`vcpkg.json` `builtin-baseline` and `vcpkg-configuration.json` carry the
-  same baseline; the scripts fail closed on drift).
+  same baseline; the scripts fail closed on drift). The reusable prototype
+  workflow retries only the observed WinHTTP timeout while downloading the
+  versioned vcpkg tool: `IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRIES` defaults to 1
+  (set to 0 to disable) and `IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRY_DELAY_SECONDS`
+  defaults to 2. Other bootstrap failures remain immediate failures; the
+  pinned checkout and version selection are unchanged.
 - Triplet base: `x64-windows` (dynamic). The isolated install uses the custom
   dynamic triplet `triplets/x64-windows-prototype-dynamic.cmake`
   (`VCPKG_TARGET_TRIPLET=VCPKG_DEFAULT_TRIPLET=VCPKGRS_TRIPLET=x64-windows-prototype-dynamic`,
