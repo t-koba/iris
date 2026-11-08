@@ -36,7 +36,7 @@ case "${0##*/}" in
         cmp "$IRIS_PERF_DEBIAN_KEYRING" "$rootfs/usr/share/keyrings/iris-debian-archive-keyring.gpg"
         ;;
       dpkg-query*) [[ "$FAIL_STAGE" != package ]] || { echo '2:4.23.8-1'; exit; }; echo '2:4.25.1+dfsg-1' ;;
-      'smbd --version') [[ "$FAIL_STAGE" != binary ]] || { echo 'Version 4.23.8'; exit; }; echo 'Version 4.25.1-Debian' ;;
+      'smbd --version') [[ "$FAIL_STAGE" != binary ]] || { echo 'Version 4.23.8'; exit; }; echo 'Version 4.25.1-Debian-4.25.1+dfsg-1' ;;
     esac
     ;;
   docker)
@@ -69,6 +69,10 @@ for FAIL_STAGE in signature apt package binary; do
   rm "$CAPTURE/imported" 2>/dev/null || true
   if run_builder; then echo "accepted $FAIL_STAGE failure" >&2; exit 1; fi
   [[ ! -e "$CAPTURE/imported" && -z "$(ls -A "$TMPDIR")" ]]
+  if [[ "$FAIL_STAGE" == binary ]]; then
+    grep -Fq 'unexpected smbd version in test rootfs' "$test_root/err"
+    grep -Fq 'observed=Version\ 4.23.8' "$test_root/err"
+  fi
 done
 export IRIS_PERF_DEBIAN_KEYRING="$test_root/missing"
 if run_builder; then echo 'accepted missing keyring' >&2; exit 1; fi

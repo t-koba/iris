@@ -28,10 +28,14 @@ sudo chroot "$rootfs" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no
   "samba=$version" "samba-common-bin=$version" >&2
 [[ "$(sudo chroot "$rootfs" dpkg-query -W '-f=${Version}' samba)" == "$version" ]] \
   || { echo "unexpected Samba package version in test rootfs (expected $version)" >&2; exit 1; }
-case "$(sudo chroot "$rootfs" smbd --version)" in
-  'Version 4.25.1'|'Version 4.25.1-Debian') ;;
-  *) echo 'unexpected smbd version in test rootfs' >&2; exit 1 ;;
-esac
+expected_smbd_version='Version 4.25.1-Debian-4.25.1+dfsg-1'
+actual_smbd_version=$(sudo chroot "$rootfs" smbd --version)
+if [[ "$actual_smbd_version" != "$expected_smbd_version" ]]; then
+  printf 'unexpected smbd version in test rootfs (expected=%s, observed=%q)\n' \
+    "$expected_smbd_version" "${actual_smbd_version:0:128}" >&2
+  if (( ${#actual_smbd_version} > 128 )); then echo 'observed version display truncated' >&2; fi
+  exit 1
+fi
 sudo install -m 0755 "$script_dir/test-samba-entrypoint.sh" "$rootfs/usr/local/sbin/iris-test-samba"
 sudo install -m 0644 "$script_dir/test-samba.conf" "$rootfs/etc/samba/smb.conf"
 sudo chroot "$rootfs" apt-get clean >&2
