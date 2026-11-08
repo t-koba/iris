@@ -17,63 +17,22 @@ ORIGINAL = (HERE.parents[1] / "Cargo.lock").read_bytes()
 
 
 def overridden(raw):
-    # Lockfile formatting and table-field order are not package identity.
+    return binding.override_lock(raw)
+
+
+def cargo_reresolved(raw):
+    # Observed in disposable offline Cargo updates, including one with no override:
+    # bindgen's >=2,<4 requirement is re-resolved from syn 3 to syn 2. This is
+    # a different dependency edge even though Cargo reports no package additions.
     text = binding.lock_text(raw)
-    packages = [package for package in binding.parse_lock(raw).get("package", [])
-                if package.get("name") == binding.NAME]
-    exact = [package for package in packages
-             if (package.get("version"), package.get("source"), package.get("checksum"))
-             == ("9.0.1", binding.REGISTRY, binding.CHECKSUM)]
-    if len(packages) != 1 or len(exact) != 1:
-        identities = []
-        for package in packages[:2]:
-            source = package.get("source", "")
-            source_kind = ("registry" if isinstance(source, str) and source.startswith("registry+") else
-                           "git" if isinstance(source, str) and source.startswith("git+") else
-                           "other" if source else "missing")
-            identities.append({
-                "version": package.get("version", "missing"),
-                "source_kind": source_kind,
-                "registry_matches": source == binding.REGISTRY,
-                "checksum_matches": package.get("checksum") == binding.CHECKSUM,
-            })
-        raise AssertionError(
-            "production binding identity changed "
-            f"(package_count={len(packages)}, exact_matches={len(exact)}, observed={identities!r})"
-        )
-
-    names = list(re.finditer(
-        rf'(?m)^[ \t]*name[ \t]*=[ \t]*{re.escape(json.dumps(binding.NAME))}[ \t]*$', text
-    ))
-    if len(names) != 1:
-        raise AssertionError("could not locate unique production binding package name")
-    start = text.rfind("[[package]]", 0, names[0].start())
-    end = text.find("[[package]]", names[0].end())
-    if start < 0:
-        raise AssertionError("could not locate production binding package table")
-    if end < 0:
-        end = len(text)
-    section = text[start:end]
-
-    def replace_field(block, key, before, after):
-        pattern = re.compile(
-            rf'(?m)^(?P<prefix>[ \t]*{re.escape(key)}[ \t]*=[ \t]*)'
-            rf'{re.escape(json.dumps(before))}[ \t]*$'
-        )
-        block, count = pattern.subn(lambda match: match.group("prefix") + json.dumps(after), block, count=1)
-        if count != 1:
-            raise AssertionError(f"expected one pinned {key} field in binding package table")
-        return block
-
-    section = replace_field(section, "version", "9.0.1", "9.1.0")
-    section = replace_field(section, "source", binding.REGISTRY, binding.SOURCE)
-    checksum = re.compile(
-        rf'(?m)^[ \t]*checksum[ \t]*=[ \t]*{re.escape(json.dumps(binding.CHECKSUM))}[ \t]*(?:\n|$)'
-    )
-    section, count = checksum.subn("", section, count=1)
-    if count != 1:
-        raise AssertionError("expected one pinned checksum field in binding package table")
-    return (text[:start] + section + text[end:]).encode("utf-8")
+    section = re.compile(r'(?ms)^\[\[package\]\]\nname = "bindgen"\n'
+                         r'version = "0\.73\.2"\n.*?(?=^\[\[package\]\]|\Z)')
+    matches = list(section.finditer(text))
+    if len(matches) != 1 or matches[0].group().count(' "syn 3.0.9",') != 1:
+        raise AssertionError("expected one bindgen 0.73.2 edge to syn 3.0.9")
+    match = matches[0]
+    return (text[:match.start()] + match.group().replace(' "syn 3.0.9",', ' "syn 2.0.119",')
+            + text[match.end():]).encode("utf-8")
 
 
 class BindingBuildTests(unittest.TestCase):
@@ -96,14 +55,12 @@ class BindingBuildTests(unittest.TestCase):
         self.assertNotEqual(changed, source)
         binding.validate_lock(ORIGINAL, overridden(changed.encode("utf-8")))
 
-    def test_override_drift_reports_only_bounded_identity(self):
+    def test_override_rejects_binding_identity_drift_without_disclosure(self):
         changed = ORIGINAL.replace(b'version = "9.0.1"', b'version = "9.2.0"', 1)
-        with self.assertRaises(AssertionError) as caught:
-            overridden(changed)
+        with self.assertRaisesRegex(ValueError, "production binding identity drifted") as caught:
+            binding.override_lock(changed)
         message = str(caught.exception)
-        self.assertIn("exact_matches=0", message)
-        self.assertIn("9.2.0", message)
-        self.assertIn("source_kind", message)
+        self.assertNotIn("9.2.0", message)
         self.assertNotIn(binding.CHECKSUM, message)
         self.assertNotIn(binding.REPOSITORY, message)
 
@@ -134,12 +91,25 @@ class BindingBuildTests(unittest.TestCase):
             valid.replace(b'name = "ffmpeg-next"\nversion = "9.0.0"',
                           b'name = "ffmpeg-next"\nversion = "9.1.0"'),
         ]
-        for changed in cases:
-            with self.subTest(changed=changed[-100:]), self.assertRaises(ValueError):
+        for index, changed in enumerate(cases):
+            with self.subTest(case=index), self.assertRaises(ValueError):
                 binding.validate_lock(ORIGINAL, changed)
 
+    def test_cargo_reresolution_is_not_lock_metadata_normalization(self):
+        valid = overridden(ORIGINAL)
+        changed = cargo_reresolved(valid)
+        before = binding.parse_lock(valid)
+        after = binding.parse_lock(changed)
+        # The package inventory and top-level metadata do not reveal this drift.
+        self.assertEqual([(p["name"], p["version"], p.get("source")) for p in before["package"]],
+                         [(p["name"], p["version"], p.get("source")) for p in after["package"]])
+        self.assertEqual({k: v for k, v in before.items() if k != "package"},
+                         {k: v for k, v in after.items() if k != "package"})
+        with self.assertRaisesRegex(ValueError, "unrelated Cargo.lock drift"):
+            binding.validate_lock(ORIGINAL, changed)
+
     def test_restore_bytes_on_success_and_each_failure_path(self):
-        for outcome in ("success", "update_failure", "lock_drift", "build_failure",
+        for outcome in ("success", "lock_drift", "dependency_drift", "build_failure",
                         "build_lock_write", "interrupt"):
             with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -151,29 +121,28 @@ class BindingBuildTests(unittest.TestCase):
                 manifest.write_bytes(b"# production manifest must not be edited\r\n")
                 evidence = root / "target/binding.json"
                 calls = []
+                temporary = overridden(original)
+                if outcome == "lock_drift":
+                    temporary += b'\n[patch]\nunused = []\n'
+                elif outcome == "dependency_drift":
+                    temporary = cargo_reresolved(temporary)
 
                 def cargo(command, *, cwd, check):
                     self.assertEqual(cwd, root)
                     self.assertTrue(check)
                     calls.append(command)
-                    self.assertEqual(command[-4:], binding.CONFIG)
-                    if command[1] == "update":
-                        lock.write_bytes(overridden(original))
-                        if outcome == "update_failure":
-                            raise subprocess.CalledProcessError(1, command)
-                        if outcome == "lock_drift":
-                            lock.write_bytes(lock.read_bytes() + b'\n[patch]\nunused = []\n')
-                    else:
-                        self.assertEqual(command, ["cargo", "build", "--locked", "--release",
-                                                 "-p", "iris-ui-shell", "--bin", "Iris", *binding.CONFIG])
-                        if outcome == "build_failure":
-                            raise subprocess.CalledProcessError(1, command)
-                        if outcome == "interrupt":
-                            raise KeyboardInterrupt
-                        if outcome == "build_lock_write":
-                            lock.write_bytes(b"unexpected build mutation")
+                    self.assertEqual(command, ["cargo", "build", "--locked", "--release",
+                                               "-p", "iris-ui-shell", "--bin", "Iris", *binding.CONFIG])
+                    self.assertEqual(lock.read_bytes(), overridden(original))
+                    if outcome == "build_failure":
+                        raise subprocess.CalledProcessError(1, command)
+                    if outcome == "interrupt":
+                        raise KeyboardInterrupt
+                    if outcome == "build_lock_write":
+                        lock.write_bytes(b"unexpected build mutation")
 
-                with patch.object(binding.subprocess, "run", side_effect=cargo):
+                with patch.object(binding.subprocess, "run", side_effect=cargo), \
+                        patch.object(binding, "override_lock", return_value=temporary):
                     if outcome == "success":
                         binding.build(root, PINS["ffmpeg_sys_next"], evidence)
                     else:
@@ -181,7 +150,7 @@ class BindingBuildTests(unittest.TestCase):
                             binding.build(root, PINS["ffmpeg_sys_next"], evidence)
                 self.assertEqual(lock.read_bytes(), original)
                 self.assertEqual(manifest.read_bytes(), b"# production manifest must not be edited\r\n")
-                self.assertEqual(len(calls), 1 if outcome in ("update_failure", "lock_drift") else 2)
+                self.assertEqual(len(calls), 0 if outcome in ("lock_drift", "dependency_drift") else 1)
                 record = json.loads(evidence.read_text())
                 self.assertTrue(record["lock_restored"])
                 self.assertEqual(record["status"], "build_passed" if outcome == "success" else "failed")
