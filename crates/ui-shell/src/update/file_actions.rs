@@ -347,6 +347,7 @@ async fn run_batch_rename(operations: Vec<BatchRenameOperation>) -> BatchRenameR
                 mtime: None,
                 trashed_path: None,
                 trash_id: None,
+                normalized_path: None,
             }),
             Err(error) => failures.push(format!(
                 "{}: {error}",
@@ -577,6 +578,7 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                             mtime: None,
                             trashed_path: None,
                             trash_id: None,
+                            normalized_path: None,
                         }],
                     ),
                     update(state, Message::Refresh),
@@ -638,6 +640,7 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                             mtime: None,
                             trashed_path: None,
                             trash_id: None,
+                            normalized_path: None,
                         }],
                     ),
                     update(state, Message::Refresh),

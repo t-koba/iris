@@ -21,6 +21,8 @@ pub struct UndoItem {
     pub mtime: Option<SystemTime>,
     pub trashed_path: Option<PathBuf>,
     pub trash_id: Option<std::ffi::OsString>,
+    /// Backend path for exact Trash identity checks, separate from the UI path.
+    pub normalized_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,6 +169,7 @@ mod tests {
                 mtime: None,
                 trashed_path: None,
                 trash_id: None,
+                normalized_path: None,
             }],
             performed_at: SystemTime::UNIX_EPOCH,
         }

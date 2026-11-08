@@ -8,6 +8,8 @@ pub struct TrashReceipt {
     pub trashed_path: Option<PathBuf>,
     /// Stable system Trash item ID on Windows/Freedesktop, not a restore pathname.
     pub trash_id: Option<OsString>,
+    /// Backend original path captured before deletion; never recomputed during restore.
+    pub normalized_path: Option<PathBuf>,
 }
 
 /// Moves a file to the trash / Recycle Bin.
@@ -36,7 +38,9 @@ pub fn trash_file_with_receipt(path: &Path) -> Result<TrashReceipt, PlatformErro
 /// must identify exactly one new system ID per original path. Missing or ambiguous
 /// candidates return an error even though deletion has already occurred; no receipt
 /// is guessed. This cannot prove attribution under arbitrary external Trash
-/// manipulation, such as removal and ID reuse. macOS uses each resulting URL.
+/// manipulation, such as removal and ID reuse. Paths are parent-normalized and
+/// duplicates rejected before deletion; receipts retain the caller path separately.
+/// macOS uses each resulting URL.
 pub fn trash_files_with_receipts(paths: &[PathBuf]) -> Result<Vec<TrashReceipt>, PlatformError> {
     if paths.is_empty() {
         return Ok(Vec::new());
@@ -54,17 +58,18 @@ pub fn trash_files_with_receipts(paths: &[PathBuf]) -> Result<Vec<TrashReceipt>,
     )
 ))]
 fn trash_files_with_receipts_impl(paths: &[PathBuf]) -> Result<Vec<TrashReceipt>, PlatformError> {
+    let normalized_paths = exact_items::normalize_paths(paths)?;
     // One snapshot on each side of the batch: no retries or ordering heuristics.
     let before = trash::os_limited::list().map_err(|e| PlatformError::Trash {
         message: format!("Cannot enumerate Trash before deleting selection: {e}"),
     })?;
-    for path in paths {
+    for path in &normalized_paths {
         trash_file(path)?;
     }
     let after = trash::os_limited::list().map_err(|e| PlatformError::Trash {
         message: format!("Deleted selection, but cannot enumerate Trash for undo: {e}"),
     })?;
-    exact_items::bind_receipts(paths, before, after)
+    exact_items::bind_receipts(paths, &normalized_paths, before, after)
 }
 
 #[cfg(not(any(
@@ -96,6 +101,7 @@ fn trash_file_with_receipt_impl(path: &Path) -> Result<TrashReceipt, PlatformErr
         original_path: path.to_path_buf(),
         trashed_path: None,
         trash_id: None,
+        normalized_path: None,
     })
 }
 
@@ -120,6 +126,7 @@ fn trash_file_with_receipt_impl(path: &Path) -> Result<TrashReceipt, PlatformErr
         original_path: path.to_path_buf(),
         trashed_path,
         trash_id: None,
+        normalized_path: None,
     })
 }
 
@@ -157,9 +164,68 @@ mod exact_items {
     use std::collections::{HashMap, HashSet};
     use trash::TrashItem;
 
+    // Match trash 5.3.0's canonicalize_paths: resolve only the parent, not the
+    // final component (which may itself be a symlink). Freeze all paths before
+    // deletion, including rejecting aliases of the same selection entry.
+    pub(super) fn normalize_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, PlatformError> {
+        let mut seen = HashSet::with_capacity(paths.len());
+        paths
+            .iter()
+            .map(|path| {
+                let error = || PlatformError::Trash {
+                    message: format!("Cannot normalize a unique Trash path: {}", path.display()),
+                };
+                if path.as_os_str().is_empty() {
+                    return Err(error());
+                }
+                let absolute = if path.is_relative() {
+                    std::env::current_dir().map_err(|_| error())?.join(path)
+                } else {
+                    path.clone()
+                };
+                let parent = absolute.parent().ok_or_else(error)?;
+                let parent = parent.canonicalize().map_err(|_| error())?;
+                let normalized = match absolute.file_name() {
+                    Some(name) => parent.join(name),
+                    None => parent,
+                };
+                // The Windows backend converts canonical verbatim paths for the Shell.
+                #[cfg(target_os = "windows")]
+                let normalized = shell_path(normalized);
+                if !seen.insert(normalized.clone()) {
+                    return Err(error());
+                }
+                Ok(normalized)
+            })
+            .collect()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn shell_path(path: PathBuf) -> PathBuf {
+        use std::path::{Component, Prefix};
+        let mut components = path.components();
+        let mut prefix = OsString::new();
+        match components.next() {
+            Some(Component::Prefix(component)) => match component.kind() {
+                Prefix::VerbatimDisk(drive) => prefix.push(format!("{}:", drive as char)),
+                Prefix::VerbatimUNC(host, share) => {
+                    prefix.push(r"\\");
+                    prefix.push(host);
+                    prefix.push(r"\");
+                    prefix.push(share);
+                }
+                _ => return path,
+            },
+            _ => return path,
+        }
+        prefix.push(components.as_path());
+        prefix.into()
+    }
+
     // IDs are .trashinfo paths on Freedesktop and Shell parsing names on Windows.
     pub(super) fn bind_receipts(
         paths: &[PathBuf],
+        normalized_paths: &[PathBuf],
         before: Vec<TrashItem>,
         after: Vec<TrashItem>,
     ) -> Result<Vec<TrashReceipt>, PlatformError> {
@@ -171,7 +237,7 @@ mod exact_items {
         };
         let previous_ids: HashSet<_> = before.into_iter().map(|item| item.id).collect();
         let mut candidates = HashMap::with_capacity(paths.len());
-        for path in paths {
+        for path in normalized_paths {
             if candidates.insert(path.clone(), None).is_some() {
                 return Err(binding_error(path));
             }
@@ -191,15 +257,17 @@ mod exact_items {
         }
         paths
             .iter()
-            .map(|path| {
+            .zip(normalized_paths)
+            .map(|(path, normalized_path)| {
                 let id = candidates
-                    .remove(path)
+                    .remove(normalized_path)
                     .flatten()
                     .ok_or_else(|| binding_error(path))?;
                 Ok(TrashReceipt {
                     original_path: path.clone(),
                     trashed_path: None,
                     trash_id: Some(id),
+                    normalized_path: Some(normalized_path.clone()),
                 })
             })
             .collect()
@@ -216,13 +284,15 @@ mod exact_items {
                 .enumerate()
                 .filter(|(_, item)| receipt.trash_id.as_ref() == Some(&item.id));
             let position = match (matches.next(), matches.next()) {
-                (Some((position, item)), None) if item.original_path() == receipt.original_path => {
+                (Some((position, item)), None)
+                    if receipt.normalized_path.as_ref() == Some(&item.original_path()) =>
+                {
                     position
                 }
                 _ => {
                     return Err(PlatformError::Trash {
                         message: format!(
-                            "{} has no unique matching Trash ID and original path",
+                            "{} has no unique matching Trash ID and normalized path",
                             receipt.original_path.display()
                         ),
                     })
@@ -251,8 +321,78 @@ mod exact_items {
             before: Vec<TrashItem>,
             after: Vec<TrashItem>,
         ) -> Result<TrashReceipt, PlatformError> {
-            bind_receipts(&[path.to_path_buf()], before, after)
+            bind_receipts(&[path.to_path_buf()], &[path.to_path_buf()], before, after)
                 .map(|mut receipts| receipts.remove(0))
+        }
+
+        // Exercise pre-delete normalization and post-delete snapshots without OS Trash.
+        fn assert_normalized_binding(path: PathBuf, normalized: Vec<PathBuf>) {
+            let old = item("old-id", &normalized[0]);
+            let new = item("new-id", &normalized[0]);
+            let receipts = bind_receipts(
+                std::slice::from_ref(&path),
+                &normalized,
+                vec![old.clone()],
+                vec![new.clone(), old.clone()],
+            )
+            .unwrap();
+            assert_eq!(receipts[0].original_path, path);
+            assert_eq!(receipts[0].normalized_path.as_ref(), Some(&normalized[0]));
+            assert_eq!(receipts[0].trash_id.as_ref(), Some(&new.id));
+            let restored = select_restore_items(vec![old, new.clone()], &receipts).unwrap();
+            assert_eq!(restored[0].id, new.id);
+            assert!(select_restore_items(vec![item("new-id", &path)], &receipts,).is_err());
+        }
+
+        #[test]
+        fn relative_input_binds_normalized_path_without_changing_cwd() {
+            let cwd = std::env::current_dir().unwrap();
+            let dir = tempfile::tempdir_in(&cwd).unwrap();
+            let path = dir.path().strip_prefix(&cwd).unwrap().join("file");
+            std::fs::write(&path, "selected").unwrap();
+            let normalized = normalize_paths(std::slice::from_ref(&path)).unwrap();
+            let expected = dir.path().canonicalize().unwrap().join("file");
+            #[cfg(target_os = "windows")]
+            let expected = shell_path(expected);
+            assert_eq!(normalized, [expected]);
+            assert!(normalize_paths(&[path.clone(), normalized[0].clone()]).is_err());
+            for invalid in [PathBuf::new(), dir.path().join("missing-parent/file")] {
+                assert!(normalize_paths(&[path.clone(), invalid]).is_err());
+                assert!(path.exists());
+            }
+            std::fs::rename(&path, dir.path().join("simulated-trash")).unwrap();
+            assert_normalized_binding(path, normalized);
+        }
+
+        #[cfg(unix)] // Symlinks need no privileges here; no process-global cwd changes.
+        #[test]
+        fn symlinked_parent_binds_without_dereferencing_final_symlink() {
+            use std::os::unix::fs::symlink;
+            let dir = tempfile::tempdir().unwrap();
+            let parent = dir.path().join("real");
+            let alias = dir.path().join("alias");
+            std::fs::create_dir(&parent).unwrap();
+            symlink(&parent, &alias).unwrap();
+            symlink("target", parent.join("file")).unwrap();
+            let path = alias.join("file");
+            let normalized = normalize_paths(std::slice::from_ref(&path)).unwrap();
+            assert_eq!(normalized, [parent.canonicalize().unwrap().join("file")]);
+            assert!(normalize_paths(&[path.clone(), normalized[0].clone()]).is_err());
+            std::fs::rename(&path, dir.path().join("simulated-trash")).unwrap();
+            std::fs::remove_file(&alias).unwrap();
+            // Receipt validation must not re-resolve the caller's now-missing alias.
+            assert_normalized_binding(path, normalized);
+        }
+
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn canonical_windows_paths_use_shell_spelling() {
+            for (canonical, shell) in [
+                (r"\\?\C:\parent\file", r"C:\parent\file"),
+                (r"\\?\UNC\host\share\file", r"\\host\share\file"),
+            ] {
+                assert_eq!(shell_path(canonical.into()), PathBuf::from(shell));
+            }
         }
 
         #[test]
@@ -294,7 +434,8 @@ mod exact_items {
             ] {
                 for selection in [paths.clone(), [paths[1].clone(), paths[0].clone()]] {
                     let receipts =
-                        bind_receipts(&selection, vec![old.clone()], after.clone()).unwrap();
+                        bind_receipts(&selection, &selection, vec![old.clone()], after.clone())
+                            .unwrap();
                     assert_eq!(receipts.len(), 2);
                     for (receipt, path) in receipts.iter().zip(&selection) {
                         assert_eq!(&receipt.original_path, path);
@@ -325,11 +466,15 @@ mod exact_items {
                 vec![first.clone(), second.clone(), second.clone()],
                 vec![first.clone(), item("new-a", &paths[1])], // IDs must be unique too.
             ] {
-                assert!(bind_receipts(&paths, vec![], after).is_err());
+                assert!(bind_receipts(&paths, &paths, vec![], after).is_err());
             }
-            assert!(
-                bind_receipts(&[paths[0].clone(), paths[0].clone()], vec![], vec![first],).is_err()
-            );
+            assert!(bind_receipts(
+                &paths,
+                &[paths[0].clone(), paths[0].clone()],
+                vec![],
+                vec![first]
+            )
+            .is_err());
         }
 
         #[test]
@@ -372,6 +517,11 @@ mod exact_items {
                 ..receipt.clone()
             };
             assert!(select_restore_items(vec![target.clone()], &[missing_id]).is_err());
+            let missing_path = TrashReceipt {
+                normalized_path: None,
+                ..receipt.clone()
+            };
+            assert!(select_restore_items(vec![target.clone()], &[missing_path]).is_err());
             // Duplicate receipt IDs cannot restore the same item twice.
             assert!(select_restore_items(vec![target], &[receipt.clone(), receipt]).is_err());
         }

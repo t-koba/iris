@@ -253,6 +253,7 @@ fn finish_pending_operation(state: &mut AppState) -> Task<Message> {
                     mtime: None,
                     trashed_path: None,
                     trash_id: None,
+                    normalized_path: None,
                 })
                 .collect();
             completion_tasks.push(record_undo_op_task(undo_kind, undo_items));

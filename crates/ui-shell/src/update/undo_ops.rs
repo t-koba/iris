@@ -109,15 +109,7 @@ pub(crate) fn perform_undo(state: &mut AppState, op: UndoableOp) -> Task<Message
                 let error = format!("{} already exists", existing.source_path.display());
                 return undo_failure_task(op, error);
             }
-            let receipts = op
-                .items
-                .iter()
-                .map(|item| iris_platform_integration::trash::TrashReceipt {
-                    original_path: item.source_path.clone(),
-                    trashed_path: item.trashed_path.clone(),
-                    trash_id: item.trash_id.clone(),
-                })
-                .collect();
+            let receipts = trash_receipts_for_undo(&op.items);
             Task::perform(
                 async move { restore_trash_receipts(receipts).await },
                 move |result| Message::UndoCompleted {
@@ -394,6 +386,20 @@ async fn delete_empty_directories(paths: Vec<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
+fn trash_receipts_for_undo(
+    items: &[UndoItem],
+) -> Vec<iris_platform_integration::trash::TrashReceipt> {
+    items
+        .iter()
+        .map(|item| iris_platform_integration::trash::TrashReceipt {
+            original_path: item.source_path.clone(),
+            trashed_path: item.trashed_path.clone(),
+            trash_id: item.trash_id.clone(),
+            normalized_path: item.normalized_path.clone(),
+        })
+        .collect()
+}
+
 async fn restore_trash_receipts(
     receipts: Vec<iris_platform_integration::trash::TrashReceipt>,
 ) -> Result<(), String> {
@@ -430,6 +436,7 @@ pub(crate) async fn trash_paths_for_undo(paths: Vec<PathBuf>) -> Result<Vec<Undo
             mtime: metadata.modified().ok(),
             trashed_path: receipt.trashed_path,
             trash_id: receipt.trash_id,
+            normalized_path: receipt.normalized_path,
         })
         .collect();
     Ok(items)
@@ -478,6 +485,7 @@ mod tests {
                 mtime: Some(std::time::SystemTime::UNIX_EPOCH),
                 trashed_path: Some(PathBuf::from("trash").join(name)),
                 trash_id: Some(name.into()),
+                normalized_path: Some(PathBuf::from("backend").join(name)),
             })
             .collect();
         let op = UndoableOp {
@@ -496,6 +504,7 @@ mod tests {
             .map(|mut item| {
                 let name = format!("{}.2", item.source_path.display());
                 item.trashed_path = Some(PathBuf::from("trash").join(&name));
+                item.normalized_path = Some(PathBuf::from("backend-after-redo").join(&name));
                 item.trash_id = Some(name.into());
                 item
             })
@@ -516,6 +525,19 @@ mod tests {
         let next_undo = journal.pop_undo().unwrap();
         assert_eq!(next_undo.items, fresh_items);
         assert_ne!(next_undo.items, old_items);
+        for (receipt, item) in trash_receipts_for_undo(&next_undo.items)
+            .iter()
+            .zip(&fresh_items)
+        {
+            assert_eq!(receipt.original_path, item.source_path);
+            assert_eq!(receipt.normalized_path, item.normalized_path);
+            assert_ne!(
+                receipt.normalized_path.as_ref(),
+                Some(&receipt.original_path)
+            );
+            assert_eq!(receipt.trash_id, item.trash_id);
+            assert_eq!(receipt.trashed_path, item.trashed_path);
+        }
         assert_eq!(next_undo.kind, op.kind);
         assert_eq!(next_undo.performed_at, op.performed_at);
 
@@ -548,6 +570,7 @@ mod tests {
                 mtime: None,
                 trashed_path: None,
                 trash_id: None,
+                normalized_path: None,
             }],
         )
         .await;

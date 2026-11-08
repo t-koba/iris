@@ -1096,6 +1096,7 @@ mod tests {
                     mtime: None,
                     trashed_path: None,
                     trash_id: None,
+                    normalized_path: None,
                 }],
             },
         );
@@ -1118,6 +1119,7 @@ mod tests {
                     mtime: None,
                     trashed_path: None,
                     trash_id: None,
+                    normalized_path: None,
                 }],
             },
         );
@@ -1139,6 +1141,7 @@ mod tests {
                     mtime: None,
                     trashed_path: None,
                     trash_id: None,
+                    normalized_path: None,
                 }],
             },
         );
@@ -1178,6 +1181,7 @@ mod tests {
                 mtime: None,
                 trashed_path: None,
                 trash_id: None,
+                normalized_path: None,
             }],
             performed_at: std::time::SystemTime::UNIX_EPOCH,
         };
@@ -1205,6 +1209,7 @@ mod tests {
                 mtime: None,
                 trashed_path: None,
                 trash_id: None,
+                normalized_path: None,
             }],
             performed_at: std::time::SystemTime::UNIX_EPOCH,
         };
@@ -1229,6 +1234,7 @@ mod tests {
                 mtime: None,
                 trashed_path: None,
                 trash_id: None,
+                normalized_path: None,
             }],
             performed_at: std::time::SystemTime::UNIX_EPOCH,
         };
@@ -1259,6 +1265,7 @@ mod tests {
                 mtime: None,
                 trashed_path: None,
                 trash_id: None,
+                normalized_path: None,
             }],
             performed_at: std::time::SystemTime::UNIX_EPOCH,
         };
