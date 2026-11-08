@@ -169,6 +169,9 @@ jobs:
     needs: release-preflight
     env:
       IRIS_RELEASE_VERSION: ${{ needs.release-preflight.outputs.version }}
+      IRIS_FFMPEG_FETCH_SECONDS: ${{ vars.IRIS_FFMPEG_FETCH_SECONDS || 300 }}
+      IRIS_FFMPEG_FETCH_RETRIES: ${{ vars.IRIS_FFMPEG_FETCH_RETRIES || 1 }}
+      IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS: ${{ vars.IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS || 2 }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

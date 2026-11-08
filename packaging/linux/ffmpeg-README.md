@@ -41,8 +41,13 @@ archive, enter `ffmpeg-8.1.3`, and run `./configure --prefix=/absolute/prefix
 shared library's RUNPATH with `patchelf --set-rpath '$ORIGIN' path/to/library`.
 The Iris source tree automates digest/signature verification and these steps
 with `scripts/build-linux-ffmpeg.sh`; `IRIS_FFMPEG_PREFIX` chooses an absolute
-prefix and `IRIS_FFMPEG_JOBS` chooses parallelism (default 2). A completed prefix
-is revalidated on reuse; delete it when intentionally rebuilding or updating.
+prefix and `IRIS_FFMPEG_JOBS` chooses parallelism (default 2). Each pinned-source
+transfer has a per-request maximum duration (`IRIS_FFMPEG_FETCH_SECONDS`, default
+300 seconds) and retries (`IRIS_FFMPEG_FETCH_RETRIES`, default 1; set to 0 to
+disable) separated by `IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS` (default 2 seconds).
+These bounded transport retries do not relax the pinned source digest, signing-key
+fingerprint, or detached-signature checks. A completed prefix is revalidated on
+reuse; delete it when intentionally rebuilding or updating.
 
 These are replaceable shared libraries, not statically linked into Iris.
 Keep the ABI-compatible SONAME symlinks, replace the libraries in `usr/lib/iris`

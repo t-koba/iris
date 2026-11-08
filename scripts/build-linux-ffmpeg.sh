@@ -21,7 +21,17 @@ export GNUPGHOME="$work/gnupg"
 mkdir -m 700 "$GNUPGHOME"
 policy="$root/packaging/linux/ffmpeg.json"
 get() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$policy" "$1"; }
-fetch() { curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' --tlsv1.2 "$1" -o "$2"; }
+fetch_seconds=${IRIS_FFMPEG_FETCH_SECONDS:-300}
+fetch_retries=${IRIS_FFMPEG_FETCH_RETRIES:-1}
+fetch_retry_delay=${IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS:-2}
+[[ $fetch_seconds =~ ^[1-9][0-9]*$ ]] || { echo 'IRIS_FFMPEG_FETCH_SECONDS must be positive' >&2; exit 1; }
+[[ $fetch_retries =~ ^[0-9]+$ ]] || { echo 'IRIS_FFMPEG_FETCH_RETRIES must be non-negative' >&2; exit 1; }
+[[ $fetch_retry_delay =~ ^[0-9]+$ ]] || { echo 'IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS must be non-negative' >&2; exit 1; }
+fetch() {
+    curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' \
+        --tlsv1.2 --max-time "$fetch_seconds" --retry-all-errors --retry "$fetch_retries" \
+        --retry-delay "$fetch_retry_delay" "$1" -o "$2"
+}
 fetch "$(get url)" "$work/source.tar.xz"
 fetch "$(get signature_url)" "$work/source.tar.xz.asc"
 fetch "$(get key_url)" "$work/signing-key.asc"

@@ -168,6 +168,22 @@ class RuntimeContracts(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "system FFmpeg"):
                     module.check(root, output, 4096)
 
+    def test_pinned_fetch_retries_are_bounded_and_configurable(self):
+        build = (ROOT / "scripts/build-linux-ffmpeg.sh").read_text()
+        self.assertIn('fetch_seconds=${IRIS_FFMPEG_FETCH_SECONDS:-300}', build)
+        self.assertIn('fetch_retries=${IRIS_FFMPEG_FETCH_RETRIES:-1}', build)
+        self.assertIn('fetch_retry_delay=${IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS:-2}', build)
+        self.assertIn('--max-time "$fetch_seconds"', build)
+        self.assertIn('--retry-all-errors --retry "$fetch_retries"', build)
+        self.assertIn('--retry-delay "$fetch_retry_delay"', build)
+        self.assertIn('echo "$(get sha256)', build)
+        self.assertIn('--verify "$work/source.tar.xz.asc" "$work/source.tar.xz"', build)
+        for workflow in ("ci.yml", "linux-ffmpeg-validation.yml", "release.yml"):
+            contents = (ROOT / ".github/workflows" / workflow).read_text()
+            self.assertIn('vars.IRIS_FFMPEG_FETCH_SECONDS || 300', contents)
+            self.assertIn('vars.IRIS_FFMPEG_FETCH_RETRIES || 1', contents)
+            self.assertIn('vars.IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS || 2', contents)
+
     def test_build_staging_and_workflow_contract(self):
         workflow = (ROOT / ".github/workflows/linux-ffmpeg-validation.yml").read_text()
         # This reusable workflow has one call trigger and one bounded JSON upload.

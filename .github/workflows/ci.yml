@@ -136,6 +136,9 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
           IRIS_VERIFY_PDFIUM_PROVENANCE: "1"
+          IRIS_FFMPEG_FETCH_SECONDS: ${{ vars.IRIS_FFMPEG_FETCH_SECONDS || 300 }}
+          IRIS_FFMPEG_FETCH_RETRIES: ${{ vars.IRIS_FFMPEG_FETCH_RETRIES || 1 }}
+          IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS: ${{ vars.IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS || 2 }}
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/package-linux-appdir.sh
 
