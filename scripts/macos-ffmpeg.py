@@ -53,10 +53,12 @@ def run(*args, cwd=None, env=None, seconds=None):
                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             code = process.wait(timeout=seconds or setting('IRIS_FFMPEG_COMMAND_SECONDS', 60))
-        except BaseException:
+        except BaseException as error:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
-            raise ValueError(f"{Path(args[0]).name} interrupted or exceeded command deadline")
+            if isinstance(error, subprocess.TimeoutExpired):
+                raise ValueError(f"{Path(args[0]).name} exceeded command deadline") from error
+            raise
         size = log.tell()
         limit = setting('IRIS_FFMPEG_COMMAND_BYTES', 32768)
         log.seek(max(0, size - limit))
@@ -594,7 +596,8 @@ def preview_env(prefix, target, source):
     require(not target.exists(), 'preview Cargo target must be fresh')
     # Same build settings, but no ambient native discovery overrides for either runtime.
     env = {k: v for k, v in os.environ.items() if not k.startswith(('FFMPEG_', 'PKG_CONFIG_', 'IRIS_MACOS_FFMPEG_'))
-           and k not in ('CPATH', 'C_INCLUDE_PATH', 'CPLUS_INCLUDE_PATH', 'LIBRARY_PATH',
+           and k not in ('CPATH', 'C_INCLUDE_PATH', 'CPLUS_INCLUDE_PATH', 'OBJC_INCLUDE_PATH', 'LIBRARY_PATH',
+                        'CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS', 'LIBS', 'PKG_CONFIG',
                         'CMAKE_PREFIX_PATH', 'CMAKE_TOOLCHAIN_FILE')}
     return dict(env, FFMPEG_DIR=str(prefix), PKG_CONFIG_PATH=str(prefix / 'lib/pkgconfig'),
                 PKG_CONFIG_LIBDIR=str(prefix / 'lib/pkgconfig'), CARGO_TARGET_DIR=str(target), GITHUB_SHA=source)
@@ -612,13 +615,16 @@ def build_preview(env):
 def stage_preview(executable, prefix, app, sdk):
     paths = libraries(prefix)
     edges = closure(executable, paths.values(), sdk)
+    require(any(t == paths['avcodec'] for _, _, t in edges), 'preview is not linked to candidate libavcodec')
     dest = app / 'Contents/MacOS/preview_corpus_smoke'
     shutil.copy2(executable, dest)
     for loader, dep, target in edges:
         if loader == executable and isinstance(target, Path):
             run('install_name_tool', '-change', dep, '@executable_path/../Frameworks/' + target.name, dest)
     staged = list((app / 'Contents/Frameworks').iterdir())
-    closure(dest, staged, sdk)  # Reject a remaining prefix/Homebrew edge before execution.
+    edges = closure(dest, staged, sdk)  # Reject a remaining prefix/Homebrew edge before execution.
+    require(any(t == (app / 'Contents/Frameworks' / paths['avcodec'].name).resolve() for _, _, t in edges),
+            'staged preview is not linked to candidate libavcodec')
     run('codesign', '--force', '--sign', '-', '--timestamp=none', dest)
     run('codesign', '--force', '--sign', '-', '--timestamp=none', app)
     return dest
@@ -641,22 +647,31 @@ def validate(output):
             REDACTIONS[str(sdk)] = '<sdk>'
             source = os.environ.get('GITHUB_SHA') or run('git', '-C', ROOT, 'rev-parse', 'HEAD')
             corpus = work / 'corpus'
-            # One fetch, one caller-owned directory, reused unchanged for both runtimes.
-            run(sys.executable, ROOT / 'scripts/fetch-preview-corpus.py', '--output', corpus, cwd=ROOT,
-                seconds=setting('IRIS_FFMPEG_FETCH_SECONDS', 300))
-            baseline_prefix = Path(run('brew', '--prefix', 'ffmpeg')).resolve()
-            baseline_env = preview_env(baseline_prefix, work / 'cargo-baseline', source)
-            baseline_exe = build_preview(baseline_env)
             preview = dict(scope='Paired sequential crate-level diagnostics, no threshold, parity claim or legal approval.',
                            baseline_runtime='Existing Homebrew FFmpeg selection (not a compatible-runtime approval)',
-                           candidate_runtime='Pinned prefix, smoke executed against staged native closure')
+                           candidate_runtime='Pinned prefix, smoke executed against staged native closure', status='unavailable')
             report['preview'] = preview
-            preview['baseline'] = parse_preview(run(baseline_exe, corpus, env=baseline_env), source)
+            corpus_available = False
+            step = 'corpus fetch'
+            try:
+                # One fetch, one caller-owned directory, reused unchanged for both runtimes.
+                run(sys.executable, ROOT / 'scripts/fetch-preview-corpus.py', '--output', corpus, cwd=ROOT,
+                    seconds=setting('IRIS_FFMPEG_FETCH_SECONDS', 300))
+                corpus_available = True
+                step = 'Homebrew baseline'
+                baseline_prefix = Path(run('brew', '--prefix', 'ffmpeg')).resolve()
+                baseline_env = preview_env(baseline_prefix, work / 'cargo-baseline', source)
+                baseline_exe = build_preview(baseline_env)
+                preview['baseline'] = parse_preview(run(baseline_exe, corpus, env=baseline_env), source)
+            except InterruptedError:
+                raise
+            except Exception as error:
+                # Optional comparison cannot suppress candidate inventory/generated smokes.
+                preview['failure'] = (step + ': ' + clean(str(error))).encode()[:
+                    setting('IRIS_FFMPEG_COMMAND_BYTES', 32768)].decode('utf-8', 'ignore')
             prefix, target = work / 'candidate', work / 'cargo-candidate'
             build(prefix, sdk)
             env = dict(preview_env(prefix, target, source), IRIS_MACOS_REPORT_ONLY='1', IRIS_MACOS_FFMPEG_CANDIDATE=str(prefix),
-                       FFMPEG_DIR=str(prefix), PKG_CONFIG_PATH=str(prefix / 'lib/pkgconfig'),
-                       PKG_CONFIG_LIBDIR=str(prefix / 'lib/pkgconfig'), CARGO_TARGET_DIR=str(target),
                        IRIS_BUILD_VARIANT='product', IRIS_MACOS_SIGN_IDENTITY='-', IRIS_MACOS_NOTARY_PROFILE='')
             candidate_exe = build_preview(env)
             run('cargo', 'build', '--release', '-p', 'iris-thumb-preview', '--example', 'video_thumbnail_smoke',
@@ -666,8 +681,11 @@ def validate(output):
             candidate_smoke = stage_preview(candidate_exe, prefix, app, sdk)
             run('codesign', '--verify', '--deep', '--strict', app)
             report.update(check(app, sdk))
-            preview['candidate'] = parse_preview(run(candidate_smoke, corpus, env=env), source)
-            preview['paired_comparisons'] = paired_preview(preview['baseline'], preview['candidate'])
+            if corpus_available:
+                preview['candidate'] = parse_preview(run(candidate_smoke, corpus, env=env), source)
+                if 'baseline' in preview:
+                    preview['paired_comparisons'] = paired_preview(preview['baseline'], preview['candidate'])
+                    preview['status'] = 'passed'
             # Retain the existing additional MPEG-4/PNG candidate checks.
             for filename, options in (('video.avi', ['-t', '1', '-c:v', 'mpeg4', '-an']),
                                       ('still.png', ['-frames:v', '1', '-c:v', 'png'])):
@@ -682,7 +700,7 @@ def validate(output):
                     {p.name: digest(p) for p in (app / 'Contents/Frameworks').iterdir()},
                     'library bytes changed during smoke')
             report.update(status='passed', smoke=dict(video_mpeg4=True, still_png_file_and_bytes=True,
-                          corpus_correctness=True, raw_scope='Embedded-preview extraction, not sensor demosaic.'))
+                          corpus_correctness=corpus_available, raw_scope='Embedded-preview extraction, not sensor demosaic.'))
     except BaseException as error:
         report['status'] = 'failed'
         report['failure'] = clean(str(error))

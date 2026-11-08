@@ -16,6 +16,18 @@ spec.loader.exec_module(m)
 
 
 class CandidateContracts(unittest.TestCase):
+    def test_command_cancellation_is_not_an_optional_comparison_failure(self):
+        for error in (InterruptedError('TERM'), KeyboardInterrupt(), m.subprocess.TimeoutExpired('synthetic', 1)):
+            with self.subTest(error=type(error).__name__), patch.object(m.subprocess, 'Popen') as popen, \
+                    patch.object(m.os, 'killpg') as kill:
+                process = popen.return_value
+                process.pid = 123
+                process.wait.side_effect = [error, 0]
+                with self.assertRaises(ValueError if isinstance(error, m.subprocess.TimeoutExpired) else type(error)):
+                    m.run('synthetic')
+                kill.assert_called_once_with(123, m.signal.SIGKILL)
+                self.assertEqual(process.wait.call_count, 2)
+
     def test_shared_pin_and_signature_refusal(self):
         self.assertEqual(m.POLICY, json.loads((ROOT / 'packaging/linux/ffmpeg.json').read_text()))
         self.assertEqual(m.MACOS_POLICY['platform'], 'macOS')
@@ -528,8 +540,16 @@ class PreviewComparison(unittest.TestCase):
     def test_fresh_default_feature_builds_and_pinned_discovery(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            baseline = m.preview_env(root / 'brew', root / 'cargo-baseline', 'synthetic')
-            candidate = m.preview_env(root / 'candidate', root / 'cargo-candidate', 'synthetic')
+            overrides = dict.fromkeys(('CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS', 'LIBS', 'OBJC_INCLUDE_PATH',
+                                       'PKG_CONFIG_SYSROOT_DIR', 'PKG_CONFIG', 'CPATH', 'C_INCLUDE_PATH',
+                                       'CPLUS_INCLUDE_PATH', 'LIBRARY_PATH', 'CMAKE_PREFIX_PATH',
+                                       'CMAKE_TOOLCHAIN_FILE', 'FFMPEG_LIB_DIR', 'IRIS_MACOS_FFMPEG_CANDIDATE'),
+                                      '/untrusted')
+            with patch.dict(m.os.environ, overrides):
+                baseline = m.preview_env(root / 'brew', root / 'cargo-baseline', 'synthetic')
+                candidate = m.preview_env(root / 'candidate', root / 'cargo-candidate', 'synthetic')
+            for env in (baseline, candidate):
+                self.assertFalse(overrides.keys() & env.keys())
             self.assertNotEqual(baseline['CARGO_TARGET_DIR'], candidate['CARGO_TARGET_DIR'])
             for env in (baseline, candidate):
                 with patch.object(m, 'run', side_effect=[env['FFMPEG_DIR'], '']) as run:
@@ -548,15 +568,22 @@ class PreviewComparison(unittest.TestCase):
 
 
     def test_single_shared_fetch_and_cleanup_on_success_failure_and_interruption(self):
-        for failure in (None, ValueError, KeyboardInterrupt, InterruptedError):
-            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+        cases = [(None, failure) for failure in (None, ValueError, KeyboardInterrupt, InterruptedError)]
+        cases += [(step, None) for step in ('fetch', 'baseline-discovery', 'baseline-build', 'baseline-smoke')]
+        cases += [('baseline-build', ValueError), ('fetch', 'inventory'), ('fetch', 'generated')]
+        for unavailable, failure in cases:
+            with self.subTest(unavailable=unavailable, failure=failure), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp).resolve()
                 pins = root / 'tests/preview-corpus/fixtures.json'
                 pins.parent.mkdir(parents=True)
                 pins.write_bytes((ROOT / 'tests/preview-corpus/fixtures.json').read_bytes())
                 app = root / 'dist/macos/Iris.app'
                 output = root / 'audit/candidate.json'
-                fetches, measurements, builds = [], [], []
+                fetches, measurements, builds, candidate_checks = [], [], [], []
+
+                def optional_failure(step):
+                    if unavailable == step:
+                        raise ValueError(str(fetches[0].parent) + ' synthetic ' + step + ' failure ' + 'x' * 40000)
 
                 def run(*args, **kwargs):
                     command = str(args[0])
@@ -564,6 +591,7 @@ class PreviewComparison(unittest.TestCase):
                     if command == 'xcrun':
                         return str(root / 'sdk')
                     if command == 'brew':
+                        optional_failure('baseline-discovery')
                         return str(root / 'brew')
                     if command == 'pkg-config':
                         return env['FFMPEG_DIR']
@@ -573,7 +601,10 @@ class PreviewComparison(unittest.TestCase):
                         corpus.mkdir()
                         (corpus / 'synthetic-fixture').write_text('must be removed')
                         fetches.append(corpus)
+                        optional_failure('fetch')
                     if command == 'cargo' and 'preview_corpus_smoke' in args:
+                        if env['FFMPEG_DIR'].endswith('/brew'):
+                            optional_failure('baseline-build')
                         target = Path(env['CARGO_TARGET_DIR'])
                         self.assertFalse(target.exists())
                         (target / 'release/examples').mkdir(parents=True)
@@ -587,12 +618,19 @@ class PreviewComparison(unittest.TestCase):
                     if command.endswith('preview_corpus_smoke'):
                         self.assertTrue((Path(args[1]) / 'synthetic-fixture').is_file())
                         measurements.append(Path(args[1]))
-                        if len(measurements) == 2 and failure:
+                        if env['FFMPEG_DIR'].endswith('/brew'):
+                            optional_failure('baseline-smoke')
+                        elif failure and not isinstance(failure, str):
                             raise failure('synthetic smoke interruption/failure')
                         return self.text()
+                    if command.endswith('video_thumbnail_smoke'):
+                        candidate_checks.append(str(args[1]).rsplit('/', 1)[-1])
+                        if failure == 'generated':
+                            raise ValueError('synthetic generated smoke failure')
                     return ''
 
                 def build(prefix, sdk):
+                    candidate_checks.append('native-build')
                     prefix.mkdir()
                     (prefix / 'synthetic-native-build').touch()
 
@@ -602,6 +640,9 @@ class PreviewComparison(unittest.TestCase):
                     return dest
 
                 def check(app, sdk):
+                    candidate_checks.append('inventory')
+                    if failure == 'inventory':
+                        raise ValueError('synthetic candidate inventory failure')
                     return dict(runtime=[], executables={p.name: m.digest(p) for p in (app / 'Contents/MacOS').iterdir()})
 
                 with patch.object(m, 'ROOT', root), patch.object(m.sys, 'platform', 'darwin'), \
@@ -609,23 +650,37 @@ class PreviewComparison(unittest.TestCase):
                         patch.object(m, 'stage_preview', side_effect=stage), patch.object(m, 'check', side_effect=check), \
                         patch.dict(m.os.environ, GITHUB_SHA='synthetic'), patch.dict(m.REDACTIONS):
                     if failure:
-                        with self.assertRaises(failure):
+                        with self.assertRaises(ValueError if isinstance(failure, str) else failure):
                             m.validate(output)
                     else:
                         m.validate(output)
                 self.assertEqual(len(fetches), 1)
-                self.assertEqual(measurements, fetches * 2)
-                self.assertEqual(len(builds), 2)
-                self.assertNotEqual(builds[0]['CARGO_TARGET_DIR'], builds[1]['CARGO_TARGET_DIR'])
-                self.assertEqual(builds[0]['FFMPEG_DIR'], str(root / 'brew'))
-                self.assertTrue(builds[1]['FFMPEG_DIR'].endswith('/candidate'))
+                expected_measurements = (0 if unavailable == 'fetch' else
+                                         1 if unavailable in ('baseline-discovery', 'baseline-build') else 2)
+                self.assertEqual(measurements, fetches * expected_measurements)
+                self.assertEqual(len(builds), 2 if unavailable in (None, 'baseline-smoke') else 1)
+                self.assertEqual(len({b['CARGO_TARGET_DIR'] for b in builds}), len(builds))
+                self.assertTrue(builds[-1]['FFMPEG_DIR'].endswith('/candidate'))
+                self.assertEqual(candidate_checks, ['native-build', 'inventory'] +
+                                 (['video.avi'] if failure == 'generated' else
+                                  [] if failure else ['video.avi', 'still.png']))
                 self.assertFalse(app.parent.exists())
                 self.assertFalse((root / 'target/macos-runtime-validation').exists())
                 report = json.loads(output.read_text())
                 self.assertEqual(report['status'], 'failed' if failure else 'passed')
-                self.assertIn('baseline', report['preview'])
+                preview = report['preview']
+                if unavailable:
+                    self.assertEqual(preview['status'], 'unavailable')
+                    self.assertNotIn('baseline', preview)
+                    self.assertNotIn('paired_comparisons', preview)
+                    self.assertNotIn(str(root), preview['failure'])
+                    self.assertIn('synthetic', preview['failure'])
+                    self.assertLessEqual(len(preview['failure'].encode()), 32768)
+                elif not failure:
+                    self.assertEqual(preview['status'], 'passed')
+                    self.assertEqual(len(preview['paired_comparisons']), 3)
                 if not failure:
-                    self.assertEqual(len(report['preview']['paired_comparisons']), 3)
+                    self.assertEqual(report['smoke']['corpus_correctness'], unavailable != 'fetch')
                 self.assertEqual({p.relative_to(root).as_posix() for p in root.rglob('*') if p.is_file()},
                                  {'tests/preview-corpus/fixtures.json', 'audit/candidate.json'})
 
@@ -643,7 +698,8 @@ class PreviewComparison(unittest.TestCase):
             staged.touch()
             dest = app / 'Contents/MacOS/preview_corpus_smoke'
             with patch.object(m, 'libraries', return_value={'avcodec': lib}), \
-                    patch.object(m, 'closure', side_effect=[[(executable, str(lib), lib)], []]) as closure, \
+                    patch.object(m, 'closure', side_effect=[[(executable, str(lib), lib)],
+                                                          [(dest, '@executable_path/../Frameworks/' + lib.name, staged)]]) as closure, \
                     patch.object(m, 'run') as run:
                 self.assertEqual(m.stage_preview(executable, root / 'candidate', app, root / 'sdk'), dest)
                 closure.assert_called_with(dest, [staged], root / 'sdk')
@@ -651,6 +707,19 @@ class PreviewComparison(unittest.TestCase):
                                  ('install_name_tool', '-change', str(lib),
                                   '@executable_path/../Frameworks/' + lib.name, dest))
                 self.assertEqual(run.call_args_list[-1].args[-1], app)
+            for edges in ([], [(executable, '/usr/lib/libSystem.B.dylib', {'system': True})],
+                          [(executable, 'libavformat.dylib', root / 'candidate/lib/libavformat.dylib')]):
+                with self.subTest(edges=edges), patch.object(m, 'libraries', return_value={'avcodec': lib}), \
+                        patch.object(m, 'closure', return_value=edges), patch.object(m, 'run') as run:
+                    with self.assertRaisesRegex(ValueError, 'not linked to candidate libavcodec'):
+                        m.stage_preview(executable, root / 'candidate', app, root / 'sdk')
+                    run.assert_not_called()
+            with patch.object(m, 'libraries', return_value={'avcodec': lib}), \
+                    patch.object(m, 'closure', side_effect=[[(executable, str(lib), lib)], []]), \
+                    patch.object(m, 'run') as run:
+                with self.assertRaisesRegex(ValueError, 'staged preview is not linked'):
+                    m.stage_preview(executable, root / 'candidate', app, root / 'sdk')
+                self.assertNotIn('codesign', [c.args[0] for c in run.call_args_list])
             with patch.object(m, 'libraries', return_value={'avcodec': lib}), \
                     patch.object(m, 'closure', side_effect=ValueError('outside exact candidate')), \
                     patch.object(m, 'run') as run:

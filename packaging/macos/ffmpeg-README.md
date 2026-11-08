@@ -91,13 +91,20 @@ approval.
 Both default-feature runtime smokes use the same once-fetched, digest-pinned
 [preview corpus](../../tests/preview-corpus/README.md), reverified before extraction.
 Fresh separate Cargo targets prevent reuse of FFmpeg discovery. The candidate
-smoke is rewritten/signed into the temporary app and its staged closure checked
-before execution. The report retains correctness and JPEG/CR3/H.264 timings for
-both runtimes; paired differences require matching input, output, build, source
+smoke is rewritten/signed into the temporary app; its resolved build and staged
+closures must link the pinned libavcodec before execution. Both preview builds
+clear ambient compiler/linker/include and pkg-config search overrides. The report
+retains correctness and JPEG/CR3/H.264 timings for both runtimes; paired differences require matching input, output, build, source
 and runner/CPU identities. Only H.264 timing exercises FFmpeg; JPEG/CR3 use Iris
 Rust code. PDF correctness uses Core Graphics. Existing generated MPEG-4/PNG
-fallback smokes remain additional candidate checks. There is no latency threshold
-or claim of runtime parity, sensor demosaic, HDR/HEIF coverage or legal approval.
+fallback smokes and native inventory remain mandatory candidate checks even if
+the corpus fetch or Homebrew discovery/build/smoke fails. Such failures record a
+bounded, path-redacted `preview.status=unavailable` reason and omit paired
+comparisons. A failed fetch sets `smoke.corpus_correctness=false`; candidate
+corpus correctness (when fetched), closure and generated-smoke failures still fail
+validation. Cancellation is not treated as an optional failure. There is no
+latency threshold or claim of runtime parity, sensor demosaic, HDR/HEIF coverage
+or legal approval.
 
 Policy defaults (all positive, configurable via job variables): IRIS_FFMPEG_JOBS
 2, IRIS_FFMPEG_BUILD_SECONDS 3600 per build command, IRIS_FFMPEG_FETCH_SECONDS

@@ -68,7 +68,10 @@ closure. Both runs use the same corpus directory and verify it before measuremen
 Its existing `macos-candidate.json` retains both correctness/timing sets and paired
 median differences only when fixture hashes/sizes, operations, output dimensions,
 format/source, Cargo lock/features, build/compiler, runner/CPU and source identities
-match. Any mismatch rejects pairing. Samples/warmups must also match.
+match. Any mismatch rejects pairing. Samples/warmups must also match. Corpus
+fetch or Homebrew baseline failure records a bounded `unavailable` reason without
+paired comparisons; candidate native inventory and generated MPEG-4/PNG smokes
+still run. Candidate correctness failures remain fatal, not optional diagnostics.
 
 The driver keeps the existing `IRIS_FFMPEG_MAX_REPORT_BYTES` cap (266,240 bytes)
 and command-output/deadline bounds. The workflow configures the corpus budget
