@@ -949,7 +949,10 @@ fn validate_response_segment(
         };
         let response_signed = response_header.flags & SMB2_FLAGS_SIGNED == SMB2_FLAGS_SIGNED;
         if !response_signed {
-            return Err(SmbConnectionError::UnsignedResponse);
+            return Err(SmbConnectionError::UnsignedResponse {
+                command: expected_command,
+                status: response_header.status().0,
+            });
         }
         if !signing_key.verify_packet(response_packet)? {
             return Err(SmbConnectionError::SignatureVerificationFailed);
@@ -1530,14 +1533,20 @@ mod tests {
     #[tokio::test]
     async fn actor_rejects_unsigned_response_once_signing_is_enabled() {
         let error = echo_with_hmac_signing(|request, _| {
-            response_packet(
-                Smb2Header::new(request.command, request.message_id),
-                b"pong",
-            )
+            let mut header = Smb2Header::new(request.command, request.message_id);
+            header.status_or_channel_sequence =
+                crate::packet::header::SmbNtStatus::MORE_PROCESSING_REQUIRED.0;
+            response_packet(header, b"pong")
         })
         .await
         .expect_err("unsigned response");
-        assert!(matches!(error, SmbConnectionError::UnsignedResponse));
+        assert!(matches!(
+            error,
+            SmbConnectionError::UnsignedResponse {
+                command: Smb2Command::Echo,
+                status: 0xc000_0016,
+            }
+        ));
     }
 
     #[tokio::test]

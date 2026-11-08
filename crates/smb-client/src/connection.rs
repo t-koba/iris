@@ -27,8 +27,10 @@ pub enum SmbConnectionError {
     #[error("SMB response signature verification failed")]
     SignatureVerificationFailed,
 
-    #[error("SMB response was not signed after signing became mandatory")]
-    UnsignedResponse,
+    #[error(
+        "SMB {command:?} response with status 0x{status:08x} was not signed after signing became mandatory"
+    )]
+    UnsignedResponse { command: Smb2Command, status: u32 },
 
     #[error("SMB {command:?} returned unexpected status 0x{status:08x}")]
     UnexpectedStatus { command: Smb2Command, status: u32 },
