@@ -1,8 +1,8 @@
 name: Windows FFmpeg prototype
 
 # Non-publishing Windows default-preview prototype: run the full investigation
-# for relevant PRs targeting dev and pushes to dev. Keep workflow_call for CI's
-# manual exact-ref validation route. Never publishes or touches release packaging.
+# only for relevant PRs targeting dev; do not repeat it after merge. Preserve
+# workflow_call for manual exact-ref validation. Never publishes or touches release packaging.
 on:
   workflow_call:
   pull_request:
@@ -15,24 +15,9 @@ on:
       - 'Cargo.lock'
       - '.cargo/**'
       - 'rust-toolchain.toml'
-      - 'assets/**'
-      - 'crates/**'
-      - 'scripts/**'
-      - 'packaging/**'
-  push:
-    branches: [dev]
-    paths:
-      - 'prototype/windows-ffmpeg/**'
-      - '.github/workflows/windows-ffmpeg-prototype.yml'
-      - '.github/workflows/ci.yml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.cargo/**'
-      - 'rust-toolchain.toml'
-      - 'assets/**'
-      - 'crates/**'
-      - 'scripts/**'
-      - 'packaging/**'
+      - 'assets/icons/iris-icon.ico'
+      - 'crates/ui-shell/**'
+      - 'crates/thumb-preview/**'
 
 permissions:
   contents: read

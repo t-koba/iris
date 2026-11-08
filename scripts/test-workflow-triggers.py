@@ -31,18 +31,22 @@ prototype_triggers = prototype.split("on:\n", 1)[1].split("\npermissions:", 1)[0
 prototype_paths = {
     "prototype/windows-ffmpeg/**", ".github/workflows/windows-ffmpeg-prototype.yml",
     ".github/workflows/ci.yml", "Cargo.toml", "Cargo.lock", ".cargo/**",
-    "rust-toolchain.toml", "assets/**", "crates/**", "scripts/**", "packaging/**",
+    "rust-toolchain.toml", "assets/icons/iris-icon.ico", "crates/ui-shell/**",
+    "crates/thumb-preview/**",
 }
 positive_paths = (
     "prototype/windows-ffmpeg/preview-smoke/src/main.rs",
     ".github/workflows/windows-ffmpeg-prototype.yml", ".github/workflows/ci.yml",
-    "Cargo.toml", "Cargo.lock", ".cargo/config.toml", "rust-toolchain.toml", "assets/icons/iris-icon.ico",
-    "crates/ui-shell/src/main.rs", "scripts/test-workflow-triggers.py",
-    "packaging/windows/app.manifest",
+    "Cargo.toml", "Cargo.lock", ".cargo/config.toml", "rust-toolchain.toml",
+    "assets/icons/iris-icon.ico", "crates/ui-shell/src/main.rs",
+    "crates/thumb-preview/src/lib.rs",
 )
 negative_paths = (
     "README.md", "docs/development.md", ".github/workflows/release.yml",
     "prototype/other/main.rs", "Cargo.toml.bak", "crates-other/main.rs",
+    "crates/smb-client/src/lib.rs", "crates/backends/src/pcloud/api_client.rs",
+    "scripts/test-workflow-triggers.py", "scripts/package-linux.sh",
+    "packaging/windows/app.manifest", "assets/screenshots/guide.png",
 )
 
 
@@ -79,13 +83,12 @@ checks = {
       contents: read
     uses: ./.github/workflows/windows-ffmpeg-prototype.yml
 """ in ci,
-    "prototype retains workflow_call without standalone manual dispatch": (
+    "prototype keeps workflow_call and has no duplicate standalone push": (
         "  workflow_call:\n" in prototype_triggers
         and re.findall(r"^  ([a-z_]+):", prototype_triggers, re.MULTILINE)
-        == ["workflow_call", "pull_request", "push"]
+        == ["workflow_call", "pull_request"]
     ),
-    "prototype PRs target only dev with relevant paths": prototype_event_contract("pull_request"),
-    "prototype pushes target only dev (not mizu/main) with relevant paths": prototype_event_contract("push"),
+    "prototype PRs target only dev with relevant build paths": prototype_event_contract("pull_request"),
     "prototype vcpkg retries are configurable and timeout-specific": all(
         text in prototype for text in (
             "IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRIES: ${{ vars.IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRIES || 1 }}",
