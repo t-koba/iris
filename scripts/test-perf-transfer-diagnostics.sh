@@ -85,6 +85,7 @@ report_logs() {
     IRIS_PERF_TEST_SMBCONTROL_BYTES="$smbcontrol_bytes" \
     IRIS_PERF_WORK_ROOT="$test_root/work" \
     IRIS_PERF_KEEP_CONTAINERS=0 \
+    IRIS_PERF_SAMBA_IMAGE="sha256:$(printf '%064d' 0)" \
     IRIS_PERF_SKIP_SFTP=1 \
     IRIS_PERF_SKIP_SMB=0 \
     IRIS_PERF_SMB_LOG_LEVEL=2 \
@@ -109,6 +110,8 @@ printf 'peer diagnostic\n' >"$test_root/logs/log.172.17.0.1"
 printf 'nmbd diagnostic\n' >"$test_root/logs/log.nmbd"
 printf 'smbd iris diagnostic\nAuth: user [iris] with [NTLMv2] status [NT_STATUS_LOGON_FAILURE]\n' >"$test_root/logs/log.smbd"
 report_logs
+grep -Fxq '<--pull=never>' "$test_root/docker-args"
+grep -Fxq "<sha256:$(printf '%064d' 0)>" "$test_root/docker-args"
 grep -Fxq '<log level = 2>' "$test_root/docker-args"
 ! grep -Fq 'auth_audit' "$test_root/docker-args"
 grep -Fq 'smbd [redacted] diagnostic' "$test_root/report"

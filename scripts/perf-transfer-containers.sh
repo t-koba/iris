@@ -13,7 +13,8 @@ sftp_image="${IRIS_PERF_SFTP_IMAGE:-atmoz/sftp:alpine}"
 sftp_port="${IRIS_PERF_SFTP_PORT:-2222}"
 ready_timeout="${IRIS_PERF_READY_TIMEOUT_SECONDS:-60}"
 ssh_keyscan_timeout="${IRIS_PERF_SSH_KEYSCAN_TIMEOUT_SECONDS:-5}"
-smb_image="${IRIS_PERF_SAMBA_IMAGE:-adrianmusante/samba:4.23.10}"
+smb_image="${IRIS_PERF_SAMBA_IMAGE:-}"
+owned_smb_image=""
 smb_port="${IRIS_PERF_SMB_PORT:-1445}"
 smb_mount="${IRIS_PERF_SMB_MOUNT:-}"
 smb_paging_files="${IRIS_PERF_SMB_PAGING_FILES:-0}"
@@ -49,7 +50,11 @@ Environment:
   IRIS_PERF_SFTP_PORT        Host SFTP port (default: 2222).
   IRIS_PERF_READY_TIMEOUT_SECONDS Readiness deadline (default: 60).
   IRIS_PERF_SSH_KEYSCAN_TIMEOUT_SECONDS Per-scan timeout (default: 5).
-  IRIS_PERF_SAMBA_IMAGE      Samba container image (default: adrianmusante/samba:4.23.10).
+  IRIS_PERF_SAMBA_IMAGE      Local Samba sha256 image ID (never a registry tag).
+                             If unset, build a signed Debian snapshot test rootfs
+                             (requires Linux, sudo, debootstrap, archive keyring).
+  IRIS_PERF_DEBIAN_KEYRING   Host archive keyring for that build (default:
+                             /usr/share/keyrings/debian-archive-keyring.gpg).
   IRIS_PERF_SMB_PORT         Host SMB port (default: 1445).
   IRIS_PERF_SMB_MOUNT        Existing SMB mount path to benchmark. If unset,
                              macOS is auto-mounted; Linux prints mount guidance.
@@ -185,6 +190,14 @@ run_sftp_benchmarks() {
 }
 
 start_samba() {
+  if [[ -z "$smb_image" ]]; then
+    smb_image="$(bash "$script_dir/build-test-samba.sh")"
+    owned_smb_image="$smb_image"
+  fi
+  if [[ ! "$smb_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "IRIS_PERF_SAMBA_IMAGE must be a local sha256 image ID" >&2
+    return 2
+  fi
   mkdir -p "$work_root/samba-share"
   if (( smb_paging_files > 0 )); then
     local suffix
@@ -195,14 +208,11 @@ start_samba() {
   fi
   docker rm -f "$smb_container" >/dev/null 2>&1 || true
   local samba_args=(
-    run -d
+    run -d --pull=never
     --name "$smb_container"
     -p "$smb_port:445"
-    -e "SAMBA_LOG_LEVEL=$smb_debug_level"
     -v "$work_root/samba-share:/mount"
     "$smb_image"
-    -u "iris;iris"
-    -s "bench;/mount;yes;no;no;iris"
   )
   if [[ -n "$smb_min_protocol" ]]; then
     samba_args+=(-g "server min protocol = $smb_min_protocol")
@@ -362,6 +372,9 @@ cleanup() {
       umount "$mounted_by_script" >/dev/null 2>&1 || true
     fi
     docker rm -f "$sftp_container" "$smb_container" >/dev/null 2>&1 || true
+    if [[ -n "$owned_smb_image" ]]; then
+      docker image rm "$owned_smb_image" >/dev/null 2>&1 || true
+    fi
     if [[ -n "${created_work_root:-}" ]]; then
       rm -rf "$created_work_root"
     fi

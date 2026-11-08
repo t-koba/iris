@@ -54,7 +54,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config clang ffmpeg netcat-openbsd openssh-client ripgrep zsh dpkg-dev build-essential nasm patchelf curl gnupg zlib1g-dev libbz2-dev liblzma-dev \
+          sudo apt-get install -y pkg-config clang ffmpeg netcat-openbsd openssh-client ripgrep zsh dpkg-dev build-essential nasm patchelf curl gnupg debootstrap debian-archive-keyring gpgv ca-certificates zlib1g-dev libbz2-dev liblzma-dev \
             libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev
 
@@ -199,6 +199,17 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: bash ./scripts/test-perf-transfer-diagnostics.sh
 
+      - name: Samba test-server policy regression
+        if: matrix.os == 'ubuntu-latest'
+        run: bash ./scripts/test-samba-builder.sh
+
+      - name: Build local signed-snapshot Samba test server
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          image=$(bash ./scripts/build-test-samba.sh)
+          [[ "$image" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "IRIS_PERF_SAMBA_IMAGE=$image" >> "$GITHUB_ENV"
+
       - name: Native SFTP and SMB container integration
         if: matrix.os == 'ubuntu-latest'
         env:
@@ -240,6 +251,10 @@ jobs:
           IRIS_PERF_SMB_SERVER_SIGNING: "mandatory"
           IRIS_PERF_SMB_ENCRYPTION: "off"
         run: bash ./scripts/perf-transfer-containers.sh
+
+      - name: Remove local Samba test image
+        if: always() && matrix.os == 'ubuntu-latest' && env.IRIS_PERF_SAMBA_IMAGE != ''
+        run: docker image rm "$IRIS_PERF_SAMBA_IMAGE"
 
       - name: Install fuzz toolchain
         if: matrix.os == 'ubuntu-latest'
