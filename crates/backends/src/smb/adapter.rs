@@ -36,6 +36,27 @@ pub struct SmbAdapter {
     ticket_counter: AtomicU64,
 }
 
+// Armed before OPEN: cancellation can lose even the CREATE response. Never
+// asynchronously CLOSE on cancellation: pipelined writes may still own the actor.
+struct StreamedWriteGuard {
+    pool: Arc<SmbPool>,
+    generation: u64,
+    armed: bool,
+}
+
+impl Drop for StreamedWriteGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.pool.mark_invalid(self.generation);
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let pool = Arc::clone(&self.pool);
+                let generation = self.generation;
+                runtime.spawn(async move { pool.invalidate(generation).await });
+            }
+        }
+    }
+}
+
 impl SmbAdapter {
     pub fn new(config: SmbConnectionConfig, backend_id: BackendId) -> Self {
         Self {
@@ -347,6 +368,11 @@ impl SmbAdapter {
         create_disposition: Smb2CreateDisposition,
     ) -> Result<(), BackendError> {
         let smb_path = smb_relative_path(display_path)?;
+        let mut guard = StreamedWriteGuard {
+            pool: Arc::clone(&self.pool),
+            generation: native.generation,
+            armed: true,
+        };
         let file = open_file_for_write(&native.actor, smb_path, create_disposition)
             .await
             .map_err(|error| smb_network_error("open file for streaming write", error))?;
@@ -358,10 +384,13 @@ impl SmbAdapter {
         'stream: loop {
             let mut chunks = Vec::with_capacity(PIPELINE_DEPTH);
             for _ in 0..PIPELINE_DEPTH {
-                let read = reader
-                    .read(&mut buffer)
-                    .await
-                    .map_err(|error| BackendError::Internal(Box::new(error)))?;
+                let read = match reader.read(&mut buffer).await {
+                    Ok(read) => read,
+                    Err(error) => {
+                        write_result = Err(BackendError::Internal(Box::new(error)));
+                        break 'stream;
+                    }
+                };
                 if read == 0 {
                     break;
                 }
@@ -374,8 +403,12 @@ impl SmbAdapter {
             if let Err(error) =
                 write_file_chunks_pipelined(&native.actor, &file, chunks, PIPELINE_DEPTH).await
             {
-                write_result = Err(smb_network_error("streaming write", error));
-                break 'stream;
+                // The pipeline returns on its first error and detaches sibling
+                // tasks (at most PIPELINE_DEPTH). They retain their actor request
+                // deadlines. Skip CLOSE: it could race those writes on the wire.
+                // The armed guard invalidates and evicts this generation; the
+                // actor drains dispatched requests before closing the connection.
+                return Err(smb_network_error("streaming write", error));
             }
         }
 
@@ -383,6 +416,8 @@ impl SmbAdapter {
             .await
             .map(|_| ())
             .map_err(|error| smb_network_error("close streamed file", error));
+        guard.armed = close_result.is_err();
+        // A reader error takes precedence over a cleanup error.
         write_result.and(close_result)
     }
 
@@ -1259,6 +1294,191 @@ mod tests {
         server_task.await.expect("server task");
     }
 
+    struct FailingReader;
+
+    impl AsyncRead for FailingReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "synthetic source failure",
+            )))
+        }
+    }
+
+    struct PendingReader(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl AsyncRead for PendingReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if let Some(entered) = self.0.take() {
+                entered.send(()).expect("reader polled after OPEN");
+            }
+            Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn native_streamed_reader_error_closes_and_preserves_error() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for close_fails in [false, true] {
+                let (config, server) =
+                    start_fake_native_server(FakeNativeScenario::StreamedWrite(Some(close_fails)))
+                        .await;
+                let backend_id = BackendId("smb:native".to_string());
+                let adapter = SmbAdapter::new(config, backend_id.clone());
+                let generation = adapter.native_session().await.unwrap().generation;
+                let error = adapter
+                    .write_from_reader(
+                        &object_ref(&backend_id, "folder/out.bin"),
+                        Box::pin(FailingReader),
+                        None,
+                        ConflictResolution::Fail,
+                    )
+                    .await
+                    .expect_err("source failed");
+                let BackendError::Internal(error) = error else {
+                    panic!("original source error was masked: {error:?}");
+                };
+                let error = error.downcast_ref::<std::io::Error>().unwrap();
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+                assert_eq!(error.to_string(), "synthetic source failure");
+
+                // A successful CLOSE keeps the same connection; cleanup failure
+                // must evict it even though the returned error is Internal.
+                let next = adapter.native_session().await.unwrap();
+                assert_eq!(next.generation == generation, !close_fails);
+                adapter
+                    .list_names(&object_ref(&backend_id, ""), None)
+                    .await
+                    .expect("follow-up listing");
+                server.await.expect("server task");
+            }
+        })
+        .await
+        .expect("bounded reader failure regression");
+    }
+
+    #[test]
+    fn streamed_write_guard_can_drop_without_runtime() {
+        let pool = Arc::new(SmbPool::new(SmbConnectionConfig {
+            server: "127.0.0.1".to_string(),
+            port: 445,
+            share_name: "share".to_string(),
+            username: None,
+            domain: None,
+            password: None,
+            workstation: None,
+            allow_guest: true,
+        }));
+        drop(StreamedWriteGuard {
+            pool,
+            generation: 1,
+            armed: true,
+        });
+    }
+
+    #[tokio::test]
+    async fn native_streamed_write_cancellation_evicts_session() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (config, server) =
+                start_fake_native_server(FakeNativeScenario::StreamedWrite(None)).await;
+            let backend_id = BackendId("smb:native".to_string());
+            let adapter = SmbAdapter::new(config, backend_id.clone());
+            let generation = adapter.native_session().await.unwrap().generation;
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let dst = object_ref(&backend_id, "folder/out.bin");
+            let mut write = Box::pin(adapter.write_from_reader(
+                &dst,
+                Box::pin(PendingReader(Some(entered))),
+                None,
+                ConflictResolution::Fail,
+            ));
+            tokio::select! {
+                result = &mut write => panic!("unexpected write result: {result:?}"),
+                result = ready => result.expect("source reached after OPEN"),
+            }
+            drop(write);
+            // No yield between cancellation and acquisition: the synchronous
+            // invalid marker, not the background removal task, prevents reuse.
+            let next = adapter.native_session().await.unwrap();
+            assert_ne!(next.generation, generation);
+            adapter
+                .list_names(&object_ref(&backend_id, ""), None)
+                .await
+                .expect("listing on new connection");
+            server
+                .await
+                .expect("old connection closed and new connection used");
+        })
+        .await
+        .expect("bounded cancellation regression");
+    }
+
+    #[tokio::test]
+    async fn native_streamed_inflight_writes_never_return_to_pool() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for fail_write in [false, true] {
+                let (entered, ready) = tokio::sync::oneshot::channel();
+                let (config, server) =
+                    start_fake_native_server(FakeNativeScenario::StreamedPipeline {
+                        fail_write,
+                        entered,
+                    })
+                    .await;
+                let backend_id = BackendId("smb:native".to_string());
+                let adapter = SmbAdapter::new(config, backend_id.clone());
+                let generation = adapter.native_session().await.unwrap().generation;
+                let dst = object_ref(&backend_id, "folder/out.bin");
+                let mut write = Box::pin(adapter.write_from_reader(
+                    &dst,
+                    Box::pin(Cursor::new(vec![42; 2 * DEFAULT_WRITE_CHUNK_LENGTH])),
+                    None,
+                    ConflictResolution::Fail,
+                ));
+                if fail_write {
+                    let error = write.as_mut().await.expect_err("first write failed");
+                    let BackendError::Internal(error) = error else {
+                        panic!("original write error was masked: {error:?}");
+                    };
+                    assert_eq!(
+                        error.to_string(),
+                        format!(
+                            "SMB native streaming write failed: {}",
+                            SmbConnectionError::ShortWrite {
+                                expected: DEFAULT_WRITE_CHUNK_LENGTH as u32,
+                                actual: 0,
+                            }
+                        )
+                    );
+                } else {
+                    tokio::select! {
+                        result = &mut write => panic!("unexpected write result: {result:?}"),
+                        result = ready => result.expect("two dispatched writes"),
+                    }
+                }
+                drop(write);
+                let next = adapter.native_session().await.unwrap();
+                assert_ne!(next.generation, generation);
+                adapter
+                    .list_names(&object_ref(&backend_id, ""), None)
+                    .await
+                    .expect("new session works while old writes are unresolved");
+                server
+                    .await
+                    .expect("old writes drain and connection closes");
+            }
+        })
+        .await
+        .expect("bounded in-flight write regression");
+    }
+
     #[tokio::test]
     async fn native_mkdir_uses_smb_actor_session() {
         let (config, server_task) = start_fake_native_server(FakeNativeScenario::Mkdir).await;
@@ -1332,11 +1552,16 @@ mod tests {
         server_task.await.expect("server task");
     }
 
-    #[derive(Clone, Copy)]
     enum FakeNativeScenario {
         ListRoot,
         ReadFile,
         WriteFile,
+        // None cancels while the source is pending; Some controls CLOSE status.
+        StreamedWrite(Option<bool>),
+        StreamedPipeline {
+            fail_write: bool,
+            entered: tokio::sync::oneshot::Sender<()>,
+        },
         Mkdir,
         MoveFile,
         DeleteFile,
@@ -1357,6 +1582,94 @@ mod tests {
                 FakeNativeScenario::ListRoot => handle_list_root(&mut transport).await,
                 FakeNativeScenario::ReadFile => handle_read_file(&mut transport).await,
                 FakeNativeScenario::WriteFile => handle_write_file(&mut transport).await,
+                FakeNativeScenario::StreamedWrite(close_fails) => {
+                    handle_stat_missing(&mut transport, "folder").await;
+                    handle_streamed_write_open(&mut transport).await;
+                    if let Some(fails) = close_fails {
+                        let packet = transport.recv_packet().await.expect("streamed CLOSE");
+                        let header = Smb2Header::decode(&packet).unwrap();
+                        assert_eq!(header.command, Smb2Command::Close);
+                        let body = Smb2CloseRequest::decode(&packet[SMB2_HEADER_BYTES..]).unwrap();
+                        assert_eq!(body.file_id, fake_file_id());
+                        let mut response = Smb2Header::new(Smb2Command::Close, header.message_id);
+                        if fails {
+                            response.status_or_channel_sequence = 0xc000_0022; // STATUS_ACCESS_DENIED
+                        }
+                        transport
+                            .send_packet(&response_packet(
+                                response,
+                                &if fails {
+                                    vec![9, 0, 0, 0, 0, 0, 0, 0, 0] // SMB2 ERROR response
+                                } else {
+                                    close_response_body(Smb2FileAttributes::ARCHIVE, 0)
+                                },
+                            ))
+                            .await
+                            .unwrap();
+                    }
+                    if close_fails != Some(false) {
+                        // No cancellation CLOSE: only release the connection once
+                        // its bounded actor work and all owners have finished.
+                        assert!(transport.recv_packet().await.is_err(), "old actor reused");
+                        let (stream, _) = listener.accept().await.expect("replacement connection");
+                        transport = DirectTcpTransport::new(stream);
+                        handle_negotiate(&mut transport).await;
+                        handle_tree_connect(&mut transport).await;
+                    }
+                    handle_list_root(&mut transport).await;
+                }
+                FakeNativeScenario::StreamedPipeline {
+                    fail_write,
+                    entered,
+                } => {
+                    handle_stat_missing(&mut transport, "folder").await;
+                    handle_streamed_write_open(&mut transport).await;
+                    let mut writes = Vec::new();
+                    for _ in 0..2 {
+                        let packet = transport.recv_packet().await.expect("pipelined write");
+                        let header = Smb2Header::decode(&packet).unwrap();
+                        assert_eq!(header.command, Smb2Command::Write);
+                        let body = Smb2WriteRequest::decode(&packet[SMB2_HEADER_BYTES..]).unwrap();
+                        assert_eq!(body.file_id, fake_file_id());
+                        writes.push((body.offset, header.message_id, body.data.len() as u32));
+                    }
+                    writes.sort_by_key(|write| write.0);
+                    entered.send(()).expect("writes observed");
+                    if fail_write {
+                        // Fail the first task but hold its sibling until the
+                        // replacement generation has completed useful work.
+                        transport
+                            .send_packet(&response_packet(
+                                Smb2Header::new(Smb2Command::Write, writes.remove(0).1),
+                                &write_response_body(0),
+                            ))
+                            .await
+                            .unwrap();
+                    }
+                    tokio::select! {
+                        biased;
+                        packet = transport.recv_packet() => {
+                            panic!("old session sent traffic or closed before writes drained: {packet:?}");
+                        }
+                        () = async {
+                            let (stream, _) = listener.accept().await.expect("replacement connection");
+                            let mut replacement = DirectTcpTransport::new(stream);
+                            handle_negotiate(&mut replacement).await;
+                            handle_tree_connect(&mut replacement).await;
+                            handle_list_root(&mut replacement).await;
+                        } => {}
+                    }
+                    for (_, message_id, count) in writes {
+                        transport
+                            .send_packet(&response_packet(
+                                Smb2Header::new(Smb2Command::Write, message_id),
+                                &write_response_body(count),
+                            ))
+                            .await
+                            .unwrap();
+                    }
+                    assert!(transport.recv_packet().await.is_err(), "old actor reused");
+                }
                 FakeNativeScenario::Mkdir => handle_mkdir(&mut transport).await,
                 FakeNativeScenario::MoveFile => handle_move_file(&mut transport).await,
                 FakeNativeScenario::DeleteFile => handle_delete_file(&mut transport).await,
@@ -1585,6 +1898,24 @@ mod tests {
             ))
             .await
             .expect("close response");
+    }
+
+    async fn handle_streamed_write_open<T>(transport: &mut DirectTcpTransport<T>)
+    where
+        T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let packet = transport.recv_packet().await.expect("streamed OPEN");
+        let header = Smb2Header::decode(&packet).unwrap();
+        assert_eq!(header.command, Smb2Command::Create);
+        let body = Smb2CreateRequest::decode(&packet[SMB2_HEADER_BYTES..]).unwrap();
+        assert_eq!(body.name, "folder\\out.bin");
+        transport
+            .send_packet(&response_packet(
+                Smb2Header::new(Smb2Command::Create, header.message_id),
+                &create_response_body(fake_file_id(), Smb2FileAttributes::ARCHIVE, 0),
+            ))
+            .await
+            .unwrap();
     }
 
     async fn handle_write_file<T>(transport: &mut DirectTcpTransport<T>)
