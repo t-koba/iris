@@ -9,22 +9,31 @@
 kernel32.dll          # process, memory, files
 ntdll.dll             # NT syscalls
 user32.dll            # windowing (Rust std / winit)
+userenv.dll             # user profile environment APIs
 gdi32.dll             # GDI (software rendering fallback)
+imm32.dll               # Input Method Manager APIs
 advapi32.dll          # registry, crypto APIs
+avicap32.dll            # Video for Windows capture APIs
 ole32.dll             # COM
+combase.dll             # COM base APIs
 oleaut32.dll          # COM automation
 shell32.dll           # shell APIs
+shlwapi.dll             # Shell lightweight utility APIs
 comdlg32.dll          # common dialogs (file picker)
 winmm.dll             # multimedia timer
 version.dll           # version resources
+uxtheme.dll             # Windows theme APIs
 ws2_32.dll            # Winsock (Rust std networking)
 mswsock.dll           # Winsock extensions
+opengl32.dll            # Windows OpenGL implementation
 bcrypt.dll            # CNG (Rust crypto)
+bcryptprimitives.dll    # Windows CNG primitives
 crypt32.dll           # certificate store
 secur32.dll           # SSPI
 ncrypt.dll            # CNG router
 api-ms-win-core-*.dll # Windows core contracts (OS only; CRT contracts are in the VC list)
 d3d11.dll             # Direct3D 11 (FFmpeg hwaccel; OS component only)
+dwmapi.dll              # Desktop Window Manager APIs
 dxgi.dll              # DXGI (FFmpeg hwaccel; OS component only)
 mfplat.dll            # Media Foundation platform (only if measured)
 propsys.dll           # property system (only if measured)
