@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Bounded mocked Darwin startup: no server installation, sockets or containers.
 set -euo pipefail
+# Keep cross-platform assertion failures actionable without printing command arguments or secrets.
+trap 'status=$?; printf "Darwin Samba regression failed at line %s (exit=%s)\n" "$LINENO" "$status" >&2; exit "$status"' ERR
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/iris-samba-darwin.XXXXXX")
 trap 'rm -rf "$test_root"' EXIT
