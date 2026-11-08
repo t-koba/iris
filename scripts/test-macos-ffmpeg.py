@@ -24,6 +24,7 @@ class CandidateContracts(unittest.TestCase):
             m.download_pinned('https://example.invalid/pinned.tar.xz', Path('/tmp/pinned.tar.xz'))
         args = run.call_args.args
         self.assertIn('--remove-on-error', args)
+        self.assertIn('--retry-all-errors', args)
         self.assertEqual(args[args.index('--retry') + 1], '1')
         self.assertEqual(args[args.index('--retry-delay') + 1], '3')
         self.assertIn('https://example.invalid/pinned.tar.xz', args)
@@ -31,6 +32,7 @@ class CandidateContracts(unittest.TestCase):
         with patch.dict(m.os.environ, {'IRIS_FFMPEG_FETCH_RETRIES': '0'}), patch.object(m, 'run') as run:
             m.download_pinned('https://example.invalid/pinned.tar.xz', Path('/tmp/pinned.tar.xz'))
         self.assertNotIn('--retry', run.call_args.args)
+        self.assertNotIn('--retry-all-errors', run.call_args.args)
         for name, value in (('IRIS_FFMPEG_FETCH_RETRIES', '-1'),
                             ('IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS', '-1')):
             with patch.dict(m.os.environ, {name: value}), self.assertRaises(ValueError):

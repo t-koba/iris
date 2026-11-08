@@ -54,7 +54,10 @@ def download_pinned(url, output):
     args = ['curl', '--fail', '--location', '--silent', '--show-error', '--proto', '=https',
             '--proto-redir', '=https', '--tlsv1.2', '--remove-on-error']
     if retries:
-        args += ['--retry', str(retries), '--retry-delay', str(delay)]
+        # The default curl retry set misses resets during TLS/response transfer.
+        # Retries remain bounded by the configured count, and downloaded bytes
+        # must still pass the pinned digest/signature checks below.
+        args += ['--retry-all-errors', '--retry', str(retries), '--retry-delay', str(delay)]
     run(*args, url, '-o', output, seconds=setting('IRIS_FFMPEG_FETCH_SECONDS', 300))
 
 
