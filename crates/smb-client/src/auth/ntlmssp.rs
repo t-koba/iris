@@ -5,7 +5,7 @@ use crate::wire::{
 };
 use crate::SmbClientError;
 use hmac::{Hmac, KeyInit, Mac};
-use md5::Md5;
+use md5::{Digest, Md5};
 use std::ops::BitOr;
 
 const NTLMSSP_SIGNATURE: &[u8; 8] = b"NTLMSSP\0";
@@ -346,6 +346,77 @@ fn hmac_md5(key: &[u8], input: &[u8]) -> Result<[u8; 16], SmbClientError> {
     Ok(mac.finalize().into_bytes().into())
 }
 
+/// MS-NLMP ESS signature for the first SPNEGO mechListMIC in one direction.
+/// MS-SPNG uses fresh NTLM sealing state for this MIC (not the key-exchange RC4
+/// stream), and resets it afterwards. No application signing state is retained.
+pub(crate) fn mech_list_mic(
+    exported_session_key: &[u8; 16],
+    flags: NtlmsspNegotiateFlags,
+    server: bool,
+    message: &[u8],
+) -> Result<[u8; 16], SmbClientError> {
+    if !flags
+        .contains(NtlmsspNegotiateFlags::SIGN | NtlmsspNegotiateFlags::EXTENDED_SESSION_SECURITY)
+    {
+        return Err(SmbClientError::InvalidAsn1Value {
+            kind: "ntlm.mic.flags",
+        });
+    }
+    let (sign_magic, seal_magic): (&[u8], &[u8]) = if server {
+        (
+            b"session key to server-to-client signing key magic constant\0",
+            b"session key to server-to-client sealing key magic constant\0",
+        )
+    } else {
+        (
+            b"session key to client-to-server signing key magic constant\0",
+            b"session key to client-to-server sealing key magic constant\0",
+        )
+    };
+    let signing_key = Md5::digest([exported_session_key.as_slice(), sign_magic].concat());
+    let digest = hmac_md5(
+        &signing_key,
+        &[0u32.to_le_bytes().as_slice(), message].concat(),
+    )?;
+    let mut signature = [0u8; 16];
+    signature[..4].copy_from_slice(&1u32.to_le_bytes());
+    if flags.contains(NtlmsspNegotiateFlags::KEY_EXCH) {
+        let key_len = if flags.contains(NtlmsspNegotiateFlags::KEY_128) {
+            16
+        } else if flags.contains(NtlmsspNegotiateFlags::KEY_56) {
+            7
+        } else {
+            5
+        };
+        let sealing_key = Md5::digest([&exported_session_key[..key_len], seal_magic].concat());
+        signature[4..12].copy_from_slice(&rc4(&sealing_key, &digest[..8]));
+    } else {
+        signature[4..12].copy_from_slice(&digest[..8]);
+    }
+    // Sequence number zero is already present in signature[12..].
+    Ok(signature)
+}
+
+pub(crate) fn verify_mech_list_mic(
+    key: &[u8; 16],
+    flags: NtlmsspNegotiateFlags,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), SmbClientError> {
+    let expected = mech_list_mic(key, flags, true, message)?;
+    // Fixed-size, constant-work comparison; never include the signature or key in errors.
+    if signature.len() != expected.len()
+        || signature
+            .iter()
+            .zip(expected)
+            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+            != 0
+    {
+        return Err(SmbClientError::InvalidAsn1Value { kind: "spnego.mic" });
+    }
+    Ok(())
+}
+
 fn rc4(key: &[u8], input: &[u8]) -> Vec<u8> {
     let mut state = [0u8; 256];
     for (index, value) in state.iter_mut().enumerate() {
@@ -416,6 +487,54 @@ fn checked_add(left: usize, right: usize) -> Result<usize, SmbClientError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn spnego_mic_ess_direction_and_key_exchange_vectors() {
+        // Independent Python hashlib/hmac + RC4 vectors; sequence zero and the
+        // DER list, not the NTLM token or SPNEGO wrapper, are authenticated.
+        let message = crate::auth::spnego::ntlm_mech_type_list();
+        let base = NtlmsspNegotiateFlags::SIGN | NtlmsspNegotiateFlags::EXTENDED_SESSION_SECURITY;
+        for (extra, client, server) in [
+            (
+                NtlmsspNegotiateFlags(0),
+                "010000002646f52a31a2c3ee00000000",
+                "010000003bdec7b235306e4700000000",
+            ),
+            (
+                NtlmsspNegotiateFlags::KEY_EXCH | NtlmsspNegotiateFlags::KEY_128,
+                "0100000022a3984fefbb9c3200000000",
+                "010000007dd6da05648a73ae00000000",
+            ),
+            (
+                NtlmsspNegotiateFlags::KEY_EXCH | NtlmsspNegotiateFlags::KEY_56,
+                "01000000489ec007bda3438d00000000",
+                "01000000ed0635b9ef101fc900000000",
+            ),
+            (
+                NtlmsspNegotiateFlags::KEY_EXCH,
+                "010000003afa859b310b000300000000",
+                "01000000b148d65eba5b830b00000000",
+            ),
+        ] {
+            let flags = base | extra;
+            assert_eq!(
+                hex(&mech_list_mic(&[0x55; 16], flags, false, &message).unwrap()),
+                client
+            );
+            let signature = mech_list_mic(&[0x55; 16], flags, true, &message).unwrap();
+            assert_eq!(hex(&signature), server);
+            verify_mech_list_mic(&[0x55; 16], flags, &message, &signature).unwrap();
+            for index in [0, 4, 12] {
+                let mut bad = signature;
+                bad[index] ^= 1;
+                assert!(verify_mech_list_mic(&[0x55; 16], flags, &message, &bad).is_err());
+            }
+            assert!(
+                verify_mech_list_mic(&[0x55; 16], flags, b"different list", &signature).is_err()
+            );
+        }
+        assert!(mech_list_mic(&[0x55; 16], NtlmsspNegotiateFlags::SIGN, false, &message).is_err());
+    }
+
     use super::*;
     use crate::test_support::*;
 

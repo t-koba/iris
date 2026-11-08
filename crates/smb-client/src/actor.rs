@@ -4,7 +4,8 @@ use crate::crypto::{
     SmbSigningKey, SMB311_PREAUTH_HASH_BYTES,
 };
 use crate::packet::header::{
-    Smb2Command, Smb2Header, SMB2_FLAGS_RELATED_OPERATIONS, SMB2_FLAGS_SIGNED, SMB2_HEADER_BYTES,
+    Smb2Command, Smb2Header, SmbNtStatus, SMB2_FLAGS_RELATED_OPERATIONS, SMB2_FLAGS_SIGNED,
+    SMB2_HEADER_BYTES,
 };
 use crate::transform::{is_smb3_transform, Smb3EncryptionContext, Smb3EncryptionKeys};
 use crate::transport::DirectTcpTransport;
@@ -53,7 +54,7 @@ enum ActorCommand {
         header_tree_id: Option<u32>,
         response_state_update: ResponseStateUpdate,
         response_tx: oneshot::Sender<ResponseResult>,
-        signing_after_send: Option<PendingSigningKey>,
+        response_signing: Option<PendingSigningKey>,
     },
     Compound {
         requests: Vec<SmbCompoundRequest>,
@@ -83,6 +84,7 @@ enum PendingRequest {
         command: Smb2Command,
         response_state_update: ResponseStateUpdate,
         response_tx: oneshot::Sender<ResponseResult>,
+        signing_key: Option<SmbSigningKey>,
         deadline: Instant,
     },
     Compound {
@@ -105,7 +107,7 @@ struct OutboundRequest {
     header_tree_id: Option<u32>,
     response_state_update: ResponseStateUpdate,
     response_tx: oneshot::Sender<ResponseResult>,
-    signing_after_send: Option<PendingSigningKey>,
+    response_signing: Option<PendingSigningKey>,
 }
 
 struct PendingSigningKey {
@@ -229,7 +231,7 @@ impl SmbConnectionActor {
             header_tree_id: None,
             response_state_update: ResponseStateUpdate::None,
             response_tx,
-            signing_after_send: None,
+            response_signing: None,
         })
         .await
     }
@@ -271,13 +273,13 @@ impl SmbConnectionActor {
             header_tree_id: Some(0),
             response_state_update: ResponseStateUpdate::SetTreeIdFromResponse,
             response_tx,
-            signing_after_send: None,
+            response_signing: None,
         })
         .await
     }
 
     /// Sends a SESSION_SETUP request. With `signing`, the signing key derived from that
-    /// session key and dialect takes effect right after this request is sent.
+    /// session key and dialect verifies the response, and is installed only on success.
     pub(crate) async fn request_session_setup(
         &self,
         body: impl Into<Vec<u8>>,
@@ -290,7 +292,7 @@ impl SmbConnectionActor {
             header_tree_id: None,
             response_state_update: ResponseStateUpdate::SetSessionIdFromResponse,
             response_tx,
-            signing_after_send: signing.map(|(session_key, dialect)| PendingSigningKey {
+            response_signing: signing.map(|(session_key, dialect)| PendingSigningKey {
                 session_key,
                 dialect,
             }),
@@ -498,7 +500,7 @@ where
             header_tree_id,
             response_state_update,
             response_tx,
-            signing_after_send,
+            response_signing,
         } => {
             send_request(
                 transport,
@@ -511,7 +513,7 @@ where
                     header_tree_id,
                     response_state_update,
                     response_tx,
-                    signing_after_send,
+                    response_signing,
                 },
             )
             .await
@@ -563,9 +565,8 @@ where
     let message_id = state.reserve_message_id(request.credit_charge);
     let charged = request.credit_charge.max(1);
     state.available_credits = state.available_credits.saturating_sub(charged);
-    // The pending key comes from the final authentication token; the server cannot
-    // install it until it processes this SESSION_SETUP. Use it only after send, so
-    // the final response can be verified with the derived session key.
+    // Authentication requests use only an established key. Derive a separate
+    // response key after hashing this request; a continuation must not activate it.
     let packet = match encode_request_packet(
         request.command,
         message_id,
@@ -590,19 +591,23 @@ where
     match transport.send_packet(&wire_packet).await {
         Ok(()) => {
             state.update_preauth_hash(request.command, &wire_packet);
-            if let Some(pending_key) = request.signing_after_send {
-                state.signing_key = Some(derive_smb2_signing_key(
-                    &pending_key.session_key,
-                    pending_key.dialect,
-                    &state.preauth_integrity_hash,
-                )?);
-            }
+            let signing_key = request
+                .response_signing
+                .map(|pending_key| {
+                    derive_smb2_signing_key(
+                        &pending_key.session_key,
+                        pending_key.dialect,
+                        &state.preauth_integrity_hash,
+                    )
+                })
+                .transpose()?;
             pending.insert(
                 message_id,
                 PendingRequest::Single {
                     command: request.command,
                     response_state_update: request.response_state_update,
                     response_tx: request.response_tx,
+                    signing_key,
                     deadline: Instant::now() + state.request_timeout,
                 },
             );
@@ -806,6 +811,7 @@ fn dispatch_response(
                 command,
                 response_state_update,
                 response_tx,
+                signing_key,
                 ..
             } => {
                 let result = validate_response_segment(
@@ -814,8 +820,14 @@ fn dispatch_response(
                     command,
                     message_id,
                     state,
+                    signing_key.as_ref(),
                 )
                 .map(|()| {
+                    if response.header.status().is_success() {
+                        if let Some(key) = signing_key {
+                            state.signing_key = Some(key);
+                        }
+                    }
                     state.update_preauth_response(
                         command,
                         response.header.status(),
@@ -838,6 +850,7 @@ fn dispatch_response(
                     command,
                     message_id,
                     state,
+                    None,
                 )?;
                 let completed = {
                     let mut compound = shared.lock().unwrap_or_else(|error| error.into_inner());
@@ -938,14 +951,25 @@ fn validate_response_segment(
     expected_command: Smb2Command,
     expected_message_id: u64,
     state: &ActorState,
+    pending_signing_key: Option<&SmbSigningKey>,
 ) -> Result<(), SmbConnectionError> {
+    validate_response_identity(response_header, expected_command, expected_message_id)?;
     if state.encryption.is_none() {
-        let Some(signing_key) = &state.signing_key else {
-            return validate_response_identity(
-                response_header,
-                expected_command,
-                expected_message_id,
-            );
+        let response_signed = response_header.flags & SMB2_FLAGS_SIGNED != 0;
+        // An incomplete initial authentication has no established SMB signing key.
+        // If the server does sign its continuation, it must use this request's key.
+        if expected_command == Smb2Command::SessionSetup
+            && response_header.status() == SmbNtStatus::MORE_PROCESSING_REQUIRED
+            && state.signing_key.is_none()
+            && !response_signed
+        {
+            return Ok(());
+        }
+        let Some(signing_key) = pending_signing_key.or(state.signing_key.as_ref()) else {
+            if response_signed && expected_command == Smb2Command::SessionSetup {
+                return Err(SmbConnectionError::SignatureVerificationFailed);
+            }
+            return Ok(());
         };
         let response_signed = response_header.flags & SMB2_FLAGS_SIGNED == SMB2_FLAGS_SIGNED;
         if !response_signed {
@@ -958,7 +982,7 @@ fn validate_response_segment(
             return Err(SmbConnectionError::SignatureVerificationFailed);
         }
     }
-    validate_response_identity(response_header, expected_command, expected_message_id)
+    Ok(())
 }
 
 fn validate_response_identity(
@@ -1098,6 +1122,46 @@ fn tracks_preauth(command: Smb2Command) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pending_auth_key_verifies_only_status_qualified_setup_responses() {
+        let mut state = ActorState::default();
+        let key = SmbSigningKey::hmac_sha256([0x35; 16]);
+        let mut header = Smb2Header::new(Smb2Command::SessionSetup, 7);
+        header.status_or_channel_sequence = SmbNtStatus::MORE_PROCESSING_REQUIRED.0;
+        let validate = |header: &Smb2Header, state: &ActorState, signed: bool| {
+            let mut packet = response_packet(header.clone(), b"setup");
+            if signed {
+                key.sign_packet(&mut packet).unwrap();
+            }
+            let decoded = Smb2Header::decode(&packet).unwrap();
+            validate_response_segment(&packet, &decoded, header.command, 7, state, Some(&key))
+        };
+        assert!(validate(&header, &state, false).is_ok());
+        header.flags |= SMB2_FLAGS_SIGNED;
+        assert!(validate(&header, &state, true).is_ok());
+        assert!(matches!(
+            validate(&header, &state, false),
+            Err(SmbConnectionError::SignatureVerificationFailed)
+        ));
+        header.flags &= !SMB2_FLAGS_SIGNED;
+        header.status_or_channel_sequence = SmbNtStatus::SUCCESS.0;
+        assert!(matches!(
+            validate(&header, &state, false),
+            Err(SmbConnectionError::UnsignedResponse { status: 0, .. })
+        ));
+        header.command = Smb2Command::Echo;
+        header.status_or_channel_sequence = SmbNtStatus::MORE_PROCESSING_REQUIRED.0;
+        assert!(
+            matches!(validate(&header, &state, false), Err(SmbConnectionError::UnsignedResponse { status, .. }) if status == SmbNtStatus::MORE_PROCESSING_REQUIRED.0)
+        );
+        header.command = Smb2Command::SessionSetup;
+        state.signing_key = Some(SmbSigningKey::hmac_sha256([0x35; 16]));
+        assert!(matches!(
+            validate(&header, &state, false),
+            Err(SmbConnectionError::UnsignedResponse { .. })
+        ));
+    }
+
     use super::*;
     use crate::crypto::{
         sign_smb2_packet_hmac_sha256, smb311_preauth_hash_sequence, verify_smb2_packet_hmac_sha256,

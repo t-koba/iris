@@ -43,7 +43,7 @@ impl SpnegoNegState {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct SpnegoNegTokenResp {
     pub neg_state: Option<SpnegoNegState>,
     pub supported_mech_is_ntlm: bool,
@@ -51,10 +51,24 @@ pub struct SpnegoNegTokenResp {
     pub mech_list_mic: Option<Vec<u8>>,
 }
 
+impl std::fmt::Debug for SpnegoNegTokenResp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpnegoNegTokenResp")
+            .field("neg_state", &self.neg_state)
+            .field("supported_mech_is_ntlm", &self.supported_mech_is_ntlm)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The exact DER MechTypeList offered by Iris, also signed by mechListMIC.
+pub(crate) fn ntlm_mech_type_list() -> Vec<u8> {
+    der_sequence(&[der_object_identifier(NTLMSSP_OID_DER)])
+}
+
 pub fn spnego_initial_context_token_ntlm(
     ntlm_negotiate_message: &[u8],
 ) -> Result<Vec<u8>, SmbClientError> {
-    let mech_type_list = der_sequence(&[der_object_identifier(NTLMSSP_OID_DER)]);
+    let mech_type_list = ntlm_mech_type_list();
     let mech_types = der_tag(TAG_CONTEXT_0, &mech_type_list)?;
     let mech_token = der_tag(TAG_CONTEXT_2, &der_octet_string(ntlm_negotiate_message)?)?;
     let neg_token_init = der_sequence(&[mech_types, mech_token]);
@@ -119,8 +133,17 @@ pub fn decode_neg_token_resp(bytes: &[u8]) -> Result<SpnegoNegTokenResp, SmbClie
 
     let mut fields = DerReader::new(sequence.value);
     let mut response = SpnegoNegTokenResp::default();
+    let mut previous_tag = None;
     while !fields.is_empty() {
         let field = fields.read_tlv()?;
+        if !(TAG_CONTEXT_0..=TAG_CONTEXT_3).contains(&field.tag)
+            || previous_tag.is_some_and(|previous| field.tag <= previous)
+        {
+            return Err(SmbClientError::InvalidAsn1Value {
+                kind: "spnego.fields",
+            });
+        }
+        previous_tag = Some(field.tag);
         match field.tag {
             TAG_CONTEXT_0 => {
                 let state = read_explicit_enumerated(field.value)?;
@@ -128,7 +151,12 @@ pub fn decode_neg_token_resp(bytes: &[u8]) -> Result<SpnegoNegTokenResp, SmbClie
             }
             TAG_CONTEXT_1 => {
                 let oid = read_explicit_oid(field.value)?;
-                response.supported_mech_is_ntlm = oid == NTLMSSP_OID_DER;
+                if oid != NTLMSSP_OID_DER {
+                    return Err(SmbClientError::InvalidAsn1Value {
+                        kind: "spnego.mechanism",
+                    });
+                }
+                response.supported_mech_is_ntlm = true;
             }
             TAG_CONTEXT_2 => {
                 response.response_token = Some(read_explicit_octet_string(field.value)?.to_vec());
@@ -136,7 +164,7 @@ pub fn decode_neg_token_resp(bytes: &[u8]) -> Result<SpnegoNegTokenResp, SmbClie
             TAG_CONTEXT_3 => {
                 response.mech_list_mic = Some(read_explicit_octet_string(field.value)?.to_vec());
             }
-            _ => {}
+            _ => unreachable!(),
         }
     }
     Ok(response)
@@ -404,6 +432,39 @@ impl<'a> DerReader<'a> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn continuation_parser_rejects_ambiguous_fields_and_unknown_mechanisms() {
+        let state = der_tag(TAG_CONTEXT_0, &der_enumerated(3).unwrap()).unwrap();
+        let mic = der_tag(TAG_CONTEXT_3, &der_octet_string(b"PRIVATE_MIC").unwrap()).unwrap();
+        let other_mech = der_tag(TAG_CONTEXT_1, &der_object_identifier(SPNEGO_OID_DER)).unwrap();
+        for fields in [
+            vec![state.clone(), state.clone()],
+            vec![mic, state],
+            vec![other_mech],
+            vec![der_tag(0xa4, b"PRIVATE_TOKEN").unwrap()],
+        ] {
+            let token = der_tag(TAG_NEG_TOKEN_RESP, &der_sequence(&fields)).unwrap();
+            let error = decode_neg_token_resp(&token).unwrap_err();
+            assert!(!format!("{error} {error:?}").contains("PRIVATE"));
+        }
+        let encoded = encode_neg_token_resp(
+            Some(SpnegoNegState::RequestMic),
+            Some(true),
+            Some(b"PRIVATE_TOKEN"),
+            Some(b"PRIVATE_MIC"),
+        )
+        .unwrap();
+        let parsed = decode_neg_token_resp(&encoded).unwrap();
+        let debug = format!("{parsed:?}");
+        assert!(!debug.contains("PRIVATE"));
+        assert!(!debug.contains("80, 82"));
+        assert_eq!(hex(&ntlm_mech_type_list()), "300c060a2b06010401823702020a");
+        assert!(spnego_initial_context_token_ntlm(b"ntlm")
+            .unwrap()
+            .windows(ntlm_mech_type_list().len())
+            .any(|part| part == ntlm_mech_type_list()));
+    }
+
     use super::*;
     use crate::test_support::*;
 
