@@ -64,6 +64,7 @@ jobs:
           IRIS_MACOS_REPORT_ONLY=1 IRIS_MACOS_FFMPEG_BASELINE=1 ./scripts/package-macos-app.sh
           python3 scripts/release-audit.py macos --output audit/macos.json
       - name: Audit pinned production package
+        if: ${{ !cancelled() && steps.candidate_contracts.outcome == 'success' }}
         shell: bash
         run: |
           # Exercise the same default-product runtime/staging/sign/archive path

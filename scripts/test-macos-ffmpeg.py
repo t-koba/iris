@@ -401,6 +401,10 @@ Load command 2
         self.assertIn('brew install ffmpeg pkg-config gnupg nasm cmake', workflow)
         self.assertIn('./scripts/package-macos-app.sh', workflow)
         self.assertIn('Audit pinned production package', workflow)
+        production_step = workflow.split('      - name: Audit pinned production package', 1)[1].split(
+            '      - name: Validate pinned candidate', 1)[0]
+        self.assertIn("if: ${{ !cancelled() && steps.candidate_contracts.outcome == 'success' }}", production_step)
+        self.assertNotIn('success()', production_step)
         self.assertIn('python3 scripts/macos-ffmpeg.py check dist/macos/Iris.app', workflow)
         self.assertIn('python3 scripts/release-audit.py macos --output audit/macos-product.json', workflow)
         self.assertIn('python3 scripts/release-audit.py macos --output audit/macos.json', workflow)
