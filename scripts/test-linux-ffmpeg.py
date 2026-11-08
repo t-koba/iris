@@ -2,7 +2,9 @@
 """Offline contracts: no source download, native compilation or package install."""
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -186,6 +188,69 @@ class RuntimeContracts(unittest.TestCase):
             self.assertIn('vars.IRIS_FFMPEG_FETCH_SECONDS || 300', contents)
             self.assertIn('vars.IRIS_FFMPEG_FETCH_RETRIES || 1', contents)
             self.assertIn('vars.IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS || 2', contents)
+
+    def test_pdfium_fetch_retry_validation_and_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = root / "bin"
+            tools.mkdir()
+            log = root / "curl-args"
+            # No network or archive extraction: record argv, then simulate exhaustion.
+            for name, body in (("curl", 'printf "%s\\n" "$@" > "$PDFIUM_TEST_CURL_ARGS"; exit 22'),
+                               ("uname", 'echo x86_64')):
+                tool = tools / name
+                tool.write_text("#!/bin/sh\n" + body + "\n")
+                tool.chmod(0o755)
+            env = {k: v for k, v in os.environ.items() if not k.startswith("IRIS_PDFIUM_")}
+            env.update(PATH=str(tools) + os.pathsep + os.environ["PATH"],
+                       IRIS_PDFIUM_CACHE_DIR=str(root / "cache"),
+                       PDFIUM_TEST_CURL_ARGS=str(log))
+            retries = "IRIS_PDFIUM_FETCH_RETRIES"
+            delay = "IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS"
+            def run(settings):
+                log.unlink(missing_ok=True)
+                result = subprocess.run(
+                    ["bash", str(ROOT / "scripts/fetch-pdfium-runtime.sh"), str(root / "AppDir")],
+                    env=dict(env, **settings), capture_output=True, text=True, timeout=5)
+                self.assertFalse((root / "AppDir").exists())
+                return result
+            for name in (retries, delay):
+                for value in ("-1", "1.5", "abc", "1 2", "+1"):
+                    with self.subTest(name=name, value=value):
+                        result = run({name: value})
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(name + " must be non-negative", result.stderr)
+                        self.assertFalse(log.exists())
+                        self.assertFalse((root / "cache").exists())
+            for settings, count, seconds in (({}, "3", "2"),
+                                              ({retries: "", delay: ""}, "3", "2"),
+                                              ({retries: "0", delay: "0"}, "0", "0"),
+                                              ({retries: "7", delay: "4"}, "7", "4")):
+                with self.subTest(settings=settings):
+                    self.assertEqual(run(settings).returncode, 22)
+                    self.assertEqual(log.read_text().splitlines(), [
+                        "--fail", "--location", "--silent", "--show-error",
+                        "--retry", count, "--retry-delay", seconds,
+                        "--proto", "=https", "--tlsv1.2", "--output",
+                        str(root / "cache/pdfium-linux-x64.tgz.part"),
+                        "https://github.com/bblanchon/pdfium-binaries/releases/download/"
+                        "chromium/8138/pdfium-linux-x64.tgz"])
+
+    def test_pdfium_retry_policy_is_local_to_every_package_invocation(self):
+        for workflow, calls in (("ci.yml", 1), ("linux-ffmpeg-validation.yml", 1),
+                                ("release.yml", 2)):
+            with self.subTest(workflow=workflow):
+                contents = (ROOT / ".github/workflows" / workflow).read_text()
+                steps = contents.split("      - ")
+                packages = [step for step in steps if "run: ./scripts/package-linux-appdir.sh" in step]
+                self.assertEqual(len(packages), calls)
+                for name, default in (("IRIS_PDFIUM_FETCH_RETRIES", 3),
+                                      ("IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS", 2)):
+                    setting = name + ": ${{ vars." + name + " || " + str(default) + " }}"
+                    self.assertEqual(contents.count(name + ":"), calls)
+                    for step in packages:
+                        self.assertIn("        env:\n", step)
+                        self.assertIn("          " + setting, step)
 
     def test_build_staging_and_workflow_contract(self):
         workflow = (ROOT / ".github/workflows/linux-ffmpeg-validation.yml").read_text()

@@ -202,12 +202,16 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         env:
           IRIS_VERIFY_PDFIUM_PROVENANCE: "0"
+          IRIS_PDFIUM_FETCH_RETRIES: ${{ vars.IRIS_PDFIUM_FETCH_RETRIES || 3 }}
+          IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS: ${{ vars.IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS || 2 }}
         run: ./scripts/package-linux-appdir.sh
       - name: Package Linux AppDir for tagged release
         if: github.event_name == 'push'
         env:
           IRIS_VERIFY_PDFIUM_PROVENANCE: "1"
           GH_TOKEN: ${{ github.token }}
+          IRIS_PDFIUM_FETCH_RETRIES: ${{ vars.IRIS_PDFIUM_FETCH_RETRIES || 3 }}
+          IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS: ${{ vars.IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS || 2 }}
         run: ./scripts/package-linux-appdir.sh
       - name: Build PDFium smoke test
         env:

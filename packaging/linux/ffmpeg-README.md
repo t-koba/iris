@@ -51,6 +51,16 @@ These bounded transport retries do not relax the pinned source digest, signing-k
 fingerprint, or detached-signature checks. A completed prefix is revalidated on
 reuse; delete it when intentionally rebuilding or updating.
 
+Linux packaging also stages pinned PDFium via `scripts/fetch-pdfium-runtime.sh`.
+`IRIS_PDFIUM_FETCH_RETRIES` (default 3 retries after the initial attempt; 0 disables
+retries) and `IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS` (default 2 seconds) accept
+non-negative integers. A positive delay is fixed; 0 selects curl's default
+exponential backoff, not immediate retries. CI packaging, report-only Linux
+runtime validation, and Release packaging read the matching repository `vars.*`
+settings with these same defaults; local packaging accepts environment variables.
+Retries do not relax the exact HTTPS URL, TLS floor, archive size/SHA-256 pin,
+or optional attestation verification; exhausted retries still fail packaging.
+
 These are replaceable shared libraries, not statically linked into Iris.
 Keep the ABI-compatible SONAME symlinks, replace the libraries in `usr/lib/iris`
 and run Iris normally; no Iris object files or relink step is required. You may

@@ -10,6 +10,11 @@ if [[ $# -ne 1 || -z ${1:-} ]]; then
 fi
 dest=$1
 
+fetch_retries=${IRIS_PDFIUM_FETCH_RETRIES:-3}
+fetch_retry_delay=${IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS:-2}
+[[ $fetch_retries =~ ^[0-9]+$ ]] || { echo 'IRIS_PDFIUM_FETCH_RETRIES must be non-negative' >&2; exit 1; }
+[[ $fetch_retry_delay =~ ^[0-9]+$ ]] || { echo 'IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS must be non-negative' >&2; exit 1; }
+
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 # Pinned from https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium%2F8138
@@ -67,7 +72,7 @@ else
         rm -f -- "$partial"
         echo "downloading $url"
         curl --fail --location --silent --show-error \
-            --retry 3 --retry-delay 2 --proto '=https' --tlsv1.2 \
+            --retry "$fetch_retries" --retry-delay "$fetch_retry_delay" --proto '=https' --tlsv1.2 \
             --output "$partial" "$url"
         if ! matches_pin "$partial"; then
             echo "downloaded $asset does not match the pinned size/sha256" >&2

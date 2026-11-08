@@ -140,6 +140,8 @@ jobs:
           IRIS_FFMPEG_FETCH_RETRIES: ${{ vars.IRIS_FFMPEG_FETCH_RETRIES || 1 }}
           IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS: ${{ vars.IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS || 2 }}
           GH_TOKEN: ${{ github.token }}
+          IRIS_PDFIUM_FETCH_RETRIES: ${{ vars.IRIS_PDFIUM_FETCH_RETRIES || 3 }}
+          IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS: ${{ vars.IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS || 2 }}
         run: ./scripts/package-linux-appdir.sh
 
       - name: Build PDFium smoke test

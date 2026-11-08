@@ -58,6 +58,9 @@ jobs:
       - name: Fetch locked Rust inputs
         run: cargo fetch --locked
       - name: Build verified FFmpeg and package default product locally
+        env:
+          IRIS_PDFIUM_FETCH_RETRIES: ${{ vars.IRIS_PDFIUM_FETCH_RETRIES || 3 }}
+          IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS: ${{ vars.IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS || 2 }}
         run: ./scripts/package-linux-appdir.sh
       - name: Locked offline Rust checks and smoke build
         run: |
