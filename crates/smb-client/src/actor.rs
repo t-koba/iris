@@ -1553,6 +1553,103 @@ mod tests {
         assert_eq!(after_echo, expected);
     }
 
+    // This actor-level packet test keeps SESSION_SETUP payloads opaque so it
+    // isolates the transcript-to-signature handoff from NTLM/SPNEGO parsing.
+    #[tokio::test]
+    async fn actor_uses_full_preauth_transcript_for_smb311_final_setup_signature() {
+        const SESSION_ID: u64 = 0x0102_0304_0506_0708;
+        const SESSION_KEY: [u8; 16] = [0x53; 16];
+        let (client, server) = duplex(4096);
+        let actor = SmbConnectionActor::spawn(client);
+        let server_task = tokio::spawn(async move {
+            let mut transport = DirectTcpTransport::new(server);
+
+            let negotiate = transport.recv_packet().await.expect("negotiate request");
+            let negotiate_header = Smb2Header::decode(&negotiate).expect("negotiate header");
+            assert_eq!(negotiate_header.command, Smb2Command::Negotiate);
+            let negotiate_response = response_packet(
+                Smb2Header::new(Smb2Command::Negotiate, negotiate_header.message_id),
+                b"negotiate response",
+            );
+            transport
+                .send_packet(&negotiate_response)
+                .await
+                .expect("negotiate response");
+
+            let challenge_request = transport.recv_packet().await.expect("challenge request");
+            let challenge_header =
+                Smb2Header::decode(&challenge_request).expect("challenge request header");
+            let mut challenge_response_header =
+                Smb2Header::new(Smb2Command::SessionSetup, challenge_header.message_id);
+            challenge_response_header.status_or_channel_sequence =
+                SmbNtStatus::MORE_PROCESSING_REQUIRED.0;
+            challenge_response_header.session_id = SESSION_ID;
+            let challenge_response =
+                response_packet(challenge_response_header, b"challenge response");
+            transport
+                .send_packet(&challenge_response)
+                .await
+                .expect("challenge response");
+
+            let authenticate_request = transport.recv_packet().await.expect("authenticate request");
+            let authenticate_header =
+                Smb2Header::decode(&authenticate_request).expect("authenticate header");
+            assert_eq!(authenticate_header.command, Smb2Command::SessionSetup);
+            assert_eq!(authenticate_header.session_id, SESSION_ID);
+            assert_eq!(authenticate_header.flags & SMB2_FLAGS_SIGNED, 0);
+
+            let preauth_hash = smb311_preauth_hash_sequence([
+                negotiate.as_slice(),
+                negotiate_response.as_slice(),
+                challenge_request.as_slice(),
+                challenge_response.as_slice(),
+                authenticate_request.as_slice(),
+            ]);
+            let signing_key = derive_smb2_signing_key(
+                &SESSION_KEY,
+                crate::packet::negotiate::Smb2Dialect::Smb311,
+                &preauth_hash,
+            )
+            .expect("derive signing key");
+            let mut final_response_header =
+                Smb2Header::new(Smb2Command::SessionSetup, authenticate_header.message_id);
+            final_response_header.status_or_channel_sequence = SmbNtStatus::SUCCESS.0;
+            final_response_header.session_id = SESSION_ID;
+            final_response_header.flags |= SMB2_FLAGS_SIGNED;
+            let mut final_response =
+                response_packet(final_response_header, b"authentication complete");
+            signing_key
+                .sign_packet(&mut final_response)
+                .expect("sign final session setup response");
+            transport
+                .send_packet(&final_response)
+                .await
+                .expect("final session setup response");
+        });
+
+        actor
+            .request(Smb2Command::Negotiate, b"negotiate request".to_vec())
+            .await
+            .expect("negotiate");
+        let challenge = actor
+            .request_session_setup(b"challenge request".to_vec(), None)
+            .await
+            .expect("challenge session setup");
+        assert_eq!(challenge.status(), SmbNtStatus::MORE_PROCESSING_REQUIRED);
+        let authenticated = actor
+            .request_session_setup(
+                b"authenticate request".to_vec(),
+                Some((
+                    SESSION_KEY.to_vec(),
+                    crate::packet::negotiate::Smb2Dialect::Smb311,
+                )),
+            )
+            .await
+            .expect("authenticate session setup");
+        assert!(authenticated.status().is_success());
+        server_task.await.expect("server task");
+    }
+
     async fn echo_with_hmac_signing(
         respond: impl FnOnce(Smb2Header, &[u8]) -> Vec<u8> + Send + 'static,
     ) -> Result<SmbResponse, SmbConnectionError> {
