@@ -635,12 +635,16 @@ class PreviewComparison(unittest.TestCase):
                             fixtures=[dict(filename=p['filename'], sha256=p['sha256'], size_bytes=p['size'],
                                            output=dict(width=256, height=144, format='jpeg', source='synthetic')) for p in pins])
         fixtures = {f['filename']: f for f in self.correct['fixtures']}
+        fixtures['one-page.pdf']['output']['decoded_rgb_sha256'] = 'a' * 64
         self.timings = [dict(record='iris.preview_latency.v1', operation=op, uses_ffmpeg=ffmpeg,
                             input={k: fixtures[name][k] for k in ('filename', 'sha256', 'size_bytes')},
                             output=dict(fixtures[name]['output'], bytes=123), identity=self.identity,
                             timing=dict(unit='nanoseconds', warmup_iterations=2, sample_count=21,
                                         min=1, median=2, p90=3, max=4, median_absolute_deviation=1))
                         for op, (name, ffmpeg) in m.PREVIEW_OPERATIONS.items()]
+        self.pdf = next(t for t in self.timings if t['input']['filename'] == 'one-page.pdf')
+        self.pdf.update(pdf_runtime=m.PDF_RUNTIMES['macos'], repeated_output_validation=m.PDF_VALIDATION,
+                        comparison=m.PDF_COMPARISON)
 
     def text(self):
         return ('discarded correctness diagnostics\nPREVIEW_CORRECTNESS ' + json.dumps(self.correct) + '\n' +
@@ -657,12 +661,41 @@ class PreviewComparison(unittest.TestCase):
         candidate = self.parsed()
         pairs = m.paired_preview(baseline, candidate)
         self.assertEqual(len(pairs), 3)
+        self.assertNotIn('pdf::extract_pdf_thumbnail', {p['operation'] for p in pairs})
         self.assertEqual(sum(p['uses_ffmpeg'] for p in pairs), 1)
         self.assertTrue(all(p['candidate_minus_baseline_ns'] == 198 for p in pairs))
         self.assertNotIn('discarded', json.dumps(baseline))
         self.assertNotIn('threshold', json.dumps(pairs))
         # A representative retained comparison is well below the existing cap.
         self.assertLess(len(m.report_bytes(dict(baseline=baseline, candidate=candidate, pairs=pairs))), 266240)
+
+    def test_pdf_renderer_and_repeated_pixel_evidence_are_required_per_platform(self):
+        for platform in ('macos', 'linux'):
+            self.identity['target_os'] = platform
+            self.pdf['pdf_runtime'] = m.PDF_RUNTIMES[platform]
+            parsed = m.parse_preview(self.text(), 'synthetic', target_os=platform)
+            self.assertEqual(len(parsed['timings']), 4)
+            mutations = [
+                (self.pdf, 'pdf_runtime', m.PDF_RUNTIMES['linux' if platform == 'macos' else 'macos']),
+                (self.pdf, 'repeated_output_validation', 'dimensions only'),
+                (self.pdf, 'comparison', 'FFmpeg effect'),
+                (self.pdf, 'uses_ffmpeg', True),
+                (self.pdf['output'], 'decoded_rgb_sha256', 'b' * 64),
+            ]
+            fixture = next(f for f in self.correct['fixtures'] if f['filename'] == 'one-page.pdf')
+            for obj in (fixture['output'], self.pdf['output']):
+                mutations.append((obj, 'decoded_rgb_sha256', 'not a digest'))
+            for obj, key, bad in mutations:
+                good = obj.pop(key)
+                with self.subTest(platform=platform, missing=key), self.assertRaises((ValueError, KeyError)):
+                    m.parse_preview(self.text(), 'synthetic', target_os=platform)
+                obj[key] = bad
+                with self.subTest(platform=platform, bad=key), self.assertRaises(ValueError):
+                    m.parse_preview(self.text(), 'synthetic', target_os=platform)
+                obj[key] = good
+            wrong_platform = 'linux' if platform == 'macos' else 'macos'
+            with self.assertRaisesRegex(ValueError, 'source/features/profile'):
+                m.parse_preview(self.text(), 'synthetic', target_os=wrong_platform)
 
     def test_parse_rejects_incomplete_duplicate_malformed_and_oversized_records(self):
         text = self.text()

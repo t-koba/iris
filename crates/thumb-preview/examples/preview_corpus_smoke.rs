@@ -1,4 +1,4 @@
-//! Correctness smoke plus bounded fixture-backed JPEG/CR3/FFmpeg video diagnostics.
+//! Correctness smoke plus bounded fixture-backed JPEG/CR3/video/PDF diagnostics.
 
 use iris_core_domain::types::thumbnail::{
     ImageFormat, ThumbnailHint, ThumbnailResult, ThumbnailSource,
@@ -221,6 +221,7 @@ struct MeasurementSpec<'a> {
     output: &'a ThumbnailResult,
     identity: &'a serde_json::Value,
     uses_ffmpeg: bool,
+    expected_pixels: Option<&'a image::RgbImage>,
 }
 
 fn latency_report<F>(
@@ -234,7 +235,12 @@ where
     let expected_dimensions = (spec.output.width, spec.output.height);
     for _ in 0..config.warmups {
         let thumb = extract().ok_or("preview failed during latency warmup")?;
-        validate_timed_output(spec.filename, &thumb, expected_dimensions);
+        validate_timed_output(
+            spec.filename,
+            &thumb,
+            expected_dimensions,
+            spec.expected_pixels,
+        );
         std::hint::black_box(thumb);
     }
 
@@ -243,7 +249,12 @@ where
         let start = Instant::now();
         let thumb = extract().ok_or("preview failed during latency measurement")?;
         let elapsed_ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        validate_timed_output(spec.filename, &thumb, expected_dimensions);
+        validate_timed_output(
+            spec.filename,
+            &thumb,
+            expected_dimensions,
+            spec.expected_pixels,
+        );
         std::hint::black_box(thumb);
         samples.push(elapsed_ns);
     }
@@ -255,7 +266,7 @@ where
         .map(|sample| sample.abs_diff(median_ns))
         .collect();
     deviations.sort_unstable();
-    Ok(serde_json::json!({
+    let mut report = serde_json::json!({
         "record": "iris.preview_latency.v1",
         "operation": spec.operation,
         "uses_ffmpeg": spec.uses_ffmpeg,
@@ -284,10 +295,33 @@ where
         "identity": spec.identity,
         "measurement_scope": "crate-level local-file extraction, not UI/end-to-end latency; CR3 measures embedded-preview extraction, not sensor demosaic",
         "comparison": "diagnostic only; pairing requires matching input, output dimensions and build/runner/source identity",
-    }))
+    });
+    if let Some(pixels) = spec.expected_pixels {
+        report["pdf_runtime"] = pdf_runtime();
+        report["output"]["decoded_rgb_sha256"] =
+            digest_hex(&Sha256::digest(pixels.as_raw())).into();
+        report["repeated_output_validation"] = "decoded RGB equality to correctness baseline on every warmup/sample; validation excluded from timing".into();
+        report["comparison"] =
+            "renderer-specific diagnostic only; not an FFmpeg effect or cross-platform comparison"
+                .into();
+    }
+    Ok(report)
 }
 
-fn validate_timed_output(name: &str, thumb: &ThumbnailResult, expected: (u32, u32)) {
+fn pdf_runtime() -> serde_json::Value {
+    if cfg!(target_os = "macos") {
+        serde_json::json!({"renderer": "CoreGraphics", "runtime": "macOS system framework"})
+    } else {
+        serde_json::json!({"renderer": "PDFium", "runtime": "dynamically loaded PDFium; this diagnostic does not establish provenance or attestation"})
+    }
+}
+
+fn validate_timed_output(
+    name: &str,
+    thumb: &ThumbnailResult,
+    expected: (u32, u32),
+    expected_pixels: Option<&image::RgbImage>,
+) {
     assert_eq!(
         thumb.format,
         ImageFormat::Jpeg,
@@ -299,6 +333,15 @@ fn validate_timed_output(name: &str, thumb: &ThumbnailResult, expected: (u32, u3
         "{name}: timed output dimensions changed"
     );
     assert!(!thumb.data.is_empty(), "{name}: timed output is empty");
+    if let Some(pixels) = expected_pixels {
+        let decoded = image::load_from_memory_with_format(&thumb.data, image::ImageFormat::Jpeg)
+            .unwrap_or_else(|err| panic!("{name}: invalid repeated JPEG: {err}"))
+            .to_rgb8();
+        assert!(
+            &decoded == pixels,
+            "{name}: repeated rendered pixels changed"
+        );
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -331,6 +374,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let jpeg_pin = &pins[0];
     let cr3_pin = &pins[2];
     let video_pin = &pins[3];
+    let pdf_pin = &pins[4];
     let jpeg = dir.join("landscape.jpg");
     let info = encoded::probe_encoded_image_path(&jpeg).ok_or("missing JPEG dimensions")?;
     assert_eq!((info.width, info.height), (4000, 3000));
@@ -386,6 +430,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         true,
     );
 
+    // Decode the correctness baseline once, outside all timed intervals.
+    let pdf_pixels =
+        image::load_from_memory_with_format(&pdf_thumb.data, image::ImageFormat::Jpeg)?.to_rgb8();
     let identity = runtime_identity()?;
     let outputs = [
         &jpeg_thumb,
@@ -399,11 +446,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         .zip(&pins)
         .zip(outputs)
         .map(|((filename, pin), thumb)| {
-            serde_json::json!({
+            let mut fixture = serde_json::json!({
                 "filename": filename, "sha256": pin.0, "size_bytes": pin.1,
                 "output": {"width": thumb.width, "height": thumb.height, "format": "jpeg",
                            "source": format!("{:?}", thumb.source)},
-            })
+            });
+            if *filename == "one-page.pdf" {
+                fixture["output"]["decoded_rgb_sha256"] =
+                    digest_hex(&Sha256::digest(pdf_pixels.as_raw())).into();
+            }
+            fixture
         })
         .collect();
     println!(
@@ -423,6 +475,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             output: &jpeg_thumb,
             identity: &identity,
             uses_ffmpeg: false,
+            expected_pixels: None,
         },
         config,
         || image_generic::extract_image_thumbnail(&jpeg, &hint),
@@ -436,6 +489,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             output: &cr3_thumb,
             identity: &identity,
             uses_ffmpeg: false,
+            expected_pixels: None,
         },
         config,
         || raw::extract_raw_thumbnail(&cr3, MAX_DIMENSION, &CancellationToken::new()),
@@ -449,13 +503,103 @@ fn main() -> Result<(), Box<dyn Error>> {
             output: &video_thumb,
             identity: &identity,
             uses_ffmpeg: true,
+            expected_pixels: None,
         },
         config,
         || video::extract_video_thumbnail(&video, MAX_DIMENSION),
     )?;
+    let pdf_report = latency_report(
+        &MeasurementSpec {
+            operation: "pdf::extract_pdf_thumbnail",
+            filename: "one-page.pdf",
+            fixture_digest: &pdf_pin.0,
+            fixture_size: pdf_pin.1,
+            output: &pdf_thumb,
+            identity: &identity,
+            uses_ffmpeg: false,
+            expected_pixels: Some(&pdf_pixels),
+        },
+        config,
+        || pdf::extract_pdf_thumbnail(&path, MAX_DIMENSION),
+    )?;
     println!("PREVIEW_LATENCY {}", serde_json::to_string(&jpeg_report)?);
     println!("PREVIEW_LATENCY {}", serde_json::to_string(&cr3_report)?);
     println!("PREVIEW_LATENCY {}", serde_json::to_string(&video_report)?);
+    println!("PREVIEW_LATENCY {}", serde_json::to_string(&pdf_report)?);
     println!("Corpus correctness smoke passed; latency reports are bounded diagnostics, not parity evidence.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn thumbnail(value: u8) -> ThumbnailResult {
+        let rgb = image::RgbImage::from_pixel(2, 2, image::Rgb([value; 3]));
+        let mut data = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(rgb)
+            .write_to(&mut data, image::ImageFormat::Jpeg)
+            .unwrap();
+        ThumbnailResult {
+            data: data.into_inner(),
+            format: ImageFormat::Jpeg,
+            width: 2,
+            height: 2,
+            source: ThumbnailSource::PartialDecode,
+        }
+    }
+
+    #[test]
+    fn pdf_repetitions_validate_pixels_in_warmups_and_samples() {
+        let baseline = thumbnail(0);
+        let pixels = image::load_from_memory(&baseline.data).unwrap().to_rgb8();
+        let identity = serde_json::json!({"target_os": std::env::consts::OS});
+        let spec = MeasurementSpec {
+            operation: "pdf::extract_pdf_thumbnail",
+            filename: "one-page.pdf",
+            fixture_digest: "synthetic",
+            fixture_size: 1,
+            output: &baseline,
+            identity: &identity,
+            uses_ffmpeg: false,
+            expected_pixels: Some(&pixels),
+        };
+        let config = LatencyConfig {
+            warmups: 1,
+            samples: 2,
+        };
+        let mut calls = 0;
+        let report = latency_report(&spec, config, || {
+            calls += 1;
+            Some(thumbnail(0))
+        })
+        .unwrap();
+        assert_eq!(calls, 3);
+        assert_eq!(report["timing"]["sample_count"], 2);
+        assert_eq!(report["timing"]["warmup_iterations"], 1);
+        assert_eq!(report["pdf_runtime"], pdf_runtime());
+        assert_eq!(
+            report["output"]["decoded_rgb_sha256"],
+            digest_hex(&Sha256::digest(pixels.as_raw()))
+        );
+
+        // Same dimensions and valid JPEG bytes are insufficient: reject a pixel
+        // change at each warmup/measured position, and reject invalid JPEG data.
+        for bad_call in 1..=3 {
+            for malformed in [false, true] {
+                let mut calls = 0;
+                assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = latency_report(&spec, config, || {
+                        calls += 1;
+                        let mut thumb = thumbnail(if calls == bad_call { 255 } else { 0 });
+                        if malformed && calls == bad_call {
+                            thumb.data = vec![1, 2, 3];
+                        }
+                        Some(thumb)
+                    });
+                }))
+                .is_err());
+            }
+        }
+    }
 }

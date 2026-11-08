@@ -19,6 +19,15 @@ spec = importlib.util.spec_from_file_location("ffmpeg_policy", ROOT / "scripts/l
 common = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(common)
 POLICY, require, digest = common.POLICY, common.require, common.digest
+preview_spec = importlib.util.spec_from_file_location("preview_corpus_report", ROOT / "scripts/preview_corpus_report.py")
+preview_report = importlib.util.module_from_spec(preview_spec)
+preview_spec.loader.exec_module(preview_report)
+PREVIEW_OPERATIONS = preview_report.PREVIEW_OPERATIONS
+PDF_RUNTIMES = preview_report.PDF_RUNTIMES
+PDF_VALIDATION = preview_report.PDF_VALIDATION
+PDF_COMPARISON = preview_report.PDF_COMPARISON
+parse_preview = preview_report.parse_preview
+validate_preview_output = preview_report.validate_preview_output
 LZMA = json.loads((ROOT / "packaging/macos/liblzma.json").read_text())
 MACOS_POLICY = {
     'liblzma': LZMA,
@@ -495,80 +504,11 @@ def check(app, sdk):
                 executables={p.name: digest(p) for p in (app / 'Contents/MacOS').iterdir()})
 
 
-# Fixed by the smoke's three operations, not an operator scan/count policy.
-PREVIEW_OPERATIONS = {
-    'image_generic::extract_image_thumbnail': ('landscape.jpg', False),
-    'raw::extract_raw_thumbnail': ('canon-eos-r.cr3', False),
-    'video::extract_video_thumbnail': ('bunny.mp4', True),
-}
-
-
 def report_bytes(report):
     data = clean(json.dumps(report, indent=2, allow_nan=False)) + '\n'
     require(len(data.encode()) <= setting('IRIS_FFMPEG_MAX_REPORT_BYTES', 266240),
             'report exceeds byte budget')
     return data
-
-
-def parse_preview(text, source):
-    """Accept only complete, bounded smoke records; never retain command logs."""
-    require(len(text.encode()) <= setting('IRIS_FFMPEG_COMMAND_BYTES', 32768),
-            'preview output exceeds command budget')
-    correctness, timings = [], []
-    for line in text.splitlines():
-        for marker, records in (('PREVIEW_CORRECTNESS ', correctness), ('PREVIEW_LATENCY ', timings)):
-            if line.startswith(marker):
-                records.append(json.loads(line[len(marker):]))
-    require(len(correctness) == 1 and len(timings) == len(PREVIEW_OPERATIONS),
-            'missing or duplicate preview records')
-    correct = correctness[0]
-    require(correct['record'] == 'iris.preview_correctness.v1' and correct['passed'] is True,
-            'preview correctness failed')
-    identity = correct['identity']
-    for key in ('source_revision', 'workflow_run_id', 'cargo_lock_sha256', 'rustc',
-                'target_os', 'target_arch', 'runner_name', 'runner_os', 'runner_arch', 'runner_image_os',
-                'runner_image_version', 'cpu_model', 'available_parallelism', 'build_profile',
-                'release_opt_level', 'crate', 'crate_version'):
-        require(identity.get(key) not in (None, ''), f'missing preview identity: {key}')
-    require(identity['source_revision'] == source and identity['target_os'] == 'macos'
-            and identity['features'] == dict(video=True, pdf=True, raw_full=True)
-            and identity['build_profile'] == 'release', 'preview source/features/profile mismatch')
-    pins = {p['filename']: p for p in json.loads((ROOT / 'tests/preview-corpus/fixtures.json').read_text())['files']}
-    fixtures = correct['fixtures']
-    require(len(fixtures) == len(pins) and {f['filename'] for f in fixtures} == set(pins),
-            'preview correctness fixture set mismatch')
-    for fixture in fixtures:
-        pin = pins[fixture['filename']]
-        require(fixture['sha256'] == pin['sha256'] and fixture['size_bytes'] == pin['size'],
-                'preview fixture pin mismatch')
-        validate_preview_output(fixture['output'])
-    by_name = {f['filename']: f for f in fixtures}
-    require({t['operation'] for t in timings} == set(PREVIEW_OPERATIONS),
-            'preview operation set mismatch')
-    warmups, samples = int(os.environ['IRIS_PREVIEW_LATENCY_WARMUPS']), int(os.environ['IRIS_PREVIEW_LATENCY_SAMPLES'])
-    require(warmups >= 0 and samples > 0, 'invalid preview iteration budget')
-    for timing in timings:
-        name, uses_ffmpeg = PREVIEW_OPERATIONS[timing['operation']]
-        fixture = by_name[name]
-        require(timing['record'] == 'iris.preview_latency.v1' and timing['identity'] == identity
-                and timing['uses_ffmpeg'] is uses_ffmpeg, 'preview timing identity mismatch')
-        require(timing['input'] == dict(filename=name, sha256=fixture['sha256'], size_bytes=fixture['size_bytes']),
-                'preview timing fixture mismatch')
-        require({k: timing['output'][k] for k in fixture['output']} == fixture['output'],
-                'preview timing output mismatch')
-        stats = timing['timing']
-        require(stats['unit'] == 'nanoseconds' and stats['warmup_iterations'] == warmups
-                and stats['sample_count'] == samples, 'preview timing budget mismatch')
-        values = [stats[k] for k in ('min', 'median', 'p90', 'max', 'median_absolute_deviation')]
-        require(all(type(v) is int and 0 <= v <= (1 << 64) - 1 for v in values)
-                and values[:4] == sorted(values[:4]), 'invalid preview timing statistics')
-    return dict(correctness=correct, timings=timings)
-
-
-def validate_preview_output(output):
-    require(output['format'] == 'jpeg' and isinstance(output['source'], str) and output['source']
-            and all(type(output[k]) is int and 0 < output[k] <= 256 for k in ('width', 'height')),
-            'invalid preview output dimensions/format/source')
 
 
 def paired_preview(baseline, candidate):
@@ -582,6 +522,10 @@ def paired_preview(baseline, candidate):
     require(set(left) == set(right) == set(PREVIEW_OPERATIONS), 'paired preview operations mismatch')
     pairs = []
     for operation, baseline_record in left.items():
+        # PDF uses the OS renderer, not FFmpeg: retain its diagnostics separately,
+        # never compute a baseline/candidate effect or compare platform renderers.
+        if operation == 'pdf::extract_pdf_thumbnail':
+            continue
         candidate_record = right[operation]
         for key in ('input', 'identity', 'uses_ffmpeg'):
             require(baseline_record[key] == candidate_record[key], f'paired preview {key} mismatch')
@@ -716,7 +660,7 @@ def validate(output):
             REDACTIONS[str(sdk)] = '<sdk>'
             source = os.environ.get('GITHUB_SHA') or run('git', '-C', ROOT, 'rev-parse', 'HEAD')
             corpus = work / 'corpus'
-            preview = dict(scope='Paired sequential crate-level diagnostics, no threshold, parity claim or legal approval.',
+            preview = dict(scope='Paired sequential JPEG/CR3/video crate-level diagnostics; PDF is a separate renderer-specific diagnostic, not an FFmpeg effect or cross-platform comparison; no threshold, parity claim or legal approval.',
                            baseline_runtime='Existing Homebrew FFmpeg selection (not a compatible-runtime approval)',
                            candidate_runtime='Pinned prefix, smoke executed against staged native closure', status='unavailable')
             report['preview'] = preview

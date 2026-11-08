@@ -23,6 +23,16 @@ jobs:
       IRIS_BUILD_VARIANT: product
       IRIS_VERIFY_PDFIUM_PROVENANCE: "0"
       IRIS_MAX_LINUX_RELEASE_BYTES: "35651584"
+      # Shared pinned corpus and repeated diagnostic budget; only JSON is retained.
+      IRIS_PREVIEW_CORPUS_MAX_BYTES: ${{ vars.IRIS_PREVIEW_CORPUS_MAX_BYTES || 40000000 }}
+      IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS: ${{ vars.IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS || 60 }}
+      IRIS_PREVIEW_CORPUS_RETRIES: ${{ vars.IRIS_PREVIEW_CORPUS_RETRIES || 1 }}
+      IRIS_PREVIEW_CORPUS_RETRY_DELAY_SECONDS: ${{ vars.IRIS_PREVIEW_CORPUS_RETRY_DELAY_SECONDS || 2 }}
+      IRIS_PREVIEW_LATENCY_WARMUPS: ${{ vars.IRIS_PREVIEW_LATENCY_WARMUPS || 2 }}
+      IRIS_PREVIEW_LATENCY_SAMPLES: ${{ vars.IRIS_PREVIEW_LATENCY_SAMPLES || 21 }}
+      IRIS_FFMPEG_FETCH_SECONDS: ${{ vars.IRIS_FFMPEG_FETCH_SECONDS || 300 }}
+      IRIS_FFMPEG_COMMAND_SECONDS: ${{ vars.IRIS_FFMPEG_COMMAND_SECONDS || 60 }}
+      IRIS_FFMPEG_COMMAND_BYTES: ${{ vars.IRIS_FFMPEG_COMMAND_BYTES || 32768 }}
       IRIS_FFMPEG_JOBS: ${{ vars.IRIS_FFMPEG_JOBS || 2 }}
       IRIS_FFMPEG_MAX_REPORT_BYTES: ${{ vars.IRIS_FFMPEG_MAX_REPORT_BYTES || 266240 }}
     steps:
@@ -51,7 +61,8 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --no-deps --locked --offline -- -D warnings
-          cargo build --release -p iris-thumb-preview --example pdf_thumbnail_smoke --example video_thumbnail_smoke --locked --offline
+          cargo test -p iris-thumb-preview --example preview_corpus_smoke --locked --offline
+          cargo build --release -p iris-thumb-preview --example pdf_thumbnail_smoke --example video_thumbnail_smoke --example preview_corpus_smoke --locked --offline
       - name: Generate built-in codec clip and smoke AppDir
         shell: bash
         run: |
@@ -63,6 +74,8 @@ jobs:
           done
           dist/linux/Iris.AppDir/usr/bin/iris-video-smoke "$RUNNER_TEMP/iris-video.avi"
           dist/linux/Iris.AppDir/usr/bin/iris-pdf-smoke
+          cp "$CARGO_TARGET_DIR/release/examples/preview_corpus_smoke" dist/linux/Iris.AppDir/usr/bin/iris-corpus-smoke
+          patchelf --set-rpath '$ORIGIN/../lib/iris' dist/linux/Iris.AppDir/usr/bin/iris-corpus-smoke
           # The check inspects the actual staged Iris, not the clip generator.
           python3 scripts/linux-ffmpeg.py check dist/linux/Iris.AppDir dist/linux/ffmpeg-audit.json
       - name: Clean-installed Debian runtime and thumbnail smoke
@@ -75,7 +88,7 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PY'
-          import hashlib, json, os, subprocess
+          import hashlib, importlib.util, json, os, subprocess, sys, tempfile
           from pathlib import Path
           staged = json.loads(Path('dist/linux/ffmpeg-audit.json').read_text())
           installed = json.loads(Path('dist/linux/installed-ffmpeg-audit.json').read_text())
@@ -85,7 +98,35 @@ jobs:
           staged['debian'] = dict(sha256=hashlib.sha256(deb.read_bytes()).hexdigest(),
                                   depends=subprocess.check_output(['dpkg-deb', '-f', str(deb), 'Depends'], text=True).strip())
           assert staged['debian']['depends'] == staged['system_requirements']
-          staged['validation'] = dict(appdir_video=True, appdir_pdf=True, installed_video=True, installed_pdf=True)
+          # Run the staged default-feature smoke once; retain its bounded records, never its fixtures/logs.
+          report_spec = importlib.util.spec_from_file_location(
+              'preview_corpus_report', 'scripts/preview_corpus_report.py')
+          preview_report = importlib.util.module_from_spec(report_spec)
+          report_spec.loader.exec_module(preview_report)
+          with tempfile.TemporaryDirectory(prefix='iris-corpus-', dir=os.environ['RUNNER_TEMP']) as temporary:
+              corpus = Path(temporary) / 'corpus'
+              subprocess.run([sys.executable, 'scripts/fetch-preview-corpus.py', '--output', str(corpus)],
+                             check=True, timeout=int(os.environ['IRIS_FFMPEG_FETCH_SECONDS']))
+              smoke = subprocess.run(
+                  [str(Path('dist/linux/Iris.AppDir/usr/bin/iris-corpus-smoke').resolve()), str(corpus)],
+                  check=True, capture_output=True, text=True,
+                  timeout=int(os.environ['IRIS_FFMPEG_COMMAND_SECONDS']))
+              staged['preview'] = preview_report.parse_preview(
+                  smoke.stdout, os.environ['GITHUB_SHA'], target_os='linux')
+          pdfium_docs = Path('dist/linux/Iris.AppDir/usr/share/doc/iris/pdfium')
+          pdfium = json.loads((pdfium_docs / 'PROVENANCE.json').read_text())
+          pdfium_library = Path('dist/linux/Iris.AppDir/usr/lib/iris/libpdfium.so')
+          with pdfium_library.open('rb') as stream:
+              pdfium_digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+          assert pdfium['runtime']['sha256'] == pdfium_digest
+          assert pdfium['attestation']['status'] == 'not_attempted'
+          staged['preview']['pdf_runtime_identity'] = dict(
+              version=(pdfium_docs / 'VERSION').read_text().strip(),
+              asset_sha256=pdfium['archive']['sha256'], library_sha256=pdfium_digest,
+              attestation_status=pdfium['attestation']['status'])
+          staged['preview']['scope'] = 'Report-only staged default-feature PDFium diagnostic; not an FFmpeg effect, cross-platform comparison, UI latency, attestation or release approval.'
+          staged['validation'] = dict(appdir_video=True, appdir_pdf=True, installed_video=True, installed_pdf=True,
+                                      appdir_corpus=True)
           report = json.dumps(staged, indent=2) + '\n'
           assert len(report.encode()) <= int(os.environ['IRIS_FFMPEG_MAX_REPORT_BYTES'])
           Path('audit').mkdir(exist_ok=True)
