@@ -45,6 +45,7 @@ Usage: scripts/perf-transfer-containers.sh
 Runs the v0.5 P0 transfer benchmark harness against local test servers.
 The script prints measurements to stdout and keeps all generated payloads under
 a temporary directory unless IRIS_PERF_WORK_ROOT is set.
+SFTP readiness requires Python 3 (standard library only) for a monotonic deadline.
 
 Environment:
   IRIS_PERF_BYTES            Large-file size in bytes (default: 67108864).
@@ -146,27 +147,45 @@ prepare_known_hosts() {
   local known_hosts="$home_dir/.ssh/known_hosts"
   local scan_output="$work_root/ssh-keyscan.out"
   local scan_error="$work_root/ssh-keyscan.err"
-  local deadline=$((SECONDS + ready_timeout))
-  local remaining
-  local scan_timeout
   mkdir -p "$home_dir/.ssh"
   chmod 700 "$home_dir/.ssh"
-  while (( SECONDS < deadline )); do
-    remaining=$((deadline - SECONDS))
-    scan_timeout="$ssh_keyscan_timeout"
-    if (( scan_timeout > remaining )); then
-      scan_timeout="$remaining"
-    fi
-    if ssh-keyscan -T "$scan_timeout" -p "$sftp_port" 127.0.0.1 >"$scan_output" 2>"$scan_error" && [[ -s "$scan_output" ]]; then
-      mv "$scan_output" "$known_hosts"
-      chmod 600 "$known_hosts"
-      export HOME="$home_dir"
-      return 0
-    fi
-    if (( SECONDS < deadline )); then
-      sleep 1
-    fi
-  done
+  if python3 - "$ready_timeout" "$ssh_keyscan_timeout" "$sftp_port" "$scan_output" "$scan_error" <<'PY'
+import os
+import subprocess
+import sys
+import time
+
+budget, ceiling, port, output, error = sys.argv[1:]
+deadline = time.monotonic() + int(budget)
+while True:
+    with open(output, "wb") as stdout, open(error, "wb") as stderr:
+        # Start the timer after local file setup so its timeout is not stale.
+        remaining = deadline - time.monotonic()
+        # ssh-keyscan accepts only whole seconds. Never round the budget up.
+        scan_timeout = min(int(ceiling), int(remaining))
+        if scan_timeout < 1:
+            break
+        try:
+            result = subprocess.run(
+                ["ssh-keyscan", "-T", str(scan_timeout), "-p", port, "127.0.0.1"],
+                stdout=stdout, stderr=stderr, timeout=remaining, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            break
+    if result.returncode == 0 and os.path.getsize(output):
+        sys.exit(0)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        break
+    time.sleep(min(1, remaining))
+sys.exit(1)
+PY
+  then
+    mv "$scan_output" "$known_hosts"
+    chmod 600 "$known_hosts"
+    export HOME="$home_dir"
+    return 0
+  fi
   echo "SFTP server did not provide an SSH host key within ${ready_timeout}s" >&2
   if [[ -s "$scan_error" ]]; then
     tail -c 2048 "$scan_error" >&2
@@ -539,6 +558,7 @@ require_cmd nc
 require_cmd cargo
 if [[ "$skip_sftp" != "1" ]]; then
   require_cmd ssh-keyscan
+  require_cmd python3
 fi
 
 if [[ -z "$work_root" ]]; then

@@ -51,7 +51,7 @@ PATH="$test_root/bin:$PATH" \
   IRIS_PERF_BYTES=1 \
   IRIS_PERF_SMALL_FILES=1 \
   IRIS_PERF_SMALL_BYTES=1 \
-  IRIS_PERF_READY_TIMEOUT_SECONDS=1 \
+  IRIS_PERF_READY_TIMEOUT_SECONDS=2 \
   IRIS_PERF_SSH_KEYSCAN_TIMEOUT_SECONDS=3 \
   IRIS_PERF_TEST_SCAN_TIMEOUT_FILE="$test_root/scan-timeout" \
   bash "$repo_root/scripts/perf-transfer-containers.sh" >"$test_root/output" 2>&1
@@ -68,10 +68,75 @@ if [[ "$(cat "$test_root/scan-timeout")" != "1" ]]; then
   cat "$test_root/output" >&2
   exit 1
 fi
-if (( elapsed > 3 )); then
-  echo "one-second readiness deadline took ${elapsed}s" >&2
+if (( elapsed > 4 )); then
+  echo "two-second readiness deadline took ${elapsed}s" >&2
   cat "$test_root/output" >&2
   exit 1
 fi
-grep -Fq 'SFTP server did not provide an SSH host key within 1s' "$test_root/output"
+grep -Fq 'SFTP server did not provide an SSH host key within 2s' "$test_root/output"
 printf 'stalled key scan respected readiness budget (elapsed=%ss)\n' "$elapsed"
+
+# Exercise the actual helper with a deterministic monotonic clock: no real
+# sleeping or scheduler timing is involved in the fractional-budget assertions.
+python3 - "$repo_root/scripts/perf-transfer-containers.sh" "$test_root" <<'PY'
+import pathlib
+import subprocess
+import sys
+from unittest.mock import patch
+
+source = pathlib.Path(sys.argv[1]).read_text().split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+root = pathlib.Path(sys.argv[2])
+
+
+def check_case(name, duration, budget, ceiling, success=False, stalled=False):
+    now = 0.0
+    scans = []
+    delays = []
+    output = root / (name + ".out")
+    error = root / (name + ".err")
+
+    def scan(args, *, stdout, stderr, timeout, check):
+        nonlocal now
+        requested = int(args[args.index("-T") + 1])
+        assert 1 <= requested <= min(ceiling, budget - now), (name, requested, now)
+        assert 0 < timeout <= budget - now, (name, timeout, now)
+        scans.append(requested)
+        if stalled:
+            now += timeout
+            raise subprocess.TimeoutExpired(args, timeout)
+        now += duration
+        if success and len(scans) == 2:
+            stdout.write(b"synthetic-host-key\n")
+            return subprocess.CompletedProcess(args, 0)
+        stderr.write(b"synthetic scan failure\n")
+        return subprocess.CompletedProcess(args, 1)
+
+    def sleep(delay):
+        nonlocal now
+        assert 0 < delay <= min(1, budget - now), (name, delay, now)
+        delays.append(delay)
+        now += delay
+
+    with patch.object(sys, "argv", ["-", str(budget), str(ceiling), "2222", str(output), str(error)]), \
+            patch("time.monotonic", side_effect=lambda: now), \
+            patch("time.sleep", side_effect=sleep), \
+            patch("subprocess.run", side_effect=scan):
+        try:
+            exec(compile(source, "readiness-helper", "exec"), {})
+        except SystemExit as result:
+            assert result.code == (0 if success else 1), (name, result.code)
+        else:
+            raise AssertionError("helper must return a status")
+    assert now <= budget, (name, now)
+    return scans, delays
+
+
+# A quick failure late in the budget leaves only a fractional retry delay.
+assert check_case("short-delay", 0.25, 1, 3) == ([1], [0.75])
+# After the retry, 0.75s remains: even a one-second scan cannot fit.
+assert check_case("no-rounded-scan", 0.25, 2, 3) == ([2], [1])
+# Retain transient success, the per-scan ceiling, and an outer scan deadline.
+assert check_case("transient", 0.25, 4, 1, success=True) == ([1, 1], [1])
+assert check_case("stalled", 0, 2, 3, stalled=True) == ([2], [])
+print("deterministic retry, integer scan budget, transient success and scan deadline passed")
+PY
