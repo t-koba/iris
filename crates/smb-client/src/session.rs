@@ -782,6 +782,15 @@ mod tests {
 
     #[tokio::test]
     async fn actor_ntlm_v2_session_setup_enables_smb311_encryption() {
+        smb311_encrypted_session_setup(false).await;
+    }
+
+    #[tokio::test]
+    async fn actor_ntlm_v2_session_setup_enables_smb311_encryption_with_key_exchange() {
+        smb311_encrypted_session_setup(true).await;
+    }
+
+    async fn smb311_encrypted_session_setup(key_exchange: bool) {
         let (client, server) = duplex(4096);
         let actor = SmbConnectionActor::spawn(client);
         let server_task = tokio::spawn(async move {
@@ -799,7 +808,10 @@ mod tests {
             assert!(find_bytes(&first_body.security_buffer, b"NTLMSSP\0"));
 
             let session_id = 0x0102_0304_0506_0708;
-            let challenge = ntlm_challenge_message();
+            let mut challenge = ntlm_challenge_message();
+            if key_exchange {
+                challenge[20..24].copy_from_slice(&default_negotiate_flags().0.to_le_bytes());
+            }
             let challenge_spnego = encode_neg_token_resp(
                 Some(SpnegoNegState::AcceptIncomplete),
                 Some(true),
@@ -843,15 +855,11 @@ mod tests {
                 .response_token
                 .expect("authenticate token");
             assert!(authenticate.starts_with(b"NTLMSSP\0"));
+            let exported_key = server_exported_session_key(&authenticate, &challenge, key_exchange);
 
             let flags = NtlmsspChallenge::decode(&challenge).unwrap().flags;
-            let server_mic = mech_list_mic(
-                &expected_session_base_key(),
-                flags,
-                true,
-                &ntlm_mech_type_list(),
-            )
-            .unwrap();
+            let server_mic =
+                mech_list_mic(&exported_key, flags, true, &ntlm_mech_type_list()).unwrap();
             let mic_spnego = encode_neg_token_resp(
                 Some(SpnegoNegState::AcceptIncomplete),
                 None,
@@ -886,14 +894,9 @@ mod tests {
             assert_eq!(
                 client_token.mech_list_mic.as_deref(),
                 Some(
-                    mech_list_mic(
-                        &expected_session_base_key(),
-                        flags,
-                        false,
-                        &ntlm_mech_type_list()
-                    )
-                    .unwrap()
-                    .as_slice()
+                    mech_list_mic(&exported_key, flags, false, &ntlm_mech_type_list())
+                        .unwrap()
+                        .as_slice()
                 )
             );
 
@@ -916,25 +919,18 @@ mod tests {
                 final_header,
                 &[session_setup_response_body(&completed), completed].concat(),
             );
-            derive_smb2_signing_key(
-                &expected_session_base_key(),
-                Smb2Dialect::Smb311,
-                &preauth_hash,
-            )
-            .expect("derive signing key")
-            .sign_packet(&mut final_response)
-            .expect("sign final response");
+            derive_smb2_signing_key(&exported_key, Smb2Dialect::Smb311, &preauth_hash)
+                .expect("derive signing key")
+                .sign_packet(&mut final_response)
+                .expect("sign final response");
             transport
                 .send_packet(&final_response)
                 .await
                 .expect("final response");
 
-            let client_keys = derive_smb311_encryption_keys(
-                &expected_session_base_key(),
-                Smb2Dialect::Smb311,
-                &preauth_hash,
-            )
-            .expect("derive encryption keys");
+            let client_keys =
+                derive_smb311_encryption_keys(&exported_key, Smb2Dialect::Smb311, &preauth_hash)
+                    .expect("derive encryption keys");
             let mut encryption =
                 Smb3EncryptionContext::new(client_keys.reversed()).expect("server encryption");
             let encrypted = transport.recv_packet().await.expect("encrypted followup");
@@ -958,6 +954,7 @@ mod tests {
                 .send_packet(&encrypted_response)
                 .await
                 .expect("echo response");
+            exported_key
         });
 
         let setup = NtlmV2SessionSetup {
@@ -979,7 +976,6 @@ mod tests {
             .expect("authenticate");
 
         assert_eq!(session.session_id, 0x0102_0304_0506_0708);
-        assert_eq!(session.session_base_key, expected_session_base_key());
         assert_eq!(
             actor.state().await.expect("state").session_id,
             0x0102_0304_0506_0708
@@ -989,7 +985,10 @@ mod tests {
             .request(Smb2Command::Echo, b"probe".to_vec())
             .await
             .expect("encrypted followup");
-        server_task.await.expect("server task");
+        assert_eq!(
+            session.session_base_key,
+            server_task.await.expect("server task")
+        );
     }
 
     #[tokio::test]
@@ -1040,6 +1039,68 @@ mod tests {
 
         assert!(matches!(error, SmbSessionError::MissingChallengeToken));
         server_task.await.expect("server task");
+    }
+
+    // Server-side MS-NLMP derivation: do not call the client's AUTHENTICATE
+    // builder (KEY_EXCH generates a fresh random exported key on every call).
+    fn server_exported_session_key(
+        authenticate: &[u8],
+        challenge: &[u8],
+        key_exchange: bool,
+    ) -> [u8; 16] {
+        use hmac::{Hmac, KeyInit, Mac};
+        use md5::Md5;
+
+        fn mac(key: &[u8], input: &[u8]) -> [u8; 16] {
+            let mut mac = Hmac::<Md5>::new_from_slice(key).unwrap();
+            mac.update(input);
+            mac.finalize().into_bytes().into()
+        }
+        fn field(message: &[u8], offset: usize) -> &[u8] {
+            let start = le_u32(message, offset + 4) as usize;
+            let length = le_u16(message, offset) as usize;
+            &message[start..start + length]
+        }
+
+        assert_eq!(&authenticate[8..12], &3u32.to_le_bytes());
+        assert_eq!(
+            le_u32(authenticate, 60) & crate::auth::ntlmssp::NtlmsspNegotiateFlags::KEY_EXCH.0 != 0,
+            key_exchange
+        );
+        // Known NT hash of the synthetic password "Password". Independently
+        // verify NTProofStr against the server challenge and the received blob.
+        let response_key = mac(
+            &hex_bytes("a4f49c406510bdcab6824ee7c30fd852"),
+            &encode_utf16le("USERDomain"),
+        );
+        let nt_response = field(authenticate, 20);
+        let proof = mac(
+            &response_key,
+            &[&challenge[24..32], &nt_response[16..]].concat(),
+        );
+        assert_eq!(&nt_response[..16], &proof);
+        let session_base_key = mac(&response_key, &proof);
+        let encrypted_key = field(authenticate, 52);
+        if !key_exchange {
+            assert!(encrypted_key.is_empty());
+            return session_base_key;
+        }
+        assert_eq!(encrypted_key.len(), 16);
+        // RC4 decryption of EncryptedRandomSessionKey with KeyExchangeKey
+        // (SessionBaseKey for NTLMv2), independent of the client's private RC4.
+        let mut state: [u8; 256] = std::array::from_fn(|i| i as u8);
+        let mut j = 0;
+        for i in 0..256 {
+            j = (j + state[i] as usize + session_base_key[i % 16] as usize) % 256;
+            state.swap(i, j);
+        }
+        let (mut i, mut j) = (0, 0);
+        std::array::from_fn(|n| {
+            i = (i + 1) % 256;
+            j = (j + state[i] as usize) % 256;
+            state.swap(i, j);
+            encrypted_key[n] ^ state[(state[i] as usize + state[j] as usize) % 256]
+        })
     }
 
     fn ntlm_challenge_message() -> Vec<u8> {
