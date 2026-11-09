@@ -116,14 +116,13 @@ fn extract_pdf_text_from_reader(reader: impl Read, limits: PdfTextLimits) -> Pdf
     }
 }
 
-// Select the stream dictionary start as the last `<<` outside PDF comments,
-// literal strings (with nesting/escapes), and hex strings.
-// A valid comment between the closing `>>` and `stream` may hold
-// delimiter-like bytes (`<<`, `>>`) and fake `/Filter`/`/DecodeParms` text;
-// ignoring comment bytes keeps such plain streams extractable while real
-// nested dictionaries still fail closed in `stream_uses_flate`.
+// Select the last outer dictionary, matching nested `<<`/`>>` tokens rather
+// than mistaking a nested dictionary for the stream's decoding policy. Strings
+// and comments cannot open or close dictionaries, including in the gap before
+// `stream`. Unbalanced dictionaries/strings fail closed.
 fn last_dict_start(prefix: &[u8]) -> Option<usize> {
     let mut last = None;
+    let mut depth = 0usize;
     let mut index = 0;
     while index < prefix.len() {
         match prefix[index] {
@@ -133,27 +132,30 @@ fn last_dict_start(prefix: &[u8]) -> Option<usize> {
                     index += 1;
                 }
             }
-            b'(' => {
-                let Some(next) = skip_dict_literal(prefix, index) else {
-                    break;
-                };
-                index = next;
-            }
+            b'(' => index = skip_dict_literal(prefix, index)?,
             b'<' => {
                 if prefix.get(index + 1) == Some(&b'<') {
-                    last = Some(index);
+                    if depth == 0 {
+                        last = Some(index);
+                    }
+                    depth += 1;
                     index += 2;
                 } else {
-                    let Some(next) = skip_dict_hex(prefix, index) else {
-                        break;
-                    };
-                    index = next;
+                    index = skip_dict_hex(prefix, index)?;
                 }
+            }
+            b'>' if prefix.get(index + 1) == Some(&b'>') => {
+                depth = depth.checked_sub(1)?;
+                index += 2;
             }
             _ => index += 1,
         }
     }
-    last
+    if depth == 0 {
+        last
+    } else {
+        None
+    }
 }
 
 fn is_pdf_whitespace(byte: u8) -> bool {
@@ -582,18 +584,6 @@ endobj
         for gap in [
             " % comment\n",
             "\0\t\x0c % /Filter /ASCII85Decode\r% /DecodeParms\r\n ",
-        ] {
-            let pdf = format!("%PDF-1.4\n<< /Length 12 >>{gap}stream\n(needle) Tj\nendstream");
-            let result = extract_pdf_text_from_reader(pdf.as_bytes(), LIMITS);
-            assert_eq!(result.text, "needle", "{gap:?}");
-            assert!(!result.truncated, "{gap:?}");
-            assert_eq!(result.pages_scanned, None);
-        }
-    }
-
-    #[test]
-    fn extracts_plain_stream_when_trailing_comment_holds_delimiters_and_fake_filters() {
-        for gap in [
             " % << >> /Filter /ASCII85Decode /DecodeParms 2 0 R\n",
             " % /DecodeParms << /Columns 5 >> << >> /Filter /ASCII85Decode\r% /DecodeParms 2 0 R\n ",
         ] {
@@ -606,14 +596,32 @@ endobj
     }
 
     #[test]
-    fn extracts_plain_stream_when_dictionary_literal_holds_dict_close() {
-        // The exact `>>` inside a literal string must not close the dictionary.
-        // A trailing comment may also hold delimiters and fake filters.
-        let pdf = b"%PDF-1.4\n<< /Metadata (a >> b) >> % comment\nstream\n(needle) Tj\nendstream";
-        let result = extract_pdf_text_from_reader(pdf.as_slice(), LIMITS);
-        assert_eq!(result.text, "needle");
-        assert!(!result.truncated);
-        assert_eq!(result.pages_scanned, None);
+    fn selects_outer_dictionary_and_matches_nested_closing_delimiters() {
+        let before = b"%PDF-1.4\n1 0 obj << /Other << >> >> endobj\n2 0 obj ";
+        for dictionary in [
+            "<< /Filter /ASCII85Decode /DecodeParms << /Columns 5 >> >>",
+            "<< /DecodeParms << /Other << /Metadata (nested (% >> << /Filter) \\) /DecodeParms) >> >> /Filter /FlateDecode >>",
+            "<< /Metadata <3c3c3e3e25> /DecodeParms << /Columns 5 >> >>",
+        ] {
+            let mut prefix = before.to_vec();
+            prefix.extend_from_slice(dictionary.as_bytes());
+            prefix.extend_from_slice(b"\t% << >> /Filter /FlateDecode\r\n \0");
+            assert_eq!(last_dict_start(&prefix), Some(before.len()), "{dictionary}");
+            assert_eq!(stream_uses_flate(&prefix[before.len()..]), None);
+        }
+        // Malformed outer dictionaries/strings cannot select an inner dictionary
+        // or turn undecoded bytes into a complete negative search result.
+        for dictionary in [
+            "<< /DecodeParms << >>",
+            "<< /Metadata (unterminated % >>",
+            "<< /Metadata <0123",
+        ] {
+            assert_eq!(last_dict_start(dictionary.as_bytes()), None);
+            let pdf = format!("{dictionary}\nstream\n(must not extract)\nendstream");
+            let result = extract_pdf_text_from_reader(pdf.as_bytes(), LIMITS);
+            assert!(result.truncated, "{dictionary}");
+            assert!(result.text.is_empty(), "{dictionary}");
+        }
     }
 
     #[test]
@@ -625,6 +633,8 @@ endobj
             "<< % << >> /Filter /ASCII85Decode\n /Length 12 >>",
             "<< /Metadata (/Filter /FlateDecode /DecodeParms) >>",
             "<< /Metadata (a % not a comment >>) >>",
+            "<< /Metadata (outer (nested % >> << /Filter /ASCII85Decode) \\) /DecodeParms) >>",
+            "<< /Metadata (escaped \\( % << >> /Filter /FlateDecode \\) and \\\\) >>",
             "<< /Metadata <2F46696C746572> >>",
         ] {
             let pdf = format!(
@@ -693,6 +703,8 @@ endobj
             "/Filter /ASCII85Decode /DecodeParms << /Columns 5 >>",
             "/Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns 5 >>",
             "/DecodeParms << /Columns 5 >> /Filter /ASCII85Decode",
+            "/Metadata (outer (nested % >> << /Filter) \\) /DecodeParms) /DecodeParms << /Columns 5 >> /Filter /ASCII85Decode",
+            "/Filter /ASCII85Decode /DecodeParms << /Other << /Metadata (nested (% >> <<) \\) /Filter) >> >>",
             "/DecodeParms << /Columns 5 >>",
             "/Other << /Columns 5 >>",
             "/Filter /FlateDecode /DecodeParms 2 0 R",
