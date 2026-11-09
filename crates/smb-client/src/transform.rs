@@ -108,13 +108,13 @@ pub fn derive_smb3_encryption_keys(
             (
                 sp800_108_counter_hmac_sha256(
                     session_base_key,
-                    b"SMB2AESCCM",
+                    b"SMB2AESCCM\0",
                     b"ServerIn \0",
                     AES128_KEY_BYTES,
                 )?,
                 sp800_108_counter_hmac_sha256(
                     session_base_key,
-                    b"SMB2AESCCM",
+                    b"SMB2AESCCM\0",
                     b"ServerOut\0",
                     AES128_KEY_BYTES,
                 )?,
@@ -123,13 +123,13 @@ pub fn derive_smb3_encryption_keys(
         Smb2Dialect::Smb311 => (
             sp800_108_counter_hmac_sha256(
                 session_base_key,
-                b"SMBC2SCipherKey",
+                b"SMBC2SCipherKey\0",
                 preauth_integrity_hash,
                 key_bytes,
             )?,
             sp800_108_counter_hmac_sha256(
                 session_base_key,
-                b"SMBS2CCipherKey",
+                b"SMBS2CCipherKey\0",
                 preauth_integrity_hash,
                 key_bytes,
             )?,
@@ -575,13 +575,11 @@ mod tests {
 
         assert_eq!(
             keys.client_to_server.to_vec(),
-            sp800_108_counter_hmac_sha256(session_key, b"SMBC2SCipherKey", &preauth, 16)
-                .expect("client key")
+            hex_bytes("2015066701672ebafc1adf85dcfe0cb0")
         );
         assert_eq!(
             keys.server_to_client.to_vec(),
-            sp800_108_counter_hmac_sha256(session_key, b"SMBS2CCipherKey", &preauth, 16)
-                .expect("server key")
+            hex_bytes("42a0c99abcf20c95d92b06ca156a4349")
         );
     }
 
@@ -598,13 +596,11 @@ mod tests {
 
         assert_eq!(
             keys.client_to_server,
-            sp800_108_counter_hmac_sha256(session_key, b"SMB2AESCCM", b"ServerIn \0", 16)
-                .expect("server in")
+            hex_bytes("f79b38257f299ce830a3faa8e29c4c8a")
         );
         assert_eq!(
             keys.server_to_client,
-            sp800_108_counter_hmac_sha256(session_key, b"SMB2AESCCM", b"ServerOut\0", 16)
-                .expect("server out")
+            hex_bytes("50c96cc98425483ebd6666750ae700ce")
         );
     }
 

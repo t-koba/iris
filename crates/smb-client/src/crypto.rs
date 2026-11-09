@@ -122,11 +122,11 @@ pub fn derive_smb2_signing_key(
             Ok(SmbSigningKey::hmac_sha256(session_base_key.to_vec()))
         }
         Smb2Dialect::Smb300 | Smb2Dialect::Smb302 => Ok(SmbSigningKey::aes_cmac(
-            derive_aes_cmac_signing_key(session_base_key, b"SMB2AESCMAC", b"SmbSign\0")?,
+            derive_aes_cmac_signing_key(session_base_key, b"SMB2AESCMAC\0", b"SmbSign\0")?,
         )),
         Smb2Dialect::Smb311 => Ok(SmbSigningKey::aes_cmac(derive_aes_cmac_signing_key(
             session_base_key,
-            b"SMBSigningKey",
+            b"SMBSigningKey\0",
             preauth_integrity_hash,
         )?)),
     }
@@ -438,10 +438,10 @@ mod tests {
     }
 
     #[test]
-    fn derive_smb2_signing_key_uses_smb300_and_smb302_nul_terminated_context() {
+    fn derive_smb2_signing_key_uses_smb300_and_smb302_nul_terminated_label_and_context() {
         let session_key = b"0123456789abcdef";
         let preauth = [0x44; SMB311_PREAUTH_HASH_BYTES];
-        let expected = SmbSigningKey::aes_cmac(hex_array_16("c896534590d4cdeaa65e15d0bf27866c"));
+        let expected = SmbSigningKey::aes_cmac(hex_array_16("60e3a82dc4f302c274b20240e12e33b6"));
 
         for dialect in [Smb2Dialect::Smb300, Smb2Dialect::Smb302] {
             assert_eq!(
@@ -458,7 +458,7 @@ mod tests {
 
         assert_eq!(
             derive_smb2_signing_key(session_key, Smb2Dialect::Smb311, &preauth).expect("derive"),
-            SmbSigningKey::aes_cmac(hex_array_16("6a3ebff9a887da620fae67697722e3e1"))
+            SmbSigningKey::aes_cmac(hex_array_16("95a364218bae55c57f45eab059b23ca6"))
         );
     }
 
