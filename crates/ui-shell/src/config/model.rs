@@ -89,13 +89,64 @@ pub struct ShortcutOverride {
     pub combo: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SidebarGroupConfig {
     pub name: String,
     pub collapsed: bool,
     pub items: Vec<SidebarItemConfig>,
     pub kind: crate::state::SidebarGroupKind,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedSidebarGroupConfig {
+    name: String,
+    collapsed: bool,
+    items: Vec<SidebarItemConfig>,
+    #[serde(default)]
+    system: Option<bool>,
+    #[serde(default)]
+    kind: Option<crate::state::SidebarGroupKind>,
+}
+
+impl<'de> Deserialize<'de> for SidebarGroupConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let saved = SavedSidebarGroupConfig::deserialize(deserializer)?;
+        let kind = match (saved.kind, saved.system) {
+            (Some(kind), _) => kind,
+            (None, Some(system)) => legacy_sidebar_group_kind(&saved.name, system),
+            (None, None) => return Err(de::Error::missing_field("kind")),
+        };
+        Ok(Self {
+            name: saved.name,
+            collapsed: saved.collapsed,
+            items: saved.items,
+            kind,
+        })
+    }
+}
+
+fn legacy_sidebar_group_kind(name: &str, system: bool) -> crate::state::SidebarGroupKind {
+    use crate::state::SidebarGroupKind;
+
+    let named = |kind: SidebarGroupKind| {
+        crate::i18n::translations_of(kind.default_name_key())
+            .iter()
+            .any(|translation| translation == name)
+    };
+    let candidates: &[SidebarGroupKind] = if system {
+        &[SidebarGroupKind::Places, SidebarGroupKind::Volumes]
+    } else {
+        &[SidebarGroupKind::Favorites, SidebarGroupKind::Cloud]
+    };
+    candidates
+        .iter()
+        .copied()
+        .find(|kind| named(*kind))
+        .unwrap_or(SidebarGroupKind::Custom)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

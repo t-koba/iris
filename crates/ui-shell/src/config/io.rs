@@ -223,7 +223,7 @@ where
 }
 
 /// Parses one config file; the error is the quarantine reason.
-fn parse_segment<T: for<'de> Deserialize<'de>>(content: &str) -> Result<T, String> {
+pub(super) fn parse_segment<T: for<'de> Deserialize<'de>>(content: &str) -> Result<T, String> {
     let value = serde_json::from_str::<serde_json::Value>(content)
         .map_err(|error| format!("invalid-json-{error}"))?;
     schema_version_quarantine_reason(&value)?;

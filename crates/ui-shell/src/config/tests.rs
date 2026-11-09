@@ -1,5 +1,6 @@
 use super::io::{
-    apply_ssh_secret_load_result, normalize_list_columns, schema_version_quarantine_reason,
+    apply_ssh_secret_load_result, normalize_list_columns, parse_segment,
+    schema_version_quarantine_reason,
 };
 use super::model::*;
 use crate::remote_transport::{RemoteTransportKind, RemoteTransportMapping, SshAuthKind};
@@ -130,6 +131,116 @@ fn serde_layout_roundtrip_preserves_sidebar_groups() {
     assert_eq!(parsed.tabs[1].pane, 0);
     assert_eq!(parsed.tabs[1].path, "/Users/test/Pictures");
     assert!(parsed.tabs[1].active);
+}
+
+#[test]
+fn layout_parser_migrates_legacy_sidebar_groups_without_losing_layout_state() {
+    let places_key = "sidebar-group-places";
+    let current_places_name = crate::i18n::tr(places_key);
+    let saved_places_name = crate::i18n::translations_of(places_key)
+        .into_iter()
+        .find(|name| name != &current_places_name)
+        .expect("the other bundled translation");
+
+    let layout = LayoutFile {
+        window_width: 1440.0,
+        window_height: 900.0,
+        window_x: Some(120.0),
+        window_y: Some(80.0),
+        tabs: vec![PaneTabConfig {
+            pane: 1,
+            path: "/sample/photos".to_string(),
+            active: true,
+        }],
+        ..LayoutFile::default()
+    };
+    let mut value = serde_json::to_value(layout).expect("serialize current layout");
+    value["sidebar_groups"] = serde_json::json!([
+        {
+            "name": saved_places_name,
+            "collapsed": true,
+            "items": [],
+            "system": true
+        },
+        {
+            "name": "Favorites",
+            "collapsed": false,
+            "items": [{
+                "name": "Project",
+                "path": "/sample/project",
+                "badge": "*",
+                "color": [0.5, 0.5, 0.5, 1.0],
+                "ejectable": false
+            }],
+            "system": false,
+            "kind": "favorites"
+        },
+        {
+            "name": "Work",
+            "collapsed": true,
+            "items": [],
+            "system": false
+        },
+        {
+            "name": "Legacy system group",
+            "collapsed": false,
+            "items": [],
+            "system": true
+        }
+    ]);
+
+    let parsed = parse_segment::<LayoutFile>(&value.to_string())
+        .expect("parse schema-v1 layout written by the prior serializer");
+    assert_eq!(parsed.window_width, 1440.0);
+    assert_eq!(parsed.window_height, 900.0);
+    assert_eq!(parsed.window_x, Some(120.0));
+    assert_eq!(parsed.window_y, Some(80.0));
+    assert_eq!(parsed.tabs.len(), 1);
+    assert_eq!(parsed.tabs[0].pane, 1);
+    assert_eq!(parsed.tabs[0].path, "/sample/photos");
+    assert!(parsed.tabs[0].active);
+    assert_eq!(parsed.sidebar_groups.len(), 4);
+    assert_eq!(parsed.sidebar_groups[0].name, saved_places_name);
+    assert!(parsed.sidebar_groups[0].collapsed);
+    assert_eq!(
+        parsed.sidebar_groups[0].kind,
+        crate::state::SidebarGroupKind::Places
+    );
+    assert_eq!(
+        parsed.sidebar_groups[1].kind,
+        crate::state::SidebarGroupKind::Favorites
+    );
+    assert_eq!(parsed.sidebar_groups[1].name, "Favorites");
+    assert!(!parsed.sidebar_groups[1].collapsed);
+    assert_eq!(parsed.sidebar_groups[1].items[0].name, "Project");
+    assert_eq!(parsed.sidebar_groups[1].items[0].path, "/sample/project");
+    assert_eq!(
+        parsed.sidebar_groups[2].kind,
+        crate::state::SidebarGroupKind::Custom
+    );
+    assert_eq!(
+        parsed.sidebar_groups[3].kind,
+        crate::state::SidebarGroupKind::Custom
+    );
+
+    let current = serde_json::to_value(&parsed).expect("serialize migrated layout");
+    assert!(current["sidebar_groups"][0].get("system").is_none());
+    assert_eq!(current["sidebar_groups"][0]["kind"], "places");
+
+    let mut unexpected_field = value.clone();
+    unexpected_field["sidebar_groups"][0]["unexpected"] = serde_json::json!(true);
+    let error = parse_segment::<LayoutFile>(&unexpected_field.to_string())
+        .expect_err("reject unrelated unknown sidebar-group fields");
+    assert!(error.contains("unknown field"));
+
+    let mut missing_legacy_marker = value;
+    missing_legacy_marker["sidebar_groups"][0]
+        .as_object_mut()
+        .expect("sidebar group object")
+        .remove("system");
+    let error = parse_segment::<LayoutFile>(&missing_legacy_marker.to_string())
+        .expect_err("reject groups missing both current kind and legacy marker");
+    assert!(error.contains("missing field `kind`"));
 }
 
 #[test]
