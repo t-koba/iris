@@ -136,7 +136,7 @@ def runtime(libdir):
         configuration.restype = ctypes.c_char_p
         flags = shlex.split(configuration().decode())
         selected = [flag for flag in flags if not flag.startswith(("--prefix=", "--libdir="))]
-        require(selected == POLICY["configure_flags"], f"unexpected {name} build flags: {flags}")
+        require(selected == POLICY["configure_flags"], f"unexpected {name} build flags")
         license_fn = getattr(library, f"{name}_license")
         license_fn.restype = ctypes.c_char_p
         license_text = license_fn().decode()
@@ -147,7 +147,7 @@ def runtime(libdir):
         version = [value >> 16, (value >> 8) & 255, value & 255]
         if name == "avcodec":
             require(version == POLICY["avcodec_version"], f"unexpected avcodec ABI: {version}")
-        records.append(dict(library=so, version=version, configuration=flags,
+        records.append(dict(library=so, version=version, configuration=selected,
                             license=license_text, dependencies=dependencies))
     actual = {soname(p) for p in libdir.glob("*.so*") if not p.is_symlink() and p.name != "libpdfium.so"}
     require(actual == {r["library"] for r in records}, "unreviewed bundled library")

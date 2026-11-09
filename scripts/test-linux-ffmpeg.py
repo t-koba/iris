@@ -95,7 +95,8 @@ class RuntimeContracts(unittest.TestCase):
                 if attr.endswith("_license"):
                     return Function(license_text.encode())
                 return Function(abi)
-        flags = " ".join(module.POLICY["configure_flags"])
+        flags = ("--prefix=/example/build --libdir=/example/build/lib "
+                 + " ".join(module.POLICY["configure_flags"]))
         license_text = "LGPL version 2.1 or later"
         abi = (62 << 16) | (28 << 8) | 103
         with tempfile.TemporaryDirectory() as directory:
@@ -106,10 +107,14 @@ class RuntimeContracts(unittest.TestCase):
                  patch.object(module.ctypes, "CDLL", return_value=Library()), \
                  patch.object(module, "system_dependency", return_value={"package": "libc6"}), \
                  patch.object(module, "resolution", return_value={"libc.so.6": "/lib/libc.so.6"}) as deps:
-                self.assertEqual(len(module.runtime(path)), 7)
+                records = module.runtime(path)
+                self.assertEqual(len(records), 7)
+                self.assertEqual(records[0]["configuration"], module.POLICY["configure_flags"])
+                self.assertNotIn("/example/build", json.dumps(records))
                 flags += " --enable-gpl"
-                with self.assertRaisesRegex(ValueError, "build flags"):
+                with self.assertRaisesRegex(ValueError, "build flags") as raised:
                     module.runtime(path)
+                self.assertNotIn("/example/build", str(raised.exception))
                 flags = " ".join(module.POLICY["configure_flags"])
                 license_text = "GPL version 2 or later"
                 with self.assertRaisesRegex(ValueError, "license"):
