@@ -13,7 +13,6 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: ${{ fromJSON(vars.IRIS_MF_JOB_TIMEOUT_MINUTES || '10') }}
     env:
-      IRIS_MF_TEMP_ROOT: ${{ runner.temp }}/iris-mf-${{ github.run_id }}-${{ github.run_attempt }}
       IRIS_PREVIEW_CORPUS_MAX_BYTES: '40000000'
       IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS: ${{ vars.IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS || '60' }}
       IRIS_PREVIEW_CORPUS_RETRIES: ${{ vars.IRIS_PREVIEW_CORPUS_RETRIES || '1' }}
@@ -32,6 +31,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
+      - name: Set temporary probe root
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP ("iris-mf-{0}-{1}" -f $env:GITHUB_RUN_ID, $env:GITHUB_RUN_ATTEMPT)
+          "IRIS_MF_TEMP_ROOT=$root" >> $env:GITHUB_ENV
       - name: Check offline probe contracts
         shell: pwsh
         run: python prototype/windows-media-foundation/test-probe.py
@@ -54,6 +59,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          if (Test-Path -LiteralPath $env:IRIS_MF_TEMP_ROOT) {
-            Remove-Item -LiteralPath $env:IRIS_MF_TEMP_ROOT -Recurse -Force -ErrorAction Stop
+          $root = $env:IRIS_MF_TEMP_ROOT
+          if (![string]::IsNullOrWhiteSpace($root) -and (Test-Path -LiteralPath $root)) {
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
           }

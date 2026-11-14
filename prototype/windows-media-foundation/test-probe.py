@@ -33,12 +33,17 @@ class ProbeTests(unittest.TestCase):
         self.assertIn("python prototype/windows-media-foundation/run.py", workflow)
         self.assertIn("arch: x64", workflow)
         self.assertIn("if: always()", workflow)
+        self.assertNotIn("runner.temp", workflow)
+        self.assertIn("Join-Path $env:RUNNER_TEMP", workflow)
+        self.assertIn('"IRIS_MF_TEMP_ROOT=$root" >> $env:GITHUB_ENV', workflow)
         caller = (probe.ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("windows-media-foundation-probe:\n    if: github.event_name == 'workflow_dispatch'\n"
                       "    permissions:\n      contents: read\n"
                       "    uses: ./.github/workflows/windows-media-foundation-probe.yml", caller)
         self.assertIn("finally {", workflow)
-        self.assertEqual(workflow.count("Remove-Item -LiteralPath $env:IRIS_MF_TEMP_ROOT"), 2)
+        self.assertIn("Remove-Item -LiteralPath $env:IRIS_MF_TEMP_ROOT", workflow)
+        self.assertIn("Remove-Item -LiteralPath $root", workflow)
+        self.assertEqual(workflow.count("Remove-Item -LiteralPath"), 2)
         for forbidden in ("upload-artifact", "workflow_dispatch:", "windows-minimal", "cargo ",
                           "package-", "ffmpeg", "pdfium", "release.yml"):
             self.assertNotIn(forbidden, workflow)

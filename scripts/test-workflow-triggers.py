@@ -12,6 +12,7 @@ prototype = (root / ".github/workflows/windows-ffmpeg-prototype.yml").read_text(
 linux = (root / ".github/workflows/linux-ffmpeg-validation.yml").read_text(encoding="utf-8")
 
 macos = (root / ".github/workflows/macos-runtime-validation.yml").read_text(encoding="utf-8")
+media_probe = (root / ".github/workflows/windows-media-foundation-probe.yml").read_text(encoding="utf-8")
 release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
 macos_call = "uses: ./.github/workflows/macos-runtime-validation.yml"
 bootstrap_timeout = (
@@ -161,6 +162,14 @@ checks = {
   workflow_call:
 """ in linux
     and all(trigger not in linux for trigger in ("  workflow_dispatch:", "  pull_request:", "  push:")),
+    "Media Foundation probe resolves runner temp from a step, not job-level context": (
+        "runner.temp" not in media_probe
+        and "    steps:\n" in media_probe
+        and "Join-Path $env:RUNNER_TEMP" in media_probe
+        and "\"IRIS_MF_TEMP_ROOT=$root\" >> $env:GITHUB_ENV" in media_probe
+        and "if: always()" in media_probe
+        and "actions/upload-artifact@" not in media_probe
+    ),
     "CI invokes the macOS runtime audit only on manual dispatch": """  macos-runtime-validation:
     if: github.event_name == 'workflow_dispatch'
     permissions:
