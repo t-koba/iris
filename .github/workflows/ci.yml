@@ -216,7 +216,25 @@ jobs:
           IRIS_PERF_SMB_SERVER_SIGNING: "mandatory"
           IRIS_PERF_SMB_ENCRYPTION: "required"
           IRIS_PERF_SMB_AUTH_AUDIT_LEVEL: "3"
-        run: bash ./scripts/perf-transfer-containers.sh
+        run: |
+          diagnostic_output=$(mktemp)
+          trap 'rm -f "$diagnostic_output"' EXIT
+          status=0
+          set +e
+          bash ./scripts/perf-transfer-containers.sh 2>&1 | tee "$diagnostic_output"
+          status=${PIPESTATUS[0]}
+          set -e
+          if grep -Fq 'SMB native stat parent directory failed: SMB Create returned unexpected status 0xc000000d' "$diagnostic_output"; then
+            echo "Re-running a reduced SMB-only smoke with Samba debug level 10 for bounded CREATE diagnostics." >&2
+            IRIS_PERF_SKIP_SFTP=1 \
+              IRIS_PERF_BYTES=1 \
+              IRIS_PERF_SMALL_FILES=1 \
+              IRIS_PERF_SMALL_BYTES=1 \
+              IRIS_PERF_SMB_PAGING_FILES=0 \
+              IRIS_PERF_SMB_LOG_LEVEL=10 \
+              bash ./scripts/perf-transfer-containers.sh || true
+          fi
+          exit "$status"
 
       - name: Native SMB 3.0 AES-CCM compatibility
         if: matrix.os == 'ubuntu-latest'
