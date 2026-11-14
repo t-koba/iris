@@ -16,6 +16,11 @@
 
 using Microsoft::WRL::ComPtr;
 
+// Media Foundation expresses sentinel stream indices as signed constants,
+// while the Source Reader API accepts DWORD. Preserve their bit patterns.
+constexpr DWORD kAllStreams = static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS);
+constexpr DWORD kFirstVideoStream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+
 struct Failure {
     const char* stage;
     HRESULT hr;
@@ -115,10 +120,10 @@ Result decode(const wchar_t* path, const Limits& limits) {
     check(attributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE), "video_processing");
     ComPtr<IMFSourceReader> reader;
     check(MFCreateSourceReaderFromURL(path, attributes.Get(), &reader), "source_open");
-    check(reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE), "deselect_streams");
-    check(reader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE), "select_video");
+    check(reader->SetStreamSelection(kAllStreams, FALSE), "deselect_streams");
+    check(reader->SetStreamSelection(kFirstVideoStream, TRUE), "select_video");
     ComPtr<IMFMediaType> native;
-    check(reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &native), "native_type");
+    check(reader->GetNativeMediaType(kFirstVideoStream, 0, &native), "native_type");
     GUID subtype;
     check(native->GetGUID(MF_MT_SUBTYPE, &subtype), "native_subtype");
     if (subtype != MFVideoFormat_H264) throw Failure{"not_h264", E_FAIL};
@@ -128,9 +133,9 @@ Result decode(const wchar_t* path, const Limits& limits) {
     check(requested->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video), "requested_video");
     check(requested->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32), "requested_rgb32");
     check(MFSetAttributeSize(requested.Get(), MF_MT_FRAME_SIZE, input.width, input.height), "requested_size");
-    check(reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, requested.Get()), "set_rgb32");
+    check(reader->SetCurrentMediaType(kFirstVideoStream, nullptr, requested.Get()), "set_rgb32");
     ComPtr<IMFMediaType> output;
-    check(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &output), "output_type");
+    check(reader->GetCurrentMediaType(kFirstVideoStream, &output), "output_type");
     const auto frame = layout(output.Get(), limits, true);
     if (frame.width != input.width || frame.height != input.height)
         throw Failure{"unexpected_resize", E_FAIL};
@@ -138,7 +143,7 @@ Result decode(const wchar_t* path, const Limits& limits) {
         DWORD actual = 0, flags = 0;
         LONGLONG timestamp = 0;
         ComPtr<IMFSample> sample;
-        check(reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, &actual, &flags, &timestamp, &sample), "decode");
+        check(reader->ReadSample(kFirstVideoStream, 0, &actual, &flags, &timestamp, &sample), "decode");
         if (flags & (MF_SOURCE_READERF_ERROR | MF_SOURCE_READERF_ENDOFSTREAM |
                      MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED | MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED))
             throw Failure{"decode_flags", E_FAIL};
