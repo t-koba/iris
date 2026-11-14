@@ -2204,114 +2204,149 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_relay_copy_skips_completed_resumable_chunks_with_matching_etag() {
-        let src_backend = MockBackend::new("s3", false);
-        let dst_backend = MockBackend::new("local", false);
-        let store_dir = tempdir().expect("jobstore tempdir");
-        let job_store = Arc::new(
-            JobStore::open(&store_dir.path().join("jobs.sqlite3")).expect("open jobstore"),
-        );
-        let job_id = JobId(42);
-        job_store
-            .save_job(&PersistedJob {
-                id: job_id.clone(),
-                state: JobState::Running,
-                created_at: "2026-07-09T00:00:00Z".into(),
-                updated_at: "2026-07-09T00:00:00Z".into(),
-                description: "resumable copy with completed chunk".into(),
-                tasks: vec![PersistedTask {
-                    id: TaskId(7),
-                    job_id: job_id.clone(),
-                    kind: TaskKind::Copy,
-                    state: TaskState::Running,
-                    src_backend: Some("s3".into()),
-                    src_stable_id: Some("test".into()),
-                    src_display_path: Some("resume.bin".into()),
-                    dst_backend: Some("local".into()),
-                    dst_stable_id: Some("test".into()),
-                    dst_display_path: Some("resume-copy.bin".into()),
-                    bytes_total: 0,
-                    bytes_completed: 0,
-                    error_message: None,
-                }],
-            })
-            .expect("save job");
+    async fn client_relay_copy_validates_resumable_chunk_checksums() {
+        use sha2::{Digest, Sha256};
 
-        let total_len = crate::chunked::CHUNKED_RANGE_MIN_BYTES + 1;
-        let mut payload = vec![0u8; total_len as usize];
-        for (index, byte) in payload.iter_mut().enumerate() {
-            *byte = (index % 251) as u8;
-        }
-        src_backend.put("resume.bin", &payload);
+        for (corrupt_first_chunk, legacy_rows) in [(true, false), (false, false), (false, true)] {
+            let src_backend = MockBackend::new("s3", false);
+            let dst_backend = MockBackend::new("local", false);
+            let store_dir = tempdir().expect("jobstore tempdir");
+            let job_store = Arc::new(
+                JobStore::open(&store_dir.path().join("jobs.sqlite3")).expect("open jobstore"),
+            );
+            let job_id = JobId(42);
+            job_store
+                .save_job(&PersistedJob {
+                    id: job_id.clone(),
+                    state: JobState::Running,
+                    created_at: "2026-07-09T00:00:00Z".into(),
+                    updated_at: "2026-07-09T00:00:00Z".into(),
+                    description: "resumable copy with completed chunk".into(),
+                    tasks: vec![PersistedTask {
+                        id: TaskId(7),
+                        job_id: job_id.clone(),
+                        kind: TaskKind::Copy,
+                        state: TaskState::Running,
+                        src_backend: Some("s3".into()),
+                        src_stable_id: Some("test".into()),
+                        src_display_path: Some("resume.bin".into()),
+                        dst_backend: Some("local".into()),
+                        dst_stable_id: Some("test".into()),
+                        dst_display_path: Some("resume-copy.bin".into()),
+                        bytes_total: 0,
+                        bytes_completed: 0,
+                        error_message: None,
+                    }],
+                })
+                .expect("save job");
 
-        let first_chunk_len = crate::chunked::CHUNKED_RANGE_CHUNK_BYTES as usize;
-        let mut partial = vec![0u8; total_len as usize];
-        partial[..first_chunk_len].copy_from_slice(&payload[..first_chunk_len]);
-        dst_backend.put("resume-copy.bin", &partial);
-        job_store
-            .upsert_chunk_state(&PersistedChunkStateRow {
+            let total_len = crate::chunked::CHUNKED_RANGE_MIN_BYTES + 1;
+            let mut payload = vec![0u8; total_len as usize];
+            for (index, byte) in payload.iter_mut().enumerate() {
+                *byte = (index % 251) as u8;
+            }
+            src_backend.put("resume.bin", &payload);
+
+            let first_chunk_len = crate::chunked::CHUNKED_RANGE_CHUNK_BYTES as usize;
+            let mut partial = vec![0u8; total_len as usize];
+            partial[..first_chunk_len * 2].copy_from_slice(&payload[..first_chunk_len * 2]);
+            if corrupt_first_chunk {
+                partial[0] ^= 0xff;
+            }
+            dst_backend.put("resume-copy.bin", &partial);
+            for index in 0..2 {
+                let offset = index * first_chunk_len;
+                job_store
+                    .upsert_chunk_state(&PersistedChunkStateRow {
+                        job_id: job_id.clone(),
+                        entry_index: 7,
+                        offset: offset as u64,
+                        len: crate::chunked::CHUNKED_RANGE_CHUNK_BYTES,
+                        state: PersistedChunkState::Completed,
+                        etag: Some(format!("etag-{total_len}")),
+                        checksum: (!legacy_rows).then(|| {
+                            Sha256::digest(&payload[offset..offset + first_chunk_len])
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect()
+                        }),
+                    })
+                    .expect("save completed chunk");
+            }
+            job_store.flush().expect("flush completed chunk");
+
+            let src = make_ref("s3", "resume.bin");
+            let dst = make_ref("local", "resume-copy.bin");
+            let resumable = ResumableTransferContext {
+                job_store: Arc::clone(&job_store),
                 job_id: job_id.clone(),
                 entry_index: 7,
-                offset: 0,
-                len: crate::chunked::CHUNKED_RANGE_CHUNK_BYTES,
-                state: PersistedChunkState::Completed,
-                etag: Some(format!("etag-{total_len}")),
-                checksum: None,
-            })
-            .expect("save completed chunk");
-        job_store.flush().expect("flush completed chunk");
+            };
+            let (tx, _rx) = watch::channel(ProgressInfo {
+                bytes_completed: 0,
+                bytes_total: None,
+                files_completed: 0,
+                files_total: None,
+            });
 
-        let src = make_ref("s3", "resume.bin");
-        let dst = make_ref("local", "resume-copy.bin");
-        let resumable = ResumableTransferContext {
-            job_store: Arc::clone(&job_store),
-            job_id: job_id.clone(),
-            entry_index: 7,
-        };
-        let (tx, _rx) = watch::channel(ProgressInfo {
-            bytes_completed: 0,
-            bytes_total: None,
-            files_completed: 0,
-            files_total: None,
-        });
+            client_relay_copy(
+                &src_backend,
+                &src,
+                &dst_backend,
+                &dst,
+                &tx,
+                CopyRelayOptions {
+                    control: None,
+                    resumable: Some(&resumable),
+                    retry_policy: None,
+                },
+            )
+            .await
+            .expect("resumable chunked copy should succeed");
 
-        client_relay_copy(
-            &src_backend,
-            &src,
-            &dst_backend,
-            &dst,
-            &tx,
-            CopyRelayOptions {
-                control: None,
-                resumable: Some(&resumable),
-                retry_policy: None,
-            },
-        )
-        .await
-        .expect("resumable chunked copy should succeed");
+            assert!(
+                dst_backend.get("resume-copy.bin").as_ref() == Some(&payload),
+                "destination must match source (corrupt={corrupt_first_chunk}, legacy={legacy_rows})"
+            );
+            let mut read_offsets = src_backend
+                .read_ranges()
+                .into_iter()
+                .map(|range| range.expect("range read").offset)
+                .collect::<Vec<_>>();
+            read_offsets.sort_unstable();
+            let expected_offsets = if corrupt_first_chunk || legacy_rows {
+                // A broken prefix cannot retain the later intact completed chunk.
+                vec![0, first_chunk_len as u64, (first_chunk_len * 2) as u64]
+            } else {
+                // Both verified chunks are reused without reading the source again.
+                vec![(first_chunk_len * 2) as u64]
+            };
+            assert_eq!(read_offsets, expected_offsets);
+            assert_eq!(
+                dst_backend.range_write_count() as usize,
+                expected_offsets.len()
+            );
 
-        assert_eq!(dst_backend.get("resume-copy.bin"), Some(payload));
-        let mut read_offsets = src_backend
-            .read_ranges()
-            .into_iter()
-            .map(|range| range.expect("range read").offset)
-            .collect::<Vec<_>>();
-        read_offsets.sort_unstable();
-        assert_eq!(
-            read_offsets,
-            vec![
-                0,
-                crate::chunked::CHUNKED_RANGE_CHUNK_BYTES,
-                crate::chunked::CHUNKED_RANGE_CHUNK_BYTES * 2
-            ]
-        );
-
-        let chunks = job_store
-            .load_chunk_states(&job_id)
-            .expect("load chunk states");
-        assert_eq!(chunks.len(), 3);
-        assert!(chunks
-            .iter()
-            .all(|chunk| chunk.state == PersistedChunkState::Completed));
+            let chunks = job_store
+                .load_chunk_states(&job_id)
+                .expect("load chunk states");
+            assert_eq!(chunks.len(), 3);
+            assert!(chunks
+                .iter()
+                .all(|chunk| chunk.state == PersistedChunkState::Completed));
+            for chunk in chunks {
+                let start = chunk.offset as usize;
+                let end = start + chunk.len as usize;
+                assert_eq!(
+                    chunk.checksum,
+                    Some(
+                        Sha256::digest(&payload[start..end])
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect()
+                    )
+                );
+            }
+        }
     }
 }

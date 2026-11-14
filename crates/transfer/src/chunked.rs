@@ -14,6 +14,7 @@ use iris_jobstore::repository::{
     JobStoreError, PersistedChunkState, PersistedChunkStateRow, PersistedMultipartUpload,
 };
 use iris_jobstore::writer_task::JobStore;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::io::Cursor;
@@ -242,9 +243,12 @@ impl ChunkStateRecorder {
         Ok(())
     }
 
-    fn completed_offsets(&self, plan: &ChunkedTransferPlan) -> Result<HashSet<u64>, BackendError> {
+    fn completed_checksums(
+        &self,
+        plan: &ChunkedTransferPlan,
+    ) -> Result<HashMap<u64, String>, BackendError> {
         if self.etag.is_none() {
-            return Ok(HashSet::new());
+            return Ok(HashMap::new());
         }
 
         let rows = self
@@ -265,7 +269,7 @@ impl ChunkStateRecorder {
                     && row.etag == self.etag
                     && planned.contains(&(row.offset, row.len))
             })
-            .map(|row| row.offset)
+            .filter_map(|row| row.checksum.map(|checksum| (row.offset, checksum)))
             .collect())
     }
 
@@ -730,15 +734,8 @@ pub(crate) async fn copy_chunked_with_range_writes(
         pause_rx: pause_rx.clone(),
         cancel_token: cancel_token.clone(),
     };
-    let completed_offsets = resumable_completed_offsets(
-        src_backend,
-        &src,
-        dst_backend,
-        dst,
-        &plan,
-        recorder.as_ref(),
-    )
-    .await?;
+    let completed_offsets =
+        resumable_completed_offsets(dst_backend, dst, &plan, recorder.as_ref(), &retry).await?;
 
     if let Some(recorder) = &recorder {
         recorder.record_pending_ranges(&plan, &completed_offsets)?;
@@ -808,7 +805,11 @@ pub(crate) async fn copy_chunked_with_range_writes(
         match write_result {
             Ok(_) => {
                 if let Some(recorder) = &recorder {
-                    recorder.record(&chunk.range, PersistedChunkState::Completed, None)?;
+                    recorder.record(
+                        &chunk.range,
+                        PersistedChunkState::Completed,
+                        Some(range_checksum(&write_bytes)),
+                    )?;
                 }
                 completed_bytes = completed_bytes.saturating_add(chunk.range.length.unwrap_or(0));
                 let _ = progress_tx.send(ProgressInfo::single_file(
@@ -1030,13 +1031,19 @@ fn jobstore_error_to_backend_error(error: JobStoreError) -> BackendError {
     BackendError::Internal(Box::new(std::io::Error::other(error.to_string())))
 }
 
+fn range_checksum(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 async fn resumable_completed_offsets(
-    src_backend: &dyn BackendAdapter,
-    src: &ObjectRef,
     dst_backend: &dyn BackendAdapter,
     dst: &ObjectRef,
     plan: &ChunkedTransferPlan,
     recorder: Option<&ChunkStateRecorder>,
+    retry: &ChunkRetryControls,
 ) -> Result<HashSet<u64>, BackendError> {
     let Some(recorder) = recorder else {
         return Ok(HashSet::new());
@@ -1049,49 +1056,33 @@ async fn resumable_completed_offsets(
     else {
         return Ok(HashSet::new());
     };
-    let persisted = recorder.completed_offsets(plan)?;
+    let persisted = recorder.completed_checksums(plan)?;
     let mut completed = HashSet::new();
-    for range in &plan.ranges {
+    // Only a verified contiguous prefix is safe to retain. Legacy rows without
+    // checksums are absent from `persisted` and must be copied again.
+    for (index, range) in plan.ranges.iter().enumerate() {
+        let Some(checksum) = persisted.get(&range.offset) else {
+            break;
+        };
         let length = range.length.unwrap_or(0);
-        if !persisted.contains(&range.offset)
-            || range.offset.saturating_add(length) > destination_size
-        {
+        if range.offset.saturating_add(length) > destination_size {
+            break;
+        }
+        let chunk = read_range_chunk(
+            dst_backend,
+            dst.clone(),
+            index,
+            range.clone(),
+            None,
+            retry.clone(),
+        )
+        .await?;
+        if range_checksum(&chunk.bytes) != *checksum {
             break;
         }
         completed.insert(range.offset);
     }
-    let Some(last_offset) = completed.iter().copied().max() else {
-        return Ok(completed);
-    };
-    let Some(last_range) = plan
-        .ranges
-        .iter()
-        .find(|range| range.offset == last_offset)
-        .cloned()
-    else {
-        return Ok(HashSet::new());
-    };
-    let source = read_backend_range(src_backend, src, last_range.clone()).await?;
-    let destination = read_backend_range(dst_backend, dst, last_range).await?;
-    if source != destination {
-        completed.remove(&last_offset);
-    }
     Ok(completed)
-}
-
-async fn read_backend_range(
-    backend: &dyn BackendAdapter,
-    object: &ObjectRef,
-    range: ByteRange,
-) -> Result<Vec<u8>, BackendError> {
-    let handle = backend.read(object, Some(range)).await?;
-    let mut reader = handle.stream;
-    let mut bytes = Vec::new();
-    reader
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|error| BackendError::Internal(Box::new(error)))?;
-    Ok(bytes)
 }
 
 async fn wait_for_resume_or_cancel(
