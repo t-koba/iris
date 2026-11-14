@@ -225,11 +225,7 @@ impl Smb2CreateRequest {
         let name_bytes = encode_utf16le(&self.name);
         let name_length = checked_u16_len("create.name", name_bytes.len())?;
         let contexts_length = checked_u32_len("create.contexts", self.create_contexts.len())?;
-        let name_offset = if name_bytes.is_empty() {
-            0
-        } else {
-            (SMB2_HEADER_BYTES + CREATE_REQUEST_FIXED_BYTES) as u16
-        };
+        let name_offset = (SMB2_HEADER_BYTES + CREATE_REQUEST_FIXED_BYTES) as u16;
 
         let mut bytes = Vec::with_capacity(
             CREATE_REQUEST_FIXED_BYTES + name_bytes.len() + self.create_contexts.len(),
@@ -406,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn create_request_encodes_root_name_without_offsets() {
+    fn create_request_encodes_root_name_with_buffer_offset() {
         let request = Smb2CreateRequest {
             security_flags: 0,
             requested_oplock_level: Smb2OplockLevel::None,
@@ -425,7 +421,10 @@ mod tests {
         let decoded = Smb2CreateRequest::decode(&encoded).expect("decode");
 
         assert_eq!(decoded, request);
-        assert_eq!(le_u16(&encoded, 44), 0);
+        assert_eq!(
+            le_u16(&encoded, 44),
+            (SMB2_HEADER_BYTES + CREATE_REQUEST_FIXED_BYTES) as u16
+        );
         assert_eq!(le_u16(&encoded, 46), 0);
         assert_eq!(le_u32(&encoded, 48), 0);
         assert_eq!(le_u32(&encoded, 52), 0);
