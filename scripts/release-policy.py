@@ -262,21 +262,15 @@ def validate(report, policy, workspace):
     require(isinstance(records, list) and records and all(
         isinstance(row, dict) and text(row.get("kind")) and row["kind"] in AUDIT_RECORD_KINDS
         for row in records), "invalid/unknown audit record kind")
-    file_paths = []
     for row in records:
         for key in ("truncated", "stderr_truncated"):
             require(key not in row or row[key] is False, "truncated/invalid audit evidence")
         require(row["kind"] != "missing", "audit has missing evidence")
-        if row["kind"] == "file":
-            require(text(row.get("path")) and type(row.get("bytes")) is int and row["bytes"] >= 0
-                    and isinstance(row.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]),
-                    "invalid file evidence")
-            file_paths.append(row["path"])
         if row["kind"] == "command":
             require(strings(row.get("argv")) and row["argv"] and "status" in row
                     and isinstance(row.get("text"), str) and row.get("truncated") is False,
                     "invalid command evidence")
-    require(len(file_paths) == len(set(file_paths)), "duplicate file evidence")
+    inventory(records, "file")
     def one(kind):
         rows = [row for row in records if row["kind"] == kind]
         require(len(rows) == 1, "missing/duplicate " + kind)

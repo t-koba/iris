@@ -486,6 +486,45 @@ class Reports(unittest.TestCase):
             self.assertFalse(any(call[:2] == ("otool", "-L") and "Foundation.framework" in call[-1] for call in calls))
             self.assertTrue(any("probe-library" in c and c[-1] == str(lib) for c in calls))
 
+    def test_macos_absolute_homebrew_dependency_repeats_identical_file_observations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            exe = base / "Iris.app/Contents/MacOS/Iris"
+            cellar = base / "Cellar"
+            keg = cellar / "ffmpeg/1.0"
+            lib = keg / "lib/libavcodec.99.dylib"
+            for path, content in ((exe, b"staged executable"), (lib, b"external Homebrew dylib"),
+                                  (keg / "INSTALL_RECEIPT.json", b"{}"),
+                                  (keg / ".brew/ffmpeg.rb", b"# synthetic formula")):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+            report = audit(platform="macos")
+
+            def command(*argv):
+                if argv[:2] == ("otool", "-L"):
+                    dependency = f"\t{lib} (compatibility version 1.0)\n" if argv[-1] == str(exe) else ""
+                    return f"{argv[-1]}:\n{dependency}"
+                if argv == ("brew", "--cellar"):
+                    return str(cellar)
+                return ""
+
+            with patch.object(report, "command", side_effect=command):
+                report.macos([exe])
+            path = report.clean(str(lib))
+            observations = [r for r in report.records if r["kind"] == "file" and r["path"] == path]
+            self.assertEqual(len(observations), 2)  # Native closure, then Homebrew candidate.
+            self.assertEqual(observations[0], observations[1])
+            self.assertEqual(observations[0]["sha256"], hashlib.sha256(lib.read_bytes()).hexdigest())
+            self.assertEqual(observations[0]["bytes"], len(lib.read_bytes()))
+            self.assertEqual(len([r for r in report.records
+                                  if r["kind"] == "native-file" and r["path"] == path]), 1)
+            provenance = next(r for r in report.records if r["kind"] == "homebrew")
+            self.assertEqual((provenance["staged"], provenance["candidate"]), (path, path))
+            match = next(r for r in report.records if r["kind"] == "provenance-match")
+            self.assertEqual(match["candidates"], [path])
+            self.assertEqual(match["status"], "candidate only")
+            self.assertFalse(any(r["kind"] == "missing" for r in report.records))
+
     def test_windows_minimal_and_import_inspector(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "Iris.exe"

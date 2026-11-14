@@ -47,16 +47,19 @@ def fields(value, keys):
 
 
 def inventory(records, kind):
+    """Index byte identities without discarding repeated observation/provenance records."""
     result = {}
     for row in records:
         if row["kind"] != kind:
             continue
         path, digest = row.get("path"), row.get("sha256")
-        require(text(path) and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
-                and path not in result, "invalid/duplicate " + kind)
+        require(text(path) and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest),
+                "invalid " + kind)
         require(type(row.get("bytes")) is int and row["bytes"] >= 0, "invalid inventory size")
-        result[path] = digest
-    return result
+        binding = (digest, row["bytes"])
+        require(path not in result or result[path] == binding, "conflicting " + kind + " hash/size binding")
+        result[path] = binding
+    return {path: binding[0] for path, binding in result.items()}
 
 
 def validate_closure(value, records, max_files, max_components):

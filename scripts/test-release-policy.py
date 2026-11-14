@@ -187,7 +187,7 @@ class Policy(unittest.TestCase):
                      lambda r: r.update(omitted_records=False), lambda r: r.update(limits={}),
                      lambda r: r.update(records=[]), lambda r: r["records"].append({"kind": "missing"}),
                      lambda r: r["records"].append({"kind": "future-record"}),
-                     lambda r: r["records"].append(copy.deepcopy(next(row for row in r["records"] if row["kind"] == "file"))),
+                     lambda r: r["records"].append(dict(next(row for row in r["records"] if row["kind"] == "file"), sha256="0" * 64)),
                      lambda r: r["records"].append(copy.deepcopy(graph(r))),
                      lambda r: graph(r).update(status="absent"), lambda r: graph(r).update(status="partial"),
                      lambda r: graph(r).update(truncated=True), lambda r: graph(r).pop("packages"),
@@ -276,6 +276,24 @@ class Policy(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("not legal/compliance approval: PASS", result.stdout)
             self.assertTrue(policy["require_complete_native_license_closure"])
+
+    def test_identical_inventory_observations_preserved_and_conflicts_rejected(self):
+        baseline, policy = complete_report("macos"), copy.deepcopy(POLICY)
+        complete_reviews(baseline, policy)
+        for kind in ("file", "native-file", "staged-file"):
+            value = copy.deepcopy(baseline)
+            original = next(row for row in value["records"] if row["kind"] == kind)
+            value["records"].append(copy.deepcopy(original))
+            observations = copy.deepcopy(value["records"])
+            with self.subTest(kind=kind):
+                self.assertEqual(module.validate(value, policy, WORKSPACE), [])
+                self.assertEqual(value["records"], observations)
+            for field, changed in (("sha256", "0" * 64), ("bytes", original["bytes"] + 1)):
+                conflicting = copy.deepcopy(value)
+                conflicting["records"][-1][field] = changed
+                with self.subTest(kind=kind, field=field), self.assertRaisesRegex(
+                        ValueError, "conflicting " + kind + " hash/size binding"):
+                    module.validate(conflicting, policy, WORKSPACE)
 
     def test_path_only_manifest_collected_hashes_reach_policy(self):
         # Synthetic documents only: exercise the production collector/validator interface offline.
