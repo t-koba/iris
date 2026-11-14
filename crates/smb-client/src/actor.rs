@@ -511,13 +511,13 @@ async fn run_actor<T>(
         ..Default::default()
     };
     let mut pending = HashMap::new();
-    tokio::select! {
+    let termination_error = tokio::select! {
         biased;
-        _ = async { if !*shutdown.borrow_and_update() { let _ = shutdown.changed().await; } } => {}
-        _ = run_actor_loop(&mut writer, &mut receiver, &mut packet_rx, &wake, &mut state, &mut pending) => {}
-        _ = read_packets => {}
-    }
-    close_pending(&mut pending, config);
+        _ = async { if !*shutdown.borrow_and_update() { let _ = shutdown.changed().await; } } => None,
+        error = run_actor_loop(&mut writer, &mut receiver, &mut packet_rx, &wake, &mut state, &mut pending) => error,
+        _ = read_packets => None,
+    };
+    close_pending(&mut pending, config, termination_error.as_ref());
 }
 
 async fn run_actor_loop<T>(
@@ -527,7 +527,8 @@ async fn run_actor_loop<T>(
     wake: &Notify,
     state: &mut ActorState,
     pending: &mut HashMap<u64, PendingRequest>,
-) where
+) -> Option<SmbConnectionError>
+where
     T: AsyncWrite + Unpin,
 {
     let mut deferred = VecDeque::<QueuedCommand>::new();
@@ -537,7 +538,7 @@ async fn run_actor_loop<T>(
         // An on-wire timeout leaves response/credit ownership uncertain. Retire
         // the generation rather than reusing it; unsent expiry below is harmless.
         if pending.values().any(|request| request.deadline() <= now) {
-            return;
+            return None;
         }
         deferred.retain(|queued| queued.deadline > now && !queued.command.is_closed());
         if let Some(queued) =
@@ -550,12 +551,12 @@ async fn run_actor_loop<T>(
             )
             .await;
             if !matches!(sent, Ok(Ok(()))) {
-                return;
+                return None;
             }
             continue;
         }
         if !accepting && deferred.is_empty() && pending.is_empty() {
-            return;
+            return None;
         }
         let deadline = deferred
             .iter()
@@ -568,8 +569,13 @@ async fn run_actor_loop<T>(
             }
             packet = packets.recv(), if !pending.is_empty() || !deferred.is_empty() => {
                 match packet {
-                    Some(Ok(packet)) => { if dispatch_response(packet, state, pending).is_err() { return; } }
-                    _ => return,
+                    Some(Ok(packet)) => {
+                        if let Err(error) = dispatch_response(packet, state, pending) {
+                            return Some(error);
+                        }
+                    }
+                    Some(Err(error)) => return Some(error.into()),
+                    None => return None,
                 }
             }
             _ = wake.notified() => {}
@@ -1142,14 +1148,20 @@ fn validate_response_identity(
     Ok(())
 }
 
-fn close_pending(pending: &mut HashMap<u64, PendingRequest>, config: SmbActorConfig) {
+fn close_pending(
+    pending: &mut HashMap<u64, PendingRequest>,
+    config: SmbActorConfig,
+    termination_error: Option<&SmbConnectionError>,
+) {
     let now = Instant::now();
     for (_, request) in pending.drain() {
         let error = if request.deadline() <= now {
             config.timeout_error()
         } else {
             SmbConnectionError::ActorStopped {
-                reason: "transport generation stopped".into(),
+                reason: termination_error
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "transport generation stopped".into()),
             }
         };
         match request {
@@ -1367,7 +1379,11 @@ mod tests {
             poll_pending(waiting.as_mut()).await;
             actor.shutdown();
             assert!(transport.recv_packet().await.is_err());
-            assert!(pending.await.is_err());
+            assert!(matches!(
+                pending.await,
+                Err(SmbConnectionError::ActorStopped { reason })
+                    if reason == "transport generation stopped"
+            ));
             assert!(deferred.await.is_err());
             assert!(waiting.await.is_err());
             assert!(matches!(
@@ -1780,6 +1796,64 @@ mod tests {
 
         assert_eq!(response.body, b"encrypted response");
         assert!(actor.state().await.expect("state").encryption_enabled);
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn actor_preserves_encryption_dispatch_error_for_pending_request() {
+        let (client, server) = duplex(4096);
+        let actor = SmbConnectionActor::spawn(client);
+        let session_id = 0x0102_0304_0506_0708;
+        let client_keys = Smb3EncryptionKeys::new([0x11; 16], [0x22; 16]);
+        let server_task = tokio::spawn(async move {
+            let mut transport = DirectTcpTransport::new(server);
+            let request = transport.recv_packet().await.expect("encrypted request");
+            assert!(is_smb3_transform(&request));
+            transport
+                .send_packet(&response_packet(
+                    Smb2Header::new(Smb2Command::Echo, 0),
+                    b"plaintext response",
+                ))
+                .await
+                .expect("plaintext response");
+        });
+
+        actor.set_ids(session_id, 0).await.expect("ids");
+        actor
+            .enable_encryption(client_keys)
+            .await
+            .expect("enable encryption");
+        let error = actor
+            .request(Smb2Command::Echo, b"secret".to_vec())
+            .await
+            .expect_err("plaintext response must retire the encrypted generation");
+        assert!(matches!(
+            error,
+            SmbConnectionError::ActorStopped { reason }
+                if reason == "expected an encrypted SMB3 transform response"
+        ));
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn actor_preserves_transport_receive_error_for_pending_request() {
+        let (client, server) = duplex(4096);
+        let actor = SmbConnectionActor::spawn(client);
+        let server_task = tokio::spawn(async move {
+            let mut transport = DirectTcpTransport::new(server);
+            transport.recv_packet().await.expect("request");
+            // Drop the peer with a response outstanding to force a receive error.
+        });
+
+        let error = actor
+            .request(Smb2Command::Echo, b"disconnect".to_vec())
+            .await
+            .expect_err("peer disconnect must retire the generation");
+        assert!(matches!(
+            error,
+            SmbConnectionError::ActorStopped { reason }
+                if reason.starts_with("SMB transport I/O error:")
+        ));
         server_task.await.expect("server task");
     }
 
