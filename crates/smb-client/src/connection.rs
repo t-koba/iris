@@ -35,6 +35,13 @@ pub enum SmbConnectionError {
     #[error("SMB {command:?} returned unexpected status 0x{status:08x}")]
     UnexpectedStatus { command: Smb2Command, status: u32 },
 
+    #[error("SMB Ioctl {name} (0x{ctl_code:08x}) returned unexpected status 0x{status:08x}")]
+    UnexpectedFsctlStatus {
+        name: &'static str,
+        ctl_code: u32,
+        status: u32,
+    },
+
     #[error("SMB write accepted {actual} bytes for expected {expected}")]
     ShortWrite { expected: u32, actual: u32 },
 

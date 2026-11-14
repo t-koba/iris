@@ -74,7 +74,11 @@ pub async fn request_resume_key(
             .encode()?,
         )
         .await?;
-    ensure_success(&response, Smb2Command::Ioctl)?;
+    ensure_fsctl_success(
+        &response,
+        "FSCTL_SRV_REQUEST_RESUME_KEY",
+        FSCTL_SRV_REQUEST_RESUME_KEY,
+    )?;
     let response = Smb2IoctlResponse::decode_packet(&response.to_packet())?;
     decode_resume_key_response(&response.output)
 }
@@ -100,7 +104,7 @@ pub async fn copy_chunks(
             .encode()?,
         )
         .await?;
-    ensure_success(&response, Smb2Command::Ioctl)?;
+    ensure_fsctl_success(&response, "FSCTL_SRV_COPYCHUNK", FSCTL_SRV_COPYCHUNK)?;
     let response = Smb2IoctlResponse::decode_packet(&response.to_packet())?;
     decode_copychunk_response(&response.output)
 }
@@ -206,13 +210,18 @@ fn copychunk_batch(copied: u64, total_size: u64) -> Vec<SmbCopyChunk> {
     chunks
 }
 
-fn ensure_success(response: &SmbResponse, command: Smb2Command) -> Result<(), SmbConnectionError> {
+fn ensure_fsctl_success(
+    response: &SmbResponse,
+    name: &'static str,
+    ctl_code: u32,
+) -> Result<(), SmbConnectionError> {
     let status = response.status();
     if status.is_success() {
         Ok(())
     } else {
-        Err(SmbConnectionError::UnexpectedStatus {
-            command,
+        Err(SmbConnectionError::UnexpectedFsctlStatus {
+            name,
+            ctl_code,
             status: status.0,
         })
     }
@@ -221,6 +230,69 @@ fn ensure_success(response: &SmbResponse, command: Smb2Command) -> Result<(), Sm
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::packet::create::{Smb2FileAttributes, Smb2FileId};
+    use crate::packet::header::{Smb2Header, SMB2_HEADER_BYTES};
+    use crate::test_support::response_packet;
+    use crate::transport::DirectTcpTransport;
+    use tokio::io::duplex;
+
+    #[tokio::test]
+    async fn refused_ioctls_label_their_own_fsctl() {
+        let (client, server) = duplex(4096);
+        let actor = SmbConnectionActor::spawn(client);
+        let file = SmbHandle {
+            file_id: Smb2FileId {
+                persistent: 1,
+                volatile: 2,
+            },
+            end_of_file: 1,
+            allocation_size: 1,
+            file_attributes: Smb2FileAttributes::ARCHIVE,
+        };
+        let server_task = tokio::spawn(async move {
+            let mut transport = DirectTcpTransport::new(server);
+            for ctl_code in [FSCTL_SRV_REQUEST_RESUME_KEY, FSCTL_SRV_COPYCHUNK] {
+                let packet = transport.recv_packet().await.expect("request");
+                let header = Smb2Header::decode(&packet).expect("header");
+                assert_eq!(header.command, Smb2Command::Ioctl);
+                let request =
+                    Smb2IoctlRequest::decode(&packet[SMB2_HEADER_BYTES..]).expect("IOCTL request");
+                assert_eq!(request.ctl_code, ctl_code);
+                let mut response = Smb2Header::new(Smb2Command::Ioctl, header.message_id);
+                response.status_or_channel_sequence = 0xc000_0022; // STATUS_ACCESS_DENIED
+                transport
+                    .send_packet(&response_packet(response, &[]))
+                    .await
+                    .expect("refusal");
+            }
+        });
+
+        let resume_error = request_resume_key(&actor, &file)
+            .await
+            .expect_err("refused");
+        assert_eq!(
+            resume_error.to_string(),
+            "SMB Ioctl FSCTL_SRV_REQUEST_RESUME_KEY (0x00140078) returned unexpected status 0xc0000022"
+        );
+        let copy_error = copy_chunks(
+            &actor,
+            &file,
+            &[0; SMB2_RESUME_KEY_BYTES],
+            &[SmbCopyChunk {
+                source_offset: 0,
+                target_offset: 0,
+                length: 1,
+            }],
+        )
+        .await
+        .expect_err("refused");
+        assert_eq!(
+            copy_error.to_string(),
+            "SMB Ioctl FSCTL_SRV_COPYCHUNK (0x001440f2) returned unexpected status 0xc0000022"
+        );
+        server_task.await.expect("server task");
+    }
 
     #[test]
     fn copychunk_copy_encodes_resume_key_count_and_chunks() {
