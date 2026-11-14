@@ -82,6 +82,12 @@ main_tag_guard = """      - name: Verify tag commit belongs to main
 """
 
 checks = {
+    "CI reruns bounded SMB diagnostics for invalid-parameter failures": (
+        "          if grep -Fq 'returned unexpected status 0xc000000d' \"$diagnostic_output\"; then\n" in ci
+        and "IRIS_PERF_SKIP_SFTP=1" in ci
+        and "IRIS_PERF_SMB_LOG_LEVEL=10" in ci
+        and "          exit \"$status\"\n" in ci
+    ),
     "CI mizu exclusion and all-tag filter": """  push:
     branches-ignore:
       - mizu
