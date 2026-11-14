@@ -106,7 +106,7 @@ fn handle_identity(_file: &std::fs::File) -> io::Result<(u64, u64)> {
 ///
 /// The opened destination is compared with the opened source before truncation;
 /// this also applies to mounted SMB/NFS paths. On Unix, new destinations are
-/// restricted to at most mode 0600 before writing; source permissions are applied
+/// created with at most mode 0600; source permissions are applied
 /// after copying succeeds.
 pub async fn platform_copy(
     src: impl AsRef<Path>,
@@ -122,7 +122,7 @@ pub async fn platform_copy(
 /// Copy a regular file through `std::io::copy(File, File)` on the blocking pool.
 ///
 /// This fallback preserves permissions of existing destinations. On Unix, new
-/// destinations are restricted to at most mode 0600 before writing and receive
+/// destinations are created with at most mode 0600 and receive
 /// their default creation permissions (filtered by umask) after a successful copy.
 pub async fn stream_file_copy(
     src: impl AsRef<Path>,
@@ -168,7 +168,7 @@ fn copy_open_handles_after_preflight(
             "source is not a regular file",
         ));
     }
-    let (mut dst_file, destination_created) = open_destination(dst)?;
+    let (mut dst_file, creation_permissions) = open_destination(dst, !copy_permissions)?;
 
     // The handles, not the earlier paths, are authoritative. Truncation and
     // copying use this exact destination handle, so later path replacement
@@ -176,56 +176,52 @@ fn copy_open_handles_after_preflight(
     if handle_identity(&src_file)? == handle_identity(&dst_file)? {
         return Err(PlatformCopyError::Io(same_file_error()));
     }
-    // Observe the kernel's creation mode rather than reading/changing the
-    // process-global umask. Only an exclusively created, still-empty file may
-    // have its permissions restricted here; existing files keep their mode.
-    let creation_permissions = if cfg!(unix) && destination_created {
-        let permissions = dst_file.metadata()?.permissions();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            dst_file
-                .set_permissions(std::fs::Permissions::from_mode(permissions.mode() & 0o600))?;
-        }
-        Some(permissions)
-    } else {
-        None
-    };
     dst_file.set_len(0)?;
     let copied = copy(&mut src_file, &mut dst_file)?;
+    if let Ok(mtime) = src_metadata.modified() {
+        preserve_modified_time_of(&dst_file, mtime)?;
+    }
+    // Publish permissions last: any earlier failure leaves new destinations private.
     if copy_permissions {
         dst_file.set_permissions(src_metadata.permissions())?;
     } else if let Some(permissions) = creation_permissions {
         dst_file.set_permissions(permissions)?;
     }
-    if let Ok(mtime) = src_metadata.modified() {
-        preserve_modified_time_of(&dst_file, mtime)?;
-    }
     Ok(copied)
 }
 
-/// Open without truncation and determine creation atomically. `create_new`
+/// Open without truncation; on Unix, create privately in the open syscall. `create_new`
 /// refuses symlinks, so follow a dangling link only after ordinary opening found
 /// no target. A race that wins both open attempts fails closed rather than spinning;
 /// writes and permission changes wait for the caller's handle-identity check.
-fn open_destination(dst: &Path) -> io::Result<(std::fs::File, bool)> {
+fn open_destination(
+    dst: &Path,
+    preserve_creation_permissions: bool,
+) -> io::Result<(std::fs::File, Option<std::fs::Permissions>)> {
     let open_existing = || std::fs::OpenOptions::new().write(true).open(dst);
     match open_existing() {
-        Ok(file) => return Ok((file, false)),
+        Ok(file) => return Ok((file, None)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
 
-    // The default creation mode is 0666, filtered by the process umask.
-    // The caller restricts the empty file before writing any content.
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(dst)
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
     {
-        Ok(file) => Ok((file, true)),
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(dst) {
+        Ok(file) => {
+            #[cfg(unix)]
+            if preserve_creation_permissions {
+                return Ok((file, Some(default_creation_permissions(dst)?)));
+            }
+            Ok((file, None))
+        }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => match open_existing() {
-            Ok(file) => Ok((file, false)),
+            Ok(file) => Ok((file, None)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let metadata = std::fs::symlink_metadata(dst)?;
                 if !metadata.is_symlink() {
@@ -237,12 +233,27 @@ fn open_destination(dst: &Path) -> io::Result<(std::fs::File, bool)> {
                 } else {
                     dst.parent().unwrap_or_else(|| Path::new("")).join(target)
                 };
-                open_destination(&target)
+                open_destination(&target, preserve_creation_permissions)
             }
             Err(error) => Err(error),
         },
         Err(error) => Err(error),
     }
+}
+
+/// Measure the kernel's default file mode without changing the process umask.
+/// The disposable probe never holds source data and is never used as a destination.
+#[cfg(unix)]
+fn default_creation_permissions(dst: &Path) -> io::Result<std::fs::Permissions> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = dst.parent().filter(|path| !path.as_os_str().is_empty());
+    let probe = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o666))
+        .tempfile_in(parent.unwrap_or_else(|| Path::new(".")))?;
+    let permissions = probe.as_file().metadata()?.permissions();
+    probe.close()?;
+    Ok(permissions)
 }
 
 /// Blocking form of [`platform_copy`]; callers must use a blocking worker.
@@ -465,123 +476,102 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn new_streaming_destination_respects_umask_077() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-        // Only the subprocess shell changes umask; the shared test process and
-        // its other test threads never change their process-global umask.
-        const CHILD: &str = "IRIS_COPY_UMASK_TEST_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            let output = std::process::Command::new("sh")
-                .args(["-c", "umask 077; exec \"$1\" --exact copy::tests::new_streaming_destination_respects_umask_077 --nocapture", "sh"])
-                .arg(std::env::current_exe().unwrap())
-                .env(CHILD, "1")
-                .output()
-                .expect("run isolated umask test");
-            assert!(
-                output.status.success(),
-                "child failed: {:?}\n{}\n{}",
-                output.status,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
-
-        let temp = tempfile::tempdir().unwrap();
-        let src = temp.path().join("src");
-        std::fs::write(&src, b"contents").unwrap();
-        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
-        for through_symlink in [false, true] {
-            let dst = temp
-                .path()
-                .join(if through_symlink { "link" } else { "direct" });
-            if through_symlink {
-                std::os::unix::fs::symlink("target", &dst).unwrap();
-            }
-            stream_file_copy_blocking(&src, &dst).unwrap();
-            assert_eq!(std::fs::read(&dst).unwrap(), b"contents");
-            assert_eq!(std::fs::metadata(&dst).unwrap().mode() & 0o7777, 0o600);
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn new_copy_targets_are_restrictive_before_writing_and_after_partial_failure() {
+    fn new_copy_destinations_are_private_until_success_under_umask() {
         use std::io::Write;
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-        for (copy_permissions, through_symlink) in
-            [(true, false), (true, true), (false, false), (false, true)]
-        {
-            let temp = tempfile::tempdir().expect("tempdir");
-            let src = temp.path().join("src");
-            let dst = temp.path().join("dst");
-            std::fs::write(&src, b"contents").unwrap();
-            std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
-
-            if through_symlink {
-                std::os::unix::fs::symlink("target", &dst).unwrap();
+        // Only subprocess shells change umask, never the shared test process.
+        const CHILD: &str = "IRIS_COPY_UMASK_TEST_CHILD";
+        let Some(mask) = std::env::var_os(CHILD) else {
+            for mask in ["000", "022", "027", "077"] {
+                let output = std::process::Command::new("sh")
+                    .args(["-c", r#"umask "$1"; exec "$2" --exact copy::tests::new_copy_destinations_are_private_until_success_under_umask --nocapture"#, "sh", mask])
+                    .arg(std::env::current_exe().unwrap())
+                    .env(CHILD, mask)
+                    .output()
+                    .expect("run isolated umask test");
+                assert!(
+                    output.status.success(),
+                    "umask {mask} child failed: {:?}\n{}\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
-            let error =
-                copy_open_handles_after_preflight(&src, &dst, copy_permissions, |_, target| {
-                    let metadata = target.metadata()?;
-                    assert_eq!(metadata.len(), 0);
-                    assert_eq!(metadata.mode() & 0o7777 & !0o600, 0);
-                    target.write_all(b"partial")?;
-                    Err(io::Error::other("simulated copy failure"))
-                })
-                .expect_err("copy must fail after writing partial data");
-
-            assert!(matches!(error, PlatformCopyError::Io(ref e)
-                if e.to_string() == "simulated copy failure"));
-            assert_eq!(std::fs::read(&dst).unwrap(), b"partial");
-            assert_eq!(std::fs::metadata(&dst).unwrap().mode() & 0o7777 & !0o600, 0);
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn new_copy_targets_receive_final_permissions_only_after_success() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            return;
+        };
+        let mask = u32::from_str_radix(mask.to_str().unwrap(), 8).unwrap();
 
         for (copy, copy_permissions) in [
             (platform_copy_blocking as fn(&Path, &Path) -> _, true),
             (stream_file_copy_blocking, false),
         ] {
-            // Exercise direct and dangling-symlink destinations while preserving
-            // the existing link-following behavior.
             for link_kind in ["direct", "relative", "absolute"] {
-                let temp = tempfile::tempdir().expect("tempdir");
+                let temp = tempfile::tempdir().unwrap();
                 let src = temp.path().join("src");
                 let dst = temp.path().join("dst");
                 let target = temp.path().join("target");
                 std::fs::write(&src, b"contents").unwrap();
                 std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
-                // A normal creation in this directory measures the current
-                // umask/default ACL without changing process-global state.
-                std::fs::write(&target, b"").unwrap();
-                let default_mode = std::fs::metadata(&target).unwrap().mode() & 0o7777;
-                std::fs::remove_file(&target).unwrap();
                 match link_kind {
                     "relative" => std::os::unix::fs::symlink("target", &dst).unwrap(),
                     "absolute" => std::os::unix::fs::symlink(&target, &dst).unwrap(),
                     _ => {}
                 }
+                let inode_path = if link_kind == "direct" { &dst } else { &target };
 
-                assert_eq!(copy(&src, &dst).expect("copy"), 8);
+                // Check the open boundary itself, not just the later copy callback:
+                // a post-open chmod cannot revoke already-open group/other handles.
+                let (file, permissions) = open_destination(&dst, !copy_permissions).unwrap();
+                assert_eq!(file.metadata().unwrap().mode() & 0o7777, 0o600 & !mask);
+                assert_eq!(
+                    std::fs::metadata(&dst).unwrap().mode() & 0o7777,
+                    0o600 & !mask
+                );
+                assert_eq!(
+                    permissions.map(|permissions| permissions.mode() & 0o7777),
+                    (!copy_permissions).then_some(0o666 & !mask)
+                );
+                drop(file);
+                std::fs::remove_file(inode_path).unwrap();
+
+                let error =
+                    copy_open_handles_after_preflight(&src, &dst, copy_permissions, |_, target| {
+                        assert_eq!(target.metadata()?.len(), 0);
+                        assert_eq!(target.metadata()?.mode() & 0o7777, 0o600 & !mask);
+                        target.write_all(b"partial")?;
+                        assert_eq!(target.metadata()?.mode() & 0o7777, 0o600 & !mask);
+                        Err(io::Error::other("simulated copy failure"))
+                    })
+                    .expect_err("copy must fail after writing partial data");
+                assert!(matches!(error, PlatformCopyError::Io(ref e)
+                    if e.to_string() == "simulated copy failure"));
+                assert_eq!(std::fs::read(&dst).unwrap(), b"partial");
+                assert_eq!(
+                    std::fs::metadata(&dst).unwrap().mode() & 0o7777,
+                    0o600 & !mask
+                );
+                std::fs::remove_file(inode_path).unwrap();
+
+                assert_eq!(copy(&src, &dst).unwrap(), 8);
                 assert_eq!(std::fs::read(&dst).unwrap(), b"contents");
-                let mode = std::fs::metadata(&dst).unwrap().mode() & 0o7777;
-                let expected = if copy_permissions {
-                    0o644
-                } else {
-                    default_mode
-                };
-                assert_eq!(mode, expected);
+                assert_eq!(
+                    std::fs::metadata(&dst).unwrap().mode() & 0o7777,
+                    if copy_permissions {
+                        0o644
+                    } else {
+                        0o666 & !mask
+                    }
+                );
                 if link_kind != "direct" {
                     assert!(std::fs::symlink_metadata(&dst).unwrap().is_symlink());
                     assert_eq!(std::fs::read(&target).unwrap(), b"contents");
                 }
+                // Sampling default permissions must not leave temporary files behind.
+                assert_eq!(
+                    std::fs::read_dir(temp.path()).unwrap().count(),
+                    if link_kind == "direct" { 2 } else { 3 }
+                );
             }
         }
     }
