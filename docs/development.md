@@ -201,14 +201,16 @@ normal 依存も build-time として伝播します。同じ package が複数 
 これは Cargo tree/metadata の宣言情報であり、license 式の互換性判定、Iris の license の推定、
 native code の網羅性の保証ではありません。path source は null（`source_kind=path`）です。
 
-`python scripts/test-release-audit.py` は軽量・offline の回帰検証です。
+`python scripts/test-release-audit.py` と `python scripts/test-release-policy.py` は軽量・offline の回帰検証です。
 レポートは `python scripts/release-audit.py <macos|linux|windows> --output <file>` でも生成できます。
 既定値は `IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES=2097152`、
 `IRIS_RELEASE_AUDIT_MAX_COMMAND_BYTES=32768`、`IRIS_RELEASE_AUDIT_MAX_METADATA_BYTES=8388608`、
 `IRIS_RELEASE_AUDIT_MAX_CARGO_PACKAGES=1024`、`IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES=256`、
-`IRIS_RELEASE_AUDIT_COMMAND_SECONDS=30` です。workflow 実行では同名の GitHub repository variables
+`IRIS_RELEASE_AUDIT_COMMAND_SECONDS=30` と policy JSON の byte limit
+`IRIS_RELEASE_POLICY_MAX_BYTES=65536` です。workflow 実行では同名の GitHub repository variables
 で調整でき、個別実行では `--max-report-bytes`、`--max-command-bytes`、
-`--max-metadata-bytes`、`--max-cargo-packages`、`--max-native-files`、`--command-seconds` で上書きできます。すべて正の整数で、report budget は
+`--max-metadata-bytes`、`--max-cargo-packages`、`--max-native-files`、`--command-seconds`、
+`--max-policy-bytes` で上書きできます。すべて正の整数で、report budget は
 JSON metadata を保持できる大きさが必要です。抜粋には元ファイル全体の hash と
 `truncated`、容量不足には `omitted_records` が付き、欠落は承認と解釈できません。
 cargo metadata/tree の stdout/stderr はそれぞれ metadata byte limit で制限し、超過時は producer を停止します。

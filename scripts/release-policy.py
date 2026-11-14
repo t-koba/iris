@@ -2,6 +2,7 @@
 """Offline policy check only; never legal/compliance approval or a package builder."""
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -9,6 +10,11 @@ import sys
 import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
+AUDIT_RECORD_KINDS = frozenset({
+    "build", "cargo-graph", "cargo-metadata-command", "cargo-tree-command",
+    "command", "file", "homebrew", "missing", "provenance-check",
+    "provenance-match", "scope", "system-dependency", "windows-payload",
+})
 
 
 def require(condition, message):
@@ -34,12 +40,15 @@ def parse_json(content):
     return json.loads(content, object_pairs_hook=unique)
 
 
-def load_json(path):
-    return parse_json(Path(path).read_text(encoding="utf-8"))
+def load_json(path, max_bytes):
+    with Path(path).open("rb") as stream:
+        raw = stream.read(max_bytes + 1)
+    require(len(raw) <= max_bytes, "JSON exceeds configured byte limit")
+    return parse_json(raw.decode("utf-8"))
 
 
-def load_policy(path):
-    policy = load_json(path)
+def load_policy(path, max_bytes):
+    policy = load_json(path, max_bytes)
     require(isinstance(policy, dict) and type(policy.get("schema")) is int
             and policy["schema"] == 1, "unsupported policy schema")
     for key in ("allowed_licenses", "blocked_licenses", "review_licenses",
@@ -254,7 +263,10 @@ def validate(report, policy, workspace):
             "max_report_bytes", "max_command_bytes", "max_metadata_bytes", "max_cargo_packages",
             "max_native_files", "command_seconds")), "invalid/missing audit limits")
     records = report.get("records")
-    require(isinstance(records, list) and records and all(isinstance(row, dict) and text(row.get("kind")) for row in records), "invalid audit records")
+    require(isinstance(records, list) and records and all(
+        isinstance(row, dict) and text(row.get("kind")) and row["kind"] in AUDIT_RECORD_KINDS
+        for row in records), "invalid/unknown audit record kind")
+    file_paths = []
     for row in records:
         for key in ("truncated", "stderr_truncated"):
             require(key not in row or row[key] is False, "truncated/invalid audit evidence")
@@ -263,10 +275,12 @@ def validate(report, policy, workspace):
             require(text(row.get("path")) and type(row.get("bytes")) is int and row["bytes"] >= 0
                     and isinstance(row.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]),
                     "invalid file evidence")
+            file_paths.append(row["path"])
         if row["kind"] == "command":
             require(strings(row.get("argv")) and row["argv"] and "status" in row
                     and isinstance(row.get("text"), str) and row.get("truncated") is False,
                     "invalid command evidence")
+    require(len(file_paths) == len(set(file_paths)), "duplicate file evidence")
     def one(kind):
         rows = [row for row in records if row["kind"] == kind]
         require(len(rows) == 1, "missing/duplicate " + kind)
@@ -295,15 +309,21 @@ def validate(report, policy, workspace):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", type=Path, default=ROOT / "scripts/release-policy.json")
-    parser.add_argument("reports", type=Path, nargs="+", help="exactly one report per release platform")
+    parser.add_argument("--max-report-bytes", type=int,
+                        default=os.environ.get("IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES", "2097152"))
+    parser.add_argument("--max-policy-bytes", type=int,
+                        default=os.environ.get("IRIS_RELEASE_POLICY_MAX_BYTES", "65536"))
+    parser.add_argument("reports", type=Path, nargs=3, help="one report for each release platform")
     args = parser.parse_args()
+    if min(args.max_report_bytes, args.max_policy_bytes) < 1:
+        parser.error("byte limits must be positive")
     errors = []
     try:
-        policy, workspace = load_policy(args.policy), workspace_packages()
+        policy, workspace = load_policy(args.policy, args.max_policy_bytes), workspace_packages()
         platforms = []
         for path in args.reports:
             try:
-                report = load_json(path)
+                report = load_json(path, args.max_report_bytes)
                 errors.extend(f"{path.name}: {error}" for error in validate(report, policy, workspace))
                 platforms.append(report["platform"])
             except (OSError, ValueError, TypeError, KeyError) as error:
