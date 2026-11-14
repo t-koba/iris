@@ -227,8 +227,13 @@ impl Smb2CreateRequest {
         let contexts_length = checked_u32_len("create.contexts", self.create_contexts.len())?;
         let name_offset = (SMB2_HEADER_BYTES + CREATE_REQUEST_FIXED_BYTES) as u16;
 
+        let empty_buffer_byte =
+            usize::from(name_bytes.is_empty() && self.create_contexts.is_empty());
         let mut bytes = Vec::with_capacity(
-            CREATE_REQUEST_FIXED_BYTES + name_bytes.len() + self.create_contexts.len(),
+            CREATE_REQUEST_FIXED_BYTES
+                + name_bytes.len()
+                + self.create_contexts.len()
+                + empty_buffer_byte,
         );
         push_u16(&mut bytes, CREATE_REQUEST_STRUCTURE_SIZE);
         bytes.push(self.security_flags);
@@ -247,6 +252,10 @@ impl Smb2CreateRequest {
         push_u32(&mut bytes, 0);
         push_u32(&mut bytes, contexts_length);
         bytes.extend_from_slice(&name_bytes);
+        if empty_buffer_byte != 0 {
+            // SMB2 CREATE requires at least one Buffer byte even when NameLength is zero.
+            bytes.push(0);
+        }
 
         if !self.create_contexts.is_empty() {
             let next_absolute_offset = SMB2_HEADER_BYTES + bytes.len();
@@ -428,6 +437,8 @@ mod tests {
         assert_eq!(le_u16(&encoded, 46), 0);
         assert_eq!(le_u32(&encoded, 48), 0);
         assert_eq!(le_u32(&encoded, 52), 0);
+        assert_eq!(encoded.len(), CREATE_REQUEST_FIXED_BYTES + 1);
+        assert_eq!(encoded[CREATE_REQUEST_FIXED_BYTES], 0);
     }
 
     #[test]
