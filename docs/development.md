@@ -220,6 +220,49 @@ GitHub Actions 外でも workspace root と home は `$WORKSPACE`/`$HOME` に置
 Iris 自体のライセンス、静的リンクされた全 native code、未解決・dlopen-only 依存、vendor の
 patch 適用状況やライセンス互換性をこのレポートだけで保証するものではありません。
 
+### Release policy gate（法的承認ではない）
+
+`scripts/release-policy.json` は監査の収集機構とは別の保守的な公開ポリシーです。
+タグ push 専用の `publish` job は同一 run の `audit-macos` / `audit-linux` / `audit-windows`
+を個別に取得し、次の offline validator が成功してから Release を公開します。
+package job がレポートを upload するだけでは公開を許可しません。
+
+```sh
+python3 scripts/test-release-policy.py
+python3 scripts/release-policy.py audit/macos/macos.json audit/linux/linux.json audit/windows/windows.json
+```
+
+出力は必ず **policy check only**（legal/compliance approval ではない）です。
+3 platform の schema、欠落・切り詰め、selected Cargo graph の完全性・edge/context の整合性を検査します。
+Iris workspace の manifest と正規化 package ID が一致する path package は第三者の判定から除外し、
+Iris の license を仮定しません。registry/git の runtime package（runtime+build を含む）は
+宣言 SPDX 式を評価します。`WITH`、括弧、`AND`、`OR` の順で結合し、`AND` は全項、`OR` は
+有効な選択肢の少なくとも一つがポリシーを満たす必要があります。例えば `MIT OR GPL-3.0-only` は
+MIT を選べますが、GPL 単独や `MIT AND GPL-3.0-only` は不可です。全 branch を構文検査するため、
+未知 ID・未対応 exception・旧 slash 表記・欠落 metadata は OR で隠せません。
+build/proc-macro 専用 package の license は runtime 互換性の判定対象外です。
+
+LGPL の legal-review approval は既定で空です。追加する場合は `lgpl_legal_approvals` に
+`domain` (`cargo` / `ffmpeg`)、`subject`（完全 Cargo package ID、または exact library の
+`<path>#sha256=<digest>`）、`license`（review 対象 ID）、`review`（法的 review の参照）を指定します。
+これは明示的な legal-review approval とその参照を記録する欄であり、このツールが法的承認を与えるものではありません。
+FFmpeg は exact library の hash と probe の path を結び付け、全 license/configuration pair を検査します。
+product の Cargo flags、必要な native component と許可 license 名は JSON で定義し、GPL/version3/nonfree flags、
+未知・欠落の native evidence、未 review の LGPL は公開を阻止します。
+`ffmpeg-next` の license や別の `ffmpeg` executable では代用できません。
+Linux PDFium は `provenance-check.attestation_verified == true` が必須です。
+Windows は build と graph の `product` variant が必須で、現行 minimal release は公開できません。
+この gate は package 内容・build flags を変更しません。
+
+**現行 schema 1 では公開は引き続き blocked です。** exact FFmpeg probe と PDFium attestation は
+検査できますが、静的 native code・dlopen-only 依存・vendor patch に関する完全な native license closure の
+構造化 review evidence はありません。Windows の PE import 記録にも native license/configuration probe はありません。
+`require_complete_native_license_closure=true` はこの未検証領域を
+明示的に阻止し、Cargo metadata、PE imports、Debian copyright、Homebrew 候補情報から承認を推定しません。
+Iris 自体の license、upstream の法的権限や notice/source 提供義務の履行も本レポートだけでは証明できず、
+このチェックの成功が全体の法的適合性を意味することはありません。
+`scripts/release-audit.py` は引き続き evidence-only の収集機構です。
+
 ## CI
 
 | ワークフロー | いつ | 内容 |

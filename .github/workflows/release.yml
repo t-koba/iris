@@ -42,6 +42,9 @@ jobs:
           python-version: '3.13'
       - name: Validate release audit contract
         run: python scripts/test-release-audit.py
+      - name: Validate release policy gate offline
+        timeout-minutes: 1
+        run: python scripts/test-release-policy.py
 
       - name: Resolve package source and workspace version
         id: source
@@ -387,6 +390,32 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Download macOS audit evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: audit-macos
+          path: audit/macos
+      - name: Download Linux audit evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: audit-linux
+          path: audit/linux
+      - name: Download Windows audit evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: audit-windows
+          path: audit/windows
+      - name: Gate publication on release policy (not legal approval)
+        run: >-
+          python scripts/release-policy.py
+          audit/macos/macos.json audit/linux/linux.json audit/windows/windows.json
       - name: Download staged release assets
         uses: actions/download-artifact@v4
         with:

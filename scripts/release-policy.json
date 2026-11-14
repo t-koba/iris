@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "allowed_licenses": [
+    "0BSD", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "BSL-1.0",
+    "CC0-1.0", "ISC", "MIT", "Unicode-3.0", "Unicode-DFS-2016", "Zlib"
+  ],
+  "allowed_with": [["Apache-2.0", "LLVM-exception"]],
+  "blocked_licenses": [
+    "GPL-1.0+", "GPL-1.0", "GPL-1.0-only", "GPL-1.0-or-later",
+    "GPL-2.0+", "GPL-2.0", "GPL-2.0-only", "GPL-2.0-or-later",
+    "GPL-3.0+", "GPL-3.0", "GPL-3.0-only", "GPL-3.0-or-later",
+    "AGPL-1.0+", "AGPL-1.0", "AGPL-1.0-only", "AGPL-1.0-or-later",
+    "AGPL-3.0+", "AGPL-3.0", "AGPL-3.0-only", "AGPL-3.0-or-later",
+    "MPL-2.0", "OpenSSL"
+  ],
+  "review_licenses": [
+    "LGPL-2.0+", "LGPL-2.0", "LGPL-2.0-only", "LGPL-2.0-or-later",
+    "LGPL-2.1+", "LGPL-2.1", "LGPL-2.1-only", "LGPL-2.1-or-later",
+    "LGPL-3.0+", "LGPL-3.0", "LGPL-3.0-only", "LGPL-3.0-or-later"
+  ],
+  "lgpl_legal_approvals": [],
+  "required_variants": {"macos": "product", "linux": "product", "windows": "product"},
+  "required_cargo_flags": [],
+  "required_pdfium_attestation": ["linux"],
+  "ffmpeg_components": ["avcodec", "avformat", "avutil", "swscale"],
+  "forbidden_ffmpeg_flags": ["--enable-gpl", "--enable-version3", "--enable-nonfree"],
+  "ffmpeg_license_names": {"LGPL version 2.1 or later": "LGPL-2.1-or-later"},
+  "require_complete_native_license_closure": true
+}
