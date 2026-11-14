@@ -147,10 +147,41 @@ pub async fn open_file_for_write(
     path: impl Into<String>,
     create_disposition: Smb2CreateDisposition,
 ) -> Result<SmbHandle, SmbConnectionError> {
+    open_file_with_write_access(
+        connection,
+        path,
+        create_disposition,
+        Smb2DesiredAccess::GENERIC_WRITE.0 | Smb2DesiredAccess::FILE_WRITE_DATA.0,
+    )
+    .await
+}
+
+pub async fn open_file_for_copychunk_target(
+    connection: &SmbConnectionActor,
+    path: impl Into<String>,
+    create_disposition: Smb2CreateDisposition,
+) -> Result<SmbHandle, SmbConnectionError> {
+    // MS-SMB2 3.3.5.15.6 requires FILE_READ_DATA and FILE_WRITE_DATA on the target.
+    open_file_with_write_access(
+        connection,
+        path,
+        create_disposition,
+        Smb2DesiredAccess::GENERIC_WRITE.0
+            | Smb2DesiredAccess::FILE_READ_DATA.0
+            | Smb2DesiredAccess::FILE_WRITE_DATA.0,
+    )
+    .await
+}
+
+async fn open_file_with_write_access(
+    connection: &SmbConnectionActor,
+    path: impl Into<String>,
+    create_disposition: Smb2CreateDisposition,
+    desired_access: u32,
+) -> Result<SmbHandle, SmbConnectionError> {
     let request = Smb2CreateRequest::new(
         path,
-        Smb2DesiredAccess::GENERIC_WRITE.0
-            | Smb2DesiredAccess::FILE_WRITE_DATA.0
+        desired_access
             | Smb2DesiredAccess::FILE_WRITE_ATTRIBUTES.0
             | Smb2DesiredAccess::SYNCHRONIZE.0,
         Smb2FileAttributes::NORMAL,

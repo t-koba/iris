@@ -1,5 +1,5 @@
 use crate::connection::{SmbConnectionError, SmbResponse};
-use crate::file::{close, open_file_for_read, open_file_for_write, SmbHandle};
+use crate::file::{close, open_file_for_copychunk_target, open_file_for_read, SmbHandle};
 use crate::packet::create::Smb2CreateDisposition;
 use crate::packet::header::Smb2Command;
 use crate::packet::ioctl::{Smb2IoctlFlags, Smb2IoctlRequest, Smb2IoctlResponse};
@@ -39,13 +39,14 @@ pub async fn copy_file_chunks(
     create_disposition: Smb2CreateDisposition,
 ) -> Result<u64, SmbConnectionError> {
     let source = open_file_for_read(connection, source_path).await?;
-    let target = match open_file_for_write(connection, target_path, create_disposition).await {
-        Ok(target) => target,
-        Err(error) => {
-            let _ = close(connection, source).await;
-            return Err(error);
-        }
-    };
+    let target =
+        match open_file_for_copychunk_target(connection, target_path, create_disposition).await {
+            Ok(target) => target,
+            Err(error) => {
+                let _ = close(connection, source).await;
+                return Err(error);
+            }
+        };
     let copy_result = copy_open_file_chunks(connection, &source, &target).await;
     let close_source_result = close(connection, source).await.map(|_| ());
     let close_target_result = close(connection, target).await.map(|_| ());

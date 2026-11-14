@@ -2967,6 +2967,12 @@ mod tests {
             .desired_access
             .contains(Smb2DesiredAccess::GENERIC_WRITE));
         assert!(target_create_body
+            .desired_access
+            .contains(Smb2DesiredAccess::FILE_READ_DATA));
+        assert!(target_create_body
+            .desired_access
+            .contains(Smb2DesiredAccess::FILE_WRITE_DATA));
+        assert!(target_create_body
             .create_options
             .contains(Smb2CreateOptions::NON_DIRECTORY_FILE));
         transport
