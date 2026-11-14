@@ -21,7 +21,8 @@ pub mod tree;
 mod wire;
 
 pub use actor::{
-    decode_compound_responses, SmbCompoundRequest, SmbConnectionActor, SmbConnectionActorState,
+    decode_compound_responses, SmbActorConfig, SmbCompoundRequest, SmbConnectionActor,
+    SmbConnectionActorState,
 };
 pub use auth::ntlm::{
     lm_v2_response, nt_hash, ntlm_v2_hash, ntlm_v2_response, ntlm_v2_temp, session_base_key,

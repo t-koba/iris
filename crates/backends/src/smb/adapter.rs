@@ -48,11 +48,6 @@ impl Drop for StreamedWriteGuard {
     fn drop(&mut self) {
         if self.armed {
             self.pool.mark_invalid(self.generation);
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                let pool = Arc::clone(&self.pool);
-                let generation = self.generation;
-                runtime.spawn(async move { pool.invalidate(generation).await });
-            }
         }
     }
 }
@@ -634,12 +629,7 @@ impl NativeSmbReadStream {
     }
 
     fn invalidate_connection(&self) {
-        let pool = Arc::clone(&self.pool);
-        let generation = self.generation;
-        pool.mark_invalid(generation);
-        tokio::spawn(async move {
-            pool.invalidate(generation).await;
-        });
+        self.pool.mark_invalid(self.generation);
     }
 }
 
@@ -1207,6 +1197,7 @@ mod tests {
             password: None,
             workstation: None,
             allow_guest: true,
+            actor: Default::default(),
         };
         let backend_id = BackendId("smb:reconnect".to_string());
         let adapter = SmbAdapter::new(config, backend_id.clone());
@@ -1376,6 +1367,7 @@ mod tests {
             password: None,
             workstation: None,
             allow_guest: true,
+            actor: Default::default(),
         }));
         drop(StreamedWriteGuard {
             pool,
@@ -1419,6 +1411,39 @@ mod tests {
         })
         .await
         .expect("bounded cancellation regression");
+    }
+
+    #[tokio::test]
+    async fn native_pool_invalidation_stops_stale_clones_and_reconnects() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut config, server) =
+                start_fake_native_server(FakeNativeScenario::PoolInvalidation).await;
+            config.actor.request_timeout = Duration::from_millis(500);
+            let backend_id = BackendId("smb:pool-lifecycle".into());
+            let adapter = SmbAdapter::new(config, backend_id.clone());
+            let stale = adapter.native_session().await.unwrap();
+            assert!(matches!(
+                stale
+                    .actor
+                    .request_with_credit_charge(Smb2Command::Read, vec![], u16::MAX)
+                    .await,
+                Err(SmbConnectionError::RequestTimedOut { .. })
+            ));
+            adapter.pool.invalidate(stale.generation).await;
+            assert!(stale.actor.state().await.is_err());
+            let replacement = adapter.native_session().await.unwrap();
+            assert!(replacement.generation > stale.generation);
+            // A delayed invalidation from a stale owner cannot kill the replacement.
+            adapter.pool.invalidate(stale.generation).await;
+            replacement.actor.state().await.unwrap();
+            adapter
+                .list_names(&object_ref(&backend_id, ""), None)
+                .await
+                .unwrap();
+            server.await.unwrap();
+        })
+        .await
+        .expect("bounded pool lifecycle regression");
     }
 
     #[tokio::test]
@@ -1472,7 +1497,7 @@ mod tests {
                     .expect("new session works while old writes are unresolved");
                 server
                     .await
-                    .expect("old writes drain and connection closes");
+                    .expect("old generation closes without draining writes");
             }
         })
         .await
@@ -1553,6 +1578,7 @@ mod tests {
     }
 
     enum FakeNativeScenario {
+        PoolInvalidation,
         ListRoot,
         ReadFile,
         WriteFile,
@@ -1579,6 +1605,18 @@ mod tests {
             handle_negotiate(&mut transport).await;
             handle_tree_connect(&mut transport).await;
             match scenario {
+                FakeNativeScenario::PoolInvalidation => {
+                    // No response or owner drop releases this generation: shutdown must.
+                    assert!(
+                        transport.recv_packet().await.is_err(),
+                        "stale generation reused"
+                    );
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut replacement = DirectTcpTransport::new(stream);
+                    handle_negotiate(&mut replacement).await;
+                    handle_tree_connect(&mut replacement).await;
+                    handle_list_root(&mut replacement).await;
+                }
                 FakeNativeScenario::ListRoot => handle_list_root(&mut transport).await,
                 FakeNativeScenario::ReadFile => handle_read_file(&mut transport).await,
                 FakeNativeScenario::WriteFile => handle_write_file(&mut transport).await,
@@ -1608,8 +1646,8 @@ mod tests {
                             .unwrap();
                     }
                     if close_fails != Some(false) {
-                        // No cancellation CLOSE: only release the connection once
-                        // its bounded actor work and all owners have finished.
+                        // No cancellation CLOSE: invalidation tears down the generation
+                        // even while callers retain actor clones.
                         assert!(transport.recv_packet().await.is_err(), "old actor reused");
                         let (stream, _) = listener.accept().await.expect("replacement connection");
                         transport = DirectTcpTransport::new(stream);
@@ -1646,29 +1684,13 @@ mod tests {
                             .await
                             .unwrap();
                     }
-                    tokio::select! {
-                        biased;
-                        packet = transport.recv_packet() => {
-                            panic!("old session sent traffic or closed before writes drained: {packet:?}");
-                        }
-                        () = async {
-                            let (stream, _) = listener.accept().await.expect("replacement connection");
-                            let mut replacement = DirectTcpTransport::new(stream);
-                            handle_negotiate(&mut replacement).await;
-                            handle_tree_connect(&mut replacement).await;
-                            handle_list_root(&mut replacement).await;
-                        } => {}
-                    }
-                    for (_, message_id, count) in writes {
-                        transport
-                            .send_packet(&response_packet(
-                                Smb2Header::new(Smb2Command::Write, message_id),
-                                &write_response_body(count),
-                            ))
-                            .await
-                            .unwrap();
-                    }
+                    // Invalidation must not wait for the unresolved sibling WRITE.
                     assert!(transport.recv_packet().await.is_err(), "old actor reused");
+                    let (stream, _) = listener.accept().await.expect("replacement connection");
+                    let mut replacement = DirectTcpTransport::new(stream);
+                    handle_negotiate(&mut replacement).await;
+                    handle_tree_connect(&mut replacement).await;
+                    handle_list_root(&mut replacement).await;
                 }
                 FakeNativeScenario::Mkdir => handle_mkdir(&mut transport).await,
                 FakeNativeScenario::MoveFile => handle_move_file(&mut transport).await,
@@ -1686,6 +1708,7 @@ mod tests {
                 password: None,
                 workstation: None,
                 allow_guest: true,
+                actor: Default::default(),
             },
             server_task,
         )

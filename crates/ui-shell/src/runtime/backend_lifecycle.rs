@@ -320,6 +320,7 @@ impl AppRuntime {
                 password,
                 workstation: None,
                 allow_guest,
+                actor: Default::default(),
             },
             backend_id.clone(),
         ));

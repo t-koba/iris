@@ -10,13 +10,36 @@ use crate::packet::header::{
 use crate::transform::{is_smb3_transform, Smb3EncryptionContext, Smb3EncryptionKeys};
 use crate::transport::DirectTcpTransport;
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{mpsc, oneshot};
-use tokio::time::{sleep_until, Duration, Instant};
+use tokio::sync::{mpsc, oneshot, watch, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::time::{sleep_until, timeout_at, Duration, Instant};
 
-const DEFAULT_ACTOR_QUEUE_DEPTH: usize = 256;
-const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Lifecycle policy. Deadlines include admission, queueing, credits, writes and
+/// responses. Capacity counts all admitted unsent commands, including the FIFO head.
+#[derive(Clone, Copy, Debug)]
+pub struct SmbActorConfig {
+    pub request_timeout: Duration,
+    pub queue_depth: NonZeroUsize,
+}
+
+impl Default for SmbActorConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout: Duration::from_secs(30),
+            queue_depth: NonZeroUsize::new(256).unwrap(),
+        }
+    }
+}
+
+impl SmbActorConfig {
+    fn timeout_error(self) -> SmbConnectionError {
+        SmbConnectionError::RequestTimedOut {
+            seconds: self.request_timeout.as_secs(),
+        }
+    }
+}
 const TARGET_CREDITS: u16 = 256;
 
 type ResponseResult = Result<SmbResponse, SmbConnectionError>;
@@ -32,7 +55,11 @@ pub struct SmbCompoundRequest {
 
 #[derive(Clone)]
 pub struct SmbConnectionActor {
-    sender: mpsc::Sender<ActorCommand>,
+    sender: mpsc::Sender<QueuedCommand>,
+    capacity: Arc<Semaphore>,
+    wake: Arc<Notify>,
+    shutdown: watch::Sender<bool>,
+    config: SmbActorConfig,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,6 +71,26 @@ pub struct SmbConnectionActorState {
     pub available_credits: u16,
     pub preauth_integrity_hash: [u8; SMB311_PREAUTH_HASH_BYTES],
     pub encryption_enabled: bool,
+}
+
+struct QueuedCommand {
+    command: ActorCommand,
+    deadline: Instant,
+    _permit: OwnedSemaphorePermit,
+}
+
+// Wake the actor when a calling future is dropped, even while credit-starved.
+struct ReplyWaiter<T> {
+    receiver: oneshot::Receiver<Result<T, SmbConnectionError>>,
+    wake: Arc<Notify>,
+}
+impl<T> Drop for ReplyWaiter<T> {
+    fn drop(&mut self) {
+        // Close before notifying: another runtime thread may immediately poll
+        // the actor, so notification alone could race receiver destruction.
+        self.receiver.close();
+        self.wake.notify_one();
+    }
 }
 
 enum ActorCommand {
@@ -75,7 +122,7 @@ enum ActorCommand {
         ack_tx: oneshot::Sender<Result<(), SmbConnectionError>>,
     },
     Snapshot {
-        response_tx: oneshot::Sender<SmbConnectionActorState>,
+        response_tx: oneshot::Sender<Result<SmbConnectionActorState, SmbConnectionError>>,
     },
 }
 
@@ -108,6 +155,7 @@ struct OutboundRequest {
     response_state_update: ResponseStateUpdate,
     response_tx: oneshot::Sender<ResponseResult>,
     response_signing: Option<PendingSigningKey>,
+    deadline: Instant,
 }
 
 struct PendingSigningKey {
@@ -139,7 +187,6 @@ struct ActorState {
     signing_key: Option<SmbSigningKey>,
     encryption: Option<Smb3EncryptionContext>,
     preauth_integrity_hash: [u8; SMB311_PREAUTH_HASH_BYTES],
-    request_timeout: Duration,
 }
 
 impl Default for ActorState {
@@ -155,7 +202,6 @@ impl Default for ActorState {
             signing_key: None,
             encryption: None,
             preauth_integrity_hash: smb311_initial_preauth_hash(),
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         }
     }
 }
@@ -173,12 +219,13 @@ impl SmbConnectionActor {
     where
         T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
-        let (sender, receiver) = mpsc::channel(DEFAULT_ACTOR_QUEUE_DEPTH);
-        tokio::spawn(async move {
-            run_actor_with_timeout(DirectTcpTransport::new(stream), receiver, request_timeout)
-                .await;
-        });
-        Self { sender }
+        Self::spawn_with_config(
+            stream,
+            SmbActorConfig {
+                request_timeout,
+                ..Default::default()
+            },
+        )
     }
 
     #[cfg(test)]
@@ -186,28 +233,77 @@ impl SmbConnectionActor {
     where
         T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
-        let (sender, receiver) = mpsc::channel(DEFAULT_ACTOR_QUEUE_DEPTH);
-        tokio::spawn(async move {
-            let mut transport = DirectTcpTransport::new(stream);
-            let mut receiver = receiver;
-            let mut state = ActorState {
-                available_credits: initial_credits.max(1),
-                ..ActorState::default()
-            };
-            run_actor_loop(&mut transport, &mut receiver, &mut state).await;
-        });
-        Self { sender }
+        Self::spawn_configured(
+            DirectTcpTransport::new(stream),
+            SmbActorConfig::default(),
+            initial_credits.max(1),
+        )
+    }
+
+    pub fn spawn_with_config<T>(stream: T, config: SmbActorConfig) -> Self
+    where
+        T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    {
+        Self::spawn_with_transport_config(DirectTcpTransport::new(stream), config)
     }
 
     pub fn spawn_with_transport<T>(transport: DirectTcpTransport<T>) -> Self
     where
         T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
-        let (sender, receiver) = mpsc::channel(DEFAULT_ACTOR_QUEUE_DEPTH);
+        Self::spawn_with_transport_config(transport, SmbActorConfig::default())
+    }
+
+    pub fn spawn_with_transport_config<T>(
+        transport: DirectTcpTransport<T>,
+        config: SmbActorConfig,
+    ) -> Self
+    where
+        T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    {
+        Self::spawn_configured(transport, config, 1)
+    }
+
+    fn spawn_configured<T>(
+        transport: DirectTcpTransport<T>,
+        config: SmbActorConfig,
+        initial_credits: u16,
+    ) -> Self
+    where
+        T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    {
+        let (sender, receiver) = mpsc::channel(config.queue_depth.get());
+        let capacity = Arc::new(Semaphore::new(config.queue_depth.get()));
+        let wake = Arc::new(Notify::new());
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let actor_wake = wake.clone();
+        let actor_capacity = capacity.clone();
         tokio::spawn(async move {
-            run_actor(transport, receiver).await;
+            run_actor(
+                transport,
+                receiver,
+                actor_wake,
+                shutdown_rx,
+                initial_credits,
+                config,
+            )
+            .await;
+            actor_capacity.close();
         });
-        Self { sender }
+        Self {
+            sender,
+            capacity,
+            wake,
+            shutdown,
+            config,
+        }
+    }
+
+    /// Invalidates this transport generation, even with stale sender clones.
+    /// New calls are rejected immediately; blocked I/O and credit waits are woken.
+    pub fn shutdown(&self) {
+        self.shutdown.send_replace(true);
+        self.capacity.close();
     }
 
     pub async fn request(
@@ -241,14 +337,40 @@ impl SmbConnectionActor {
         &self,
         command: impl FnOnce(oneshot::Sender<Result<T, SmbConnectionError>>) -> ActorCommand,
     ) -> Result<T, SmbConnectionError> {
+        let deadline = Instant::now() + self.config.request_timeout;
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.sender
-            .send(command(reply_tx))
-            .await
-            .map_err(|_| SmbConnectionError::RequestQueueClosed)?;
-        reply_rx
-            .await
-            .map_err(|_| SmbConnectionError::ResponseCanceled)?
+        let mut reply = ReplyWaiter {
+            receiver: reply_rx,
+            wake: self.wake.clone(),
+        };
+        timeout_at(deadline, async {
+            if *self.shutdown.borrow() {
+                return Err(SmbConnectionError::RequestQueueClosed);
+            }
+            let permit = self
+                .capacity
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| SmbConnectionError::RequestQueueClosed)?;
+            self.sender
+                .send(QueuedCommand {
+                    command: command(reply_tx),
+                    deadline,
+                    _permit: permit,
+                })
+                .await
+                .map_err(|_| SmbConnectionError::RequestQueueClosed)?;
+            (&mut reply.receiver).await.map_err(|_| {
+                if Instant::now() >= deadline {
+                    self.config.timeout_error()
+                } else {
+                    SmbConnectionError::ResponseCanceled
+                }
+            })?
+        })
+        .await
+        .unwrap_or_else(|_| Err(self.config.timeout_error()))
     }
 
     pub async fn request_compound(
@@ -339,135 +461,123 @@ impl SmbConnectionActor {
     }
 
     pub async fn state(&self) -> Result<SmbConnectionActorState, SmbConnectionError> {
-        let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(ActorCommand::Snapshot { response_tx })
+        self.call(|response_tx| ActorCommand::Snapshot { response_tx })
             .await
-            .map_err(|_| SmbConnectionError::RequestQueueClosed)?;
-        response_rx
-            .await
-            .map_err(|_| SmbConnectionError::ResponseCanceled)
+    }
+}
+
+impl ActorCommand {
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Request { response_tx, .. } => response_tx.is_closed(),
+            Self::Compound { response_tx, .. } => response_tx.is_closed(),
+            Self::Snapshot { response_tx } => response_tx.is_closed(),
+            #[cfg(test)]
+            Self::SetIds { ack_tx, .. } => ack_tx.is_closed(),
+            Self::SetSigningKey { ack_tx, .. } | Self::EnableEncryption { ack_tx, .. } => {
+                ack_tx.is_closed()
+            }
+        }
     }
 }
 
 async fn run_actor<T>(
-    mut transport: DirectTcpTransport<T>,
-    mut receiver: mpsc::Receiver<ActorCommand>,
+    transport: DirectTcpTransport<T>,
+    mut receiver: mpsc::Receiver<QueuedCommand>,
+    wake: Arc<Notify>,
+    mut shutdown: watch::Receiver<bool>,
+    initial_credits: u16,
+    config: SmbActorConfig,
 ) where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut state = ActorState::default();
-    run_actor_loop(&mut transport, &mut receiver, &mut state).await;
-}
-
-#[cfg(test)]
-async fn run_actor_with_timeout<T>(
-    mut transport: DirectTcpTransport<T>,
-    mut receiver: mpsc::Receiver<ActorCommand>,
-    request_timeout: Duration,
-) where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    let mut state = ActorState {
-        request_timeout,
-        ..ActorState::default()
+    let (mut reader, mut writer) = transport.split();
+    let (packet_tx, mut packet_rx) = mpsc::channel(1);
+    // A queue/deadline wake must never cancel a partial packet read.
+    let read_packets = async {
+        loop {
+            let packet = reader.recv_packet().await;
+            let failed = packet.is_err();
+            if packet_tx.send(packet).await.is_err() {
+                return;
+            }
+            if failed {
+                std::future::pending::<()>().await;
+            }
+        }
     };
-    run_actor_loop(&mut transport, &mut receiver, &mut state).await;
+    let mut state = ActorState {
+        available_credits: initial_credits,
+        ..Default::default()
+    };
+    let mut pending = HashMap::new();
+    tokio::select! {
+        biased;
+        _ = async { if !*shutdown.borrow_and_update() { let _ = shutdown.changed().await; } } => {}
+        _ = run_actor_loop(&mut writer, &mut receiver, &mut packet_rx, &wake, &mut state, &mut pending) => {}
+        _ = read_packets => {}
+    }
+    close_pending(&mut pending, config);
 }
 
 async fn run_actor_loop<T>(
     transport: &mut DirectTcpTransport<T>,
-    receiver: &mut mpsc::Receiver<ActorCommand>,
+    receiver: &mut mpsc::Receiver<QueuedCommand>,
+    packets: &mut mpsc::Receiver<Result<Vec<u8>, crate::transport::SmbTransportError>>,
+    wake: &Notify,
     state: &mut ActorState,
+    pending: &mut HashMap<u64, PendingRequest>,
 ) where
-    T: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncWrite + Unpin,
 {
-    let mut pending = HashMap::<u64, PendingRequest>::new();
-    let mut deferred = VecDeque::<ActorCommand>::new();
-    let mut accepting_commands = true;
-
+    let mut deferred = VecDeque::<QueuedCommand>::new();
+    let mut accepting = true;
     loop {
-        if pending.is_empty() && !accepting_commands {
+        let now = Instant::now();
+        // An on-wire timeout leaves response/credit ownership uncertain. Retire
+        // the generation rather than reusing it; unsent expiry below is harmless.
+        if pending.values().any(|request| request.deadline() <= now) {
             return;
         }
-
-        if pending.is_empty() {
-            match receiver.recv().await {
-                Some(command) => {
-                    deferred.push_back(command);
-                    if let Err(error) =
-                        flush_deferred(&mut deferred, transport, state, &mut pending).await
-                    {
-                        close_pending(&mut pending, error.to_string());
-                        return;
-                    }
-                }
-                None => return,
+        deferred.retain(|queued| queued.deadline > now && !queued.command.is_closed());
+        if let Some(queued) =
+            deferred.pop_front_if(|h| command_credit_charge(&h.command) <= state.available_credits)
+        {
+            // Partial writes cannot be retried safely: stop the generation on timeout.
+            let sent = timeout_at(
+                queued.deadline,
+                handle_command(queued.command, queued.deadline, transport, state, pending),
+            )
+            .await;
+            if !matches!(sent, Ok(Ok(()))) {
+                return;
             }
             continue;
         }
-
+        if !accepting && deferred.is_empty() && pending.is_empty() {
+            return;
+        }
+        let deadline = deferred
+            .iter()
+            .map(|h| h.deadline)
+            .chain(pending.values().map(PendingRequest::deadline))
+            .min();
         tokio::select! {
-            maybe_command = receiver.recv(), if accepting_commands => {
-                match maybe_command {
-                    Some(command) => {
-                        deferred.push_back(command);
-                        if let Err(error) = flush_deferred(&mut deferred, transport, state, &mut pending).await {
-                            close_pending(&mut pending, error.to_string());
-                            return;
-                        }
-                    }
-                    None => {
-                        accepting_commands = false;
-                    }
+            command = receiver.recv(), if accepting => {
+                match command { Some(command) => deferred.push_back(command), None => accepting = false }
+            }
+            packet = packets.recv(), if !pending.is_empty() || !deferred.is_empty() => {
+                match packet {
+                    Some(Ok(packet)) => { if dispatch_response(packet, state, pending).is_err() { return; } }
+                    _ => return,
                 }
             }
-            response = transport.recv_packet(), if !pending.is_empty() => {
-                match response {
-                    Ok(packet) => {
-                        if let Err(error) = dispatch_response(packet, state, &mut pending) {
-                            close_pending(&mut pending, error.to_string());
-                            return;
-                        }
-                        if let Err(error) = flush_deferred(&mut deferred, transport, state, &mut pending).await {
-                            close_pending(&mut pending, error.to_string());
-                            return;
-                        }
-                    }
-                    Err(error) => {
-                        close_pending(&mut pending, error.to_string());
-                        return;
-                    }
-                }
-            }
-            _ = sleep_until(next_pending_deadline(&pending)), if !pending.is_empty() => {
-                expire_pending(&mut pending, Instant::now());
-            }
+            _ = wake.notified() => {}
+            _ = async { match deadline {
+                Some(deadline) => sleep_until(deadline).await,
+                None => std::future::pending::<()>().await,
+            }} => {}
         }
-    }
-}
-
-async fn flush_deferred<T>(
-    deferred: &mut VecDeque<ActorCommand>,
-    transport: &mut DirectTcpTransport<T>,
-    state: &mut ActorState,
-    pending: &mut HashMap<u64, PendingRequest>,
-) -> Result<(), SmbConnectionError>
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    loop {
-        let Some(command) = deferred.front() else {
-            return Ok(());
-        };
-        let required = command_credit_charge(command);
-        if required > state.available_credits {
-            return Ok(());
-        }
-        let Some(command) = deferred.pop_front() else {
-            return Ok(());
-        };
-        handle_command(command, transport, state, pending).await?;
     }
 }
 
@@ -485,12 +595,13 @@ fn command_credit_charge(command: &ActorCommand) -> u16 {
 
 async fn handle_command<T>(
     command: ActorCommand,
+    deadline: Instant,
     transport: &mut DirectTcpTransport<T>,
     state: &mut ActorState,
     pending: &mut HashMap<u64, PendingRequest>,
 ) -> Result<(), SmbConnectionError>
 where
-    T: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncWrite + Unpin,
 {
     match command {
         ActorCommand::Request {
@@ -514,6 +625,7 @@ where
                     response_state_update,
                     response_tx,
                     response_signing,
+                    deadline,
                 },
             )
             .await
@@ -521,7 +633,9 @@ where
         ActorCommand::Compound {
             requests,
             response_tx,
-        } => send_compound_request(transport, state, pending, requests, response_tx).await,
+        } => {
+            send_compound_request(transport, state, pending, requests, response_tx, deadline).await
+        }
         #[cfg(test)]
         ActorCommand::SetIds {
             session_id,
@@ -547,7 +661,7 @@ where
             Ok(())
         }
         ActorCommand::Snapshot { response_tx } => {
-            let _ = response_tx.send(state.snapshot());
+            let _ = response_tx.send(Ok(state.snapshot()));
             Ok(())
         }
     }
@@ -560,7 +674,7 @@ async fn send_request<T>(
     request: OutboundRequest,
 ) -> Result<(), SmbConnectionError>
 where
-    T: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncWrite + Unpin,
 {
     let message_id = state.reserve_message_id(request.credit_charge);
     let charged = request.credit_charge.max(1);
@@ -608,17 +722,17 @@ where
                     response_state_update: request.response_state_update,
                     response_tx: request.response_tx,
                     signing_key,
-                    deadline: Instant::now() + state.request_timeout,
+                    deadline: request.deadline,
                 },
             );
             Ok(())
         }
         Err(error) => {
-            state.available_credits = state.available_credits.saturating_add(charged);
+            let reason = error.to_string();
             let _ = request
                 .response_tx
                 .send(Err(SmbConnectionError::Transport(error)));
-            Ok(())
+            Err(SmbConnectionError::ActorStopped { reason })
         }
     }
 }
@@ -629,9 +743,10 @@ async fn send_compound_request<T>(
     pending: &mut HashMap<u64, PendingRequest>,
     requests: Vec<SmbCompoundRequest>,
     response_tx: oneshot::Sender<CompoundResponseResult>,
+    deadline: Instant,
 ) -> Result<(), SmbConnectionError>
 where
-    T: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncWrite + Unpin,
 {
     if requests.is_empty() {
         let _ = response_tx.send(Err(crate::SmbClientError::EmptyCompoundRequest.into()));
@@ -676,7 +791,6 @@ where
                 responses: vec![None; requests.len()],
                 response_tx: Some(response_tx),
             }));
-            let deadline = Instant::now() + state.request_timeout;
             for (index, (request, message_id)) in requests.iter().zip(message_ids).enumerate() {
                 pending.insert(
                     message_id,
@@ -691,9 +805,9 @@ where
             Ok(())
         }
         Err(error) => {
-            state.available_credits = state.available_credits.saturating_add(total_charge);
+            let reason = error.to_string();
             let _ = response_tx.send(Err(SmbConnectionError::Transport(error)));
-            Ok(())
+            Err(SmbConnectionError::ActorStopped { reason })
         }
     }
 }
@@ -1028,10 +1142,15 @@ fn validate_response_identity(
     Ok(())
 }
 
-fn close_pending(pending: &mut HashMap<u64, PendingRequest>, reason: String) {
+fn close_pending(pending: &mut HashMap<u64, PendingRequest>, config: SmbActorConfig) {
+    let now = Instant::now();
     for (_, request) in pending.drain() {
-        let error = SmbConnectionError::ActorStopped {
-            reason: reason.clone(),
+        let error = if request.deadline() <= now {
+            config.timeout_error()
+        } else {
+            SmbConnectionError::ActorStopped {
+                reason: "transport generation stopped".into(),
+            }
         };
         match request {
             PendingRequest::Single { response_tx, .. } => {
@@ -1046,48 +1165,6 @@ fn close_pending(pending: &mut HashMap<u64, PendingRequest>, reason: String) {
                 if let Some(response_tx) = response_tx {
                     let _ = response_tx.send(Err(error));
                 }
-            }
-        }
-    }
-}
-
-fn next_pending_deadline(pending: &HashMap<u64, PendingRequest>) -> Instant {
-    pending
-        .values()
-        .map(PendingRequest::deadline)
-        .min()
-        .unwrap_or_else(Instant::now)
-}
-
-fn expire_pending(pending: &mut HashMap<u64, PendingRequest>, now: Instant) {
-    let expired = pending
-        .iter()
-        .filter_map(|(message_id, request)| (request.deadline() <= now).then_some(*message_id))
-        .collect::<Vec<_>>();
-    for message_id in expired {
-        let Some(request) = pending.remove(&message_id) else {
-            continue;
-        };
-        let error = SmbConnectionError::RequestTimedOut {
-            seconds: DEFAULT_REQUEST_TIMEOUT.as_secs(),
-        };
-        match request {
-            PendingRequest::Single { response_tx, .. } => {
-                let _ = response_tx.send(Err(error));
-            }
-            PendingRequest::Compound { shared, .. } => {
-                let response_tx = shared
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .response_tx
-                    .take();
-                if let Some(response_tx) = response_tx {
-                    let _ = response_tx.send(Err(error));
-                }
-                pending.retain(|_, request| match request {
-                    PendingRequest::Compound { shared: other, .. } => !Arc::ptr_eq(other, &shared),
-                    PendingRequest::Single { .. } => true,
-                });
             }
         }
     }
@@ -1145,6 +1222,223 @@ fn tracks_preauth(command: Smb2Command) -> bool {
 
 #[cfg(test)]
 mod tests {
+    // Poll once to establish queue order without sleeps or task scheduling assumptions.
+    async fn poll_pending<F: std::future::Future>(future: std::pin::Pin<&mut F>) {
+        let mut future = future;
+        std::future::poll_fn(|cx| {
+            assert!(future.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn actor_expired_credit_starved_head_releases_live_close() {
+        let (client, server) = duplex(4096);
+        let actor = SmbConnectionActor::spawn_with_timeout(client, Duration::from_millis(20));
+        let mut blocked = Box::pin(actor.request_with_credit_charge(Smb2Command::Read, vec![], 2));
+        poll_pending(blocked.as_mut()).await;
+        let mut longer = actor.clone();
+        longer.config.request_timeout = Duration::from_secs(2);
+        let mut close = Box::pin(longer.request(Smb2Command::Close, vec![]));
+        poll_pending(close.as_mut()).await;
+        let mut transport = DirectTcpTransport::new(server);
+        let packet = tokio::time::timeout(Duration::from_secs(1), transport.recv_packet())
+            .await
+            .unwrap()
+            .unwrap();
+        let header = Smb2Header::decode(&packet).unwrap();
+        assert_eq!(header.command, Smb2Command::Close);
+        assert_eq!(header.message_id, 0); // expired READ never reached the wire
+        assert!(matches!(
+            blocked.await,
+            Err(SmbConnectionError::RequestTimedOut { .. })
+        ));
+        transport
+            .send_packet(&response_packet(
+                Smb2Header::new(Smb2Command::Close, header.message_id),
+                b"closed",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(close.await.unwrap().body, b"closed");
+        actor.shutdown();
+    }
+
+    #[tokio::test]
+    async fn actor_cancellation_discards_head_and_preserves_live_fifo() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (client, server) = duplex(4096);
+            let actor = SmbConnectionActor::spawn(client);
+            let mut blocked =
+                Box::pin(actor.request_with_credit_charge(Smb2Command::Read, vec![], 2));
+            poll_pending(blocked.as_mut()).await;
+            let mut first = Box::pin(actor.request(Smb2Command::Echo, b"first".to_vec()));
+            poll_pending(first.as_mut()).await;
+            let mut cancelled = Box::pin(actor.request_compound(vec![SmbCompoundRequest {
+                command: Smb2Command::Read,
+                body: vec![],
+                credit_charge: 2,
+                related: false,
+            }]));
+            poll_pending(cancelled.as_mut()).await;
+            let mut close = Box::pin(actor.request(Smb2Command::Close, vec![]));
+            poll_pending(close.as_mut()).await;
+            drop(cancelled);
+            drop(blocked);
+            let mut transport = DirectTcpTransport::new(server);
+            for command in [Smb2Command::Echo, Smb2Command::Close] {
+                let packet = transport.recv_packet().await.unwrap();
+                let header = Smb2Header::decode(&packet).unwrap();
+                assert_eq!(header.command, command);
+                transport
+                    .send_packet(&response_packet(
+                        Smb2Header::new(command, header.message_id),
+                        b"ok",
+                    ))
+                    .await
+                    .unwrap();
+            }
+            first.await.unwrap();
+            close.await.unwrap();
+            actor.shutdown();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn actor_queue_bound_includes_deferred_and_admission_wait_times_out() {
+        let (client, _server) = duplex(4096);
+        let actor = SmbConnectionActor::spawn_with_config(
+            client,
+            SmbActorConfig {
+                queue_depth: NonZeroUsize::new(2).unwrap(),
+                ..Default::default()
+            },
+        );
+        let mut head = Box::pin(actor.request_with_credit_charge(Smb2Command::Read, vec![], 2));
+        poll_pending(head.as_mut()).await;
+        let mut cancelled =
+            Box::pin(actor.request_with_credit_charge(Smb2Command::Read, vec![], 2));
+        poll_pending(cancelled.as_mut()).await;
+        let mut short = actor.clone();
+        short.config.request_timeout = Duration::from_millis(20);
+        assert!(matches!(
+            short.request(Smb2Command::Close, vec![]).await,
+            Err(SmbConnectionError::RequestTimedOut { .. })
+        ));
+        // mpsc has been drained, but its two deferred commands still own capacity.
+        assert_eq!(actor.capacity.available_permits(), 0);
+        drop(cancelled);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while actor.capacity.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // A cancelled non-head command releases capacity without waiting for the head.
+        assert_eq!(actor.capacity.available_permits(), 1);
+        drop(head);
+        actor.shutdown();
+    }
+
+    #[tokio::test]
+    async fn actor_shutdown_tears_down_with_stale_clones_and_waiters() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (client, server) = duplex(4096);
+            let actor = SmbConnectionActor::spawn_with_config(
+                client,
+                SmbActorConfig {
+                    queue_depth: NonZeroUsize::new(1).unwrap(),
+                    ..Default::default()
+                },
+            );
+            let stale = actor.clone();
+            let mut pending = Box::pin(stale.request(Smb2Command::Echo, vec![]));
+            poll_pending(pending.as_mut()).await;
+            let mut transport = DirectTcpTransport::new(server);
+            transport.recv_packet().await.unwrap();
+            let mut deferred =
+                Box::pin(stale.request_with_credit_charge(Smb2Command::Read, vec![], 2));
+            poll_pending(deferred.as_mut()).await;
+            let mut waiting = Box::pin(stale.state());
+            poll_pending(waiting.as_mut()).await;
+            actor.shutdown();
+            assert!(transport.recv_packet().await.is_err());
+            assert!(pending.await.is_err());
+            assert!(deferred.await.is_err());
+            assert!(waiting.await.is_err());
+            assert!(matches!(
+                stale.request(Smb2Command::Close, vec![]).await,
+                Err(SmbConnectionError::RequestQueueClosed)
+            ));
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn actor_preserves_partial_response_across_command_wakeups() {
+        use tokio::io::AsyncWriteExt;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (client, server) = duplex(4);
+            let actor = SmbConnectionActor::spawn(client);
+            let mut request = Box::pin(actor.request(Smb2Command::Echo, vec![]));
+            poll_pending(request.as_mut()).await;
+            let (partial_tx, partial_rx) = oneshot::channel();
+            let (resume_tx, resume_rx) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                let mut transport = DirectTcpTransport::new(server);
+                let request = transport.recv_packet().await.unwrap();
+                let header = Smb2Header::decode(&request).unwrap();
+                let packet = response_packet(
+                    Smb2Header::new(Smb2Command::Echo, header.message_id),
+                    b"complete",
+                );
+                let framing = crate::netbios::encode_direct_tcp_header(packet.len()).unwrap();
+                let bytes = [framing.as_slice(), packet.as_slice()].concat();
+                let mut stream = transport.into_inner();
+                // Five bytes into a four-byte duplex guarantees a partial read.
+                stream.write_all(&bytes[..5]).await.unwrap();
+                partial_tx.send(()).unwrap();
+                resume_rx.await.unwrap();
+                stream.write_all(&bytes[5..]).await.unwrap();
+            });
+            partial_rx.await.unwrap();
+            actor.state().await.unwrap();
+            resume_tx.send(()).unwrap();
+            assert_eq!(request.await.unwrap().body, b"complete");
+            server.await.unwrap();
+            actor.shutdown();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn actor_shutdown_interrupts_blocked_transport_write() {
+        use tokio::io::AsyncReadExt;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (client, mut server) = duplex(4);
+            let actor = SmbConnectionActor::spawn(client);
+            let stale = actor.clone();
+            let mut request = Box::pin(stale.request(Smb2Command::Echo, vec![0; 128]));
+            poll_pending(request.as_mut()).await;
+            // Reading the framing header proves the actor is inside send_packet.
+            let mut header = [0; 4];
+            server.read_exact(&mut header).await.unwrap();
+            actor.shutdown();
+            let mut remaining = Vec::new();
+            server.read_to_end(&mut remaining).await.unwrap();
+            assert!(remaining.len() < SMB2_HEADER_BYTES + 128);
+            assert!(request.await.is_err());
+        })
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn pending_auth_key_verifies_only_status_qualified_setup_responses() {
         let mut state = ActorState::default();
@@ -1219,6 +1513,10 @@ mod tests {
             .await
             .expect_err("request should time out");
         assert!(matches!(error, SmbConnectionError::RequestTimedOut { .. }));
+        tokio::time::timeout(Duration::from_secs(1), actor.sender.closed())
+            .await
+            .unwrap();
+        assert!(actor.state().await.is_err());
         server_task.await.expect("server task");
     }
 

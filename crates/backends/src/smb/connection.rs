@@ -2,10 +2,12 @@ use iris_core_domain::types::error::{AuthErrorDetail, BackendError, NetworkError
 use iris_smb_client::{
     authenticate_guest, authenticate_ntlm_v2, tree_connect_share, NtlmV2SecurityConfig,
     NtlmV2SessionSetup, Smb2Command, Smb2Dialect, Smb2EncryptionCipher, Smb2NegotiateContext,
-    Smb2NegotiateRequest, Smb2NegotiateResponse, Smb2SecurityMode, SmbConnectionActor, SmbTree,
+    Smb2NegotiateRequest, Smb2NegotiateResponse, Smb2SecurityMode, SmbActorConfig,
+    SmbConnectionActor, SmbTree,
 };
 use ring::rand::{SecureRandom, SystemRandom};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex as StdMutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -30,6 +32,8 @@ pub struct SmbConnectionConfig {
     pub workstation: Option<String>,
     /// Allow an unauthenticated guest session. This must be explicitly enabled.
     pub allow_guest: bool,
+    /// Actor queue and end-to-end request deadline policy (30s / 256 by default).
+    pub actor: SmbActorConfig,
 }
 
 #[derive(Clone)]
@@ -57,7 +61,8 @@ pub struct SmbSession {
 #[derive(Debug)]
 pub struct SmbPool {
     config: SmbConnectionConfig,
-    session: Mutex<Option<SmbSession>>,
+    session: StdMutex<Option<SmbSession>>,
+    connecting: Mutex<()>,
     next_generation: AtomicU64,
     invalid_through_generation: AtomicU64,
 }
@@ -66,48 +71,66 @@ impl SmbPool {
     pub fn new(config: SmbConnectionConfig) -> Self {
         Self {
             config,
-            session: Mutex::new(None),
+            session: StdMutex::new(None),
+            connecting: Mutex::new(()),
             next_generation: AtomicU64::new(1),
             invalid_through_generation: AtomicU64::new(0),
         }
     }
 
     pub async fn session(&self) -> Result<SmbSession, BackendError> {
-        let mut cached = self.session.lock().await;
-        let invalid_through = self.invalid_through_generation.load(Ordering::Acquire);
-        if cached
-            .as_ref()
-            .is_some_and(|session| session.native.generation <= invalid_through)
-        {
-            *cached = None;
-        }
-        if let Some(session) = cached.as_ref() {
-            if session.native.actor.state().await.is_ok() {
-                return Ok(session.clone());
+        let _connecting = self.connecting.lock().await;
+        let cached = self.session.lock().unwrap().clone();
+        if let Some(session) = cached {
+            if session.native.generation > self.invalid_through_generation.load(Ordering::Acquire)
+                && session.native.actor.state().await.is_ok()
+                && session.native.generation
+                    > self.invalid_through_generation.load(Ordering::Acquire)
+            {
+                return Ok(session);
             }
-            *cached = None;
+            self.mark_invalid(session.native.generation);
         }
 
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let session = connect_smb(&self.config, generation).await?;
+        let mut cached = self.session.lock().unwrap();
+        if generation <= self.invalid_through_generation.load(Ordering::Acquire) {
+            session.native.actor.shutdown();
+            return Err(network_error(
+                "SMB generation invalidated during connection",
+            ));
+        }
         *cached = Some(session.clone());
         Ok(session)
     }
 
     pub async fn invalidate(&self, generation: u64) {
         self.mark_invalid(generation);
-        let mut cached = self.session.lock().await;
-        if cached
-            .as_ref()
-            .is_some_and(|session| session.native.generation == generation)
-        {
-            *cached = None;
-        }
     }
 
+    /// Synchronously evicts and shuts down the invalidated transport, including
+    /// cancellation paths that cannot await or have no runtime to spawn cleanup.
     pub fn mark_invalid(&self, generation: u64) {
         self.invalid_through_generation
             .fetch_max(generation, Ordering::Release);
+        let mut cached = self.session.lock().unwrap();
+        if cached
+            .as_ref()
+            .is_some_and(|session| session.native.generation <= generation)
+        {
+            if let Some(session) = cached.take() {
+                session.native.actor.shutdown();
+            }
+        }
+    }
+}
+
+impl Drop for SmbPool {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.get_mut().unwrap().take() {
+            session.native.actor.shutdown();
+        }
     }
 }
 
@@ -143,7 +166,7 @@ async fn connect_native_smb(
         .set_nodelay(true)
         .map_err(|error| network_error(format!("SMB native TCP_NODELAY failed: {error}")))?;
 
-    let actor = SmbConnectionActor::spawn(stream);
+    let actor = SmbConnectionActor::spawn_with_config(stream, config.actor);
     let negotiated = negotiate_native_smb(&actor).await?;
 
     if negotiated.security_mode.0

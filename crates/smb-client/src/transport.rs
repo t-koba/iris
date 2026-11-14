@@ -36,6 +36,29 @@ impl<T> DirectTcpTransport<T> {
         self
     }
 
+    /// Splits packet reads and writes while retaining the transport payload policy.
+    pub(crate) fn split(
+        self,
+    ) -> (
+        DirectTcpTransport<tokio::io::ReadHalf<T>>,
+        DirectTcpTransport<tokio::io::WriteHalf<T>>,
+    )
+    where
+        T: AsyncRead + AsyncWrite,
+    {
+        let (read, write) = tokio::io::split(self.stream);
+        (
+            DirectTcpTransport {
+                stream: read,
+                max_payload_len: self.max_payload_len,
+            },
+            DirectTcpTransport {
+                stream: write,
+                max_payload_len: self.max_payload_len,
+            },
+        )
+    }
+
     pub fn into_inner(self) -> T {
         self.stream
     }
@@ -51,7 +74,7 @@ impl DirectTcpTransport<TcpStream> {
 
 impl<T> DirectTcpTransport<T>
 where
-    T: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncWrite + Unpin,
 {
     pub async fn send_packet(&mut self, payload: &[u8]) -> Result<(), SmbTransportError> {
         if payload.len() > self.max_payload_len {
@@ -66,7 +89,9 @@ where
         self.stream.flush().await?;
         Ok(())
     }
+}
 
+impl<T: AsyncRead + Unpin> DirectTcpTransport<T> {
     pub async fn recv_packet(&mut self) -> Result<Vec<u8>, SmbTransportError> {
         let mut header = [0; 4];
         self.stream.read_exact(&mut header).await?;
