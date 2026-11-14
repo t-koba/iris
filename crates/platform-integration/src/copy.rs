@@ -220,6 +220,18 @@ fn open_destination_using(
         Err(error) => return Err(error),
     }
 
+    // A dangling symlink's target determines where the eventual file is created.
+    // Sample the default mode in that directory, not beside the link, which may be
+    // searchable but not writable even when the target directory is writable.
+    #[cfg(unix)]
+    if let Some(target) = symlink_target(dst)? {
+        return open_destination_using(
+            &target,
+            preserve_creation_permissions,
+            sample_default_permissions,
+        );
+    }
+
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -243,27 +255,37 @@ fn open_destination_using(
         Ok(file) => Ok((file, creation_permissions)),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => match open_existing() {
             Ok(file) => Ok((file, None)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let metadata = std::fs::symlink_metadata(dst)?;
-                if !metadata.is_symlink() {
-                    return Err(error);
-                }
-                let target = std::fs::read_link(dst)?;
-                let target = if target.is_absolute() {
-                    target
-                } else {
-                    dst.parent().unwrap_or_else(|| Path::new("")).join(target)
-                };
-                open_destination_using(
+            Err(error) if error.kind() == io::ErrorKind::NotFound => match symlink_target(dst)? {
+                Some(target) => open_destination_using(
                     &target,
                     preserve_creation_permissions,
                     sample_default_permissions,
-                )
-            }
+                ),
+                None => Err(error),
+            },
             Err(error) => Err(error),
         },
         Err(error) => Err(error),
     }
+}
+
+/// Resolve a symlink target without requiring it to exist. Callers use this
+/// only after opening through the original path reports `NotFound`.
+fn symlink_target(path: &Path) -> io::Result<Option<std::path::PathBuf>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_symlink() {
+        return Ok(None);
+    }
+    let target = std::fs::read_link(path)?;
+    Ok(Some(if target.is_absolute() {
+        target
+    } else {
+        path.parent().unwrap_or_else(|| Path::new("")).join(target)
+    }))
 }
 
 /// Measure the kernel's default file mode without changing the process umask.
@@ -505,6 +527,40 @@ mod tests {
         assert_eq!(error.to_string(), "simulated probe failure");
         assert!(!dst.exists());
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_mode_probe_uses_target_parent() {
+        use std::cell::Cell;
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let link_parent = temp.path().join("links");
+        let target_parent = temp.path().join("targets");
+        std::fs::create_dir(&link_parent).unwrap();
+        std::fs::create_dir(&target_parent).unwrap();
+        let dst = link_parent.join("dst");
+        let target = target_parent.join("created");
+        std::os::unix::fs::symlink(&target, &dst).unwrap();
+        let sampled = Cell::new(0);
+        let mut sample = |path: &Path| {
+            assert_eq!(path, target, "sample the actual destination directory");
+            sampled.set(sampled.get() + 1);
+            default_creation_permissions(path)
+        };
+
+        let (file, permissions) =
+            open_destination_using(&dst, true, &mut sample).expect("create through dangling link");
+
+        assert_eq!(sampled.get(), 1);
+        assert!(permissions.is_some());
+        assert_eq!(file.metadata().unwrap().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(&target).unwrap().mode() & 0o777, 0o600);
+        assert!(std::fs::symlink_metadata(&dst)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[cfg(unix)]
