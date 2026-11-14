@@ -1,10 +1,9 @@
-use crate::file_times::{preserve_modified_time, preserve_modified_time_of};
+use crate::file_times::preserve_modified_time_of;
 use std::{io, path::Path};
 
-/// macOS copyfile and Windows CopyFileEx run without a progress callback here, so larger files
-/// take the progressed streaming path instead.
+/// Route large macOS and Windows copies through the existing streaming fallback.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-const UNPROGRESSED_COPY_LIMIT: u64 = 256 * 1024 * 1024;
+const PLATFORM_COPY_SIZE_LIMIT: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PlatformCopyError {
@@ -21,10 +20,16 @@ impl PlatformCopyError {
     }
 }
 
+fn same_file_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "source and destination refer to the same file",
+    )
+}
+
 /// Reject copies whose existing destination resolves to the source file, including
 /// hard links and symlinks. Identity lookup errors other than a missing destination
-/// fail closed. This is a preflight check, not protection against concurrent path
-/// replacement between the check and the copy's opens.
+/// fail closed. Copy paths also compare the actual opened handles before truncation.
 pub fn ensure_distinct_files(src: &Path, dst: &Path) -> io::Result<()> {
     let destination = match file_identity(dst) {
         Ok(identity) => identity,
@@ -32,10 +37,7 @@ pub fn ensure_distinct_files(src: &Path, dst: &Path) -> io::Result<()> {
         Err(error) => return Err(error),
     };
     if file_identity(src)? == destination {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "source and destination refer to the same file",
-        ));
+        return Err(same_file_error());
     }
     Ok(())
 }
@@ -71,12 +73,38 @@ fn file_identity(_path: &Path) -> io::Result<(u64, u64)> {
     ))
 }
 
-/// Copy a file through the operating system's native path.
+#[cfg(unix)]
+fn handle_identity(file: &std::fs::File) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn handle_identity(file: &std::fs::File) -> io::Result<(u64, u64)> {
+    use std::os::windows::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    let volume = metadata.volume_serial_number().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::Unsupported, "volume identity is unavailable")
+    })?;
+    let index = metadata.file_index().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::Unsupported, "file identity is unavailable")
+    })?;
+    Ok((u64::from(volume), index))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn handle_identity(_file: &std::fs::File) -> io::Result<(u64, u64)> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem identity is unavailable on this platform",
+    ))
+}
+
+/// Copy a file using handle-checked `std::io::copy` on a blocking worker.
 ///
-/// This intentionally operates on filesystem paths, including mounted SMB/NFS
-/// paths. On supported platforms `std::fs::copy` delegates to OS facilities
-/// such as copyfile/copy_file_range/CopyFileEx, which lets the kernel or
-/// filesystem attempt clone/offloaded copies before user-space streaming.
+/// The opened destination is compared with the opened source before truncation;
+/// this also applies to mounted SMB/NFS paths.
 pub async fn platform_copy(
     src: impl AsRef<Path>,
     dst: impl AsRef<Path>,
@@ -90,9 +118,7 @@ pub async fn platform_copy(
 
 /// Copy a regular file through `std::io::copy(File, File)` on the blocking pool.
 ///
-/// This is the progressed fallback for local and mounted shares when native
-/// platform copy is intentionally skipped. Keeping the operands as plain files
-/// lets std use platform-specialized file copy paths where available.
+/// This fallback preserves the permissions of an existing destination.
 pub async fn stream_file_copy(
     src: impl AsRef<Path>,
     dst: impl AsRef<Path>,
@@ -104,6 +130,61 @@ pub async fn stream_file_copy(
         .map_err(|error| std::io::Error::other(format!("stream copy task failed: {error}")))?
 }
 
+fn copy_open_handles(
+    src: &Path,
+    dst: &Path,
+    copy_permissions: bool,
+) -> Result<u64, PlatformCopyError> {
+    let metadata = std::fs::metadata(src)?;
+    if !metadata.is_file() {
+        return Err(PlatformCopyError::Unsupported(
+            "source is not a regular file",
+        ));
+    }
+    ensure_distinct_files(src, dst)?;
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    copy_open_handles_after_preflight(src, dst, copy_permissions)
+}
+
+/// Copy using handles after the path preflight and parent creation have succeeded.
+fn copy_open_handles_after_preflight(
+    src: &Path,
+    dst: &Path,
+    copy_permissions: bool,
+) -> Result<u64, PlatformCopyError> {
+    let mut src_file = std::fs::File::open(src)?;
+    let src_metadata = src_file.metadata()?;
+    if !src_metadata.is_file() {
+        return Err(PlatformCopyError::Unsupported(
+            "source is not a regular file",
+        ));
+    }
+    let mut dst_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dst)?;
+
+    // The handles, not the earlier paths, are authoritative. Truncation and
+    // copying use this exact destination handle, so later path replacement
+    // cannot redirect writes into the source.
+    if handle_identity(&src_file)? == handle_identity(&dst_file)? {
+        return Err(PlatformCopyError::Io(same_file_error()));
+    }
+    dst_file.set_len(0)?;
+    let copied = std::io::copy(&mut src_file, &mut dst_file)?;
+    if copy_permissions {
+        dst_file.set_permissions(src_metadata.permissions())?;
+    }
+    if let Ok(mtime) = src_metadata.modified() {
+        preserve_modified_time_of(&dst_file, mtime)?;
+    }
+    Ok(copied)
+}
+
 /// Blocking form of [`platform_copy`]; callers must use a blocking worker.
 pub fn platform_copy_blocking(src: &Path, dst: &Path) -> Result<u64, PlatformCopyError> {
     let metadata = std::fs::metadata(src)?;
@@ -113,54 +194,25 @@ pub fn platform_copy_blocking(src: &Path, dst: &Path) -> Result<u64, PlatformCop
         ));
     }
 
-    ensure_distinct_files(src, dst)?;
-
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    if metadata.len() > UNPROGRESSED_COPY_LIMIT {
+    if metadata.len() > PLATFORM_COPY_SIZE_LIMIT {
         return Err(PlatformCopyError::Unsupported(
-            "large platform copy has no progress callback",
+            "large copy uses the streaming fallback",
         ));
     }
 
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    // macOS copyfile/clonefile keep the source mtime; Linux and Windows stamp the copy time.
-    let copied = std::fs::copy(src, dst)?;
-    if let Ok(mtime) = metadata.modified() {
-        preserve_modified_time(dst, mtime)?;
-    }
-    Ok(copied)
+    copy_open_handles(src, dst, true)
 }
 
 /// Blocking form of [`stream_file_copy`]; callers must use a blocking worker.
 pub fn stream_file_copy_blocking(src: &Path, dst: &Path) -> Result<u64, PlatformCopyError> {
-    let metadata = std::fs::metadata(src)?;
-    if !metadata.is_file() {
-        return Err(PlatformCopyError::Unsupported(
-            "source is not a regular file",
-        ));
-    }
-
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    ensure_distinct_files(src, dst)?;
-    let mut src_file = std::fs::File::open(src)?;
-    let mut dst_file = std::fs::File::create(dst)?;
-    let copied = std::io::copy(&mut src_file, &mut dst_file)?;
-    // The new file got the current time; set the source's on the same handle before closing.
-    if let Ok(mtime) = metadata.modified() {
-        preserve_modified_time_of(&dst_file, mtime)?;
-    }
-    Ok(copied)
+    copy_open_handles(src, dst, false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_times::preserve_modified_time;
 
     #[test]
     fn copy_helpers_reject_same_file_without_changing_bytes() {
@@ -188,6 +240,28 @@ mod tests {
                 assert_eq!(std::fs::read(&dst).unwrap(), b"keep original bytes");
             }
         }
+    }
+
+    #[test]
+    fn opened_handle_check_rejects_alias_created_after_path_preflight() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let src = temp.path().join("src");
+        let dst = temp.path().join("dst");
+        std::fs::write(&src, b"keep original bytes").expect("source");
+        std::fs::write(&dst, b"distinct destination").expect("destination");
+
+        ensure_distinct_files(&src, &dst).expect("path preflight sees distinct files");
+        // Replace the target after path preflight but before the actual handles
+        // are opened, then exercise the exact handle-copy path used by both APIs.
+        std::fs::remove_file(&dst).expect("remove original destination");
+        std::fs::hard_link(&src, &dst).expect("create concurrent alias");
+        let error = copy_open_handles_after_preflight(&src, &dst, false)
+            .expect_err("the compared handles must reject the new alias");
+
+        assert!(matches!(error, PlatformCopyError::Io(ref error)
+            if error.kind() == io::ErrorKind::InvalidInput));
+        assert_eq!(std::fs::read(&src).unwrap(), b"keep original bytes");
+        assert_eq!(std::fs::read(&dst).unwrap(), b"keep original bytes");
     }
 
     #[tokio::test]
@@ -251,6 +325,30 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn copy_paths_keep_their_existing_permission_semantics() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let src = temp.path().join("src");
+        let dst = temp.path().join("dst");
+        std::fs::write(&src, b"contents").expect("source");
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))
+            .expect("source permissions");
+        std::fs::write(&dst, b"previous").expect("destination");
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o640))
+            .expect("destination permissions");
+
+        platform_copy_blocking(&src, &dst).expect("platform copy");
+        assert_eq!(std::fs::metadata(&dst).unwrap().mode() & 0o777, 0o600);
+
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o640))
+            .expect("reset destination permissions");
+        stream_file_copy_blocking(&src, &dst).expect("stream copy");
+        assert_eq!(std::fs::metadata(&dst).unwrap().mode() & 0o777, 0o640);
+    }
+
     #[tokio::test]
     async fn stream_file_copy_rejects_directories() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -268,7 +366,7 @@ mod tests {
         let src = temp.path().join("large.bin");
         let dst = temp.path().join("dst.bin");
         let file = std::fs::File::create(&src).expect("create src");
-        file.set_len(UNPROGRESSED_COPY_LIMIT + 1)
+        file.set_len(PLATFORM_COPY_SIZE_LIMIT + 1)
             .expect("make sparse src");
 
         let error = platform_copy(&src, &dst)
