@@ -90,7 +90,7 @@ class ProbeTests(unittest.TestCase):
         calls = self.simulate()
         self.assertEqual(calls[0][0], "cl.exe")
         self.assertIn("mfreadwrite.lib", calls[0])
-        self.assertTrue(calls[1][1].endswith("scripts/fetch-preview-corpus.py"))
+        self.assertEqual(Path(calls[1][1]).parts[-2:], ("scripts", "fetch-preview-corpus.py"))
         self.assertIn("--manifest", calls[1])
         self.assertEqual(len(calls[2]), 5)
         self.assertEqual(Path(calls[2][1]).name, "bunny.mp4")
