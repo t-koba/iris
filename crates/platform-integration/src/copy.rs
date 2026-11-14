@@ -198,6 +198,21 @@ fn open_destination(
     dst: &Path,
     preserve_creation_permissions: bool,
 ) -> io::Result<(std::fs::File, Option<std::fs::Permissions>)> {
+    open_destination_using(
+        dst,
+        preserve_creation_permissions,
+        &mut default_creation_permissions,
+    )
+}
+
+fn open_destination_using(
+    dst: &Path,
+    preserve_creation_permissions: bool,
+    sample_default_permissions: &mut impl FnMut(&Path) -> io::Result<std::fs::Permissions>,
+) -> io::Result<(std::fs::File, Option<std::fs::Permissions>)> {
+    #[cfg(not(unix))]
+    let _ = sample_default_permissions;
+
     let open_existing = || std::fs::OpenOptions::new().write(true).open(dst);
     match open_existing() {
         Ok(file) => return Ok((file, None)),
@@ -212,14 +227,20 @@ fn open_destination(
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
+    // Sample and remove the disposable probe before creating the destination.
+    // A copy then needs at most one inode at a time, and probe failures cannot
+    // leave an empty destination behind.
+    #[cfg(unix)]
+    let creation_permissions = if preserve_creation_permissions {
+        Some(sample_default_permissions(dst)?)
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    let creation_permissions = None;
+
     match options.open(dst) {
-        Ok(file) => {
-            #[cfg(unix)]
-            if preserve_creation_permissions {
-                return Ok((file, Some(default_creation_permissions(dst)?)));
-            }
-            Ok((file, None))
-        }
+        Ok(file) => Ok((file, creation_permissions)),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => match open_existing() {
             Ok(file) => Ok((file, None)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -233,7 +254,11 @@ fn open_destination(
                 } else {
                     dst.parent().unwrap_or_else(|| Path::new("")).join(target)
                 };
-                open_destination(&target, preserve_creation_permissions)
+                open_destination_using(
+                    &target,
+                    preserve_creation_permissions,
+                    sample_default_permissions,
+                )
             }
             Err(error) => Err(error),
         },
@@ -254,6 +279,14 @@ fn default_creation_permissions(dst: &Path) -> io::Result<std::fs::Permissions> 
     let permissions = probe.as_file().metadata()?.permissions();
     probe.close()?;
     Ok(permissions)
+}
+
+#[cfg(not(unix))]
+fn default_creation_permissions(_dst: &Path) -> io::Result<std::fs::Permissions> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "default creation permissions are unavailable on this platform",
+    ))
 }
 
 /// Blocking form of [`platform_copy`]; callers must use a blocking worker.
@@ -426,6 +459,52 @@ mod tests {
             stream_file_copy_blocking(&src, &dst).expect("stream copy");
             assert_eq!(std::fs::metadata(&dst).unwrap().mode() & 0o777, 0o640);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_destination_mode_probe_precedes_destination_creation() {
+        use std::cell::Cell;
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dst = temp.path().join("dst");
+        let sampled = Cell::new(false);
+        let mut sample = |path: &Path| {
+            assert_eq!(path, dst);
+            assert!(
+                !path.exists(),
+                "destination must not exist during mode sampling"
+            );
+            assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+            let permissions = default_creation_permissions(path)?;
+            sampled.set(true);
+            Ok(permissions)
+        };
+
+        let (file, permissions) =
+            open_destination_using(&dst, true, &mut sample).expect("private new destination");
+        assert!(sampled.get());
+        assert!(permissions.is_some());
+        assert_eq!(file.metadata().unwrap().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mode_probe_failure_does_not_leave_an_empty_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let dst = temp.path().join("dst");
+        let mut sample = |path: &Path| {
+            assert!(!path.exists(), "probe runs before destination creation");
+            Err(io::Error::other("simulated probe failure"))
+        };
+
+        let error = open_destination_using(&dst, true, &mut sample)
+            .expect_err("probe failure must abort before target creation");
+        assert_eq!(error.to_string(), "simulated probe failure");
+        assert!(!dst.exists());
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
     }
 
     #[cfg(unix)]
