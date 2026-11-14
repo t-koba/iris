@@ -105,8 +105,9 @@ fn handle_identity(_file: &std::fs::File) -> io::Result<(u64, u64)> {
 /// Copy a file using handle-checked `std::io::copy` on a blocking worker.
 ///
 /// The opened destination is compared with the opened source before truncation;
-/// this also applies to mounted SMB/NFS paths. On Unix, new destinations start
-/// with at most mode 0600; source permissions are applied after copying succeeds.
+/// this also applies to mounted SMB/NFS paths. On Unix, new destinations are
+/// restricted to at most mode 0600 before writing; source permissions are applied
+/// after copying succeeds.
 pub async fn platform_copy(
     src: impl AsRef<Path>,
     dst: impl AsRef<Path>,
@@ -121,8 +122,8 @@ pub async fn platform_copy(
 /// Copy a regular file through `std::io::copy(File, File)` on the blocking pool.
 ///
 /// This fallback preserves permissions of existing destinations. On Unix, new
-/// destinations start with at most mode 0600 and receive source permissions only
-/// after a successful copy.
+/// destinations are restricted to at most mode 0600 before writing and receive
+/// their default creation permissions (filtered by umask) after a successful copy.
 pub async fn stream_file_copy(
     src: impl AsRef<Path>,
     dst: impl AsRef<Path>,
@@ -145,18 +146,12 @@ fn copy_open_handles(
             "source is not a regular file",
         ));
     }
-    let destination_existed = ensure_distinct_files(src, dst)?;
+    ensure_distinct_files(src, dst)?;
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    copy_open_handles_after_preflight(
-        src,
-        dst,
-        copy_permissions,
-        destination_existed,
-        std::io::copy,
-    )
+    copy_open_handles_after_preflight(src, dst, copy_permissions, std::io::copy)
 }
 
 /// Copy using handles after the path preflight and parent creation have succeeded.
@@ -164,7 +159,6 @@ fn copy_open_handles_after_preflight(
     src: &Path,
     dst: &Path,
     copy_permissions: bool,
-    destination_existed: bool,
     copy: impl FnOnce(&mut std::fs::File, &mut std::fs::File) -> io::Result<u64>,
 ) -> Result<u64, PlatformCopyError> {
     let mut src_file = std::fs::File::open(src)?;
@@ -174,17 +168,7 @@ fn copy_open_handles_after_preflight(
             "source is not a regular file",
         ));
     }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // Restrict creation itself, before any bytes can be written. This also
-        // covers a missing target reached through a symlink, without changing
-        // the permissions of an existing destination (or its symlink target).
-        options.mode(0o600);
-    }
-    let mut dst_file = options.open(dst)?;
+    let (mut dst_file, destination_created) = open_destination(dst)?;
 
     // The handles, not the earlier paths, are authoritative. Truncation and
     // copying use this exact destination handle, so later path replacement
@@ -192,15 +176,73 @@ fn copy_open_handles_after_preflight(
     if handle_identity(&src_file)? == handle_identity(&dst_file)? {
         return Err(PlatformCopyError::Io(same_file_error()));
     }
+    // Observe the kernel's creation mode rather than reading/changing the
+    // process-global umask. Only an exclusively created, still-empty file may
+    // have its permissions restricted here; existing files keep their mode.
+    let creation_permissions = if cfg!(unix) && destination_created {
+        let permissions = dst_file.metadata()?.permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            dst_file
+                .set_permissions(std::fs::Permissions::from_mode(permissions.mode() & 0o600))?;
+        }
+        Some(permissions)
+    } else {
+        None
+    };
     dst_file.set_len(0)?;
     let copied = copy(&mut src_file, &mut dst_file)?;
-    if copy_permissions || (cfg!(unix) && !destination_existed) {
+    if copy_permissions {
         dst_file.set_permissions(src_metadata.permissions())?;
+    } else if let Some(permissions) = creation_permissions {
+        dst_file.set_permissions(permissions)?;
     }
     if let Ok(mtime) = src_metadata.modified() {
         preserve_modified_time_of(&dst_file, mtime)?;
     }
     Ok(copied)
+}
+
+/// Open without truncation and determine creation atomically. `create_new`
+/// refuses symlinks, so follow a dangling link only after ordinary opening found
+/// no target. A race that wins both open attempts fails closed rather than spinning;
+/// writes and permission changes wait for the caller's handle-identity check.
+fn open_destination(dst: &Path) -> io::Result<(std::fs::File, bool)> {
+    let open_existing = || std::fs::OpenOptions::new().write(true).open(dst);
+    match open_existing() {
+        Ok(file) => return Ok((file, false)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    // The default creation mode is 0666, filtered by the process umask.
+    // The caller restricts the empty file before writing any content.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)
+    {
+        Ok(file) => Ok((file, true)),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => match open_existing() {
+            Ok(file) => Ok((file, false)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let metadata = std::fs::symlink_metadata(dst)?;
+                if !metadata.is_symlink() {
+                    return Err(error);
+                }
+                let target = std::fs::read_link(dst)?;
+                let target = if target.is_absolute() {
+                    target
+                } else {
+                    dst.parent().unwrap_or_else(|| Path::new("")).join(target)
+                };
+                open_destination(&target)
+            }
+            Err(error) => Err(error),
+        },
+        Err(error) => Err(error),
+    }
 }
 
 /// Blocking form of [`platform_copy`]; callers must use a blocking worker.
@@ -275,14 +317,8 @@ mod tests {
         // are opened, then exercise the exact handle-copy path used by both APIs.
         std::fs::remove_file(&dst).expect("remove original destination");
         std::fs::hard_link(&src, &dst).expect("create concurrent alias");
-        let error = copy_open_handles_after_preflight(
-            &src,
-            &dst,
-            false,
-            destination_existed,
-            std::io::copy,
-        )
-        .expect_err("the compared handles must reject the new alias");
+        let error = copy_open_handles_after_preflight(&src, &dst, false, std::io::copy)
+            .expect_err("the compared handles must reject the new alias");
 
         assert!(matches!(error, PlatformCopyError::Io(ref error)
             if error.kind() == io::ErrorKind::InvalidInput));
@@ -356,23 +392,117 @@ mod tests {
     fn copy_paths_keep_their_existing_permission_semantics() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-        let temp = tempfile::tempdir().expect("tempdir");
+        for through_symlink in [false, true] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let src = temp.path().join("src");
+            let target = temp.path().join("target");
+            let dst = temp.path().join("dst");
+            if through_symlink {
+                std::os::unix::fs::symlink(&target, &dst).unwrap();
+            }
+            std::fs::write(&src, b"contents").expect("source");
+            std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))
+                .expect("source permissions");
+            std::fs::write(&dst, b"previous").expect("destination");
+            std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o640))
+                .expect("destination permissions");
+
+            platform_copy_blocking(&src, &dst).expect("platform copy");
+            assert_eq!(std::fs::metadata(&dst).unwrap().mode() & 0o777, 0o600);
+
+            std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o640))
+                .expect("reset destination permissions");
+            stream_file_copy_blocking(&src, &dst).expect("stream copy");
+            assert_eq!(std::fs::metadata(&dst).unwrap().mode() & 0o777, 0o640);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streaming_permissions_follow_open_result_not_preflight() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        for existed_at_preflight in [false, true] {
+            for through_symlink in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let src = temp.path().join("src");
+                let dst = temp.path().join("dst");
+                let target = temp.path().join("target");
+                std::fs::write(&src, b"contents").unwrap();
+                std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o700)).unwrap();
+                std::fs::write(&target, b"previous").unwrap();
+                let default_mode = std::fs::metadata(&target).unwrap().mode() & 0o7777;
+                if !existed_at_preflight {
+                    std::fs::remove_file(&target).unwrap();
+                }
+                if through_symlink {
+                    std::os::unix::fs::symlink("target", &dst).unwrap();
+                }
+                let path = if through_symlink { &dst } else { &target };
+                assert_eq!(
+                    ensure_distinct_files(&src, path).unwrap(),
+                    existed_at_preflight
+                );
+
+                let expected = if existed_at_preflight {
+                    std::fs::remove_file(&target).unwrap();
+                    default_mode
+                } else {
+                    std::fs::write(&target, b"concurrent destination").unwrap();
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                    0o600
+                };
+                copy_open_handles_after_preflight(&src, path, false, std::io::copy).unwrap();
+                assert_eq!(std::fs::read(path).unwrap(), b"contents");
+                assert_eq!(std::fs::metadata(path).unwrap().mode() & 0o7777, expected);
+                if through_symlink {
+                    assert!(std::fs::symlink_metadata(&dst).unwrap().is_symlink());
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_streaming_destination_respects_umask_077() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        // Only the subprocess shell changes umask; the shared test process and
+        // its other test threads never change their process-global umask.
+        const CHILD: &str = "IRIS_COPY_UMASK_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new("sh")
+                .args(["-c", "umask 077; exec \"$1\" --exact copy::tests::new_streaming_destination_respects_umask_077 --nocapture", "sh"])
+                .arg(std::env::current_exe().unwrap())
+                .env(CHILD, "1")
+                .output()
+                .expect("run isolated umask test");
+            assert!(
+                output.status.success(),
+                "child failed: {:?}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
         let src = temp.path().join("src");
-        let dst = temp.path().join("dst");
-        std::fs::write(&src, b"contents").expect("source");
-        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600))
-            .expect("source permissions");
-        std::fs::write(&dst, b"previous").expect("destination");
-        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o640))
-            .expect("destination permissions");
-
-        platform_copy_blocking(&src, &dst).expect("platform copy");
-        assert_eq!(std::fs::metadata(&dst).unwrap().mode() & 0o777, 0o600);
-
-        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o640))
-            .expect("reset destination permissions");
-        stream_file_copy_blocking(&src, &dst).expect("stream copy");
-        assert_eq!(std::fs::metadata(&dst).unwrap().mode() & 0o777, 0o640);
+        std::fs::write(&src, b"contents").unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
+        for through_symlink in [false, true] {
+            let dst = temp
+                .path()
+                .join(if through_symlink { "link" } else { "direct" });
+            if through_symlink {
+                std::os::unix::fs::symlink("target", &dst).unwrap();
+            }
+            stream_file_copy_blocking(&src, &dst).unwrap();
+            assert_eq!(std::fs::read(&dst).unwrap(), b"contents");
+            assert_eq!(std::fs::metadata(&dst).unwrap().mode() & 0o7777, 0o600);
+        }
     }
 
     #[cfg(unix)]
@@ -381,27 +511,27 @@ mod tests {
         use std::io::Write;
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-        for copy_permissions in [true, false] {
+        for (copy_permissions, through_symlink) in
+            [(true, false), (true, true), (false, false), (false, true)]
+        {
             let temp = tempfile::tempdir().expect("tempdir");
             let src = temp.path().join("src");
             let dst = temp.path().join("dst");
             std::fs::write(&src, b"contents").unwrap();
             std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-            let error = copy_open_handles_after_preflight(
-                &src,
-                &dst,
-                copy_permissions,
-                false,
-                |_, target| {
+            if through_symlink {
+                std::os::unix::fs::symlink("target", &dst).unwrap();
+            }
+            let error =
+                copy_open_handles_after_preflight(&src, &dst, copy_permissions, |_, target| {
                     let metadata = target.metadata()?;
                     assert_eq!(metadata.len(), 0);
                     assert_eq!(metadata.mode() & 0o7777 & !0o600, 0);
                     target.write_all(b"partial")?;
                     Err(io::Error::other("simulated copy failure"))
-                },
-            )
-            .expect_err("copy must fail after writing partial data");
+                })
+                .expect_err("copy must fail after writing partial data");
 
             assert!(matches!(error, PlatformCopyError::Io(ref e)
                 if e.to_string() == "simulated copy failure"));
@@ -412,28 +542,43 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn new_copy_targets_receive_source_permissions_only_after_success() {
+    fn new_copy_targets_receive_final_permissions_only_after_success() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-        for copy in [platform_copy_blocking, stream_file_copy_blocking] {
+        for (copy, copy_permissions) in [
+            (platform_copy_blocking as fn(&Path, &Path) -> _, true),
+            (stream_file_copy_blocking, false),
+        ] {
             // Exercise direct and dangling-symlink destinations while preserving
             // the existing link-following behavior.
-            for through_symlink in [false, true] {
+            for link_kind in ["direct", "relative", "absolute"] {
                 let temp = tempfile::tempdir().expect("tempdir");
                 let src = temp.path().join("src");
                 let dst = temp.path().join("dst");
                 let target = temp.path().join("target");
                 std::fs::write(&src, b"contents").unwrap();
                 std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
-                if through_symlink {
-                    std::os::unix::fs::symlink(&target, &dst).unwrap();
+                // A normal creation in this directory measures the current
+                // umask/default ACL without changing process-global state.
+                std::fs::write(&target, b"").unwrap();
+                let default_mode = std::fs::metadata(&target).unwrap().mode() & 0o7777;
+                std::fs::remove_file(&target).unwrap();
+                match link_kind {
+                    "relative" => std::os::unix::fs::symlink("target", &dst).unwrap(),
+                    "absolute" => std::os::unix::fs::symlink(&target, &dst).unwrap(),
+                    _ => {}
                 }
 
                 assert_eq!(copy(&src, &dst).expect("copy"), 8);
                 assert_eq!(std::fs::read(&dst).unwrap(), b"contents");
                 let mode = std::fs::metadata(&dst).unwrap().mode() & 0o7777;
-                assert_eq!(mode, 0o644);
-                if through_symlink {
+                let expected = if copy_permissions {
+                    0o644
+                } else {
+                    default_mode
+                };
+                assert_eq!(mode, expected);
+                if link_kind != "direct" {
                     assert!(std::fs::symlink_metadata(&dst).unwrap().is_symlink());
                     assert_eq!(std::fs::read(&target).unwrap(), b"contents");
                 }
