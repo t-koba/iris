@@ -30,8 +30,9 @@ pub struct SmbListingConfig {
 impl Default for SmbListingConfig {
     fn default() -> Self {
         Self {
-            page_size: std::num::NonZeroUsize::new(100).unwrap(),
-            max_active: std::num::NonZeroUsize::new(64).unwrap(),
+            page_size: std::num::NonZeroUsize::new(100).expect("default SMB page size is nonzero"),
+            max_active: std::num::NonZeroUsize::new(64)
+                .expect("default SMB cursor limit is nonzero"),
             idle_timeout: Duration::from_secs(30),
         }
     }
@@ -99,7 +100,11 @@ impl SmbPool {
 
     pub async fn session(&self) -> Result<SmbSession, BackendError> {
         let _connecting = self.connecting.lock().await;
-        let cached = self.session.lock().unwrap().clone();
+        let cached = self
+            .session
+            .lock()
+            .expect("SMB session mutex poisoned")
+            .clone();
         if let Some(session) = cached {
             if session.native.generation > self.invalid_through_generation.load(Ordering::Acquire)
                 && session.native.actor.state().await.is_ok()
@@ -113,7 +118,7 @@ impl SmbPool {
 
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let session = connect_smb(&self.config, generation).await?;
-        let mut cached = self.session.lock().unwrap();
+        let mut cached = self.session.lock().expect("SMB session mutex poisoned");
         if generation <= self.invalid_through_generation.load(Ordering::Acquire) {
             session.native.actor.shutdown();
             return Err(network_error(
@@ -133,7 +138,7 @@ impl SmbPool {
     pub fn mark_invalid(&self, generation: u64) {
         self.invalid_through_generation
             .fetch_max(generation, Ordering::Release);
-        let mut cached = self.session.lock().unwrap();
+        let mut cached = self.session.lock().expect("SMB session mutex poisoned");
         if cached
             .as_ref()
             .is_some_and(|session| session.native.generation <= generation)
@@ -147,7 +152,12 @@ impl SmbPool {
 
 impl Drop for SmbPool {
     fn drop(&mut self) {
-        if let Some(session) = self.session.get_mut().unwrap().take() {
+        if let Some(session) = self
+            .session
+            .get_mut()
+            .expect("SMB session mutex poisoned")
+            .take()
+        {
             session.native.actor.shutdown();
         }
     }

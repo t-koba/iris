@@ -267,7 +267,10 @@ impl SmbAdapter {
         // Take ownership before any await. Cancellation drops these states and
         // synchronously shuts down their actors; no lock spans SMB I/O.
         let (state, expired) = {
-            let mut registry = self.list_cursors.lock().unwrap();
+            let mut registry = self
+                .list_cursors
+                .lock()
+                .expect("SMB cursor registry mutex poisoned");
             let now = Instant::now();
             let keys = registry
                 .iter()
@@ -320,7 +323,8 @@ impl SmbAdapter {
         let mut entries = Vec::new();
         while entries.len() < self.listing.page_size.get() && !state.enumeration.is_closed() {
             let remaining =
-                std::num::NonZeroUsize::new(self.listing.page_size.get() - entries.len()).unwrap();
+                std::num::NonZeroUsize::new(self.listing.page_size.get() - entries.len())
+                    .expect("directory page has remaining capacity");
             let page = state
                 .enumeration
                 .next_page(remaining)
@@ -355,7 +359,10 @@ impl SmbAdapter {
             // returned; closing evicted handles below may take time.
             state.touched = None;
             let evicted = {
-                let mut registry = self.list_cursors.lock().unwrap();
+                let mut registry = self
+                    .list_cursors
+                    .lock()
+                    .expect("SMB cursor registry mutex poisoned");
                 let mut evicted = Vec::new();
                 if registry.len() >= self.listing.max_active.get() {
                     if let Some(key) = registry
@@ -375,7 +382,10 @@ impl SmbAdapter {
             // or future cancellation while the evicted handles are closed.
             close_list_cursors(evicted, native.generation).await?;
             let registered = {
-                let mut registry = self.list_cursors.lock().unwrap();
+                let mut registry = self
+                    .list_cursors
+                    .lock()
+                    .expect("SMB cursor registry mutex poisoned");
                 registry.get_mut(&token).is_some_and(|state| {
                     state.touched = Some(Instant::now());
                     true
