@@ -51,6 +51,13 @@ fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
 }
 
 #[cfg(windows)]
+fn windows_file_identity(file: std::fs::File) -> io::Result<(u64, u64)> {
+    let handle = winapi_util::Handle::from_file(file);
+    let information = winapi_util::file::information(&handle)?;
+    Ok((information.volume_serial_number(), information.file_index()))
+}
+
+#[cfg(windows)]
 fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -61,9 +68,7 @@ fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
         .access_mode(FILE_READ_ATTRIBUTES)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?;
-    let handle = winapi_util::Handle::from_file(file);
-    let information = winapi_util::file::information(&handle)?;
-    Ok((information.volume_serial_number(), information.file_index()))
+    windows_file_identity(file)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -83,15 +88,7 @@ fn handle_identity(file: &std::fs::File) -> io::Result<(u64, u64)> {
 
 #[cfg(windows)]
 fn handle_identity(file: &std::fs::File) -> io::Result<(u64, u64)> {
-    use std::os::windows::fs::MetadataExt;
-    let metadata = file.metadata()?;
-    let volume = metadata.volume_serial_number().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::Unsupported, "volume identity is unavailable")
-    })?;
-    let index = metadata.file_index().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::Unsupported, "file identity is unavailable")
-    })?;
-    Ok((u64::from(volume), index))
+    windows_file_identity(file.try_clone()?)
 }
 
 #[cfg(not(any(unix, windows)))]
