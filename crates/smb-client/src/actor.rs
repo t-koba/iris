@@ -28,7 +28,7 @@ impl Default for SmbActorConfig {
     fn default() -> Self {
         Self {
             request_timeout: Duration::from_secs(30),
-            queue_depth: NonZeroUsize::new(256).unwrap(),
+            queue_depth: NonZeroUsize::new(256).expect("default queue depth is non-zero"),
         }
     }
 }
