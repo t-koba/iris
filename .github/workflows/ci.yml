@@ -346,6 +346,12 @@ jobs:
       contents: read
     uses: ./.github/workflows/windows-ffmpeg-prototype.yml
 
+  windows-media-foundation-probe:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/windows-media-foundation-probe.yml
+
   macos-runtime-validation:
     if: github.event_name == 'workflow_dispatch'
     permissions:

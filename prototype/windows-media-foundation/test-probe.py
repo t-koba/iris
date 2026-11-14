@@ -23,19 +23,23 @@ FRAME = dict(ok=True, backend="mf-source-reader", codec="h264", pixel_format="rg
 
 
 class ProbeTests(unittest.TestCase):
-    def test_workflow_is_dispatch_only_and_cleanup_only(self):
+    def test_workflow_is_manual_ci_only_and_cleanup_only(self):
         workflow = (probe.ROOT / ".github/workflows/windows-media-foundation-probe.yml").read_text()
         triggers = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
-        self.assertEqual(triggers.strip(), "workflow_dispatch:")
+        self.assertEqual(triggers.strip(), "workflow_call:")
         self.assertIn("runs-on: windows-2022", workflow)
         self.assertIn("IRIS_PREVIEW_CORPUS_MAX_BYTES: '40000000'", workflow)
         self.assertIn("python prototype/windows-media-foundation/test-probe.py", workflow)
         self.assertIn("python prototype/windows-media-foundation/run.py", workflow)
         self.assertIn("arch: x64", workflow)
         self.assertIn("if: always()", workflow)
+        caller = (probe.ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("windows-media-foundation-probe:\n    if: github.event_name == 'workflow_dispatch'\n"
+                      "    permissions:\n      contents: read\n"
+                      "    uses: ./.github/workflows/windows-media-foundation-probe.yml", caller)
         self.assertIn("finally {", workflow)
         self.assertEqual(workflow.count("Remove-Item -LiteralPath $env:IRIS_MF_TEMP_ROOT"), 2)
-        for forbidden in ("upload-artifact", "workflow_call:", "windows-minimal", "cargo ",
+        for forbidden in ("upload-artifact", "workflow_dispatch:", "windows-minimal", "cargo ",
                           "package-", "ffmpeg", "pdfium", "release.yml"):
             self.assertNotIn(forbidden, workflow)
 

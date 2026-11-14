@@ -9,9 +9,10 @@ its system import libraries; orchestration/tests use Python's standard library.
 
 ## Run and evidence
 
-Request **Windows Media Foundation probe** at the exact published revision.
-This independent `windows-2022` workflow runs only on `workflow_dispatch`; it is not
-part of normal CI or any release workflow. No artifacts are uploaded. The runner image and its installed system codecs can change.
+Request the `CI` workflow at the exact published revision. Its reusable
+`windows-media-foundation-probe` job runs only on the explicit `workflow_dispatch`
+caller; it is not part of normal PR CI or any release workflow. No artifacts are
+uploaded. The runner image and its installed system codecs can change.
 
 The driver builds in a fresh temporary directory, calls
 `scripts/fetch-preview-corpus.py` with the existing manifest and the workflow's
