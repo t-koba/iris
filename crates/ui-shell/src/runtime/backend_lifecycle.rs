@@ -321,6 +321,7 @@ impl AppRuntime {
                 workstation: None,
                 allow_guest,
                 actor: Default::default(),
+                listing: Default::default(),
             },
             backend_id.clone(),
         ));

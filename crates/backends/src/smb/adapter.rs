@@ -1,6 +1,5 @@
-use crate::common::parse_cursor_offset;
 use crate::smb::capabilities::smb_capabilities;
-use crate::smb::connection::{SmbConnectionConfig, SmbNativeSession, SmbPool};
+use crate::smb::connection::{SmbConnectionConfig, SmbListingConfig, SmbNativeSession, SmbPool};
 use async_trait::async_trait;
 use iris_core_domain::backend_adapter::BackendAdapter;
 use iris_core_domain::types::capability::CapabilitySet;
@@ -16,16 +15,19 @@ use iris_core_domain::types::session::BackendSession;
 use iris_smb_client::{
     close, copy_file_chunks, create_directory, delete, list_directory_once, open_file_and_read,
     open_file_for_read, open_file_for_write, read_file_ranges_pipelined, rename, set_basic_info,
-    write_file_at, write_file_chunks_pipelined, Smb2CreateDisposition, Smb2FileAttributes,
-    Smb2FileBasicInformation, SmbConnectionActor, SmbConnectionError, SmbDirectoryEntry, SmbHandle,
-    SmbReadRange, DEFAULT_READ_CHUNK_LENGTH, DEFAULT_WRITE_CHUNK_LENGTH,
+    stat_path, write_file_at, write_file_chunks_pipelined, Smb2CreateDisposition,
+    Smb2FileAttributes, Smb2FileBasicInformation, SmbConnectionActor, SmbConnectionError,
+    SmbDirectoryEntry, SmbDirectoryEnumeration, SmbHandle, SmbReadRange, DEFAULT_READ_CHUNK_LENGTH,
+    DEFAULT_WRITE_CHUNK_LENGTH,
 };
+use ring::rand::{SecureRandom, SystemRandom};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 
 /// SMB adapter built on the native SMB2/3 client (never an OS mount).
@@ -34,6 +36,40 @@ pub struct SmbAdapter {
     backend_id: BackendId,
     pool: Arc<SmbPool>,
     ticket_counter: AtomicU64,
+    listing: SmbListingConfig,
+    list_cursors: Mutex<HashMap<String, NativeListCursor>>,
+}
+
+struct NativeListCursor {
+    directory: ObjectRef,
+    generation: u64,
+    enumeration: SmbDirectoryEnumeration,
+    touched: Instant,
+}
+
+async fn close_list_cursors(
+    cursors: Vec<NativeListCursor>,
+    active_generation: u64,
+) -> Result<(), BackendError> {
+    let mut active_generation_error = None;
+    for mut cursor in cursors {
+        if let Err(error) = cursor.enumeration.close().await {
+            if cursor.generation == active_generation && active_generation_error.is_none() {
+                active_generation_error = Some(BackendError::Network(NetworkErrorDetail {
+                    message: format!("SMB native directory cursor cleanup failed: {error}"),
+                    is_timeout: false,
+                }));
+            }
+        }
+    }
+    active_generation_error.map_or(Ok(()), Err)
+}
+
+fn invalid_list_cursor() -> BackendError {
+    BackendError::Internal(Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "SMB list cursor is expired, consumed, or belongs to another directory/generation",
+    )))
 }
 
 // Armed before OPEN: cancellation can lose even the CREATE response. Never
@@ -55,6 +91,8 @@ impl Drop for StreamedWriteGuard {
 impl SmbAdapter {
     pub fn new(config: SmbConnectionConfig, backend_id: BackendId) -> Self {
         Self {
+            listing: config.listing.clone(),
+            list_cursors: Mutex::new(HashMap::new()),
             pool: Arc::new(SmbPool::new(config)),
             backend_id,
             ticket_counter: AtomicU64::new(1),
@@ -113,31 +151,118 @@ impl SmbAdapter {
         dir: &ObjectRef,
         cursor: Option<ListCursor>,
     ) -> Result<ListPage, BackendError> {
-        const PAGE_SIZE: usize = 100;
-
-        let smb_path = smb_relative_path(&dir.display_path)?;
-        let offset = parse_cursor_offset(cursor)?;
-        let entries = list_directory_once(&native.actor, smb_path)
-            .await
-            .map_err(|error| smb_network_error("list directory", error))?;
-
-        let mut listed = entries
-            .into_iter()
-            .filter(|entry| entry.file_name != "." && entry.file_name != "..")
-            .skip(offset)
-            .take(PAGE_SIZE + 1)
-            .map(|entry| self.native_listed_entry(dir, entry))
-            .collect::<Vec<_>>();
-
-        let next_cursor = if listed.len() > PAGE_SIZE {
-            listed.pop();
-            Some(ListCursor((offset + PAGE_SIZE).to_string()))
-        } else {
-            None
+        // Take ownership before any await. Cancellation drops these states and
+        // synchronously shuts down their actors; no lock spans SMB I/O.
+        let (state, expired) = {
+            let mut registry = self.list_cursors.lock().unwrap();
+            let now = Instant::now();
+            let keys = registry
+                .iter()
+                .filter(|(_, state)| {
+                    now.duration_since(state.touched) >= self.listing.idle_timeout
+                        || state.generation < native.generation
+                })
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            let expired = keys
+                .into_iter()
+                .filter_map(|key| registry.remove(&key))
+                .collect();
+            let state = cursor
+                .as_ref()
+                .and_then(|cursor| registry.remove(&cursor.0));
+            (state, expired)
         };
-
+        close_list_cursors(expired, native.generation).await?;
+        let mut state = match (cursor, state) {
+            (Some(_), Some(mut state)) => {
+                if state.directory.key != dir.key
+                    || state.directory.display_path != dir.display_path
+                    || state.generation != native.generation
+                {
+                    if let Err(error) = state.enumeration.close().await {
+                        return Err(BackendError::Network(NetworkErrorDetail {
+                            message: format!("SMB native directory cursor cleanup failed: {error}"),
+                            is_timeout: false,
+                        }));
+                    }
+                    return Err(invalid_list_cursor());
+                }
+                state
+            }
+            (Some(_), None) => return Err(invalid_list_cursor()),
+            (None, _) => NativeListCursor {
+                directory: dir.clone(),
+                generation: native.generation,
+                enumeration: SmbDirectoryEnumeration::open(
+                    &native.actor,
+                    smb_relative_path(&dir.display_path)?,
+                )
+                .await
+                .map_err(|error| smb_network_error("open directory", error))?,
+                touched: Instant::now(),
+            },
+        };
+        let mut entries = Vec::new();
+        while entries.len() < self.listing.page_size.get() && !state.enumeration.is_closed() {
+            let remaining =
+                std::num::NonZeroUsize::new(self.listing.page_size.get() - entries.len()).unwrap();
+            let page = state
+                .enumeration
+                .next_page(remaining)
+                .await
+                .map_err(|error| smb_network_error("list directory", error))?;
+            entries.extend(
+                page.into_iter()
+                    .filter(|entry| entry.file_name != "." && entry.file_name != "..")
+                    .map(|entry| self.native_listed_entry(dir, entry)),
+            );
+        }
+        let next_cursor = if state.enumeration.is_closed() {
+            None
+        } else {
+            // Random one-use tokens are adapter-owned, never SMB file_index or
+            // a numeric offset. A new token is issued for every returned page.
+            let mut random = [0u8; 16];
+            if SystemRandom::new().fill(&mut random).is_err() {
+                let _ = state.enumeration.close().await;
+                return Err(BackendError::Internal(Box::new(std::io::Error::other(
+                    "SMB cursor randomness unavailable",
+                ))));
+            }
+            let token = format!(
+                "smb-list:{}",
+                random
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            );
+            state.touched = Instant::now();
+            let evicted = {
+                let mut registry = self.list_cursors.lock().unwrap();
+                let mut evicted = Vec::new();
+                if registry.len() >= self.listing.max_active.get() {
+                    if let Some(key) = registry
+                        .iter()
+                        .min_by_key(|(_, state)| state.touched)
+                        .map(|(key, _)| key.clone())
+                    {
+                        evicted.extend(registry.remove(&key));
+                    }
+                }
+                evicted.extend(registry.insert(token.clone(), state));
+                evicted
+            };
+            if let Err(error) = close_list_cursors(evicted, native.generation).await {
+                // The token was not exposed to the caller; remove its retained
+                // handle rather than returning a cursor on a stopped generation.
+                drop(self.list_cursors.lock().unwrap().remove(&token));
+                return Err(error);
+            }
+            Some(ListCursor(token))
+        };
         Ok(ListPage {
-            entries: listed,
+            entries,
             next_cursor,
         })
     }
@@ -180,15 +305,16 @@ impl SmbAdapter {
             });
         }
 
-        let (parent, name) = parent_display_path_and_name(&object.display_path)?;
-        let entries = list_directory_once(&native.actor, smb_relative_path(&parent)?)
+        let entry = stat_path(&native.actor, smb_relative_path(&object.display_path)?)
             .await
-            .map_err(|error| smb_network_error("stat parent directory", error))?;
-        let entry = entries
-            .into_iter()
-            .find(|entry| entry.file_name == name)
-            .ok_or_else(|| BackendError::NotFound {
-                object: object.clone(),
+            .map_err(|error| match error {
+                SmbConnectionError::UnexpectedStatus {
+                    status: 0xc000_000f | 0xc000_0034 | 0xc000_003a,
+                    ..
+                } => BackendError::NotFound {
+                    object: object.clone(),
+                },
+                error => smb_network_error("stat child", error),
             })?;
         let is_dir = entry
             .file_attributes
@@ -204,7 +330,7 @@ impl SmbAdapter {
             },
             mtime: filetime_to_system_time(entry.last_write_time),
             ctime: filetime_to_system_time(entry.creation_time),
-            content_type: mime_guess::from_path(&entry.file_name)
+            content_type: mime_guess::from_path(&object.display_path)
                 .first()
                 .map(|mime| mime.to_string()),
             etag: None,
@@ -722,11 +848,17 @@ impl BackendAdapter for SmbAdapter {
         dir: &ObjectRef,
         cursor: Option<ListCursor>,
     ) -> Result<ListPage, BackendError> {
-        self.with_read_reconnect(|native| {
-            let cursor = cursor.clone();
-            async move { self.list_names_native(&native, dir, cursor).await }
-        })
-        .await
+        if cursor.is_some() {
+            // Continuations are generation-bound: never reconnect/restart a page.
+            let native = self.native_session().await?;
+            let result = self.list_names_native(&native, dir, cursor).await;
+            self.finish_mutation(&native, result).await
+        } else {
+            self.with_read_reconnect(|native| async move {
+                self.list_names_native(&native, dir, None).await
+            })
+            .await
+        }
     }
 
     async fn stat(&self, object: &ObjectRef) -> Result<MetadataResult, BackendError> {
@@ -1147,6 +1279,196 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_listing_is_incremental_and_cursor_is_single_use() {
+        let counts = Arc::new(ListingCounts::default());
+        let (mut config, server) =
+            start_fake_native_server(FakeNativeScenario::Incremental(counts.clone())).await;
+        assert_eq!(config.listing.page_size.get(), 100);
+        config.listing.page_size = std::num::NonZeroUsize::new(2).unwrap();
+        let backend = BackendId("smb:pages".into());
+        let adapter = SmbAdapter::new(config, backend.clone());
+        let root = object_ref(&backend, "");
+        let first = adapter.list_names(&root, None).await.unwrap();
+        assert_eq!(
+            first
+                .entries
+                .iter()
+                .map(|entry| entry.name().name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "beta"]
+        );
+        assert_eq!(counts.creates.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            counts.queries.load(Ordering::SeqCst),
+            1,
+            "page one must not fetch the whole directory"
+        );
+        let token = first.next_cursor.unwrap();
+        assert!(token.0.parse::<usize>().is_err());
+        let second = adapter
+            .list_names(&root, Some(token.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            second
+                .entries
+                .iter()
+                .map(|entry| entry.name().name.as_str())
+                .collect::<Vec<_>>(),
+            ["gamma", "delta"]
+        );
+        let gamma = second.entries[0].name();
+        assert!(gamma.is_dir);
+        assert!(!gamma.is_symlink && !gamma.is_inaccessible);
+        assert_eq!(
+            gamma.object_ref.parent_stable_id,
+            Some(root.key.stable_id.clone())
+        );
+        assert_eq!(gamma.object_ref.key.backend_id, backend);
+        assert_eq!(gamma.object_ref.display_path, "gamma");
+        assert!(
+            adapter.list_names(&root, Some(token)).await.is_err(),
+            "replay rejected"
+        );
+        let last = adapter.list_names(&root, second.next_cursor).await.unwrap();
+        assert_eq!(
+            last.entries
+                .iter()
+                .map(|entry| entry.name().name.as_str())
+                .collect::<Vec<_>>(),
+            ["epsilon"]
+        );
+        assert!(last.next_cursor.is_none());
+        assert_eq!(counts.creates.load(Ordering::SeqCst), 1);
+        assert_eq!(counts.queries.load(Ordering::SeqCst), 3);
+        assert_eq!(counts.closes.load(Ordering::SeqCst), 1);
+        drop(adapter);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_cursor_eviction_close_does_not_return_a_dead_cursor() {
+        let counts = Arc::new(ListingCounts::default());
+        let (mut config, server) =
+            start_fake_native_server(FakeNativeScenario::Incremental(counts.clone())).await;
+        config.listing.page_size = std::num::NonZeroUsize::new(1).unwrap();
+        config.listing.max_active = std::num::NonZeroUsize::new(1).unwrap();
+        let backend = BackendId("smb:close-failure".into());
+        let adapter = SmbAdapter::new(config, backend.clone());
+        let root = object_ref(&backend, "");
+        let first = adapter.list_names(&root, None).await.unwrap();
+        assert!(first.next_cursor.is_some());
+
+        counts.fail_close.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            adapter.list_names(&root, None).await,
+            Err(BackendError::Network(_))
+        ));
+        assert!(adapter.list_cursors.lock().unwrap().is_empty());
+        drop(adapter);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_cursors_close_on_cap_expiry_wrong_directory_and_generation() {
+        let counts = Arc::new(ListingCounts::default());
+        let (mut config, server) =
+            start_fake_native_server(FakeNativeScenario::Incremental(counts.clone())).await;
+        assert_eq!(config.listing.max_active.get(), 64);
+        assert_eq!(config.listing.idle_timeout, Duration::from_secs(30));
+        config.listing.page_size = std::num::NonZeroUsize::new(1).unwrap();
+        config.listing.max_active = std::num::NonZeroUsize::new(1).unwrap();
+        let backend = BackendId("smb:cleanup".into());
+        let adapter = SmbAdapter::new(config, backend.clone());
+        let root = object_ref(&backend, "");
+        let first = adapter
+            .list_names(&root, None)
+            .await
+            .unwrap()
+            .next_cursor
+            .unwrap();
+        let second = adapter
+            .list_names(&root, None)
+            .await
+            .unwrap()
+            .next_cursor
+            .unwrap();
+        assert_eq!(
+            counts.closes.load(Ordering::SeqCst),
+            1,
+            "oldest cursor evicted"
+        );
+        assert_eq!(adapter.list_cursors.lock().unwrap().len(), 1);
+        assert!(adapter.list_names(&root, Some(first)).await.is_err());
+        assert!(adapter
+            .list_names(&object_ref(&backend, "other"), Some(second))
+            .await
+            .is_err());
+        assert_eq!(
+            counts.closes.load(Ordering::SeqCst),
+            2,
+            "wrong-directory cursor closed"
+        );
+        let third = adapter
+            .list_names(&root, None)
+            .await
+            .unwrap()
+            .next_cursor
+            .unwrap();
+        // Set policy to immediate expiry, without timing-dependent sleeps.
+        let mut adapter = adapter;
+        adapter.listing.idle_timeout = Duration::ZERO;
+        assert!(adapter.list_names(&root, Some(third)).await.is_err());
+        assert_eq!(counts.closes.load(Ordering::SeqCst), 3);
+        adapter.listing.idle_timeout = Duration::from_secs(30);
+        let fourth = adapter
+            .list_names(&root, None)
+            .await
+            .unwrap()
+            .next_cursor
+            .unwrap();
+        let mut native = adapter.native_session().await.unwrap();
+        native.generation += 1;
+        assert!(adapter
+            .list_names_native(&native, &root, Some(fourth))
+            .await
+            .is_err());
+        assert_eq!(counts.closes.load(Ordering::SeqCst), 4);
+        drop(adapter);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_stat_opens_exact_child_and_preserves_metadata() {
+        let (config, server) = start_fake_native_server(FakeNativeScenario::StatMetadata).await;
+        let backend = BackendId("smb:stat".into());
+        let adapter = SmbAdapter::new(config, backend.clone());
+        for (path, is_dir, size, content_type) in [
+            (
+                "folder/report.pdf",
+                false,
+                Some(512),
+                Some("application/pdf".to_string()),
+            ),
+            ("folder/child", true, None, None),
+        ] {
+            let metadata = adapter.stat(&object_ref(&backend, path)).await.unwrap();
+            assert_eq!(metadata.level, MetadataLevel::L1);
+            assert_eq!(metadata.is_dir, is_dir);
+            assert_eq!(metadata.size, size);
+            assert_eq!(metadata.ctime, Some(UNIX_EPOCH + Duration::from_secs(1)));
+            assert_eq!(metadata.mtime, Some(UNIX_EPOCH + Duration::from_secs(2)));
+            assert_eq!(metadata.content_type, content_type);
+            assert!(metadata.etag.is_none());
+        }
+        assert!(matches!(
+            adapter.stat(&object_ref(&backend, "folder/missing")).await,
+            Err(BackendError::NotFound { .. })
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn native_list_names_uses_smb_actor_session() {
         let (config, server_task) = start_fake_native_server(FakeNativeScenario::ListRoot).await;
         let backend_id = BackendId("smb:native".to_string());
@@ -1198,6 +1520,7 @@ mod tests {
             workstation: None,
             allow_guest: true,
             actor: Default::default(),
+            listing: Default::default(),
         };
         let backend_id = BackendId("smb:reconnect".to_string());
         let adapter = SmbAdapter::new(config, backend_id.clone());
@@ -1368,6 +1691,7 @@ mod tests {
             workstation: None,
             allow_guest: true,
             actor: Default::default(),
+            listing: Default::default(),
         }));
         drop(StreamedWriteGuard {
             pool,
@@ -1577,7 +1901,17 @@ mod tests {
         server_task.await.expect("server task");
     }
 
+    #[derive(Default)]
+    struct ListingCounts {
+        creates: AtomicU64,
+        queries: AtomicU64,
+        closes: AtomicU64,
+        fail_close: std::sync::atomic::AtomicBool,
+    }
+
     enum FakeNativeScenario {
+        Incremental(Arc<ListingCounts>),
+        StatMetadata,
         PoolInvalidation,
         ListRoot,
         ReadFile,
@@ -1617,11 +1951,29 @@ mod tests {
                     handle_tree_connect(&mut replacement).await;
                     handle_list_root(&mut replacement).await;
                 }
+                FakeNativeScenario::Incremental(counts) => {
+                    handle_incremental_listing(&mut transport, &counts).await
+                }
+                FakeNativeScenario::StatMetadata => {
+                    for (name, attributes, size) in [
+                        ("folder/report.pdf", Smb2FileAttributes::ARCHIVE, 512),
+                        ("folder/child", Smb2FileAttributes::DIRECTORY, 0),
+                    ] {
+                        let (parent, name) = parent_display_path_and_name(name).unwrap();
+                        handle_stat_found(
+                            &mut transport,
+                            &parent,
+                            directory_entry_record(0, &name, size, 42, attributes),
+                        )
+                        .await;
+                    }
+                    handle_stat_missing(&mut transport, "folder\\missing").await;
+                }
                 FakeNativeScenario::ListRoot => handle_list_root(&mut transport).await,
                 FakeNativeScenario::ReadFile => handle_read_file(&mut transport).await,
                 FakeNativeScenario::WriteFile => handle_write_file(&mut transport).await,
                 FakeNativeScenario::StreamedWrite(close_fails) => {
-                    handle_stat_missing(&mut transport, "folder").await;
+                    handle_stat_missing(&mut transport, "folder\\out.bin").await;
                     handle_streamed_write_open(&mut transport).await;
                     if let Some(fails) = close_fails {
                         let packet = transport.recv_packet().await.expect("streamed CLOSE");
@@ -1660,7 +2012,7 @@ mod tests {
                     fail_write,
                     entered,
                 } => {
-                    handle_stat_missing(&mut transport, "folder").await;
+                    handle_stat_missing(&mut transport, "folder\\out.bin").await;
                     handle_streamed_write_open(&mut transport).await;
                     let mut writes = Vec::new();
                     for _ in 0..2 {
@@ -1709,6 +2061,7 @@ mod tests {
                 workstation: None,
                 allow_guest: true,
                 actor: Default::default(),
+                listing: Default::default(),
             },
             server_task,
         )
@@ -1783,6 +2136,101 @@ mod tests {
             ))
             .await
             .expect("tree response");
+    }
+
+    async fn handle_incremental_listing<T>(
+        transport: &mut DirectTcpTransport<T>,
+        counts: &ListingCounts,
+    ) where
+        T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let mut handles = HashMap::new();
+        while let Ok(request) = transport.recv_packet().await {
+            let header = Smb2Header::decode(&request).unwrap();
+            let mut response = Smb2Header::new(header.command, header.message_id);
+            let body = &request[SMB2_HEADER_BYTES..];
+            let body = match header.command {
+                Smb2Command::Create => {
+                    let create = Smb2CreateRequest::decode(body).unwrap();
+                    assert!(create
+                        .create_options
+                        .contains(Smb2CreateOptions::DIRECTORY_FILE));
+                    let id = counts.creates.fetch_add(1, Ordering::SeqCst) + 1;
+                    handles.insert(id, 0);
+                    create_response_body(
+                        Smb2FileId {
+                            persistent: id,
+                            volatile: id,
+                        },
+                        Smb2FileAttributes::DIRECTORY,
+                        0,
+                    )
+                }
+                Smb2Command::QueryDirectory => {
+                    counts.queries.fetch_add(1, Ordering::SeqCst);
+                    let query = Smb2QueryDirectoryRequest::decode(body).unwrap();
+                    assert_eq!(query.file_index, 0); // Never an index-based resume.
+                    let page = handles
+                        .get_mut(&query.file_id.persistent)
+                        .expect("same open handle");
+                    assert_eq!(
+                        query.flags.contains(Smb2QueryDirectoryFlags::RESTART_SCANS),
+                        *page == 0
+                    );
+                    let names: &[&str] = match *page {
+                        0 => &[".", "..", "alpha", "beta", "gamma"],
+                        1 => &["delta", "epsilon"],
+                        _ => &[],
+                    };
+                    *page += 1;
+                    if names.is_empty() {
+                        response.status_or_channel_sequence = SmbNtStatus::NO_MORE_FILES.0;
+                        Vec::new()
+                    } else {
+                        let mut buffer = Vec::new();
+                        for (index, name) in names.iter().enumerate() {
+                            // Deliberately identical file_index values across all records.
+                            let mut record = directory_entry_record(
+                                7,
+                                name,
+                                42,
+                                42,
+                                if *name == "gamma" {
+                                    Smb2FileAttributes::DIRECTORY
+                                } else {
+                                    Smb2FileAttributes::ARCHIVE
+                                },
+                            );
+                            if index + 1 < names.len() {
+                                let len = record.len() as u32;
+                                put_u32(&mut record, 0, len);
+                            }
+                            buffer.extend(record);
+                        }
+                        query_directory_response_body(&buffer)
+                    }
+                }
+                Smb2Command::Close => {
+                    counts.closes.fetch_add(1, Ordering::SeqCst);
+                    let close = Smb2CloseRequest::decode(body).unwrap();
+                    assert!(
+                        handles.remove(&close.file_id.persistent).is_some(),
+                        "closed exactly once"
+                    );
+                    if counts.fail_close.load(Ordering::SeqCst) {
+                        response.status_or_channel_sequence = 0xc000_0022;
+                        vec![9, 0, 0, 0, 0, 0, 0, 0, 0]
+                    } else {
+                        close_response_body(Smb2FileAttributes::DIRECTORY, 0)
+                    }
+                }
+                command => panic!("unexpected listing command {command:?}"),
+            };
+            transport
+                .send_packet(&response_packet(response, &body))
+                .await
+                .unwrap();
+        }
     }
 
     async fn handle_list_root<T>(transport: &mut DirectTcpTransport<T>)
@@ -1945,7 +2393,7 @@ mod tests {
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
-        handle_stat_missing(transport, "folder").await;
+        handle_stat_missing(transport, "folder\\out.bin").await;
 
         let file_id = fake_file_id();
         let create = transport.recv_packet().await.expect("create write request");
@@ -2053,7 +2501,7 @@ mod tests {
             directory_entry_record(1, "file.bin", 32, 0x100, Smb2FileAttributes::ARCHIVE),
         )
         .await;
-        handle_stat_missing(transport, "").await;
+        handle_stat_missing(transport, "renamed.bin").await;
 
         let file_id = fake_file_id();
         let request = transport
@@ -2207,7 +2655,7 @@ mod tests {
             ),
         )
         .await;
-        handle_stat_missing(transport, "").await;
+        handle_stat_missing(transport, "copy.bin").await;
 
         let source_file_id = Smb2FileId {
             persistent: 0x1111_2222_3333_4444,
@@ -2415,110 +2863,76 @@ mod tests {
     ) where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
-        let file_id = fake_file_id();
-        for (step, expected) in [
-            Smb2Command::Create,
-            Smb2Command::QueryDirectory,
-            Smb2Command::QueryDirectory,
-            Smb2Command::Close,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let request = transport.recv_packet().await.expect("stat found request");
-            let header = Smb2Header::decode(&request).expect("stat found header");
-            assert_eq!(header.command, expected);
-            assert_eq!(header.tree_id, 0x1122_3344);
-            let body = &request[SMB2_HEADER_BYTES..];
-            let response_body = match expected {
-                Smb2Command::Create => {
-                    let create = Smb2CreateRequest::decode(body).expect("stat found create");
-                    assert_eq!(create.name, parent_path);
-                    assert!(create
-                        .create_options
-                        .contains(Smb2CreateOptions::DIRECTORY_FILE));
-                    create_response_body(file_id, Smb2FileAttributes::DIRECTORY, 0)
-                }
-                Smb2Command::QueryDirectory => {
-                    let query = Smb2QueryDirectoryRequest::decode(body).expect("stat found query");
-                    assert_eq!(query.file_id, file_id);
-                    if step == 1 {
-                        query_directory_response_body(&directory_record)
-                    } else {
-                        Vec::new()
-                    }
-                }
-                Smb2Command::Close => {
-                    let close = Smb2CloseRequest::decode(body).expect("stat found close");
-                    assert_eq!(close.file_id, file_id);
-                    close_response_body(Smb2FileAttributes::DIRECTORY, 0)
-                }
-                _ => unreachable!("covered command list"),
-            };
-            let mut response_header = Smb2Header::new(expected, header.message_id);
-            if step == 2 {
-                response_header.status_or_channel_sequence = SmbNtStatus::NO_MORE_FILES.0;
-            }
-            transport
-                .send_packet(&response_packet(response_header, &response_body))
-                .await
-                .expect("stat found response");
-        }
+        let entry = iris_smb_client::decode_file_id_both_directory_entries(&directory_record)
+            .unwrap()
+            .remove(0);
+        let path = if parent_path.is_empty() {
+            entry.file_name
+        } else {
+            format!("{parent_path}\\{}", entry.file_name)
+        };
+        let request = transport.recv_packet().await.expect("stat create");
+        let header = Smb2Header::decode(&request).unwrap();
+        assert_eq!(header.command, Smb2Command::Create);
+        let create = Smb2CreateRequest::decode(&request[SMB2_HEADER_BYTES..]).unwrap();
+        assert_stat_request(&create, &path);
+        let mut body =
+            create_response_body(fake_file_id(), entry.file_attributes, entry.end_of_file);
+        put_u64(&mut body, 8, entry.creation_time);
+        put_u64(&mut body, 24, entry.last_write_time);
+        transport
+            .send_packet(&response_packet(
+                Smb2Header::new(Smb2Command::Create, header.message_id),
+                &body,
+            ))
+            .await
+            .unwrap();
+        let request = transport
+            .recv_packet()
+            .await
+            .expect("stat close (not query directory)");
+        let header = Smb2Header::decode(&request).unwrap();
+        assert_eq!(header.command, Smb2Command::Close);
+        assert_eq!(
+            Smb2CloseRequest::decode(&request[SMB2_HEADER_BYTES..])
+                .unwrap()
+                .file_id,
+            fake_file_id()
+        );
+        transport
+            .send_packet(&response_packet(
+                Smb2Header::new(Smb2Command::Close, header.message_id),
+                &close_response_body(entry.file_attributes, entry.end_of_file),
+            ))
+            .await
+            .unwrap();
     }
 
-    async fn handle_stat_missing<T>(transport: &mut DirectTcpTransport<T>, parent_path: &str)
+    fn assert_stat_request(create: &Smb2CreateRequest, path: &str) {
+        assert_eq!(create.name, path);
+        assert_eq!(
+            create.desired_access,
+            Smb2DesiredAccess::FILE_READ_ATTRIBUTES
+        );
+        assert_eq!(create.create_disposition, Smb2CreateDisposition::Open);
+        assert_eq!(create.create_options, Smb2CreateOptions::default());
+    }
+
+    async fn handle_stat_missing<T>(transport: &mut DirectTcpTransport<T>, path: &str)
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
-        let file_id = fake_file_id();
-        for (step, expected) in [
-            Smb2Command::Create,
-            Smb2Command::QueryDirectory,
-            Smb2Command::QueryDirectory,
-            Smb2Command::Close,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let request = transport.recv_packet().await.expect("stat request");
-            let header = Smb2Header::decode(&request).expect("stat header");
-            assert_eq!(header.command, expected);
-            assert_eq!(header.tree_id, 0x1122_3344);
-            let body = &request[SMB2_HEADER_BYTES..];
-            let response_body = match expected {
-                Smb2Command::Create => {
-                    let create = Smb2CreateRequest::decode(body).expect("stat create");
-                    assert_eq!(create.name, parent_path);
-                    assert!(create
-                        .create_options
-                        .contains(Smb2CreateOptions::DIRECTORY_FILE));
-                    create_response_body(file_id, Smb2FileAttributes::DIRECTORY, 0)
-                }
-                Smb2Command::QueryDirectory => {
-                    let query = Smb2QueryDirectoryRequest::decode(body).expect("stat query");
-                    assert_eq!(query.file_id, file_id);
-                    if step == 1 {
-                        query_directory_response_body(&[])
-                    } else {
-                        Vec::new()
-                    }
-                }
-                Smb2Command::Close => {
-                    let close = Smb2CloseRequest::decode(body).expect("stat close");
-                    assert_eq!(close.file_id, file_id);
-                    close_response_body(Smb2FileAttributes::DIRECTORY, 0)
-                }
-                _ => unreachable!("covered command list"),
-            };
-            let mut response_header = Smb2Header::new(expected, header.message_id);
-            if step == 2 {
-                response_header.status_or_channel_sequence = SmbNtStatus::NO_MORE_FILES.0;
-            }
-            transport
-                .send_packet(&response_packet(response_header, &response_body))
-                .await
-                .expect("stat response");
-        }
+        let request = transport.recv_packet().await.expect("stat missing create");
+        let header = Smb2Header::decode(&request).unwrap();
+        assert_eq!(header.command, Smb2Command::Create);
+        let create = Smb2CreateRequest::decode(&request[SMB2_HEADER_BYTES..]).unwrap();
+        assert_stat_request(&create, path);
+        let mut response = Smb2Header::new(Smb2Command::Create, header.message_id);
+        response.status_or_channel_sequence = 0xc000_0034; // STATUS_OBJECT_NAME_NOT_FOUND
+        transport
+            .send_packet(&response_packet(response, &[]))
+            .await
+            .unwrap();
     }
 
     fn fake_file_id() -> Smb2FileId {

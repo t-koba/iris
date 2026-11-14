@@ -1,6 +1,6 @@
 use crate::actor::SmbConnectionActor;
 use crate::connection::SmbConnectionError;
-use crate::file::{close, open, SmbHandle};
+use crate::file::{close, open, HandleGuard, SmbHandle};
 use crate::packet::create::{
     Smb2CreateDisposition, Smb2CreateOptions, Smb2CreateRequest, Smb2DesiredAccess,
     Smb2FileAttributes,
@@ -80,45 +80,141 @@ fn query_directory_request(handle: &SmbHandle, first: bool) -> Smb2QueryDirector
     }
 }
 
+/// Incremental enumeration tied to one actor and server directory handle.
+/// Explicitly close abandoned enumerations. Dropping an unclosed enumeration
+/// invalidates the transport synchronously, including cancellation during I/O.
+pub struct SmbDirectoryEnumeration {
+    connection: SmbConnectionActor,
+    handle: Option<SmbHandle>,
+    pending: std::collections::VecDeque<SmbDirectoryEntry>,
+    first: bool,
+}
+
+impl Drop for SmbDirectoryEnumeration {
+    fn drop(&mut self) {
+        if self.handle.is_some() {
+            self.connection.shutdown();
+        }
+    }
+}
+
+impl SmbDirectoryEnumeration {
+    pub async fn open(
+        connection: &SmbConnectionActor,
+        path: impl Into<String>,
+    ) -> Result<Self, SmbConnectionError> {
+        let mut guard = HandleGuard(Some(connection.clone()));
+        let request = directory_request(
+            path,
+            Smb2DesiredAccess::FILE_READ_DATA.0
+                | Smb2DesiredAccess::FILE_READ_ATTRIBUTES.0
+                | Smb2DesiredAccess::FILE_READ_EA.0
+                | Smb2DesiredAccess::SYNCHRONIZE.0,
+            Smb2CreateDisposition::Open,
+        );
+        let handle = match open(connection, request).await {
+            Ok(handle) => handle,
+            Err(
+                error @ SmbConnectionError::UnexpectedStatus {
+                    command: Smb2Command::Create,
+                    ..
+                },
+            ) => {
+                guard.0 = None; // An explicit CREATE refusal cannot leave a handle.
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        guard.0 = None;
+        Ok(Self {
+            connection: connection.clone(),
+            handle: Some(handle),
+            pending: Default::default(),
+            first: true,
+        })
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.handle.is_none()
+    }
+
+    /// Return at most `limit` entries, retaining any excess wire response entries.
+    /// No look-ahead QUERY_DIRECTORY is issued once the requested page is full.
+    /// A full final page may therefore require another call to observe EOF.
+    pub async fn next_page(
+        &mut self,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<Vec<SmbDirectoryEntry>, SmbConnectionError> {
+        let mut guard = HandleGuard(Some(self.connection.clone()));
+        let result = self.read_page(limit.get()).await;
+        if result.is_err() {
+            let _ = self.close().await;
+        }
+        guard.0 = None;
+        result
+    }
+
+    async fn read_page(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<SmbDirectoryEntry>, SmbConnectionError> {
+        let mut entries = Vec::new();
+        while entries.len() < limit {
+            if let Some(entry) = self.pending.pop_front() {
+                entries.push(entry);
+                continue;
+            }
+            let Some(handle) = self.handle.as_ref() else {
+                break;
+            };
+            let request = query_directory_request(handle, self.first);
+            let response = self
+                .connection
+                .request(Smb2Command::QueryDirectory, request.encode()?)
+                .await?;
+            if response.status() == SmbNtStatus::NO_MORE_FILES {
+                self.close().await?;
+                break;
+            }
+            response.ensure_success(Smb2Command::QueryDirectory)?;
+            let page = Smb2QueryDirectoryResponse::decode_packet(&response.to_packet())?;
+            if page.output_buffer.is_empty() {
+                return Err(SmbClientError::EmptyQueryDirectoryResponse.into());
+            }
+            self.pending
+                .extend(decode_file_id_both_directory_entries(&page.output_buffer)?);
+            self.first = false;
+        }
+        Ok(entries)
+    }
+
+    /// Best-effort callers may ignore the result; a failed/cancelled CLOSE leaves
+    /// the fallback armed so the generation cannot be reused with a lost handle.
+    pub async fn close(&mut self) -> Result<(), SmbConnectionError> {
+        if let Some(handle) = self.handle.as_ref() {
+            let mut guard = HandleGuard(Some(self.connection.clone()));
+            let result = close(&self.connection, handle.clone()).await;
+            if result.is_err() {
+                self.connection.shutdown();
+            }
+            self.handle = None;
+            self.pending.clear();
+            result?;
+            guard.0 = None;
+        }
+        self.pending.clear();
+        Ok(())
+    }
+}
+
 pub async fn list_directory_once(
     connection: &SmbConnectionActor,
     path: impl Into<String>,
 ) -> Result<Vec<SmbDirectoryEntry>, SmbConnectionError> {
-    let request = directory_request(
-        path,
-        Smb2DesiredAccess::FILE_READ_DATA.0
-            | Smb2DesiredAccess::FILE_READ_ATTRIBUTES.0
-            | Smb2DesiredAccess::FILE_READ_EA.0
-            | Smb2DesiredAccess::SYNCHRONIZE.0,
-        Smb2CreateDisposition::Open,
-    );
-    let directory = open(connection, request).await?;
-    let entries = list_all_directory_entries(connection, &directory).await;
-    let close_result = close(connection, directory).await;
-    match (entries, close_result) {
-        (Ok(entries), Ok(_)) => Ok(entries),
-        (Err(error), _) | (_, Err(error)) => Err(error),
-    }
-}
-
-async fn list_all_directory_entries(
-    connection: &SmbConnectionActor,
-    directory: &SmbHandle,
-) -> Result<Vec<SmbDirectoryEntry>, SmbConnectionError> {
+    let mut directory = SmbDirectoryEnumeration::open(connection, path).await?;
     let mut entries = Vec::new();
-    let mut first = true;
-    loop {
-        let request = query_directory_request(directory, first);
-        let response = connection
-            .request(Smb2Command::QueryDirectory, request.encode()?)
-            .await?;
-        if response.status() == SmbNtStatus::NO_MORE_FILES {
-            break;
-        }
-        response.ensure_success(Smb2Command::QueryDirectory)?;
-        let page = Smb2QueryDirectoryResponse::decode_packet(&response.to_packet())?;
-        entries.extend(decode_file_id_both_directory_entries(&page.output_buffer)?);
-        first = false;
+    while !directory.is_closed() {
+        entries.extend(directory.next_page(std::num::NonZeroUsize::MAX).await?);
     }
     Ok(entries)
 }
@@ -220,7 +316,6 @@ fn checked_add_offset(
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::*;
@@ -234,6 +329,217 @@ mod tests {
     use crate::transport::DirectTcpTransport;
     use crate::wire::{align8, encode_utf16le, put_u32, put_u64};
     use tokio::io::duplex;
+
+    #[tokio::test]
+    async fn cancelled_enumeration_open_page_and_close_stop_generation() {
+        for command in [
+            Smb2Command::Create,
+            Smb2Command::QueryDirectory,
+            Smb2Command::Close,
+        ] {
+            let (client, server) = duplex(8192);
+            let actor = SmbConnectionActor::spawn(client);
+            let owned_actor = actor.clone();
+            let task = tokio::spawn(async move {
+                let mut directory = SmbDirectoryEnumeration::open(&owned_actor, "folder")
+                    .await
+                    .unwrap();
+                if command == Smb2Command::Close {
+                    directory.close().await.unwrap();
+                } else {
+                    directory
+                        .next_page(std::num::NonZeroUsize::new(1).unwrap())
+                        .await
+                        .unwrap();
+                }
+            });
+            let mut transport = DirectTcpTransport::new(server);
+            let request = transport.recv_packet().await.unwrap();
+            let header = Smb2Header::decode(&request).unwrap();
+            assert_eq!(header.command, Smb2Command::Create);
+            if command != Smb2Command::Create {
+                transport
+                    .send_packet(&response_packet(
+                        Smb2Header::new(Smb2Command::Create, header.message_id),
+                        &create_response_body(
+                            Smb2FileId {
+                                persistent: 1,
+                                volatile: 2,
+                            },
+                            Smb2FileAttributes::DIRECTORY,
+                            0,
+                        ),
+                    ))
+                    .await
+                    .unwrap();
+                let request = transport.recv_packet().await.unwrap();
+                assert_eq!(Smb2Header::decode(&request).unwrap().command, command);
+            }
+            // Leave the response outstanding, then cancel the sole state owner.
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            assert!(
+                actor.state().await.is_err(),
+                "cancelled {command:?} reused its generation"
+            );
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                transport.recv_packet()
+            )
+            .await
+            .unwrap()
+            .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_create_refusal_does_not_stop_the_actor_generation() {
+        let (client, server) = duplex(4096);
+        let actor = SmbConnectionActor::spawn(client);
+        let server_task = tokio::spawn(async move {
+            let mut transport = DirectTcpTransport::new(server);
+            let request = transport.recv_packet().await.expect("create");
+            let header = Smb2Header::decode(&request).expect("header");
+            assert_eq!(header.command, Smb2Command::Create);
+            let mut response = Smb2Header::new(Smb2Command::Create, header.message_id);
+            response.status_or_channel_sequence = 0xc000_0022; // STATUS_ACCESS_DENIED
+            transport
+                .send_packet(&response_packet(response, &[]))
+                .await
+                .expect("refusal");
+            assert!(transport.recv_packet().await.is_err());
+        });
+
+        let error = match SmbDirectoryEnumeration::open(&actor, "folder").await {
+            Err(error) => error,
+            Ok(_) => panic!("CREATE refusal was accepted"),
+        };
+        assert!(matches!(
+            error,
+            SmbConnectionError::UnexpectedStatus {
+                command: Smb2Command::Create,
+                ..
+            }
+        ));
+        assert!(
+            actor.state().await.is_ok(),
+            "explicit refusal is not a lost handle"
+        );
+        actor.shutdown();
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn empty_successful_query_page_fails_closed_and_closes_handle() {
+        let (client, server) = duplex(8192);
+        let actor = SmbConnectionActor::spawn(client);
+        let file_id = Smb2FileId {
+            persistent: 3,
+            volatile: 4,
+        };
+        let server_task = tokio::spawn(async move {
+            let mut transport = DirectTcpTransport::new(server);
+            for expected in [
+                Smb2Command::Create,
+                Smb2Command::QueryDirectory,
+                Smb2Command::Close,
+            ] {
+                let request = transport.recv_packet().await.expect("request");
+                let header = Smb2Header::decode(&request).expect("header");
+                assert_eq!(header.command, expected);
+                let body = match expected {
+                    Smb2Command::Create => {
+                        create_response_body(file_id, Smb2FileAttributes::DIRECTORY, 0)
+                    }
+                    Smb2Command::QueryDirectory => query_directory_response_body(&[]),
+                    Smb2Command::Close => {
+                        assert_eq!(
+                            Smb2CloseRequest::decode(&request[SMB2_HEADER_BYTES..])
+                                .expect("close")
+                                .file_id,
+                            file_id
+                        );
+                        close_response_body(Smb2FileAttributes::DIRECTORY, 0)
+                    }
+                    _ => unreachable!(),
+                };
+                transport
+                    .send_packet(&response_packet(
+                        Smb2Header::new(expected, header.message_id),
+                        &body,
+                    ))
+                    .await
+                    .expect("response");
+            }
+        });
+
+        let mut directory = SmbDirectoryEnumeration::open(&actor, "folder")
+            .await
+            .expect("open");
+        let error = directory
+            .next_page(std::num::NonZeroUsize::new(1).unwrap())
+            .await
+            .expect_err("empty success is malformed");
+        assert!(matches!(
+            error,
+            SmbConnectionError::Protocol(SmbClientError::EmptyQueryDirectoryResponse)
+        ));
+        assert!(directory.is_closed());
+        assert!(actor.state().await.is_ok());
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn enumeration_error_closes_and_failed_close_stops_generation() {
+        for close_fails in [false, true] {
+            let (client, server) = duplex(8192);
+            let actor = SmbConnectionActor::spawn(client);
+            let owned_actor = actor.clone();
+            let task = tokio::spawn(async move {
+                let mut directory = SmbDirectoryEnumeration::open(&owned_actor, "folder")
+                    .await
+                    .unwrap();
+                assert!(directory
+                    .next_page(std::num::NonZeroUsize::new(1).unwrap())
+                    .await
+                    .is_err());
+            });
+            let mut transport = DirectTcpTransport::new(server);
+            for command in [
+                Smb2Command::Create,
+                Smb2Command::QueryDirectory,
+                Smb2Command::Close,
+            ] {
+                let request = transport.recv_packet().await.unwrap();
+                let header = Smb2Header::decode(&request).unwrap();
+                assert_eq!(header.command, command);
+                let mut response = Smb2Header::new(command, header.message_id);
+                let body = match command {
+                    Smb2Command::Create => create_response_body(
+                        Smb2FileId {
+                            persistent: 1,
+                            volatile: 2,
+                        },
+                        Smb2FileAttributes::DIRECTORY,
+                        0,
+                    ),
+                    Smb2Command::Close if !close_fails => {
+                        close_response_body(Smb2FileAttributes::DIRECTORY, 0)
+                    }
+                    _ => {
+                        response.status_or_channel_sequence = 0xc000_0022;
+                        Vec::new()
+                    }
+                };
+                transport
+                    .send_packet(&response_packet(response, &body))
+                    .await
+                    .unwrap();
+            }
+            task.await.unwrap();
+            assert_eq!(actor.state().await.is_err(), close_fails);
+        }
+    }
 
     #[test]
     fn decode_file_id_both_directory_entries_reads_chained_records() {

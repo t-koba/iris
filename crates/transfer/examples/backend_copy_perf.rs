@@ -333,6 +333,7 @@ fn make_backend(
                 workstation: None,
                 allow_guest: true,
                 actor: Default::default(),
+                listing: Default::default(),
             },
             backend_id,
         ))),

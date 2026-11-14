@@ -62,6 +62,45 @@ pub(crate) async fn open(
     Ok(Smb2CreateResponse::decode_packet(&response.to_packet())?.into())
 }
 
+// Armed before CREATE: cancellation can lose even its response. Also used
+// around borrowed handle operations so cancelling them cannot resume ambiguously.
+pub(crate) struct HandleGuard(pub Option<SmbConnectionActor>);
+
+impl Drop for HandleGuard {
+    fn drop(&mut self) {
+        if let Some(connection) = self.0.take() {
+            connection.shutdown();
+        }
+    }
+}
+
+/// Read metadata for an exact file or directory, without enumerating its parent.
+/// Cancellation or an ambiguous CREATE/CLOSE invalidates this actor generation.
+pub async fn stat_path(
+    connection: &SmbConnectionActor,
+    path: impl Into<String>,
+) -> Result<Smb2CreateResponse, SmbConnectionError> {
+    let mut guard = HandleGuard(Some(connection.clone()));
+    let request = Smb2CreateRequest::new(
+        path,
+        Smb2DesiredAccess::FILE_READ_ATTRIBUTES.0,
+        Smb2FileAttributes::default(),
+        Smb2CreateDisposition::Open,
+        Smb2CreateOptions::default(),
+    );
+    let response = connection
+        .request(Smb2Command::Create, request.encode()?)
+        .await?;
+    if let Err(error) = response.ensure_success(Smb2Command::Create) {
+        guard.0 = None; // The server explicitly refused CREATE: no handle exists.
+        return Err(error);
+    }
+    let metadata = Smb2CreateResponse::decode_packet(&response.to_packet())?;
+    close(connection, metadata.clone().into()).await?;
+    guard.0 = None;
+    Ok(metadata)
+}
+
 pub async fn open_file_for_read(
     connection: &SmbConnectionActor,
     path: impl Into<String>,
@@ -335,6 +374,7 @@ pub async fn close(
             .encode(),
         )
         .await?;
+    response.ensure_success(Smb2Command::Close)?;
     Ok(Smb2CloseResponse::decode_packet(&response.to_packet())?)
 }
 

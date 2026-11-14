@@ -36,6 +36,7 @@ async fn run() -> Result<(), String> {
             workstation: Some("IRIS-CI".to_string()),
             allow_guest: false,
             actor: Default::default(),
+            listing: Default::default(),
         },
         backend_id.clone(),
     );

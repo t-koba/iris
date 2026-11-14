@@ -53,13 +53,13 @@ pub use crypto::{
 };
 pub use dir::{
     create_directory, decode_file_id_both_directory_entries, list_directory_once,
-    SmbDirectoryEntry, DEFAULT_DIRECTORY_OUTPUT_BUFFER_LENGTH,
+    SmbDirectoryEntry, SmbDirectoryEnumeration, DEFAULT_DIRECTORY_OUTPUT_BUFFER_LENGTH,
 };
 pub use file::{
     close, delete, open_file_and_read, open_file_for_read, open_file_for_write,
-    read_file_ranges_pipelined, rename, set_basic_info, write_file_at, write_file_chunks_pipelined,
-    SmbHandle, SmbReadRange, DEFAULT_READ_CHUNK_LENGTH, DEFAULT_READ_PIPELINE_DEPTH,
-    DEFAULT_WRITE_CHUNK_LENGTH,
+    read_file_ranges_pipelined, rename, set_basic_info, stat_path, write_file_at,
+    write_file_chunks_pipelined, SmbHandle, SmbReadRange, DEFAULT_READ_CHUNK_LENGTH,
+    DEFAULT_READ_PIPELINE_DEPTH, DEFAULT_WRITE_CHUNK_LENGTH,
 };
 pub use netbios::{decode_direct_tcp_header, encode_direct_tcp_header};
 pub use packet::close::{Smb2CloseFlags, Smb2CloseRequest, Smb2CloseResponse};
@@ -187,6 +187,9 @@ pub enum SmbClientError {
 
     #[error("invalid SMB2 protocol id")]
     InvalidProtocolId,
+
+    #[error("SMB2 QUERY_DIRECTORY succeeded with an empty entry buffer")]
+    EmptyQueryDirectoryResponse,
 
     #[error("SMB2 compound request must contain at least one operation")]
     EmptyCompoundRequest,

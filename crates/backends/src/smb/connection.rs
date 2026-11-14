@@ -19,6 +19,24 @@ const NTLM_FILETIME_TICKS_PER_SECOND: u64 = 10_000_000;
 const SMB2_GLOBAL_CAP_ENCRYPTION: u32 = 0x0000_0040;
 const SMB_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Backend listing policy; independent of UI preferences and actor deadlines.
+#[derive(Clone, Debug)]
+pub struct SmbListingConfig {
+    pub page_size: std::num::NonZeroUsize,
+    pub max_active: std::num::NonZeroUsize,
+    pub idle_timeout: Duration,
+}
+
+impl Default for SmbListingConfig {
+    fn default() -> Self {
+        Self {
+            page_size: std::num::NonZeroUsize::new(100).unwrap(),
+            max_active: std::num::NonZeroUsize::new(64).unwrap(),
+            idle_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SmbConnectionConfig {
     pub server: String,
@@ -34,6 +52,7 @@ pub struct SmbConnectionConfig {
     pub allow_guest: bool,
     /// Actor queue and end-to-end request deadline policy (30s / 256 by default).
     pub actor: SmbActorConfig,
+    pub listing: SmbListingConfig,
 }
 
 #[derive(Clone)]
