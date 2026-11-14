@@ -17,7 +17,9 @@ use iris_core_domain::types::options::{ConflictResolution, CopyOptions, DeleteMo
 use iris_core_domain::types::progress::ByteRange;
 use iris_core_domain::types::read_handle::ReadHandle;
 use iris_core_domain::types::session::BackendSession;
-use iris_platform_integration::copy::{platform_copy_blocking, stream_file_copy_blocking};
+use iris_platform_integration::copy::{
+    ensure_distinct_files, platform_copy_blocking, stream_file_copy_blocking,
+};
 use iris_platform_integration::path::{ensure_within, numbered_sibling_path};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -618,6 +620,8 @@ impl BackendAdapter for LocalFsAdapter {
         tokio::task::spawn_blocking(move || {
             Self::early_conflict(&dst_path, &copy_display, &options.on_conflict)?;
             let target = WriteDestination::new(&dst_path, &options.on_conflict)?;
+            ensure_distinct_files(&src_path, target.path())
+                .map_err(|error| BackendError::Internal(Box::new(error)))?;
             let cloned = can_clone
                 && try_reflink_copy(&src_path, target.path())
                     .map_err(|e| BackendError::Internal(Box::new(e)))?;
@@ -916,6 +920,73 @@ mod tests {
         ObjectRef {
             display_path: name.into(),
             ..root_ref(backend_id)
+        }
+    }
+
+    #[tokio::test]
+    async fn same_file_copies_preserve_bytes_and_conflict_semantics() {
+        for can_clone in [false, true] {
+            for hard_link in [false, true] {
+                for mode in [
+                    ConflictResolution::Overwrite,
+                    ConflictResolution::Fail,
+                    ConflictResolution::Skip,
+                    ConflictResolution::Rename,
+                ] {
+                    let temp = TempDir::new().expect("tempdir");
+                    let backend_id = BackendId("same-file-test".into());
+                    let mut adapter = LocalFsAdapter::new(temp.path().into(), backend_id.clone());
+                    adapter.can_clone = can_clone; // false forces the non-reflink path.
+                    let src = file_ref(&backend_id, "src.txt");
+                    let dst =
+                        file_ref(&backend_id, if hard_link { "alias.txt" } else { "src.txt" });
+                    std::fs::write(temp.path().join("src.txt"), b"keep original").unwrap();
+                    if hard_link {
+                        std::fs::hard_link(
+                            temp.path().join("src.txt"),
+                            temp.path().join("alias.txt"),
+                        )
+                        .unwrap();
+                    }
+                    let result = adapter
+                        .copy(
+                            &src,
+                            &dst,
+                            CopyOptions {
+                                on_conflict: mode.clone(),
+                            },
+                        )
+                        .await;
+                    match mode {
+                        ConflictResolution::Overwrite => {
+                            assert!(matches!(result, Err(BackendError::Internal(_))))
+                        }
+                        ConflictResolution::Fail | ConflictResolution::Skip => {
+                            assert!(matches!(result, Err(BackendError::Conflict { .. })))
+                        }
+                        ConflictResolution::Rename => {
+                            result.expect("rename copies to a distinct file");
+                            let renamed = if hard_link {
+                                "alias (1).txt"
+                            } else {
+                                "src (1).txt"
+                            };
+                            assert_eq!(
+                                std::fs::read(temp.path().join(renamed)).unwrap(),
+                                b"keep original"
+                            );
+                        }
+                    }
+                    assert_eq!(
+                        std::fs::read(temp.path().join("src.txt")).unwrap(),
+                        b"keep original"
+                    );
+                    assert_eq!(
+                        std::fs::read(temp.path().join(&dst.display_path)).unwrap(),
+                        b"keep original"
+                    );
+                }
+            }
         }
     }
 

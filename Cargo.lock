@@ -3490,6 +3490,8 @@ dependencies = [
  "tokio",
  "tracing",
  "trash",
+ "winapi-util",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

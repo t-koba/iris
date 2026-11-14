@@ -18,3 +18,8 @@ tempfile = "3"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", features = ["NSError", "NSFileManager", "NSString", "NSURL"] }
+
+# Reuse the identity-query APIs already used by the local filesystem backend.
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1.11"
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }

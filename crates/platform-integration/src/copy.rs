@@ -1,5 +1,5 @@
 use crate::file_times::{preserve_modified_time, preserve_modified_time_of};
-use std::path::Path;
+use std::{io, path::Path};
 
 /// macOS copyfile and Windows CopyFileEx run without a progress callback here, so larger files
 /// take the progressed streaming path instead.
@@ -19,6 +19,56 @@ impl PlatformCopyError {
     pub fn should_fallback_to_streaming(&self) -> bool {
         matches!(self, Self::Unsupported(_))
     }
+}
+
+/// Reject copies whose existing destination resolves to the source file, including
+/// hard links and symlinks. Identity lookup errors other than a missing destination
+/// fail closed. This is a preflight check, not protection against concurrent path
+/// replacement between the check and the copy's opens.
+pub fn ensure_distinct_files(src: &Path, dst: &Path) -> io::Result<()> {
+    let destination = match file_identity(dst) {
+        Ok(identity) => identity,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if file_identity(src)? == destination {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "source and destination refer to the same file",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn file_identity(path: &Path) -> io::Result<(u64, u64)> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
+    };
+    // Query identity without requiring read access to the destination's contents.
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    let handle = winapi_util::Handle::from_file(file);
+    let information = winapi_util::file::information(&handle)?;
+    Ok((information.volume_serial_number(), information.file_index()))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_identity(_path: &Path) -> io::Result<(u64, u64)> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem identity is unavailable on this platform",
+    ))
 }
 
 /// Copy a file through the operating system's native path.
@@ -63,6 +113,8 @@ pub fn platform_copy_blocking(src: &Path, dst: &Path) -> Result<u64, PlatformCop
         ));
     }
 
+    ensure_distinct_files(src, dst)?;
+
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     if metadata.len() > UNPROGRESSED_COPY_LIMIT {
         return Err(PlatformCopyError::Unsupported(
@@ -95,6 +147,7 @@ pub fn stream_file_copy_blocking(src: &Path, dst: &Path) -> Result<u64, Platform
         std::fs::create_dir_all(parent)?;
     }
 
+    ensure_distinct_files(src, dst)?;
     let mut src_file = std::fs::File::open(src)?;
     let mut dst_file = std::fs::File::create(dst)?;
     let copied = std::io::copy(&mut src_file, &mut dst_file)?;
@@ -109,6 +162,34 @@ pub fn stream_file_copy_blocking(src: &Path, dst: &Path) -> Result<u64, Platform
 mod tests {
     use super::*;
 
+    #[test]
+    fn copy_helpers_reject_same_file_without_changing_bytes() {
+        for copy in [platform_copy_blocking, stream_file_copy_blocking] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let src = temp.path().join("src");
+            let alias = temp.path().join("hard-link");
+            std::fs::write(&src, b"keep original bytes").expect("source");
+            std::fs::hard_link(&src, &alias).expect("hard link");
+            let destinations = vec![src.clone(), alias];
+            #[cfg(unix)]
+            let destinations = {
+                let mut destinations = destinations;
+                let link = temp.path().join("symlink");
+                std::os::unix::fs::symlink(&src, &link).expect("symlink");
+                destinations.push(link);
+                destinations
+            };
+            for dst in destinations {
+                let error = copy(&src, &dst).expect_err("same file must fail");
+                assert!(!error.should_fallback_to_streaming());
+                assert!(matches!(error, PlatformCopyError::Io(ref e)
+                    if e.kind() == io::ErrorKind::InvalidInput));
+                assert_eq!(std::fs::read(&src).unwrap(), b"keep original bytes");
+                assert_eq!(std::fs::read(&dst).unwrap(), b"keep original bytes");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn platform_copy_preserves_bytes_and_mtime() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -119,6 +200,8 @@ mod tests {
         let old_mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(12345);
         preserve_modified_time(&src, old_mtime).expect("set mtime");
 
+        std::fs::create_dir_all(dst.parent().unwrap()).expect("destination parent");
+        std::fs::write(&dst, b"old destination is longer").expect("old destination");
         let copied = platform_copy(&src, &dst).await.expect("platform copy");
         assert_eq!(copied, 5);
         assert_eq!(std::fs::read(&dst).expect("read dst"), b"hello");
@@ -154,6 +237,8 @@ mod tests {
         let old_mtime = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(54321);
         preserve_modified_time(&src, old_mtime).expect("set mtime");
 
+        std::fs::create_dir_all(dst.parent().unwrap()).expect("destination parent");
+        std::fs::write(&dst, vec![0; bytes.len() + 1]).expect("old destination");
         let copied = stream_file_copy(&src, &dst).await.expect("stream copy");
         assert_eq!(copied, bytes.len() as u64);
         assert_eq!(std::fs::read(&dst).expect("read dst"), bytes);
