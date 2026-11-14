@@ -123,6 +123,80 @@ class ProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(probe.ProbeError, "timeout"):
                 probe.command([sys.executable, "-c", "import time; time.sleep(30)"], directory, 0.1, 100)
 
+    def failed_build(self, data, budget=4096):
+        paths = []
+        output = io.StringIO()
+        real_run = probe.run
+
+        def child(argv, cwd, stdout, stderr, timeout, check):
+            self.assertEqual(argv[0], "cl.exe")
+            self.assertEqual(timeout, 7)
+            self.assertFalse(check)
+            self.assertEqual(stderr, probe.subprocess.STDOUT)
+            paths.append(cwd)
+            stdout.write(data)
+            return probe.subprocess.CompletedProcess(argv, 1)
+
+        with patch.dict(os.environ, {"IRIS_MF_MAX_LOG_BYTES": str(budget),
+                                     "IRIS_MF_BUILD_TIMEOUT_SECONDS": "7"}, clear=True), \
+                patch.object(probe.subprocess, "run", side_effect=child), \
+                patch.object(probe, "run", side_effect=real_run), \
+                patch.object(probe.time, "monotonic", return_value=0), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(probe.main(), 1)
+        self.assertEqual(len(paths), 1)
+        self.assertFalse(paths[0].exists())
+        self.assertLessEqual(len(output.getvalue().encode("utf-8")), budget)
+        return output.getvalue()
+
+    def test_build_diagnostics_retain_only_codes_and_source_lines(self):
+        log = (b"C:\\private\\probe.cpp(42,7): warning C4267: secret-token=abc123\r\n"
+               b"C:\\private\\probe.cpp(42,7): warning C4267: duplicate\r\n"
+               b"C:\\private\\probe.cpp(43): error C2220: PATH=private\r\n"
+               b"cl : Command line warning D9002 : private-token\r\n"
+               b"LINK : fatal error LNK1120: \x00\x00\x00\x18ftypmp42\xff\xfe\r\n"
+               b"private(99): error X1234: unknown-code\r\n"
+               b"error C1083 without diagnostic delimiters\n")
+        line = self.failed_build(log)
+        self.assertEqual(len(line.splitlines()), 1)
+        self.assertEqual(json.loads(line), {
+            "ok": False, "stage": "build_failed", "elapsed_ms": 0,
+            "diagnostics": [{"code": "C4267", "line": 42},
+                            {"code": "C2220", "line": 43},
+                            {"code": "D9002"}, {"code": "LNK1120"}]})
+        self.assertEqual(line, self.failed_build(log))
+        for forbidden in ("private", "probe.cpp", "token", "abc123", "PATH", "ftyp", "X1234"):
+            self.assertNotIn(forbidden, line)
+
+    def test_unknown_or_malformed_build_output_contributes_no_text(self):
+        log = (b"private(123): note C4267: not a warning\n"
+               b"private(456): error C12345: wrong code length\n"
+               b"private(789): warning c4267: wrong case\n"
+               b"private: error E1234: unknown family\n"
+               b"private: warning C4267-token: malformed\n"
+               b"TOKEN=abc123; C1083; \x00\x00\x00\x18ftypmp42\xff\xfe\n")
+        self.assertEqual(json.loads(self.failed_build(log)),
+                         {"ok": False, "stage": "build_failed", "elapsed_ms": 0})
+
+    def test_build_diagnostics_and_child_log_respect_budget(self):
+        log = b"".join(f":error C{1000 + i}:\n".encode() for i in range(30))
+        full = json.loads(self.failed_build(log))["diagnostics"]
+        bounded = json.loads(self.failed_build(log, 512))["diagnostics"]
+        self.assertTrue(bounded)
+        self.assertLess(len(bounded), len(full))
+        self.assertEqual(bounded, full[:len(bounded)])
+        # If only the base error fits, omit diagnostics; if even that cannot fit,
+        # emit nothing. Neither case can bypass cleanup or the child-log bound.
+        small = b":error C1083:"
+        self.assertNotIn("diagnostics", json.loads(self.failed_build(small, 64)))
+        self.assertEqual(self.failed_build(small, 1), "")
+        self.assertEqual(json.loads(self.failed_build(b"x" * 65, 64))["stage"],
+                         "build_command_log_bound")
+        self.assertEqual(self.failed_build(small, len(small)), "")
+        self.assertEqual(json.loads(self.failed_build(b"x" * 4096))["stage"], "build_failed")
+        self.assertEqual(json.loads(self.failed_build(b"x" * 4097))["stage"],
+                         "build_command_log_bound")
+
     def test_main_emits_one_sanitized_failure_line(self):
         output = io.StringIO()
         with patch.object(probe, "run", side_effect=OSError("private/path")), contextlib.redirect_stdout(output):

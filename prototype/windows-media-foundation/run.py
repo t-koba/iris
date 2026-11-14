@@ -15,7 +15,36 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class ProbeError(Exception):
-    pass
+    def __init__(self, stage, diagnostics=None):
+        super().__init__(stage)
+        self.diagnostics = diagnostics or []
+
+
+def build_diagnostics(data):
+    # MSVC compiler (C), command-line (D), and linker (LNK) code syntax.
+    # Match whole diagnostic lines, but retain neither origin nor message bytes.
+    pattern = (rb"[^\r\n]*?(?:\(([0-9]+)(?:, *[0-9]+)?\))? *: *"
+               rb"(?:Command line )?(?:fatal error|error|warning) +"
+               rb"(C[0-9]{4}|D[0-9]{4}|LNK[0-9]{4}) *:[^\r\n]*")
+    diagnostics = []
+    seen = set()
+    for line in data.splitlines():
+        match = re.fullmatch(pattern, line)
+        if not match:
+            continue
+        code = match[2].decode("ascii")
+        try:
+            source_line = int(match[1]) if match[1] else None
+        except ValueError:
+            source_line = None
+        key = (code, source_line)
+        if key not in seen:
+            seen.add(key)
+            diagnostic = {"code": code}
+            if source_line is not None:
+                diagnostic["line"] = source_line
+            diagnostics.append(diagnostic)
+    return diagnostics
 
 
 def setting(name, default):
@@ -88,12 +117,12 @@ def run(execute=command, temporary=tempfile.TemporaryDirectory):
             directory = Path(temp)
             executable = directory / "probe.exe"
             source = ROOT / "prototype/windows-media-foundation/probe.cpp"
-            code, _ = execute(["cl.exe", "/nologo", "/EHsc", "/std:c++17", "/W4", "/WX",
+            code, data = execute(["cl.exe", "/nologo", "/EHsc", "/std:c++17", "/W4", "/WX",
                                str(source), f"/Fe:{executable}", "/Fo:probe.obj", "/Fd:probe.pdb",
                                "/link", "mfreadwrite.lib", "mfplat.lib", "mfuuid.lib", "ole32.lib"],
                               directory, build_timeout, max_log)
             if code:
-                raise ProbeError("failed")
+                raise ProbeError("failed", build_diagnostics(data))
             stage = "fetch"
             code, _ = execute([sys.executable, str(ROOT / "scripts/fetch-preview-corpus.py"),
                                "--manifest", str(manifest), "--output", str(directory / "corpus")],
@@ -113,7 +142,7 @@ def run(execute=command, temporary=tempfile.TemporaryDirectory):
         # Cleanup is complete before a result is made visible.
         return line, 0 if record["ok"] else 1
     except ProbeError as error:
-        raise ProbeError(f"{stage}_{error}") from error
+        raise ProbeError(f"{stage}_{error}", error.diagnostics) from error
     except (OSError, ValueError, KeyError, TypeError, StopIteration) as error:
         raise ProbeError(f"{stage}_invalid_or_unavailable") from error
 
@@ -125,9 +154,27 @@ def main():
     except (ProbeError, ValueError, OSError, KeyError, StopIteration) as error:
         # Never print exceptions/child output: these may contain paths or bytes.
         stage = str(error) if isinstance(error, ProbeError) else "configuration"
-        line = json.dumps({"ok": False, "stage": stage,
-                           "elapsed_ms": round((time.monotonic() - started) * 1000, 3)},
-                          separators=(",", ":"))
+        record = {"ok": False, "stage": stage,
+                  "elapsed_ms": round((time.monotonic() - started) * 1000, 3)}
+        line = json.dumps(record, separators=(",", ":"))
+        if isinstance(error, ProbeError) and error.diagnostics:
+            # Retain a deterministic prefix that fits the same total JSON budget.
+            # No separate count limit; the configured byte budget owns retention.
+            try:
+                budget = setting("IRIS_MF_MAX_LOG_BYTES", 4096)
+            except (ProbeError, ValueError):
+                return 1
+            size = len(line.encode("utf-8")) + len(',"diagnostics":[]') + 1
+            retained = []
+            for diagnostic in error.diagnostics:
+                extra = len(json.dumps(diagnostic, separators=(",", ":"))) + bool(retained)
+                if size + extra > budget:
+                    break
+                retained.append(diagnostic)
+                size += extra
+            if retained:
+                record["diagnostics"] = retained
+                line = json.dumps(record, separators=(",", ":"))
         code = 1
     # Even an error record must respect the configured retained-log budget.
     # An impossibly small/invalid budget fails closed without printing a line.
