@@ -49,6 +49,42 @@ struct NativeListCursor {
     touched: Option<Instant>,
 }
 
+struct CursorRegistrationGuard {
+    cursors: Arc<Mutex<HashMap<String, NativeListCursor>>>,
+    token: Option<String>,
+}
+
+impl CursorRegistrationGuard {
+    fn new(cursors: Arc<Mutex<HashMap<String, NativeListCursor>>>, token: String) -> Self {
+        Self {
+            cursors,
+            token: Some(token),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.token = None;
+    }
+}
+
+impl Drop for CursorRegistrationGuard {
+    fn drop(&mut self) {
+        let Some(token) = self.token.take() else {
+            return;
+        };
+        let cursor = {
+            let mut cursors = self
+                .cursors
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            cursors.remove(&token)
+        };
+        // Drop outside the registry lock; an unclosed enumeration synchronously
+        // retires its SMB actor generation.
+        drop(cursor);
+    }
+}
+
 async fn close_list_cursors(
     cursors: Vec<NativeListCursor>,
     active_generation: u64,
@@ -333,12 +369,11 @@ impl SmbAdapter {
                 evicted.extend(registry.insert(token.clone(), state));
                 evicted
             };
-            if let Err(error) = close_list_cursors(evicted, native.generation).await {
-                // The token was not exposed to the caller; remove its retained
-                // handle rather than returning a cursor on a stopped generation.
-                drop(self.list_cursors.lock().unwrap().remove(&token));
-                return Err(error);
-            }
+            let mut registration =
+                CursorRegistrationGuard::new(self.list_cursors.clone(), token.clone());
+            // The armed guard removes this unreturned cursor on close failure
+            // or future cancellation while the evicted handles are closed.
+            close_list_cursors(evicted, native.generation).await?;
             let registered = {
                 let mut registry = self.list_cursors.lock().unwrap();
                 registry.get_mut(&token).is_some_and(|state| {
@@ -350,6 +385,7 @@ impl SmbAdapter {
                 return Err(invalid_list_cursor());
             }
             self.cursor_reaper_wake.notify_one();
+            registration.disarm();
             Some(ListCursor(token))
         };
         Ok(ListPage {
@@ -1543,6 +1579,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_listing_removes_unpublished_cursor_during_eviction_close() {
+        let counts = Arc::new(ListingCounts::default());
+        let (close_seen_tx, close_seen_rx) = tokio::sync::oneshot::channel();
+        let (release_close_tx, release_close_rx) = tokio::sync::oneshot::channel();
+        let (mut config, server) =
+            start_fake_native_server(FakeNativeScenario::IncrementalPausedClose {
+                counts: counts.clone(),
+                close_seen: close_seen_tx,
+                release_close: release_close_rx,
+            })
+            .await;
+        config.listing.page_size = std::num::NonZeroUsize::new(1).unwrap();
+        config.listing.max_active = std::num::NonZeroUsize::new(1).unwrap();
+        let backend = BackendId("smb:cancelled-registration".into());
+        let adapter = SmbAdapter::new(config, backend.clone());
+        let root = object_ref(&backend, "");
+        let first = adapter.list_names(&root, None).await.unwrap();
+        assert!(first.next_cursor.is_some());
+
+        let mut listing = Box::pin(adapter.list_names(&root, None));
+        tokio::select! {
+            result = &mut listing => panic!("listing completed before paused CLOSE: {result:?}"),
+            seen = close_seen_rx => seen.expect("evicted cursor CLOSE started"),
+        }
+        {
+            let cursors = adapter.list_cursors.lock().unwrap();
+            assert_eq!(cursors.len(), 1);
+            assert!(cursors.values().all(|cursor| cursor.touched.is_none()));
+        }
+
+        drop(listing);
+        assert!(adapter.list_cursors.lock().unwrap().is_empty());
+        assert_eq!(counts.closes.load(Ordering::SeqCst), 1);
+        release_close_tx.send(()).expect("release server CLOSE");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn abandoned_native_cursor_closes_at_idle_timeout_without_listing_again() {
         let counts = Arc::new(ListingCounts::default());
         let (mut config, server) =
@@ -2046,6 +2120,11 @@ mod tests {
 
     enum FakeNativeScenario {
         Incremental(Arc<ListingCounts>),
+        IncrementalPausedClose {
+            counts: Arc<ListingCounts>,
+            close_seen: tokio::sync::oneshot::Sender<()>,
+            release_close: tokio::sync::oneshot::Receiver<()>,
+        },
         StatMetadata,
         PoolInvalidation,
         ListRoot,
@@ -2087,7 +2166,19 @@ mod tests {
                     handle_list_root(&mut replacement).await;
                 }
                 FakeNativeScenario::Incremental(counts) => {
-                    handle_incremental_listing(&mut transport, &counts).await
+                    handle_incremental_listing(&mut transport, &counts, None).await
+                }
+                FakeNativeScenario::IncrementalPausedClose {
+                    counts,
+                    close_seen,
+                    release_close,
+                } => {
+                    handle_incremental_listing(
+                        &mut transport,
+                        &counts,
+                        Some((close_seen, release_close)),
+                    )
+                    .await
                 }
                 FakeNativeScenario::StatMetadata => {
                     for (name, attributes, size) in [
@@ -2276,6 +2367,10 @@ mod tests {
     async fn handle_incremental_listing<T>(
         transport: &mut DirectTcpTransport<T>,
         counts: &ListingCounts,
+        mut paused_close: Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
     ) where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
@@ -2361,10 +2456,18 @@ mod tests {
                 }
                 command => panic!("unexpected listing command {command:?}"),
             };
-            transport
-                .send_packet(&response_packet(response, &body))
-                .await
-                .unwrap();
+            let response_packet = response_packet(response, &body);
+            if header.command == Smb2Command::Close {
+                if let Some((seen, release)) = paused_close.take() {
+                    seen.send(()).expect("test is waiting for paused CLOSE");
+                    release.await.expect("test releases paused CLOSE");
+                    if transport.send_packet(&response_packet).await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+            }
+            transport.send_packet(&response_packet).await.unwrap();
         }
     }
 
