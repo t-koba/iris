@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -240,6 +241,127 @@ class RuntimeContracts(unittest.TestCase):
                         str(root / "cache/pdfium-linux-x64.tgz.part"),
                         "https://github.com/bblanchon/pdfium-binaries/releases/download/"
                         "chromium/8138/pdfium-linux-x64.tgz"])
+
+    def test_pdfium_attestation_status_tracks_staged_archive_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = root / "bin"
+            tools.mkdir()
+            # Fake only archive hashing, extraction, and gh; the real pinned bytes
+            # are neither downloaded nor retained outside this temporary directory.
+            tarball = root / "pdfium-linux-x64.tgz"
+            with tarball.open("wb") as stream:
+                stream.truncate(3945444)
+            real_sha256sum = shutil.which("sha256sum")
+            self.assertIsNotNone(real_sha256sum)
+            asset_sha256 = "d6b1e28950a0392590d79bbdbb7eb19686872b688f8a36f170acb19e41473113"
+
+            scripts = {
+                "uname": "#!/bin/sh\necho x86_64\n",
+                "sha256sum": '''#!/bin/sh
+if [ "$1" = "$IRIS_PDFIUM_TARBALL" ]; then
+    printf '%s  %s\\n' "$PDFIUM_TEST_ASSET_SHA256" "$1"
+else
+    exec "$PDFIUM_TEST_REAL_SHA256SUM" "$@"
+fi
+''',
+                "tar": '''#!/bin/sh
+extract=
+want_extract=0
+for arg in "$@"; do
+    if [ "$want_extract" = 1 ]; then extract=$arg; want_extract=0; continue; fi
+    if [ "$arg" = "-C" ]; then want_extract=1; fi
+done
+[ -n "$extract" ] || exit 2
+mkdir -p "$extract/licenses" "$extract/lib"
+printf 'PDFium license test\\n' > "$extract/LICENSE"
+printf 'MAJOR=159\\nMINOR=0\\nBUILD=8138\\nPATCH=0\\n' > "$extract/VERSION"
+printf 'args\\n' > "$extract/args.gn"
+printf 'license test\\n' > "$extract/licenses/pdfium.txt"
+printf 'synthetic runtime test bytes\\n' > "$extract/lib/libpdfium.so"
+''',
+                "gh": '''#!/bin/sh
+printf '%s\\n' "$@" > "$PDFIUM_TEST_GH_ARGS"
+exit "${PDFIUM_TEST_GH_EXIT:-0}"
+''',
+            }
+            for name, body in scripts.items():
+                tool = tools / name
+                tool.write_text(body, encoding="utf-8")
+                tool.chmod(0o755)
+
+            base_env = {
+                key: value for key, value in os.environ.items()
+                if not key.startswith("IRIS_PDFIUM_") and key != "GH_TOKEN"
+            }
+            base_env.update(
+                PATH=str(tools) + os.pathsep + os.environ["PATH"],
+                IRIS_PDFIUM_TARBALL=str(tarball),
+                PDFIUM_TEST_ASSET_SHA256=asset_sha256,
+                PDFIUM_TEST_REAL_SHA256SUM=real_sha256sum,
+            )
+
+            def run(name, verify, token=False, gh_exit="0"):
+                appdir = root / name
+                gh_args = root / (name + "-gh-args")
+                env = dict(base_env)
+                env.update(
+                    IRIS_VERIFY_PDFIUM_PROVENANCE=verify,
+                    PDFIUM_TEST_GH_ARGS=str(gh_args),
+                    PDFIUM_TEST_GH_EXIT=gh_exit,
+                )
+                if token:
+                    env["GH_TOKEN"] = "test-only"
+                result = subprocess.run(
+                    ["bash", str(ROOT / "scripts/fetch-pdfium-runtime.sh"), str(appdir)],
+                    env=env, capture_output=True, text=True, timeout=5,
+                )
+                return result, appdir, gh_args
+
+            manual, appdir, gh_args = run("manual", "0")
+            self.assertEqual(manual.returncode, 0, manual.stderr)
+            self.assertFalse(gh_args.exists())
+            manual_record = json.loads(
+                (appdir / "usr/share/doc/iris/pdfium/PROVENANCE.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manual_record["attestation"]["status"], "not_attempted")
+            self.assertEqual(manual_record["attestation"]["subject_sha256"], asset_sha256)
+
+            tagged, appdir, gh_args = run("tagged", "1", token=True)
+            self.assertEqual(tagged.returncode, 0, tagged.stderr)
+            self.assertEqual(gh_args.read_text(encoding="utf-8").splitlines(), [
+                "attestation", "verify", str(tarball), "--repo", "bblanchon/pdfium-binaries",
+            ])
+            tagged_record = json.loads(
+                (appdir / "usr/share/doc/iris/pdfium/PROVENANCE.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(tagged_record["attestation"]["status"], "verified")
+            self.assertEqual(tagged_record["attestation"]["subject_sha256"], asset_sha256)
+
+            failed, appdir, _ = run("failed", "1", token=True, gh_exit="1")
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertFalse(appdir.exists())
+
+            missing_token, appdir, gh_args = run("missing-token", "1")
+            self.assertNotEqual(missing_token.returncode, 0)
+            self.assertIn("GH_TOKEN is required", missing_token.stderr)
+            self.assertFalse(gh_args.exists())
+            self.assertFalse(appdir.exists())
+
+            workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+            manual_step = workflow.split(
+                "      - name: Package Linux AppDir for manual audit", 1
+            )[1].split("      - name: Package Linux AppDir for tagged release", 1)[0]
+            tagged_step = workflow.split(
+                "      - name: Package Linux AppDir for tagged release", 1
+            )[1].split("      - name: Build PDFium smoke test", 1)[0]
+            self.assertIn("if: github.event_name == 'workflow_dispatch'", manual_step)
+            self.assertIn('IRIS_VERIFY_PDFIUM_PROVENANCE: "0"', manual_step)
+            self.assertNotIn("GH_TOKEN:", manual_step)
+            self.assertIn("if: github.event_name == 'push'", tagged_step)
+            self.assertIn('IRIS_VERIFY_PDFIUM_PROVENANCE: "1"', tagged_step)
+            self.assertIn("GH_TOKEN:", tagged_step)
+            self.assertIn('      - "v*"', workflow)
 
     def test_pdfium_retry_policy_is_local_to_every_package_invocation(self):
         for workflow, calls in (("ci.yml", 1), ("linux-ffmpeg-validation.yml", 1),
