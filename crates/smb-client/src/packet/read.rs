@@ -45,7 +45,8 @@ pub struct Smb2ReadRequest {
 impl Smb2ReadRequest {
     pub fn encode(&self) -> Result<Vec<u8>, SmbClientError> {
         let channel_info_length = checked_u16_len("read.channel_info", self.channel_info.len())?;
-        let mut bytes = Vec::with_capacity(READ_REQUEST_FIXED_BYTES + self.channel_info.len());
+        let mut bytes =
+            Vec::with_capacity(READ_REQUEST_FIXED_BYTES + self.channel_info.len().max(1));
         push_u16(&mut bytes, READ_REQUEST_STRUCTURE_SIZE);
         bytes.push(0);
         bytes.push(self.flags.0);
@@ -60,6 +61,8 @@ impl Smb2ReadRequest {
         if self.channel_info.is_empty() {
             push_u16(&mut bytes, 0);
             push_u16(&mut bytes, 0);
+            // StructureSize includes the one-byte minimum Buffer field.
+            bytes.push(0);
         } else {
             push_u16(
                 &mut bytes,
@@ -73,7 +76,11 @@ impl Smb2ReadRequest {
     }
 
     pub fn decode(body: &[u8]) -> Result<Self, SmbClientError> {
-        check_fixed_body(body, READ_REQUEST_FIXED_BYTES, READ_REQUEST_STRUCTURE_SIZE)?;
+        check_fixed_body(
+            body,
+            usize::from(READ_REQUEST_STRUCTURE_SIZE),
+            READ_REQUEST_STRUCTURE_SIZE,
+        )?;
 
         let channel_info_offset = le_u16(body, 44) as usize;
         let channel_info_length = le_u16(body, 46) as usize;
@@ -181,8 +188,24 @@ mod tests {
         let decoded = Smb2ReadRequest::decode(&encoded).expect("decode");
 
         assert_eq!(decoded, request);
+        assert_eq!(encoded.len(), usize::from(READ_REQUEST_STRUCTURE_SIZE));
+        assert_eq!(encoded.last(), Some(&0));
         assert_eq!(le_u16(&encoded, 44), 0);
         assert_eq!(le_u16(&encoded, 46), 0);
+    }
+
+    #[test]
+    fn read_request_rejects_missing_buffer_placeholder() {
+        let mut encoded = read_request(Vec::new()).encode().expect("encode");
+        encoded.pop();
+
+        assert_eq!(
+            Smb2ReadRequest::decode(&encoded),
+            Err(SmbClientError::ShortFrame {
+                expected: usize::from(READ_REQUEST_STRUCTURE_SIZE),
+                actual: READ_REQUEST_FIXED_BYTES
+            })
+        );
     }
 
     #[test]
