@@ -29,17 +29,18 @@ fn same_file_error() -> io::Error {
 
 /// Reject copies whose existing destination resolves to the source file, including
 /// hard links and symlinks. Identity lookup errors other than a missing destination
-/// fail closed. Copy paths also compare the actual opened handles before truncation.
-pub fn ensure_distinct_files(src: &Path, dst: &Path) -> io::Result<()> {
+/// fail closed; return whether a distinct destination existed. Copy paths also compare
+/// the actual opened handles before truncation.
+pub fn ensure_distinct_files(src: &Path, dst: &Path) -> io::Result<bool> {
     let destination = match file_identity(dst) {
         Ok(identity) => identity,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
     if file_identity(src)? == destination {
         return Err(same_file_error());
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(unix)]
@@ -104,7 +105,8 @@ fn handle_identity(_file: &std::fs::File) -> io::Result<(u64, u64)> {
 /// Copy a file using handle-checked `std::io::copy` on a blocking worker.
 ///
 /// The opened destination is compared with the opened source before truncation;
-/// this also applies to mounted SMB/NFS paths.
+/// this also applies to mounted SMB/NFS paths. On Unix, new destinations start
+/// with at most mode 0600; source permissions are applied after copying succeeds.
 pub async fn platform_copy(
     src: impl AsRef<Path>,
     dst: impl AsRef<Path>,
@@ -118,7 +120,9 @@ pub async fn platform_copy(
 
 /// Copy a regular file through `std::io::copy(File, File)` on the blocking pool.
 ///
-/// This fallback preserves the permissions of an existing destination.
+/// This fallback preserves permissions of existing destinations. On Unix, new
+/// destinations start with at most mode 0600 and receive source permissions only
+/// after a successful copy.
 pub async fn stream_file_copy(
     src: impl AsRef<Path>,
     dst: impl AsRef<Path>,
@@ -141,12 +145,18 @@ fn copy_open_handles(
             "source is not a regular file",
         ));
     }
-    ensure_distinct_files(src, dst)?;
+    let destination_existed = ensure_distinct_files(src, dst)?;
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    copy_open_handles_after_preflight(src, dst, copy_permissions)
+    copy_open_handles_after_preflight(
+        src,
+        dst,
+        copy_permissions,
+        destination_existed,
+        std::io::copy,
+    )
 }
 
 /// Copy using handles after the path preflight and parent creation have succeeded.
@@ -154,6 +164,8 @@ fn copy_open_handles_after_preflight(
     src: &Path,
     dst: &Path,
     copy_permissions: bool,
+    destination_existed: bool,
+    copy: impl FnOnce(&mut std::fs::File, &mut std::fs::File) -> io::Result<u64>,
 ) -> Result<u64, PlatformCopyError> {
     let mut src_file = std::fs::File::open(src)?;
     let src_metadata = src_file.metadata()?;
@@ -162,11 +174,17 @@ fn copy_open_handles_after_preflight(
             "source is not a regular file",
         ));
     }
-    let mut dst_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dst)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Restrict creation itself, before any bytes can be written. This also
+        // covers a missing target reached through a symlink, without changing
+        // the permissions of an existing destination (or its symlink target).
+        options.mode(0o600);
+    }
+    let mut dst_file = options.open(dst)?;
 
     // The handles, not the earlier paths, are authoritative. Truncation and
     // copying use this exact destination handle, so later path replacement
@@ -175,8 +193,8 @@ fn copy_open_handles_after_preflight(
         return Err(PlatformCopyError::Io(same_file_error()));
     }
     dst_file.set_len(0)?;
-    let copied = std::io::copy(&mut src_file, &mut dst_file)?;
-    if copy_permissions {
+    let copied = copy(&mut src_file, &mut dst_file)?;
+    if copy_permissions || (cfg!(unix) && !destination_existed) {
         dst_file.set_permissions(src_metadata.permissions())?;
     }
     if let Ok(mtime) = src_metadata.modified() {
@@ -250,13 +268,21 @@ mod tests {
         std::fs::write(&src, b"keep original bytes").expect("source");
         std::fs::write(&dst, b"distinct destination").expect("destination");
 
-        ensure_distinct_files(&src, &dst).expect("path preflight sees distinct files");
+        let destination_existed =
+            ensure_distinct_files(&src, &dst).expect("path preflight sees distinct files");
+        assert!(destination_existed);
         // Replace the target after path preflight but before the actual handles
         // are opened, then exercise the exact handle-copy path used by both APIs.
         std::fs::remove_file(&dst).expect("remove original destination");
         std::fs::hard_link(&src, &dst).expect("create concurrent alias");
-        let error = copy_open_handles_after_preflight(&src, &dst, false)
-            .expect_err("the compared handles must reject the new alias");
+        let error = copy_open_handles_after_preflight(
+            &src,
+            &dst,
+            false,
+            destination_existed,
+            std::io::copy,
+        )
+        .expect_err("the compared handles must reject the new alias");
 
         assert!(matches!(error, PlatformCopyError::Io(ref error)
             if error.kind() == io::ErrorKind::InvalidInput));
@@ -347,6 +373,72 @@ mod tests {
             .expect("reset destination permissions");
         stream_file_copy_blocking(&src, &dst).expect("stream copy");
         assert_eq!(std::fs::metadata(&dst).unwrap().mode() & 0o777, 0o640);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_copy_targets_are_restrictive_before_writing_and_after_partial_failure() {
+        use std::io::Write;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        for copy_permissions in [true, false] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let src = temp.path().join("src");
+            let dst = temp.path().join("dst");
+            std::fs::write(&src, b"contents").unwrap();
+            std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+            let error = copy_open_handles_after_preflight(
+                &src,
+                &dst,
+                copy_permissions,
+                false,
+                |_, target| {
+                    let metadata = target.metadata()?;
+                    assert_eq!(metadata.len(), 0);
+                    assert_eq!(metadata.mode() & 0o7777 & !0o600, 0);
+                    target.write_all(b"partial")?;
+                    Err(io::Error::other("simulated copy failure"))
+                },
+            )
+            .expect_err("copy must fail after writing partial data");
+
+            assert!(matches!(error, PlatformCopyError::Io(ref e)
+                if e.to_string() == "simulated copy failure"));
+            assert_eq!(std::fs::read(&dst).unwrap(), b"partial");
+            assert_eq!(std::fs::metadata(&dst).unwrap().mode() & 0o7777 & !0o600, 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_copy_targets_receive_source_permissions_only_after_success() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        for copy in [platform_copy_blocking, stream_file_copy_blocking] {
+            // Exercise direct and dangling-symlink destinations while preserving
+            // the existing link-following behavior.
+            for through_symlink in [false, true] {
+                let temp = tempfile::tempdir().expect("tempdir");
+                let src = temp.path().join("src");
+                let dst = temp.path().join("dst");
+                let target = temp.path().join("target");
+                std::fs::write(&src, b"contents").unwrap();
+                std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
+                if through_symlink {
+                    std::os::unix::fs::symlink(&target, &dst).unwrap();
+                }
+
+                assert_eq!(copy(&src, &dst).expect("copy"), 8);
+                assert_eq!(std::fs::read(&dst).unwrap(), b"contents");
+                let mode = std::fs::metadata(&dst).unwrap().mode() & 0o7777;
+                assert_eq!(mode, 0o644);
+                if through_symlink {
+                    assert!(std::fs::symlink_metadata(&dst).unwrap().is_symlink());
+                    assert_eq!(std::fs::read(&target).unwrap(), b"contents");
+                }
+            }
+        }
     }
 
     #[tokio::test]

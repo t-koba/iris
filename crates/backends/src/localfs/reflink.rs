@@ -130,8 +130,8 @@ fn clone_new_file(src: &Path, dst: &Path) -> Result<Option<OwnedStagingFile>, io
     }
 }
 
-/// `FICLONE` shares the data blocks but the destination is a new inode: it starts with the
-/// current time and default permissions, so exactly those two are set from the source.
+/// `FICLONE` shares data blocks into a new inode with a private initial mode; source permissions
+/// and mtime are applied only after the clone succeeds.
 #[cfg(target_os = "linux")]
 fn clone_new_file(src: &Path, dst: &Path) -> Result<Option<OwnedStagingFile>, io::Error> {
     use std::fs::File;
@@ -145,10 +145,7 @@ fn clone_new_file(src: &Path, dst: &Path) -> Result<Option<OwnedStagingFile>, io
 
     let src_file = File::open(src)?;
     let src_metadata = src_file.metadata()?;
-    let dst_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(dst)?;
+    let dst_file = new_clone_destination(dst)?;
 
     let staging = OwnedStagingFile::new(dst);
     let result = unsafe { ioctl(dst_file.as_raw_fd(), FICLONE, src_file.as_raw_fd()) };
@@ -163,6 +160,17 @@ fn clone_new_file(src: &Path, dst: &Path) -> Result<Option<OwnedStagingFile>, io
     Ok(Some(staging))
 }
 
+#[cfg(target_os = "linux")]
+fn new_clone_destination(path: &Path) -> Result<std::fs::File, io::Error> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn clone_new_file(_src: &Path, _dst: &Path) -> Result<Option<OwnedStagingFile>, io::Error> {
     Ok(None)
@@ -172,6 +180,25 @@ fn clone_new_file(_src: &Path, _dst: &Path) -> Result<Option<OwnedStagingFile>, 
 mod tests {
     use super::*;
     use std::time::{Duration, SystemTime};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn new_clone_destination_is_restrictive_before_partial_contents() {
+        use std::io::Write;
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let staging = temp.path().join("staging");
+        let mut file = new_clone_destination(&staging).expect("private staging file");
+        let private_mode =
+            |path: &Path| std::fs::metadata(path).unwrap().mode() & 0o7777 & !0o600 == 0;
+        assert!(private_mode(&staging));
+        file.write_all(b"partial clone").expect("partial contents");
+        assert!(private_mode(&staging));
+        drop(file);
+        assert_eq!(std::fs::read(&staging).unwrap(), b"partial clone");
+        assert!(private_mode(&staging));
+    }
 
     #[test]
     fn occupied_staging_candidate_is_never_removed_or_overwritten() {
