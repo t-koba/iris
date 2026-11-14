@@ -11,6 +11,7 @@ prototype = (root / ".github/workflows/windows-ffmpeg-prototype.yml").read_text(
 linux = (root / ".github/workflows/linux-ffmpeg-validation.yml").read_text(encoding="utf-8")
 
 macos = (root / ".github/workflows/macos-runtime-validation.yml").read_text(encoding="utf-8")
+release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
 macos_call = "uses: ./.github/workflows/macos-runtime-validation.yml"
 bootstrap_timeout = (
     "Downloading https://github.com/microsoft/vcpkg-tool/releases/download/2026-10-29/vcpkg.exe "
@@ -69,6 +70,16 @@ def prototype_event_contract(event):
         and all(any(fnmatchcase(path, pattern) for pattern in paths) for path in positive_paths)
         and not any(fnmatchcase(path, pattern) for path in negative_paths for pattern in paths)
     )
+
+main_tag_guard = """      - name: Verify tag commit belongs to main
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "release tags must point to a commit reachable from main" >&2
+            exit 1
+          fi
+"""
 
 checks = {
     "CI mizu exclusion and all-tag filter": """  push:
@@ -188,6 +199,14 @@ permissions:
             "Native SMB 3.0 AES-CCM compatibility",
             "Native SMB 2.1 signed compatibility",
             "Fuzz smoke",
+        )
+    ),
+    "Release tags are checked against main before package jobs": (
+        "          fetch-depth: 0\n" in release
+        and main_tag_guard in release
+        and all(
+            f"  {job}:\n    needs: release-preflight\n" in release
+            for job in ("package-macos", "package-linux", "package-windows")
         )
     ),
     "CI manual, pull-request, and scheduled triggers": all(
