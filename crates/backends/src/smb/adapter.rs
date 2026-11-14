@@ -37,14 +37,16 @@ pub struct SmbAdapter {
     pool: Arc<SmbPool>,
     ticket_counter: AtomicU64,
     listing: SmbListingConfig,
-    list_cursors: Mutex<HashMap<String, NativeListCursor>>,
+    list_cursors: Arc<Mutex<HashMap<String, NativeListCursor>>>,
+    cursor_reaper: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    cursor_reaper_wake: Arc<tokio::sync::Notify>,
 }
 
 struct NativeListCursor {
     directory: ObjectRef,
     generation: u64,
     enumeration: SmbDirectoryEnumeration,
-    touched: Instant,
+    touched: Option<Instant>,
 }
 
 async fn close_list_cursors(
@@ -92,7 +94,9 @@ impl SmbAdapter {
     pub fn new(config: SmbConnectionConfig, backend_id: BackendId) -> Self {
         Self {
             listing: config.listing.clone(),
-            list_cursors: Mutex::new(HashMap::new()),
+            list_cursors: Arc::new(Mutex::new(HashMap::new())),
+            cursor_reaper: Mutex::new(None),
+            cursor_reaper_wake: Arc::new(tokio::sync::Notify::new()),
             pool: Arc::new(SmbPool::new(config)),
             backend_id,
             ticket_counter: AtomicU64::new(1),
@@ -145,12 +149,85 @@ impl SmbAdapter {
         result
     }
 
+    fn start_cursor_reaper(&self) {
+        let mut task = self
+            .cursor_reaper
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if task.is_some() {
+            return;
+        }
+
+        let cursors = Arc::downgrade(&self.list_cursors);
+        let pool = Arc::downgrade(&self.pool);
+        let wake = self.cursor_reaper_wake.clone();
+        let idle_timeout = self.listing.idle_timeout;
+        *task = Some(tokio::spawn(async move {
+            loop {
+                let Some(registry) = cursors.upgrade() else {
+                    break;
+                };
+                let deadline = registry
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .values()
+                    .filter_map(|state| {
+                        state
+                            .touched
+                            .and_then(|touched| touched.checked_add(idle_timeout))
+                    })
+                    .min();
+                drop(registry);
+
+                match deadline {
+                    Some(deadline) => {
+                        tokio::select! {
+                            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
+                            _ = wake.notified() => {}
+                        }
+                    }
+                    None => wake.notified().await,
+                }
+
+                let Some(registry) = cursors.upgrade() else {
+                    break;
+                };
+                let now = Instant::now();
+                let expired = {
+                    let mut registry = registry.lock().unwrap_or_else(|error| error.into_inner());
+                    let keys = registry
+                        .iter()
+                        .filter(|(_, state)| {
+                            state
+                                .touched
+                                .is_some_and(|touched| now.duration_since(touched) >= idle_timeout)
+                        })
+                        .map(|(key, _)| key.clone())
+                        .collect::<Vec<_>>();
+                    keys.into_iter()
+                        .filter_map(|key| registry.remove(&key))
+                        .collect::<Vec<_>>()
+                };
+                drop(registry);
+
+                for mut cursor in expired {
+                    if cursor.enumeration.close().await.is_err() {
+                        if let Some(pool) = pool.upgrade() {
+                            pool.invalidate(cursor.generation).await;
+                        }
+                    }
+                }
+            }
+        }));
+    }
+
     async fn list_names_native(
         &self,
         native: &SmbNativeSession,
         dir: &ObjectRef,
         cursor: Option<ListCursor>,
     ) -> Result<ListPage, BackendError> {
+        self.start_cursor_reaper();
         // Take ownership before any await. Cancellation drops these states and
         // synchronously shuts down their actors; no lock spans SMB I/O.
         let (state, expired) = {
@@ -159,8 +236,9 @@ impl SmbAdapter {
             let keys = registry
                 .iter()
                 .filter(|(_, state)| {
-                    now.duration_since(state.touched) >= self.listing.idle_timeout
-                        || state.generation < native.generation
+                    state.touched.is_some_and(|touched| {
+                        now.duration_since(touched) >= self.listing.idle_timeout
+                    }) || state.generation < native.generation
                 })
                 .map(|(key, _)| key.clone())
                 .collect::<Vec<_>>();
@@ -200,7 +278,7 @@ impl SmbAdapter {
                 )
                 .await
                 .map_err(|error| smb_network_error("open directory", error))?,
-                touched: Instant::now(),
+                touched: Some(Instant::now()),
             },
         };
         let mut entries = Vec::new();
@@ -237,14 +315,16 @@ impl SmbAdapter {
                     .map(|byte| format!("{byte:02x}"))
                     .collect::<String>()
             );
-            state.touched = Instant::now();
+            // Do not start the idle period until the cursor is actually
+            // returned; closing evicted handles below may take time.
+            state.touched = None;
             let evicted = {
                 let mut registry = self.list_cursors.lock().unwrap();
                 let mut evicted = Vec::new();
                 if registry.len() >= self.listing.max_active.get() {
                     if let Some(key) = registry
                         .iter()
-                        .min_by_key(|(_, state)| state.touched)
+                        .min_by_key(|(_, state)| state.touched.unwrap_or_else(Instant::now))
                         .map(|(key, _)| key.clone())
                     {
                         evicted.extend(registry.remove(&key));
@@ -259,6 +339,17 @@ impl SmbAdapter {
                 drop(self.list_cursors.lock().unwrap().remove(&token));
                 return Err(error);
             }
+            let registered = {
+                let mut registry = self.list_cursors.lock().unwrap();
+                registry.get_mut(&token).is_some_and(|state| {
+                    state.touched = Some(Instant::now());
+                    true
+                })
+            };
+            if !registered {
+                return Err(invalid_list_cursor());
+            }
+            self.cursor_reaper_wake.notify_one();
             Some(ListCursor(token))
         };
         Ok(ListPage {
@@ -829,6 +920,19 @@ impl Drop for NativeSmbReadStream {
             tokio::spawn(async move {
                 let _ = close(&actor, file).await;
             });
+        }
+    }
+}
+
+impl Drop for SmbAdapter {
+    fn drop(&mut self) {
+        if let Some(task) = self
+            .cursor_reaper
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            task.abort();
         }
     }
 }
@@ -1434,6 +1538,37 @@ mod tests {
             .await
             .is_err());
         assert_eq!(counts.closes.load(Ordering::SeqCst), 4);
+        drop(adapter);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn abandoned_native_cursor_closes_at_idle_timeout_without_listing_again() {
+        let counts = Arc::new(ListingCounts::default());
+        let (mut config, server) =
+            start_fake_native_server(FakeNativeScenario::Incremental(counts.clone())).await;
+        config.listing.page_size = std::num::NonZeroUsize::new(1).unwrap();
+        config.listing.idle_timeout = Duration::from_millis(50);
+        let backend = BackendId("smb:idle-expiry".into());
+        let adapter = SmbAdapter::new(config, backend.clone());
+        let root = object_ref(&backend, "");
+        let cursor = adapter
+            .list_names(&root, None)
+            .await
+            .unwrap()
+            .next_cursor
+            .expect("first page has a continuation");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while counts.closes.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("idle cursor reaped without another list call");
+        assert_eq!(counts.closes.load(Ordering::SeqCst), 1);
+        assert!(adapter.list_names(&root, Some(cursor)).await.is_err());
+        assert_eq!(counts.closes.load(Ordering::SeqCst), 1);
         drop(adapter);
         server.await.unwrap();
     }
