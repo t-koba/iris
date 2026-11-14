@@ -224,7 +224,7 @@ jobs:
           bash ./scripts/perf-transfer-containers.sh 2>&1 | tee "$diagnostic_output"
           status=${PIPESTATUS[0]}
           set -e
-          if grep -Fq 'returned unexpected status 0xc000000d' "$diagnostic_output"; then
+          if grep -Eq 'returned unexpected status 0x(c000000d|c0000022)([^[:alnum:]_]|$)' "$diagnostic_output"; then
             echo "Re-running a reduced SMB-only smoke with Samba debug level 10 for bounded SMB diagnostics." >&2
             IRIS_PERF_SKIP_SFTP=1 \
               IRIS_PERF_BYTES=1 \

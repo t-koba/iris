@@ -4,6 +4,7 @@
 from fnmatch import fnmatchcase
 from pathlib import Path
 import re
+import subprocess
 
 root = Path(__file__).resolve().parents[1]
 ci = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -71,6 +72,33 @@ def prototype_event_contract(event):
         and not any(fnmatchcase(path, pattern) for path in negative_paths for pattern in paths)
     )
 
+
+def smb_diagnostic_status_contract():
+    # Exercise the workflow's actual grep pattern, including token boundaries.
+    trigger = re.search(
+        r"if grep -Eq '([^'\n]+)' \"\$diagnostic_output\"; then", ci,
+    )
+    if not trigger:
+        return False
+    cases = {
+        "returned unexpected status 0xc000000d": True,
+        "SMB Ioctl returned unexpected status 0xc0000022": True,
+        'Error: "SMB Ioctl returned unexpected status 0xc0000022"': True,
+        "returned unexpected status 0xc000000d (STATUS_INVALID_PARAMETER)": True,
+        "returned unexpected status 0xc000000d0": False,
+        "returned unexpected status 0xc00000220": False,
+        "returned unexpected status 0xc0000022_suffix": False,
+        "returned unexpected status 0xc000000dx": False,
+        "returned unexpected status 0xc0000001": False,
+        "unrelated log status 0xc0000022": False,
+    }
+    return all(
+        subprocess.run(["grep", "-Eq", trigger[1]], input=line, text=True).returncode
+        == (0 if expected else 1)
+        for line, expected in cases.items()
+    )
+
+
 main_tag_guard = """      - name: Verify tag commit belongs to main
         if: github.event_name == 'push'
         shell: bash
@@ -82,8 +110,8 @@ main_tag_guard = """      - name: Verify tag commit belongs to main
 """
 
 checks = {
-    "CI reruns bounded SMB diagnostics for invalid-parameter failures": (
-        "          if grep -Fq 'returned unexpected status 0xc000000d' \"$diagnostic_output\"; then\n" in ci
+    "CI reruns bounded SMB diagnostics for exact invalid-parameter/access-denied statuses": (
+        smb_diagnostic_status_contract()
         and "IRIS_PERF_SKIP_SFTP=1" in ci
         and "IRIS_PERF_SMB_LOG_LEVEL=10" in ci
         and "          exit \"$status\"\n" in ci
