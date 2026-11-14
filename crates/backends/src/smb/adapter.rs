@@ -1337,7 +1337,9 @@ fn invalid_smb_path(display_path: &str, reason: &'static str) -> BackendError {
 fn smb_network_error(operation: &'static str, error: SmbConnectionError) -> BackendError {
     if matches!(
         &error,
-        SmbConnectionError::UnexpectedStatus { .. } | SmbConnectionError::ShortWrite { .. }
+        SmbConnectionError::UnexpectedStatus { .. }
+            | SmbConnectionError::UnexpectedFsctlStatus { .. }
+            | SmbConnectionError::ShortWrite { .. }
     ) {
         return BackendError::Internal(Box::new(std::io::Error::other(format!(
             "SMB native {operation} failed: {error}"
@@ -1409,11 +1411,19 @@ mod tests {
     }
 
     #[test]
-    fn smb_status_errors_do_not_trigger_connection_retries() {
+    fn smb_status_and_fsctl_errors_do_not_trigger_connection_retries() {
         let status = smb_network_error(
             "probe",
             SmbConnectionError::UnexpectedStatus {
                 command: Smb2Command::Create,
+                status: 0xc000_0022,
+            },
+        );
+        let fsctl_status = smb_network_error(
+            "server-side copy",
+            SmbConnectionError::UnexpectedFsctlStatus {
+                name: "FSCTL_SRV_COPYCHUNK",
+                ctl_code: FSCTL_SRV_COPYCHUNK,
                 status: 0xc000_0022,
             },
         );
@@ -1425,6 +1435,7 @@ mod tests {
         );
 
         assert!(matches!(status, BackendError::Internal(_)));
+        assert!(matches!(fsctl_status, BackendError::Internal(_)));
         assert!(matches!(disconnect, BackendError::Network(_)));
     }
 
