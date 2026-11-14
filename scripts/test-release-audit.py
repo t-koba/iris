@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Light offline regressions; no native package build or dependency installation."""
 import argparse
+import copy
 import hashlib
 import importlib.util
 import json
@@ -397,6 +398,10 @@ class Reports(unittest.TestCase):
             self.assertTrue({str(root), str(library)}.issubset({r["path"] for r in files}))
             self.assertTrue(any(c[:2] == ("readelf", "-d") and c[-1] == str(library) for c in calls))
             self.assertTrue(any("probe-library" in c and c[-1] == str(library) for c in calls))
+            owner = next(r for r in report.records if r["kind"] == "system-dependency")
+            self.assertEqual(owner, dict(kind="system-dependency", platform="linux", path=str(library),
+                                         sha256=module.Audit.sha256_file(library),
+                                         package="libavcodec99", owner="libavcodec99:amd64"))
             self.assertIn(("apt-cache", "policy", "libavcodec99:amd64"), calls)
             self.assertTrue(any(c[:2] == ("dpkg-query", "-W") and c[-1] == "libavcodec99:amd64" for c in calls))
             self.assertTrue(any(r.get("dependency") == "libmissing.so => not found" for r in report.records))
@@ -405,6 +410,34 @@ class Reports(unittest.TestCase):
             with patch.object(limited, "command", side_effect=command):
                 list(limited.closure([root], "linux"))
             self.assertTrue(any(r.get("reason") == "native closure scan limit reached" for r in limited.records))
+
+    def test_linux_owner_requires_exact_dpkg_path_and_retains_usr_merge_binding(self):
+        path = "/usr/lib/synthetic/libgcc_s.so.1"
+        alias = path[4:]
+        for replies, expected in (
+            ({path: "libgcc-s1:amd64: " + path}, True),
+            ({alias: "libgcc-s1:amd64: " + alias}, True),
+            ({path: "libgcc-s1:amd64: " + path + ".other"}, False),
+            ({path: "libgcc-s1:amd64: /other/libgcc_s.so.1"}, False),
+            ({path: "diversion by libgcc-s1: " + path}, False),
+            ({}, False),
+        ):
+            with self.subTest(replies=replies):
+                report = audit()
+                report.add("native-file", path=path, bytes=12, sha256="a" * 64)
+                def command(*argv):
+                    return replies.get(argv[-1], "") if argv[:2] == ("dpkg-query", "-S") else ""
+                with patch.object(report, "closure", return_value=iter([Path(path)])), patch.object(
+                        report, "command", side_effect=command), patch.object(report, "file") as file:
+                    report.linux([Path(path)])
+                owners = [r for r in report.records if r["kind"] == "system-dependency"]
+                if expected:
+                    self.assertEqual(owners, [dict(kind="system-dependency", platform="linux", path=path,
+                                                  sha256="a" * 64, package="libgcc-s1", owner="libgcc-s1:amd64")])
+                    file.assert_any_call(Path("/usr/share/doc/libgcc-s1/copyright"), text=True)
+                else:
+                    self.assertFalse(owners)
+                    self.assertTrue(any(r["kind"] == "missing" and r.get("path") == path for r in report.records))
 
     def test_ffmpeg_probe_selects_each_exact_linked_library(self):
         report = audit()
@@ -515,6 +548,98 @@ class Reports(unittest.TestCase):
             mismatch = report.pdfium_attestation(docs, library)
             self.assertFalse(mismatch["attestation_verified"])
             self.assertEqual(mismatch["attestation_status"], "unknown")
+
+    def test_native_evidence_binds_actual_stage_bytes_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory) / "stage"
+            stage.mkdir()
+            payload, proof = stage / "Iris", stage / "SYNTHETIC-EVIDENCE.txt"
+            payload.write_bytes(b"synthetic executable, NOT a real release")
+            proof.write_text("synthetic link/source/license/notice evidence; NOT legal approval")
+            copyright = Path(directory) / "copyright"
+            copyright.write_text("SYNTHETIC OS package copyright; NOT production license evidence")
+            sidecar = Path(directory) / "closure.json"
+            ref = lambda p: dict(path=str(p), sha256=module.Audit.sha256_file(p))
+            payload_ref, proof_ref = ref(payload), ref(proof)
+            modes = ("static", "embedded", "dynamic", "dlopen")
+            value = dict(schema=1, artifacts=[dict(file=ref(p), coverage={
+                mode: dict(components=[mode] if p == payload else [], evidence=[proof_ref])
+                for mode in modes}) for p in (payload, proof)], components=[dict(
+                    id=mode, artifact=payload_ref, mode=mode, name="synthetic-" + mode,
+                    source=dict(origin="https://example.invalid/synthetic", revision="test-revision", evidence=[proof_ref]),
+                    modifications=dict(status="unmodified", evidence=[proof_ref]),
+                    license=dict(id="MIT", disposition="allowed", evidence=[ref(copyright)]),
+                    obligations={key: dict(status="provided", evidence=[proof_ref])
+                                 for key in ("notice", "source", "relinking")}) for mode in modes])
+
+            def collect(content=None, **limits):
+                if content is not None:
+                    sidecar.write_text(content)
+                report = audit(max_native_components=16, **limits)
+                report.file(payload, native=True)
+                report.file(copyright, text=True)
+                report.native_evidence(stage, sidecar)
+                return report
+
+            report = collect(json.dumps(value))
+            self.assertFalse(any(r["kind"] == "missing" for r in report.records), report.records)
+            closure = next(r["evidence"] for r in report.records if r["kind"] == "native-closure")
+            self.assertEqual(len(module.validate_closure(closure, report.records, 256, 16)), 4)
+            # Reusing the same sidecar after a proof or payload change must not pass.
+            for path in (proof, payload, copyright):
+                original = path.read_bytes()
+                path.write_bytes(original + b"tampered")
+                failed = collect()
+                self.assertTrue(any(r["kind"] == "missing" for r in failed.records))
+                self.assertFalse(any(r["kind"] == "native-closure" for r in failed.records))
+                path.write_bytes(original)
+            def path_only(item):
+                if isinstance(item, list):
+                    return [path_only(child) for child in item]
+                if isinstance(item, dict):
+                    if set(item) == {"path", "sha256"}:
+                        return dict(path=item["path"] if item["path"] == str(copyright) else Path(item["path"]).name)
+                    return {key: path_only(child) for key, child in item.items()}
+                return item
+
+            manifest = path_only(value)
+            for path in (payload, proof):
+                original = path.read_bytes()
+                path.write_bytes(original + b"new build")
+                fresh = collect(json.dumps(manifest))
+                self.assertFalse(any(r["kind"] == "missing" for r in fresh.records))
+                inventory = next(r for r in fresh.records if r["kind"] == "staged-file" and r["path"] == str(path))
+                self.assertEqual(inventory["bytes"], len(original + b"new build"))
+                self.assertEqual(inventory["sha256"], module.Audit.sha256_file(path))
+                path.write_bytes(original)
+            for bad_path in ("../Iris", "./Iris", "dir//Iris", "dir/../Iris", "dir\\Iris",
+                             "C:/Iris", "Iris/", "absent", "Iri*", "Iris\n", ""):
+                invalid = copy.deepcopy(manifest)
+                invalid["artifacts"][0]["file"]["path"] = bad_path
+                failed = collect(json.dumps(invalid))
+                self.assertTrue(any(r["kind"] == "missing" for r in failed.records), bad_path)
+                self.assertFalse(any(r["kind"] == "native-closure" for r in failed.records), bad_path)
+            # Supporting references cannot read arbitrary, uninventoried filesystem paths.
+            invalid = copy.deepcopy(manifest)
+            invalid["components"][0]["source"]["evidence"] = [dict(path="/etc/passwd")]
+            self.assertTrue(any(r["kind"] == "missing" for r in collect(json.dumps(invalid)).records))
+            collect(json.dumps(value))
+            extra = stage / "unlisted"
+            extra.write_bytes(b"unlisted payload")
+            self.assertTrue(any(r["kind"] == "missing" for r in collect().records))
+            extra.unlink()
+            for content in ('{"schema":1,"schema":1}', '{"schema":1,"complete":true}',
+                            json.dumps(dict(value, schema=2)), 'true'):
+                failed = collect(content)
+                self.assertTrue(any(r["kind"] == "missing" for r in failed.records))
+                self.assertFalse(any(r["kind"] == "native-closure" for r in failed.records))
+            failed = collect(json.dumps(value), max_native_files=1)
+            self.assertTrue(any(r["kind"] == "missing" for r in failed.records))
+            failed = collect(json.dumps(value), max_report_bytes=256)
+            self.assertFalse(any(r["kind"] == "native-closure" for r in failed.records))
+            self.assertTrue(failed.omitted or any(r["kind"] == "missing" for r in failed.records))
+            sidecar.unlink()
+            self.assertTrue(any(r["kind"] == "missing" for r in collect().records))
 
     def test_cli_missing_outputs_is_bounded_evidence_not_approval(self):
         with tempfile.TemporaryDirectory() as directory:

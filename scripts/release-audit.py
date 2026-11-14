@@ -4,13 +4,15 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+
+from release_evidence import load_json, require, validate_closure
 
 
 class Audit:
@@ -71,16 +73,17 @@ class Audit:
                 text = text.replace(value, replacement)
         return text
 
+    def scrub(self, value):
+        if isinstance(value, str):
+            return self.clean(value)
+        if isinstance(value, list):
+            return [self.scrub(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self.scrub(item) for key, item in value.items()}
+        return value
+
     def add(self, kind, **data):
-        def scrub(value):
-            if isinstance(value, str):
-                return self.clean(value)
-            if isinstance(value, list):
-                return [scrub(item) for item in value]
-            if isinstance(value, dict):
-                return {key: scrub(item) for key, item in value.items()}
-            return value
-        record = scrub(dict(kind=kind, **data))
+        record = self.scrub(dict(kind=kind, **data))
         size = len(json.dumps(record, ensure_ascii=True).encode()) + 2
         if self.used + size > self.args.max_report_bytes:
             self.omitted += 1
@@ -432,21 +435,75 @@ class Audit:
         self.add("cargo-graph", **context, status="absent", reason=reason,
                  packages=[], edges=[])
 
-    def file(self, path, text=False):
+    def file(self, path, text=False, native=False):
         path = Path(path)
         if not path.is_file():
             self.add("missing", path=str(path), reason="file absent (or system shared cache)")
             return
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        data = dict(path=str(path), bytes=path.stat().st_size, sha256=digest.hexdigest())
+        data = dict(path=str(path), bytes=path.stat().st_size, sha256=self.sha256_file(path))
+        if native:
+            self.add("native-file", **data)
         if text:
             with path.open("rb") as stream:
                 data["text"] = stream.read(self.args.max_command_bytes).decode("utf-8", "replace")
             data["truncated"] = data["bytes"] > self.args.max_command_bytes
         self.add("file", **data)
+
+    def bind_native_references(self, value, directory):
+        """Resolve manifest references only against bytes already inventoried, never arbitrary files."""
+        catalog = {row["path"]: row["sha256"] for row in self.records
+                   if row["kind"] in ("staged-file", "native-file", "file")}
+
+        def bind(item):
+            if isinstance(item, list):
+                return [bind(child) for child in item]
+            if not isinstance(item, dict):
+                return item
+            if set(item) in ({"path"}, {"path", "sha256"}):
+                path = item["path"]
+                require(isinstance(path, str), "invalid native manifest path")
+                normalized = self.clean(path)
+                if normalized not in catalog:
+                    # Stage-relative paths use one portable, exact spelling on every runner.
+                    relative = PurePosixPath(path)
+                    require(path and not relative.is_absolute() and str(relative) == path
+                            and not any(part in (".", "..") for part in relative.parts)
+                            and not any(char in path for char in "\\:\r\n\t\0"),
+                            "native manifest path must be exact stage-relative or inventoried file path")
+                    normalized = self.clean(str(directory.absolute().joinpath(*relative.parts)))
+                require(normalized in catalog, "native manifest reference not inventoried: " + path)
+                require("sha256" not in item or item["sha256"] == catalog[normalized],
+                        "mismatched native manifest hash: " + path)
+                return dict(path=normalized, sha256=catalog[normalized])
+            return {key: bind(child) for key, child in item.items()}
+
+        return bind(value)
+
+    def native_evidence(self, directory, evidence_path):
+        """Hash the stage and bind reviewed manifest paths to the collected inventory."""
+        try:
+            require(directory.is_dir() and not directory.is_symlink(), "staged directory absent/unsupported")
+            count, pending = 0, [directory]
+            while pending:
+                with os.scandir(pending.pop()) as entries:
+                    for entry in entries:
+                        count += 1
+                        require(count <= self.args.max_native_files, "staged inventory scan limit reached")
+                        path = Path(entry.path)
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(path)
+                            continue
+                        require(path.is_file() and path.resolve().is_relative_to(directory.resolve()),
+                                "unsupported/escaping staged file")
+                        self.add("staged-file", path=str(path.absolute()), bytes=path.stat().st_size,
+                                 sha256=self.sha256_file(path))
+            require(evidence_path is not None and evidence_path.is_file(), "native evidence manifest absent")
+            value = self.scrub(self.bind_native_references(
+                load_json(evidence_path, self.args.max_report_bytes), directory))
+            validate_closure(value, self.records, self.args.max_native_files, self.args.max_native_components)
+            self.add("native-closure", evidence=value)
+        except (OSError, ValueError, TypeError, KeyError, RecursionError) as error:
+            self.add("missing", reason="native evidence: " + str(error))
 
     def ffmpeg(self, path):
         if re.match(r"lib(?:avcodec|avformat|avutil|avdevice|avfilter|swscale|swresample)[.-]", path.name):
@@ -462,12 +519,24 @@ class Audit:
             # Debian's /usr merge means the package database may use either spelling.
             spelling = str(path)
             owners = self.command("dpkg-query", "-S", spelling)
+            query_path = spelling
             if not owners and spelling.startswith("/usr/"):
-                owners = self.command("dpkg-query", "-S", spelling[4:])
+                query_path = spelling[4:]
+                owners = self.command("dpkg-query", "-S", query_path)
             found = False
             for line in owners.splitlines():
-                if ": /" in line:
-                    packages.add(line.split(": /", 1)[0])
+                owner, separator, owned_path = line.partition(": /")
+                if separator and "/" + owned_path == query_path and re.fullmatch(
+                        r"[a-z0-9][a-z0-9+.-]*(?::[a-z0-9][a-z0-9-]*)?", owner):
+                    packages.add(owner)
+                    # Keep the raw dpkg owner and an architecture-independent package identity.
+                    native = next((row for row in self.records
+                                   if row["kind"] == "native-file" and row["path"] == self.clean(spelling)), None)
+                    if native is None:
+                        self.add("missing", path=spelling, reason="package owner lacks native file hash")
+                        continue
+                    self.add("system-dependency", platform="linux", path=spelling, sha256=native["sha256"],
+                             package=owner.split(":", 1)[0], owner=owner)
                     found = True
             if not found:
                 self.add("missing", path=spelling, reason="no Debian package owner; see bundled PDFium evidence if applicable")
@@ -485,7 +554,7 @@ class Audit:
             if path in seen:
                 continue
             seen.add(path)
-            self.file(path)
+            self.file(path, native=True)
             if not path.is_file():
                 continue
             self.ffmpeg(path)
@@ -557,7 +626,8 @@ class Audit:
         self.add("scope", note="otool describes exact staged load commands. System shared-cache libraries may have no readable bytes. Homebrew metadata/receipts are available provenance candidates, not proof of source patches or license compatibility. dlopen-only runtimes not staged here remain unknown.")
 
     def windows(self, executable):
-        self.file(executable)
+        executable = executable.resolve()
+        self.file(executable, native=True)
         payload = sorted(p for p in executable.parent.rglob("*") if p.is_file())
         self.add("windows-payload", files=[str(p) for p in payload],
                  ffmpeg_pdfium_files=[str(p) for p in payload if re.search(
@@ -617,6 +687,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("platform", choices=("macos", "linux", "windows"))
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--native-evidence", type=Path, help="reviewed native closure JSON manifest; paths relative to dist/<platform> (not approval)")
+    parser.add_argument("--max-native-components", type=int,
+                        default=os.environ.get("IRIS_RELEASE_AUDIT_MAX_NATIVE_COMPONENTS", "4096"))
     parser.add_argument("--max-report-bytes", type=int,
                         default=os.environ.get("IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES", "2097152"))
     parser.add_argument("--max-command-bytes", type=int,
@@ -631,11 +704,12 @@ def main():
                         default=os.environ.get("IRIS_RELEASE_AUDIT_COMMAND_SECONDS", "30"))
     args = parser.parse_args()
     if min(args.max_report_bytes, args.max_command_bytes, args.max_native_files, args.command_seconds,
-           args.max_metadata_bytes, args.max_cargo_packages) < 1:
+           args.max_metadata_bytes, args.max_cargo_packages, args.max_native_components) < 1:
         parser.error("all bounds must be positive")
     limits = vars(args).copy()
     del limits["output"]
-    minimum_report = dict(schema=1, platform=args.platform, limits=limits,
+    del limits["native_evidence"]
+    minimum_report = dict(schema=2, platform=args.platform, limits=limits,
                           omitted_records=0, records=[])
     if len((json.dumps(minimum_report, ensure_ascii=True) + "\n").encode()) > args.max_report_bytes:
         parser.error("report budget is too small for its metadata")
@@ -670,8 +744,9 @@ def main():
         audit.macos([contents / "MacOS/Iris", *sorted((contents / "Frameworks").glob("*.dylib"))])
     else:
         audit.windows(directory / "Iris/Iris.exe")
+    audit.native_evidence(directory, args.native_evidence)
     while True:
-        report = dict(schema=1, platform=args.platform, limits=limits,
+        report = dict(schema=2, platform=args.platform, limits=limits,
                       omitted_records=audit.omitted, records=audit.records)
         encoded = json.dumps(report, ensure_ascii=True) + "\n"
         if len(encoded.encode()) <= args.max_report_bytes:

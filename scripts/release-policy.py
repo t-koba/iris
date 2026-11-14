@@ -9,42 +9,15 @@ import shlex
 import sys
 import tomllib
 
+from release_evidence import OBLIGATIONS, inventory, load_json, parse_json, require, strings, text, validate_closure
+
 ROOT = Path(__file__).resolve().parent.parent
 AUDIT_RECORD_KINDS = frozenset({
     "build", "cargo-graph", "cargo-metadata-command", "cargo-tree-command",
     "command", "file", "homebrew", "missing", "provenance-check",
     "provenance-match", "scope", "system-dependency", "windows-payload",
+    "staged-file", "native-file", "native-closure",
 })
-
-
-def require(condition, message):
-    if not condition:
-        raise ValueError(message)
-
-
-def text(value):
-    return isinstance(value, str) and bool(value.strip())
-
-
-def strings(value):
-    return isinstance(value, list) and all(text(item) for item in value)
-
-
-def parse_json(content):
-    def unique(pairs):
-        result = {}
-        for key, value in pairs:
-            require(key not in result, "duplicate JSON key")
-            result[key] = value
-        return result
-    return json.loads(content, object_pairs_hook=unique)
-
-
-def load_json(path, max_bytes):
-    with Path(path).open("rb") as stream:
-        raw = stream.read(max_bytes + 1)
-    require(len(raw) <= max_bytes, "JSON exceeds configured byte limit")
-    return parse_json(raw.decode("utf-8"))
 
 
 def load_policy(path, max_bytes):
@@ -64,7 +37,7 @@ def load_policy(path, max_bytes):
     for review in policy["lgpl_legal_approvals"]:
         require(isinstance(review, dict) and set(review) == {"domain", "subject", "license", "review"}
                 and all(text(value) for value in review.values())
-                and review["domain"] in ("cargo", "ffmpeg")
+                and review["domain"] in ("cargo", "ffmpeg", "native")
                 and review["license"] in groups[2], "invalid scoped LGPL legal review")
     require(isinstance(policy.get("required_variants"), dict)
             and set(policy["required_variants"]) == {"linux", "macos", "windows"}
@@ -74,6 +47,31 @@ def load_policy(path, max_bytes):
         "invalid FFmpeg license mapping")
     require(type(policy.get("require_complete_native_license_closure")) is bool,
             "invalid native closure policy")
+    exceptions = policy.get("native_license_exceptions")
+    require(isinstance(exceptions, list), "invalid native license exceptions")
+    for row in exceptions:
+        require(isinstance(row, dict) and set(row) == {"license", "name", "platform", "modes",
+                                                    "artifact_scope", "system_package", "required_obligations"}
+                and text(row["license"]) and re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9.+-]* WITH [A-Za-z0-9][A-Za-z0-9.+-]*", row["license"])
+                and text(row["name"]) and "/" not in row["name"] and "\\" not in row["name"]
+                and row["platform"] in policy["required_variants"]
+                and row["artifact_scope"] == "external" and text(row["system_package"])
+                and strings(row["required_obligations"])
+                and len(row["required_obligations"]) == len(set(row["required_obligations"]))
+                and set(row["required_obligations"]) <= set(OBLIGATIONS)
+                and strings(row["modes"]) and row["modes"]
+                and len(row["modes"]) == len(set(row["modes"]))
+                and set(row["modes"]) <= {"static", "embedded", "dynamic", "dlopen"},
+                "invalid scoped native license exception")
+    exception_scopes = [(row["license"], row["name"], row["platform"], mode)
+                        for row in exceptions for mode in row["modes"]]
+    require(len(exception_scopes) == len(set(exception_scopes)),
+            "overlapping native license exceptions")
+    obligations = policy.get("native_required_obligations")
+    require(isinstance(obligations, dict) and set(obligations) == {"allowed", "review"}
+            and all(strings(v) and len(v) == len(set(v)) and set(v) <= set(OBLIGATIONS)
+                    for v in obligations.values()), "invalid native obligations policy")
     return policy
 
 
@@ -246,13 +244,11 @@ def native(records, policy):
         r"(?:^|/)lib(?:avcodec|avformat|avutil|avdevice|avfilter|swscale|swresample)[.-]", path)}
     if expected - probes.keys() or set(policy["ffmpeg_components"]) - set(probes.values()):
         errors.append("FFmpeg: absent exact-library native license/configuration evidence")
-    if policy["require_complete_native_license_closure"]:
-        errors.append("schema 1 cannot establish complete native license closure: static code, dlopen-only dependencies and vendor patches have no structured review evidence")
     return errors
 
 
 def validate(report, policy, workspace):
-    require(isinstance(report, dict) and type(report.get("schema")) is int and report["schema"] == 1,
+    require(isinstance(report, dict) and type(report.get("schema")) is int and report["schema"] in (1, 2),
             "unsupported audit schema")
     platform = report.get("platform")
     require(platform in policy["required_variants"], "unknown audit platform")
@@ -303,6 +299,46 @@ def validate(report, policy, workspace):
         if len(rows) != 1 or rows[0].get("attestation_verified") is not True:
             errors.append("Linux PDFium: verified provenance-check attestation required")
     errors.extend(native(records, policy))
+    closures = [row for row in records if row["kind"] == "native-closure"]
+    if policy["require_complete_native_license_closure"] and report["schema"] == 1 and not closures:
+        errors.append("schema 1 cannot establish complete native license closure without schema-2 evidence")
+        return errors
+    if policy["require_complete_native_license_closure"] or closures:
+        require(report["schema"] == 2 and len(closures) == 1,
+                "complete native license closure requires one schema-2 evidence record")
+        require(type(limits.get("max_native_components")) is int and limits["max_native_components"] > 0,
+                "invalid native component bound")
+        components = validate_closure(closures[0].get("evidence"), records,
+                                      limits["max_native_files"], limits["max_native_components"])
+        staged, native_files = inventory(records, "staged-file"), inventory(records, "native-file")
+        for component in components:
+            license_id = component["license"]["id"]
+            disposition = component["license"]["disposition"]
+            group = "allowed_licenses" if disposition == "allowed" else "review_licenses"
+            artifact = component["artifact"]
+            # OS runtime exceptions never cover shipped files or ambiguous package ownership.
+            system_owners = [owner for owner in records
+                             if owner["kind"] == "system-dependency" and owner.get("path") == artifact["path"]]
+            exception = next((row for row in policy["native_license_exceptions"]
+                if disposition == "allowed" and row["license"] == license_id
+                and row["name"] == component["name"] == artifact["path"].rsplit("/", 1)[-1]
+                and row["platform"] == platform and component["mode"] in row["modes"]
+                and row["artifact_scope"] == "external" and artifact["path"] not in staged
+                and native_files.get(artifact["path"]) == artifact["sha256"]
+                and len(system_owners) == 1 and system_owners[0].get("platform") == platform
+                and system_owners[0].get("sha256") == artifact["sha256"]
+                and system_owners[0].get("package") == row["system_package"]
+                and isinstance(system_owners[0].get("owner"), str) and re.fullmatch(
+                    re.escape(row["system_package"]) + r"(?::[a-z0-9][a-z0-9-]*)?", system_owners[0]["owner"])), None)
+            require(license_id in policy[group] or exception is not None,
+                    "blocked/unknown native license or mismatched disposition")
+            subject = artifact["path"] + "#sha256=" + artifact["sha256"] + "#component=" + component["id"]
+            require(disposition != "review" or reviewed(policy, "native", subject, license_id),
+                    "native LGPL legal review pending")
+            required = (exception["required_obligations"] if exception is not None
+                        else policy["native_required_obligations"][disposition])
+            require(all(component["obligations"][key]["status"] == "provided" for key in required),
+                    "required native notice/source/relinking evidence absent")
     return errors
 
 
@@ -326,10 +362,10 @@ def main():
                 report = load_json(path, args.max_report_bytes)
                 errors.extend(f"{path.name}: {error}" for error in validate(report, policy, workspace))
                 platforms.append(report["platform"])
-            except (OSError, ValueError, TypeError, KeyError) as error:
+            except (OSError, ValueError, TypeError, KeyError, RecursionError) as error:
                 errors.append(f"{path.name}: invalid/incomplete report: {error}")
         require(sorted(platforms) == sorted(policy["required_variants"]), "exactly one valid report for each release platform required")
-    except (OSError, ValueError, TypeError, KeyError) as error:
+    except (OSError, ValueError, TypeError, KeyError, RecursionError) as error:
         errors.append(str(error))
     print("policy check only — not legal/compliance approval: " + ("BLOCKED" if errors else "PASS"))
     for error in errors:

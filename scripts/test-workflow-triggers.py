@@ -111,6 +111,17 @@ main_tag_guard = """      - name: Verify tag commit belongs to main
 """
 
 checks = {
+    "All release audit jobs inherit the operator-configured native component bound": (
+        "\n  IRIS_RELEASE_AUDIT_MAX_NATIVE_COMPONENTS: "
+        "${{ vars.IRIS_RELEASE_AUDIT_MAX_NATIVE_COMPONENTS || 4096 }}\n" in release
+        and release.count("IRIS_RELEASE_AUDIT_MAX_NATIVE_COMPONENTS:") == 1
+        and "--max-native-components" not in release
+    ),
+    "Every production release audit supplies its platform closure manifest": all(
+        f"        run: python scripts/release-audit.py {platform} --output audit/{platform}.json "
+        f"--native-evidence packaging/native-evidence/{platform}.json\n" in release
+        for platform in ("macos", "linux", "windows")
+    ) and len(re.findall(r"run: python scripts/release-audit\.py ", release)) == 3,
     "CI reruns bounded SMB diagnostics for exact invalid-parameter/access-denied statuses": (
         smb_diagnostic_status_contract()
         and "IRIS_PERF_SKIP_SFTP=1" in ci

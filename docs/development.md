@@ -206,10 +206,11 @@ native code の網羅性の保証ではありません。path source は null（
 既定値は `IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES=2097152`、
 `IRIS_RELEASE_AUDIT_MAX_COMMAND_BYTES=32768`、`IRIS_RELEASE_AUDIT_MAX_METADATA_BYTES=8388608`、
 `IRIS_RELEASE_AUDIT_MAX_CARGO_PACKAGES=1024`、`IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES=256`、
+`IRIS_RELEASE_AUDIT_MAX_NATIVE_COMPONENTS=4096`、
 `IRIS_RELEASE_AUDIT_COMMAND_SECONDS=30` と policy JSON の byte limit
-`IRIS_RELEASE_POLICY_MAX_BYTES=65536` です。workflow 実行では同名の GitHub repository variables
-で調整でき、個別実行では `--max-report-bytes`、`--max-command-bytes`、
-`--max-metadata-bytes`、`--max-cargo-packages`、`--max-native-files`、`--command-seconds`、
+`IRIS_RELEASE_POLICY_MAX_BYTES=65536` です。すべて同名の GitHub repository variables
+で調整でき、release の全 audit job に適用されます。個別実行では `--max-report-bytes`、`--max-command-bytes`、
+`--max-metadata-bytes`、`--max-cargo-packages`、`--max-native-files`、`--max-native-components`、`--command-seconds`、
 `--max-policy-bytes` で上書きできます。すべて正の整数で、report budget は
 JSON metadata を保持できる大きさが必要です。抜粋には元ファイル全体の hash と
 `truncated`、容量不足には `omitted_records` が付き、欠落は承認と解釈できません。
@@ -245,8 +246,9 @@ MIT を選べますが、GPL 単独や `MIT AND GPL-3.0-only` は不可です。
 build/proc-macro 専用 package の license は runtime 互換性の判定対象外です。
 
 LGPL の legal-review approval は既定で空です。追加する場合は `lgpl_legal_approvals` に
-`domain` (`cargo` / `ffmpeg`)、`subject`（完全 Cargo package ID、または exact library の
-`<path>#sha256=<digest>`）、`license`（review 対象 ID）、`review`（法的 review の参照）を指定します。
+`domain` (`cargo` / `ffmpeg` / `native`)、`subject`（完全 Cargo package ID、exact library の
+`<path>#sha256=<digest>`、または native component の
+`<artifact-path>#sha256=<digest>#component=<id>`）、`license`（review 対象 ID）、`review`（法的 review の参照）を指定します。
 これは明示的な legal-review approval とその参照を記録する欄であり、このツールが法的承認を与えるものではありません。
 FFmpeg は exact library の hash と probe の path を結び付け、全 license/configuration pair を検査します。
 product の Cargo flags、必要な native component と許可 license 名は JSON で定義し、GPL/version3/nonfree flags、
@@ -256,14 +258,84 @@ Linux PDFium は `provenance-check.attestation_verified == true` が必須です
 Windows は build と graph の `product` variant が必須で、現行 minimal release は公開できません。
 この gate は package 内容・build flags を変更しません。
 
-**現行 schema 1 では公開は引き続き blocked です。** exact FFmpeg probe と PDFium attestation は
-検査できますが、静的 native code・dlopen-only 依存・vendor patch に関する完全な native license closure の
-構造化 review evidence はありません。Windows の PE import 記録にも native license/configuration probe はありません。
-`require_complete_native_license_closure=true` はこの未検証領域を
-明示的に阻止し、Cargo metadata、PE imports、Debian copyright、Homebrew 候補情報から承認を推定しません。
-Iris 自体の license、upstream の法的権限や notice/source 提供義務の履行も本レポートだけでは証明できず、
-このチェックの成功が全体の法的適合性を意味することはありません。
-`scripts/release-audit.py` は引き続き evidence-only の収集機構です。
+#### Native closure evidence（audit schema 2）
+
+collector は audit schema 2 を生成します。`--native-evidence <sidecar.json>` で別途作成・review した
+構造化 evidence を渡すと、staged bytes を再 hash した inventory と照合して `native-closure` record に
+格納します。sidecar と `--output` は `dist/<platform>` の外に置き、検査中に stage を変更しないでください。
+release workflow は `packaging/native-evidence/{macos,linux,windows}.json` を明示的に渡します。
+これらの review 済み manifest と実在する supporting evidence はまだ揃っていないため、**現行 release は引き続き blocked** です。
+旧 audit schema 1、sidecar の欠落、`complete: true` のような宣言だけでは closure 要件を満たしません。
+この入力は package・runtime composition を変更せず、既存の公開 policy gate を迂回しません。
+
+sidecar の schema は独立した整数 `1` で、top-level は `schema`, `artifacts`, `components` のみです。
+未知 field/schema、重複 JSON key、重複 identity、欠落、曖昧な値は拒否します。
+manifest の reference は `{path}` で指定できます。staged/native artifact と supporting staged evidence の
+path は `dist/<platform>` からの exact relative path（`/` 区切り、例: `Iris.AppDir/usr/bin/Iris`）です。
+`..`、`.`、重複 `/`、backslash、drive prefix は不可で、basename/glob による検索はしません。
+stage 外の native dependency は収集済み `native-file` の exact 正規化 path を指定します。
+supporting evidence は staged file のほか、collector が既に hash/size を記録した `file` の exact path も参照できます
+（例: `/usr/share/doc/libgcc-s1/copyright`）。manifest の path を使って任意の filesystem file を読むことはありません。
+collector は実 bytes の SHA-256 と size を inventory に保存し、各 reference を正規化済み絶対 path と
+SHA-256 に展開して report に保持します。事前に build artifact の hash を知る必要はありません。
+`{path, sha256}`（lowercase SHA-256）で pin することもでき、その場合は実 digest との一致が必須です。
+policy validator は path-only 入力を受理せず、report 内の hash と size の整合性を引き続き検査します。
+外部 URL や license filename だけを supporting evidence として渡すことはできません。
+
+- collector の `staged-file` は `dist/<platform>` の全 file（最終 archive/installer と supporting docs を含む）、
+  `native-file` は既存 native scan が読んだ実行 file/library です。native file は通常の `file` hash とも一致が必要です。
+  `artifacts` はこの和集合を過不足なく一度ずつ列挙し、各項目は `file` reference と `coverage` を持ちます。
+- `coverage` は `static`, `embedded`, `dynamic`, `dlopen` の全四区分です。各区分は
+  `{components: [component-id, ...], evidence: [reference, ...]}`。
+  link map、embedded/vendor inventory、loader/import inventory、dlopen/plugin manifest 等を stage に保存し、
+  その digest を指定します。空の component list にも「該当依存なし」を裏付ける evidence が必要です。
+  archive や docs のような非 native artifact も明示的に分類し、空 list の根拠を残します。
+- `components` の各 record は `id`, `artifact`, `mode`, `name`, `source`, `modifications`, `license`,
+  `obligations` のみです。id は report 内で一意、`artifact` は exact artifact reference、`mode` は上記四区分の一つ。
+  coverage と component record は双方向に一致させます。同一 artifact/mode/name の重複も不可です。
+  dynamic と dlopen-only の依存を静的 code の記録や Cargo graph で代用できません。
+- `source` は `{origin, revision, evidence}`。正確な source の由来・revision と、それを裏付ける inventoried evidence を指定します。
+  `modifications` は `{status, evidence}`。status は `unmodified` または `modified` のみで、
+  前者にも source 比較の根拠、後者には vendor patch set/変更内容の evidence が必要です。unknown は不可です。
+- `license` は `{id, disposition, evidence}`。id は policy の単一 license ID、または
+  `native_license_exceptions` に完全一致する `WITH` 式です。一般の SPDX 複合式は受理しません。
+  disposition は `allowed` または `review` で、対応する policy list または native 専用例外の scope と一致が必要です。
+  唯一の例外は Linux の OS 提供 `libgcc_s.so.1`、`GPL-3.0-or-later WITH GCC-exception-3.1`、
+  disposition `allowed` です。component name と artifact の basename が完全一致し、mode は dynamic/dlopen、
+  `artifact_scope: external`（exact `native-file` hash と一致し、`staged-file` には存在しない）が必須です。
+  collector の `dpkg-query -S` がその exact path（`/usr` merge の別表記を含む）の owner を確認した
+  Linux `system-dependency` record も必要です。record の path/hash と `system_package: libgcc-s1` が一致し、
+  raw `owner` も同じ package（任意の `:architecture` 付き）であることを照合します。package identity は architecture suffix
+  のみを除いた完全一致で、filename から owner を推測しません。Iris はこの runtime を同梱しません。
+  staged/bundled copy はこの例外の対象外です。GCC Runtime Library Exception の適用根拠、distro package の
+  source/revision・変更状況、license と各 obligation の根拠は引き続き hash-bound inventoried evidence で必要です。
+  例外は evidence の真実性・法的十分性の承認ではありません。
+  GPL 単独、別の exception、他 component/platform/mode、Cargo license にはこの許可は適用しません。
+  それ以外の GPL/AGPL・nonfree・未知 license は通りません。LGPL は artifact digest と component id に scope した
+  `native` review が必要で、`cargo` や `ffmpeg` review では代用できません。FFmpeg の従来の exact-library review/probe も別途必要です。
+- `obligations` は `notice`, `source`, `relinking` の全三項目で、それぞれ `{status, evidence}`。
+  status は `provided` または `not-applicable` のみ。非該当にも review 済みの根拠文書が必要です。
+  `native_required_obligations` の既定 policy は allowed に notice、review に notice/source/relinking の
+  `provided` を要求します。OS runtime 例外だけは scoped `required_obligations: []` で上書きします。
+  Iris が library を配布・変更せず OS package が別途提供するため、Iris の配布物としての notice/source/relinking は
+  `not-applicable` と記録できます。それでも三項目すべての明示的な status と、外部 OS 提供・非同梱を説明する
+  review 済みの根拠文書の参照は必須です。他 component の義務は緩和しません。
+  `provided` の source archive、notice、relink 用 object/instructions 等の実際の提供物は stage して参照します。
+  すべての evidence list は非空で、重複なく、非空の `staged-file` または収集済み `file` の exact digest に結び付きます。
+
+sidecar の読込は report byte limit、component 数は `--max-native-components` で制限します。
+`--max-native-files` は既存 native scan に加え stage の走査 entry 数（directory を含む）と
+artifact 和集合の数も制限します。stage 内への file symlink は hash 検査できますが、directory symlink、
+stage 外への symlink、特殊 file は未対応として blocked です。超過・読込失敗・切り詰め・omission も通りません。
+この共通 schema 検証は collector と validator で共有され、collector は入力側の自己申告 hash を inventory として採用しません。
+validator は report 内の exact inventory digest と evidence reference を照合します。report は staged bytes を読んだ
+信頼できる collector から取得する必要があり、この gate は署名・証明書や任意の report の真実性を検証する仕組みではありません。
+
+**PASS は構造・digest binding と設定した policy の検査成功だけで、法的承認ではありません。**
+文書の内容が完全・真正であること、source/notice/relinking が法的に十分であること、
+upstream の権限、Iris 自体の license、配布全体の互換性を推定しません。
+実際の evidence の収集・内容 review と必要な法的判断は別途必要です。
+synthetic positive regression は到達可能な PASS を確認するだけで、production の license evidence や approval ではありません。
 
 ## CI
 

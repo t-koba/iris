@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Bounded offline synthetic tests: no Cargo build, native load or network."""
+import argparse
 import copy
+import hashlib
+import os
 import importlib.util
 import json
 from pathlib import Path
@@ -8,11 +11,15 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("release_policy", ROOT / "scripts/release-policy.py")
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+audit_spec = importlib.util.spec_from_file_location("release_audit", ROOT / "scripts/release-audit.py")
+audit_module = importlib.util.module_from_spec(audit_spec)
+audit_spec.loader.exec_module(audit_module)
 POLICY = module.load_policy(ROOT / "scripts/release-policy.json", 65536)
 WORKSPACE = module.workspace_packages()
 
@@ -58,6 +65,71 @@ def legal_reviews(value, policy):
             policy["lgpl_legal_approvals"].append(dict(
                 domain="ffmpeg", subject=row["path"] + "#sha256=" + row["sha256"],
                 license="LGPL-2.1-or-later", review="synthetic test review; NOT production approval"))
+
+
+def complete_report(platform="linux"):
+    """Wholly synthetic closure: no production artifacts, licenses or approval claims."""
+    value = report(platform)
+    value["schema"] = 2
+    value["limits"]["max_native_components"] = 4096
+    proof = dict(path="/stage/SYNTHETIC-EVIDENCE.txt", sha256="b" * 64)
+    files = [row for row in value["records"] if row["kind"] == "file"]
+    value["records"].append(dict(kind="staged-file", bytes=100, **proof))
+    for row in files:
+        value["records"].append(dict(row, kind="native-file"))
+    artifacts, components = [], []
+    for index, file in enumerate(files + [proof]):
+        ref = {key: file[key] for key in ("path", "sha256")}
+        coverage = {mode: dict(components=[], evidence=[proof])
+                    for mode in ("static", "embedded", "dynamic", "dlopen")}
+        artifacts.append(dict(file=ref, coverage=coverage))
+        if file is proof:
+            continue
+        for mode in coverage if index == 0 else ("dynamic",):
+            cid = str(index) + "-" + mode
+            coverage[mode]["components"].append(cid)
+            components.append(dict(id=cid, artifact=ref, mode=mode, name="synthetic-" + cid,
+                source=dict(origin="https://example.invalid/synthetic", revision="test-revision", evidence=[proof]),
+                modifications=dict(status="modified" if mode == "embedded" else "unmodified", evidence=[proof]),
+                license=dict(id="LGPL-2.1-or-later" if mode == "dynamic" else "MIT",
+                             disposition="review" if mode == "dynamic" else "allowed", evidence=[proof]),
+                obligations={key: dict(status="provided", evidence=[proof])
+                             for key in ("notice", "source", "relinking")}))
+    value["records"].append(dict(kind="native-closure", evidence=dict(schema=1, artifacts=artifacts, components=components)))
+    return value
+
+
+def gcc_runtime(value, mode="dynamic"):
+    """Synthetic import of the OS runtime, not production license evidence."""
+    closure = value["records"][-1]["evidence"]
+    component = copy.deepcopy(next(c for c in closure["components"] if c["mode"] == "dynamic"))
+    ref = dict(path="/usr/lib/synthetic/libgcc_s.so.1", sha256="c" * 64)
+    copyright_ref = dict(path="/usr/share/doc/libgcc-s1/copyright", sha256="d" * 64)
+    value["records"][-1:-1] = [dict(kind=kind, bytes=12, **ref) for kind in ("file", "native-file")] + [
+        dict(kind="system-dependency", platform="linux", package="libgcc-s1", owner="libgcc-s1:amd64", **ref),
+        dict(kind="file", bytes=100, **copyright_ref)]
+    coverage = {key: dict(components=["gcc-runtime"] if key == mode else [],
+                          evidence=copy.deepcopy(component["license"]["evidence"]))
+                for key in ("static", "embedded", "dynamic", "dlopen")}
+    closure["artifacts"].append(dict(file=ref, coverage=coverage))
+    component.update(id="gcc-runtime", artifact=ref, mode=mode, name="libgcc_s.so.1")
+    component["license"].update(id="GPL-3.0-or-later WITH GCC-exception-3.1", disposition="allowed",
+                                evidence=[copyright_ref])
+    for obligation in component["obligations"].values():
+        # The staged synthetic rationale documents external OS provision, not redistribution.
+        obligation["status"] = "not-applicable"
+    closure["components"].append(component)
+    return component
+
+
+def complete_reviews(value, policy):
+    legal_reviews(value, policy)
+    for row in value["records"][-1]["evidence"]["components"]:
+        if row["license"]["disposition"] == "review":
+            ref = row["artifact"]
+            policy["lgpl_legal_approvals"].append(dict(domain="native",
+                subject=ref["path"] + "#sha256=" + ref["sha256"] + "#component=" + row["id"],
+                license=row["license"]["id"], review="synthetic test review; NOT production approval"))
 
 
 class Policy(unittest.TestCase):
@@ -111,7 +183,7 @@ class Policy(unittest.TestCase):
             module.cargo_graph(selected, POLICY, WORKSPACE)
 
     def test_missing_partial_and_malformed_reports(self):
-        mutations = [lambda r: r.update(schema=2), lambda r: r.update(omitted_records=1),
+        mutations = [lambda r: r.update(schema=3), lambda r: r.update(omitted_records=1),
                      lambda r: r.update(omitted_records=False), lambda r: r.update(limits={}),
                      lambda r: r.update(records=[]), lambda r: r["records"].append({"kind": "missing"}),
                      lambda r: r["records"].append({"kind": "future-record"}),
@@ -184,6 +256,300 @@ class Policy(unittest.TestCase):
         graph(value)["variant"] = value["records"][3]["variant"] = "product"
         graph(value)["cargo_flags"] = ["--no-default-features", "--features", "minimal"]
         self.assertIn("windows: required build/graph variant product", module.validate(value, POLICY, WORKSPACE))
+
+    def test_complete_native_report_and_cli_pass_without_disabling_policy(self):
+        policy = copy.deepcopy(POLICY)
+        complete_reviews(complete_report(), policy)
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            for platform in POLICY["required_variants"]:
+                value = complete_report(platform)
+                self.assertEqual(module.validate(value, policy, WORKSPACE), [])
+                path = Path(directory) / (platform + ".json")
+                path.write_text(json.dumps(value))
+                paths.append(str(path))
+            policy_path = Path(directory) / "synthetic-policy.json"
+            policy_path.write_text(json.dumps(policy))
+            result = subprocess.run([sys.executable, str(ROOT / "scripts/release-policy.py"),
+                                     "--policy", str(policy_path)] + paths,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("not legal/compliance approval: PASS", result.stdout)
+            self.assertTrue(policy["require_complete_native_license_closure"])
+
+    def test_path_only_manifest_collected_hashes_reach_policy(self):
+        # Synthetic documents only: exercise the production collector/validator interface offline.
+        for platform in ("macos", "linux", "windows"):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as directory, patch.dict(
+                    os.environ, {"GITHUB_WORKSPACE": directory}):
+                stage = Path(directory) / "dist" / platform
+                template = complete_report(platform)
+                external = set()
+                if platform == "linux":
+                    component = gcc_runtime(template)
+                    external = {component["artifact"]["path"], component["license"]["evidence"][0]["path"]}
+                files = [row for row in template["records"] if row["kind"] in ("file", "staged-file")]
+                paths = {}
+                for row in files:
+                    relative = ("evidence/" if row["kind"] == "staged-file" else "native/") + row["path"].rsplit("/", 1)[-1]
+                    path = (Path(directory) / "os" / row["path"].rsplit("/", 1)[-1]
+                            if row["path"] in external else stage / relative)
+                    if row["path"] in external:
+                        relative = str(path)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"SYNTHETIC test bytes, NOT license evidence: " + relative.encode())
+                    paths[row["path"]] = (relative, path)
+                manifest_path = Path(directory) / "manifest.json"
+
+                def manifest_refs(item):
+                    if isinstance(item, list):
+                        return [manifest_refs(child) for child in item]
+                    if isinstance(item, dict):
+                        if set(item) == {"path", "sha256"}:
+                            return dict(path=paths[item["path"]][0])
+                        return {key: manifest_refs(child) for key, child in item.items()}
+                    return item
+
+                manifest = manifest_refs(template["records"][-1]["evidence"])
+                manifest_path.write_text(json.dumps(manifest))
+                settings = dict(template["limits"])
+
+                def collect():
+                    collected = audit_module.Audit(argparse.Namespace(**settings))
+                    for old_path, (relative, path) in paths.items():
+                        if relative.startswith("native/") or old_path in external:
+                            collected.file(path, native=path.name != "copyright")
+                        if path.name == "libgcc_s.so.1":
+                            collected.add("system-dependency", platform="linux", path=str(path),
+                                          sha256=collected.sha256_file(path), package="libgcc-s1", owner="libgcc-s1:amd64")
+                    collected.native_evidence(stage, manifest_path)
+                    return collected
+
+                collected = collect()
+                self.assertFalse(collected.omitted)
+                for row in collected.records:
+                    if row["kind"] in ("file", "native-file", "staged-file"):
+                        path = next(p for _, p in paths.values() if collected.clean(str(p)) == row["path"])
+                        self.assertEqual(row["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+                        self.assertEqual(row["bytes"], path.stat().st_size)
+                # Keep the existing synthetic Cargo, FFmpeg and PDFium checks, with probe paths
+                # rebound to the same exact files that the real collector just hashed.
+                for row in template["records"]:
+                    if row["kind"] == "command":
+                        old_path = row["argv"][-1]
+                        new_path = collected.clean(str(paths[old_path][1]))
+                        row["argv"][-1] = new_path
+                        row["text"] = row["text"].replace(old_path, new_path)
+                template["records"] = [row for row in template["records"] if row["kind"] not in (
+                    "file", "staged-file", "native-file", "native-closure", "system-dependency")] + collected.records
+                policy = copy.deepcopy(POLICY)
+                complete_reviews(template, policy)
+                # A serialized retained report, not the manifest, is the policy input.
+                retained = json.loads(json.dumps(template))
+                self.assertNotIn(directory, json.dumps(retained))
+                self.assertEqual(module.validate(retained, policy, WORKSPACE), [])
+                closure = retained["records"][-1]["evidence"]
+                closure["artifacts"][0]["file"]["sha256"] = "0" * 64
+                with self.assertRaisesRegex(ValueError, "mismatched native evidence reference"):
+                    module.validate(retained, policy, WORKSPACE)
+                closure["artifacts"][0]["file"].pop("sha256")
+                with self.assertRaises(ValueError):
+                    module.validate(retained, policy, WORKSPACE)
+                incomplete = copy.deepcopy(manifest)
+                incomplete["components"][0]["source"]["evidence"] = []
+                for content in (dict(manifest, components=[]), dict(manifest, artifacts=[]), incomplete):
+                    manifest_path.write_text(json.dumps(content))
+                    failed = collect()
+                    self.assertTrue(any(row["kind"] == "missing" for row in failed.records))
+                    self.assertFalse(any(row["kind"] == "native-closure" for row in failed.records))
+                    broken = dict(template, records=template["records"][:-len(collected.records)] + failed.records)
+                    with self.assertRaisesRegex(ValueError, "missing evidence"):
+                        module.validate(broken, policy, WORKSPACE)
+                manifest_path.unlink()
+                failed = collect()
+                self.assertTrue(any("manifest absent" in row.get("reason", "") for row in failed.records))
+                broken = dict(template, records=template["records"][:-len(collected.records)] + failed.records)
+                with self.assertRaisesRegex(ValueError, "missing evidence"):
+                    module.validate(broken, policy, WORKSPACE)
+
+    def test_native_gcc_exception_scope_and_evidence(self):
+        for mode in ("dynamic", "dlopen"):
+            baseline, policy = complete_report(), copy.deepcopy(POLICY)
+            component = gcc_runtime(baseline, mode)
+            complete_reviews(baseline, policy)
+            self.assertEqual(module.validate(baseline, policy, WORKSPACE), [])
+            for license_id in (
+                "GPL-3.0-or-later", "GPL-3.0-only", "AGPL-3.0-or-later",
+                "GPL-3.0-only WITH GCC-exception-3.1",
+                "GPL-3.0-or-later WITH GCC-exception-2.0",
+                "GPL-3.0-or-later WITH LLVM-exception",
+                "MIT WITH GCC-exception-3.1",
+                "GPL-3.0-or-later WITH GCC-exception-3.1 OR MIT",
+            ):
+                value = copy.deepcopy(baseline)
+                row = next(c for c in value["records"][-1]["evidence"]["components"]
+                           if c["id"] == component["id"])
+                row["license"]["id"] = license_id
+                with self.subTest(mode=mode, license=license_id), self.assertRaisesRegex(ValueError, "native license"):
+                    module.validate(value, policy, WORKSPACE)
+            for mutate in (
+                lambda c: c.update(name="other-library"),
+                lambda c: c["license"].update(disposition="review"),
+                lambda c: c["license"].update(evidence=[]),
+                lambda c: c["license"]["evidence"][0].update(sha256="0" * 64),
+                lambda c: c["source"].update(evidence=[]),
+                lambda c: c["modifications"].update(evidence=[]),
+                lambda c: c["obligations"]["notice"].update(status="unknown"),
+                lambda c: c["obligations"].pop("notice"),
+                lambda c: c["obligations"]["source"].update(evidence=[]),
+                lambda c: c["obligations"]["relinking"]["evidence"][0].update(sha256="0" * 64),
+            ):
+                value = copy.deepcopy(baseline)
+                row = next(c for c in value["records"][-1]["evidence"]["components"]
+                           if c["id"] == component["id"])
+                mutate(row)
+                with self.subTest(mode=mode, mutation=mutate), self.assertRaises(ValueError):
+                    module.validate(value, policy, WORKSPACE)
+            # Ownership is exact-path/hash Linux evidence, not a name or license assertion.
+            for mutation in (None, dict(package="libgcc-s10"), dict(owner="libgcc-s10:amd64"),
+                             dict(owner=None), dict(path="/other/libgcc_s.so.1"),
+                             dict(sha256="0" * 64), dict(platform="macos")):
+                value = copy.deepcopy(baseline)
+                owner = next(r for r in value["records"] if r["kind"] == "system-dependency")
+                if mutation is None:
+                    value["records"].remove(owner)
+                else:
+                    owner.update(mutation)
+                with self.subTest(owner=mutation), self.assertRaisesRegex(ValueError, "native license"):
+                    module.validate(value, policy, WORKSPACE)
+            # Multiple package-owner records make provenance ambiguous even if one matches.
+            value = copy.deepcopy(baseline)
+            owner = next(r for r in value["records"] if r["kind"] == "system-dependency")
+            value["records"].append(dict(owner, package="libgcc-s2", owner="libgcc-s2:amd64"))
+            with self.assertRaisesRegex(ValueError, "native license"):
+                module.validate(value, policy, WORKSPACE)
+            # Correct OS evidence cannot license a staged/bundled copy, even at the same path.
+            for bundled_path in (component["artifact"]["path"], "/stage/libgcc_s.so.1"):
+                value = copy.deepcopy(baseline)
+                closure = value["records"][-1]["evidence"]
+                ref = next(c for c in closure["components"] if c["id"] == component["id"])["artifact"]
+                old_path = ref["path"]
+                ref["path"] = bundled_path
+                for record in value["records"]:
+                    if record.get("path") == old_path:
+                        record["path"] = bundled_path
+                value["records"].insert(-1, dict(kind="staged-file", bytes=12, **ref))
+                with self.subTest(bundled=bundled_path), self.assertRaisesRegex(ValueError, "native license"):
+                    module.validate(value, policy, WORKSPACE)
+            # Component name alone is insufficient if the native artifact basename differs.
+            value = copy.deepcopy(baseline)
+            ref = next(c for c in value["records"][-1]["evidence"]["components"]
+                       if c["id"] == component["id"])["artifact"]
+            old_path = ref["path"]
+            ref["path"] = "/usr/lib/synthetic/other.so"
+            for record in value["records"]:
+                if record.get("path") == old_path:
+                    record["path"] = ref["path"]
+            with self.assertRaisesRegex(ValueError, "native license"):
+                module.validate(value, policy, WORKSPACE)
+            scoped = copy.deepcopy(policy)
+            scoped["native_license_exceptions"][0]["required_obligations"] = ["notice"]
+            with self.assertRaisesRegex(ValueError, "required native"):
+                module.validate(baseline, scoped, WORKSPACE)
+            policy["native_license_exceptions"] = []
+            with self.assertRaisesRegex(ValueError, "native license"):
+                module.validate(baseline, policy, WORKSPACE)
+        for platform, mode in (("macos", "dynamic"), ("windows", "dynamic"),
+                               ("linux", "static"), ("linux", "embedded")):
+            value, policy = complete_report(platform), copy.deepcopy(POLICY)
+            gcc_runtime(value, mode)
+            complete_reviews(value, policy)
+            with self.subTest(platform=platform, mode=mode), self.assertRaisesRegex(ValueError, "native license"):
+                module.validate(value, policy, WORKSPACE)
+        # The native-only allowance cannot change Cargo's SPDX or FFmpeg policies.
+        with self.assertRaisesRegex(ValueError, "unsupported SPDX WITH pair"):
+            module.spdx("GPL-3.0-or-later WITH GCC-exception-3.1", POLICY, "third")
+        self.assertFalse(module.spdx("GPL-3.0-or-later", POLICY, "third"))
+        self.assertNotIn("GPL-3.0-or-later WITH GCC-exception-3.1", POLICY["ffmpeg_license_names"])
+
+    def test_native_exception_policy_structure(self):
+        for mutation in (None, {}, [dict(POLICY["native_license_exceptions"][0], modes=[])],
+                         [dict(POLICY["native_license_exceptions"][0], artifact_scope="staged")],
+                         [dict(POLICY["native_license_exceptions"][0], system_package="")],
+                         [dict(POLICY["native_license_exceptions"][0], required_obligations=["unknown"])],
+                         [POLICY["native_license_exceptions"][0],
+                          dict(POLICY["native_license_exceptions"][0], modes=["dynamic"])],
+                         [dict(POLICY["native_license_exceptions"][0], platform="unknown")],
+                         [dict(POLICY["native_license_exceptions"][0], license="GPL-3.0-or-later")]):
+            policy = copy.deepcopy(POLICY)
+            policy["native_license_exceptions"] = mutation
+            with self.subTest(policy=mutation), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "policy.json"
+                path.write_text(json.dumps(policy))
+                with self.assertRaisesRegex(ValueError, "native license exception"):
+                    module.load_policy(path, 65536)
+
+    def test_native_closure_tamper_omission_and_unsupported_evidence(self):
+        baseline, policy = complete_report(), copy.deepcopy(POLICY)
+        complete_reviews(baseline, policy)
+        mutations = [
+            lambda e: e.update(schema=True), lambda e: e.update(schema=2),
+            lambda e: e.update(complete=True), lambda e: e.pop("components"),
+            lambda e: e["artifacts"].pop(), lambda e: e["artifacts"].append(e["artifacts"][0]),
+            lambda e: e["artifacts"].__setitem__(-1, e["artifacts"][0]),
+            lambda e: e["components"].pop(), lambda e: e["components"].append(e["components"][0]),
+            lambda e: e["artifacts"][0]["coverage"].pop("dlopen"),
+            lambda e: e["artifacts"][0]["coverage"]["static"].update(evidence=[]),
+            lambda e: e["artifacts"][0]["coverage"]["dynamic"]["components"].append("omitted"),
+            lambda e: e["components"][0]["artifact"].update(sha256="0" * 64),
+            lambda e: e["components"][0].update(mode="unknown"),
+            lambda e: e["components"][0]["source"].pop("revision"),
+            lambda e: e["components"][0]["modifications"].update(status="unknown"),
+            lambda e: e["components"][0]["modifications"].update(evidence=[]),
+            lambda e: e["components"][0]["modifications"]["evidence"].append(e["components"][0]["modifications"]["evidence"][0]),
+            lambda e: e["components"][0]["license"].update(id="GPL-3.0-only"),
+            lambda e: e["components"][0]["license"].update(id="AGPL-3.0-or-later"),
+            lambda e: e["components"][0]["license"].update(id="LicenseRef-nonfree"),
+            lambda e: e["components"][0]["license"].update(disposition="review"),
+            lambda e: e["components"][0]["obligations"].pop("source"),
+            lambda e: e["components"][0]["obligations"]["notice"].update(status="not-applicable"),
+            lambda e: e["components"][0]["obligations"]["source"]["evidence"][0].update(sha256="0" * 64),
+            lambda e: e["components"][0]["obligations"]["source"].update(evidence=[True]),
+        ]
+        for mutate in mutations:
+            value = copy.deepcopy(baseline)
+            mutate(value["records"][-1]["evidence"])
+            with self.subTest(mutation=mutate), self.assertRaises(ValueError):
+                module.validate(value, policy, WORKSPACE)
+        for replacement in (True, {}, {"schema": 1, "complete": True}):
+            value = copy.deepcopy(baseline)
+            value["records"][-1]["evidence"] = replacement
+            with self.subTest(replacement=replacement), self.assertRaises(ValueError):
+                module.validate(value, policy, WORKSPACE)
+        for mutate in (
+            lambda r: r["records"].append(copy.deepcopy(r["records"][-1])),
+            lambda r: r["records"].append(dict(kind="staged-file", path="/stage/extra", bytes=1, sha256="c" * 64)),
+            lambda r: next(row for row in r["records"] if row["kind"] == "staged-file").update(bytes=0),
+            lambda r: next(row for row in r["records"] if row["kind"] == "native-file").update(sha256="0" * 64),
+            lambda r: r["limits"].update(max_native_components=1),
+            lambda r: r["limits"].update(max_native_files=1),
+        ):
+            value = copy.deepcopy(baseline)
+            mutate(value)
+            with self.subTest(mutation=mutate), self.assertRaises(ValueError):
+                module.validate(value, policy, WORKSPACE)
+        # An LGPL review must bind component identity AND artifact digest; FFmpeg review is not enough.
+        for changes in ({"domain": "ffmpeg"}, {"subject": "different"}, {"license": "LGPL-3.0-only"}):
+            scoped = copy.deepcopy(policy)
+            next(r for r in scoped["lgpl_legal_approvals"] if r["domain"] == "native").update(changes)
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "review pending"):
+                module.validate(baseline, scoped, WORKSPACE)
+        for key in ("notice", "source", "relinking"):
+            value = copy.deepcopy(baseline)
+            component = next(c for c in value["records"][-1]["evidence"]["components"] if c["license"]["disposition"] == "review")
+            component["obligations"][key]["status"] = "not-applicable"
+            with self.subTest(obligation=key), self.assertRaisesRegex(ValueError, "evidence absent"):
+                module.validate(value, policy, WORKSPACE)
 
     def test_cli_closed_and_workflow_gate(self):
         with tempfile.TemporaryDirectory() as directory:

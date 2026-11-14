@@ -21,5 +21,9 @@
   "ffmpeg_components": ["avcodec", "avformat", "avutil", "swscale"],
   "forbidden_ffmpeg_flags": ["--enable-gpl", "--enable-version3", "--enable-nonfree"],
   "ffmpeg_license_names": {"LGPL version 2.1 or later": "LGPL-2.1-or-later"},
+  "native_license_exceptions": [
+    {"license": "GPL-3.0-or-later WITH GCC-exception-3.1", "name": "libgcc_s.so.1", "platform": "linux", "modes": ["dynamic", "dlopen"], "artifact_scope": "external", "system_package": "libgcc-s1", "required_obligations": []}
+  ],
+  "native_required_obligations": {"allowed": ["notice"], "review": ["notice", "source", "relinking"]},
   "require_complete_native_license_closure": true
 }
