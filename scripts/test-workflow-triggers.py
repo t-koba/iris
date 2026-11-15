@@ -288,6 +288,27 @@ permissions:
           cargo test -p iris-platform-integration --lib trash::exact_items::tests:: --locked
 
 """ in ci,
+    "SMB3.0/3.02 signing KDF vector runs independently of container smoke": """  smb3-signing-kdf:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-latest-smb3-kdf-cargo
+
+      - name: SMB 3.0/3.0.2 signing KDF vector regression
+        run: |
+          cargo test -p iris-smb-client --lib derive_smb2_signing_key_uses_smb300_and_smb302_nul_terminated_label_and_context --locked
+
+""" in ci,
     "CI manual, pull-request, and scheduled triggers": all(
         trigger in ci for trigger in ("  workflow_dispatch:\n", "  pull_request:\n", "  schedule:\n")
     ),
