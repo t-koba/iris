@@ -63,7 +63,7 @@ macOS 14 以降が必要です。コード署名 ID が設定されていない�
   削除する場合は `sudo apt remove iris` を実行します。`.deb` はリンクされた共有ライブラリの依存関係を宣言します。
 - `Iris-linux-appdir.tar.gz`: 展開後、`Iris.AppDir/AppRun` を実行します。これは AppDir のアーカイブであり、AppImage ではありません。ホストに必要な共有ライブラリが必要です。
 
-Linux のリリース成果物には、検証済みの PDFium 共有ライブラリ（PDFium 159.0.8138.0）とライセンスが同梱されます。AppDir では `Iris.AppDir/usr/lib/iris/libpdfium.so`、`.deb` では `/usr/lib/iris/libpdfium.so` に配置され、Iris は実行ファイルの隣、インストール先の `lib/iris`、作業ディレクトリ、システムのライブラリパスの順に探します。
+Linux のリリースビルドは、PDF プレビュー用 PDFium 共有ライブラリ（現在の固定バージョンは 159.0.8138.0）とライセンス文書を同梱する設定です。AppDir では `Iris.AppDir/usr/lib/iris/libpdfium.so`、`.deb` では `/usr/lib/iris/libpdfium.so` に配置され、Iris は実行ファイルの隣、インストール先の `lib/iris`、作業ディレクトリ、システムのライブラリパスの順に探します。
 
 ### Windows
 
