@@ -189,5 +189,20 @@ awk '
   $1 == "smbcontrol" { smbcontrol = 1; if ($2 > 2048) bad = 1 }
   END { if (!inspect || !logs || !testparm || !smbcontrol || bad) exit 1 }
 ' "$test_root/filter-observations"
+# Exercise the same bounded-retry predicate used by CI against the real observed
+# QueryDirectory wording and the older FSCTL wording; unrelated statuses stay out.
+workflow_regex=$(grep -F 'if grep -Eq ' "$script_dir/../.github/workflows/ci.yml" |
+  cut -d "'" -f 2)
+[[ -n "$workflow_regex" ]]
+for message in \
+  'SMB QueryDirectory returned status 0xc000000d (dialect=Smb311)' \
+  'SMB FSCTL_COPYCHUNK returned unexpected status 0xc0000022'; do
+  printf '%s\n' "$message" | grep -Eq "$workflow_regex"
+done
+if printf '%s\n' 'SMB QueryDirectory returned status 0xc0000005' | grep -Eq "$workflow_regex"; then
+  echo 'unrelated QueryDirectory status triggered the reduced diagnostic rerun' >&2
+  exit 1
+fi
+
 printf 'Samba diagnostics bound inspect/log/testparm/smbcontrol streams before redaction filters\n'
 printf 'Samba diagnostics configure auth_audit and smb2_credits selectively, prioritize smbd, redact credentials, and retain 4096/8192-byte bounds\n'
