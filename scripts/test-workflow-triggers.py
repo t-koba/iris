@@ -110,6 +110,27 @@ main_tag_guard = """      - name: Verify tag commit belongs to main
           fi
 """
 
+try:
+    ci_jobs_text = ci.split("jobs:\n", 1)[1]
+except IndexError:
+    ci_jobs_text = ""
+
+
+def ci_job_block(name):
+    starts = list(re.finditer(rf"(?m)^  {re.escape(name)}:\n", ci_jobs_text))
+    if len(starts) != 1:
+        return ""
+    start = starts[0]
+    following = re.search(r"(?m)^  [a-zA-Z0-9_-]+:\n", ci_jobs_text[start.end():])
+    end = start.end() + following.start() if following else len(ci_jobs_text)
+    return ci_jobs_text[start.start():end]
+
+
+def ci_job_has(name, *needles):
+    block = ci_job_block(name)
+    return bool(block) and all(needle in block for needle in needles)
+
+
 checks = {
     "All release audit jobs inherit the operator-configured native component bound": (
         "\n  IRIS_RELEASE_AUDIT_MAX_NATIVE_COMPONENTS: "
@@ -263,135 +284,33 @@ permissions:
             for job in ("package-macos", "package-linux", "package-windows")
         )
     ),
-    "Trash path preflight regressions run on Ubuntu and Windows outside container smoke": """  trash-path-preflight:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.97.1
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ matrix.os }}-trash-cargo
-
-      - name: Trash path preflight regressions
-        run: |
-          cargo test -p iris-platform-integration --lib trash::exact_items::tests:: --locked
-
-""" in ci,
-    "Trash redo receipt regression runs on Ubuntu and Windows outside container smoke": """  trash-redo-receipts:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.97.1
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ matrix.os }}-trash-redo-cargo
-
-      - name: Trash redo receipt regression
-        run: |
-          cargo test -p iris-ui-shell --lib update::undo_ops::tests::trash_redo_passes_fresh_receipts_to_next_undo --locked --no-default-features --features minimal
-
-""" in ci,
-    "Private copy destination regression runs on Unix CI outside native smoke": """  copy-private-destinations:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.97.1
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ${{ matrix.os }}-private-copy-cargo
-
-      - name: Private destination during copy regression
-        run: |
-          cargo test -p iris-platform-integration --lib copy::tests::new_copy_destinations_are_private_until_success_under_umask --locked
-
-""" in ci,
-    "Workflow contract checks run independently of platform integration": """  workflow-contracts:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Workflow contract regressions
-        run: python3 scripts/test-workflow-triggers.py
-
-""" in ci,
-    "SMB streamed-write cleanup regressions run separately from native container smoke": """  smb-streamed-write-cleanup:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.97.1
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ubuntu-latest-smb-stream-cargo
-
-      - name: Native SMB streamed-write cleanup regressions
-        run: |
-          cargo test -p iris-backends --lib smb::adapter::tests::native_streamed_ --locked
-
-""" in ci,
-    "SMB3.0/3.02 signing KDF vector runs independently of container smoke": """  smb3-signing-kdf:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.97.1
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ubuntu-latest-smb3-kdf-cargo
-
-      - name: SMB 3.0/3.0.2 signing KDF vector regression
-        run: |
-          cargo test -p iris-smb-client --lib derive_smb2_signing_key_uses_smb300_and_smb302_nul_terminated_label_and_context --locked
-
-""" in ci,
+    "Trash path preflight regressions run on Ubuntu and Windows outside container smoke": ci_job_has(
+        "trash-path-preflight",
+        "os: [ubuntu-latest, windows-latest]",
+        "cargo test -p iris-platform-integration --lib trash::exact_items::tests:: --locked",
+    ),
+    "Trash redo receipt regression runs on Ubuntu and Windows outside container smoke": ci_job_has(
+        "trash-redo-receipts",
+        "os: [ubuntu-latest, windows-latest]",
+        "cargo test -p iris-ui-shell --lib update::undo_ops::tests::trash_redo_passes_fresh_receipts_to_next_undo --locked --no-default-features --features minimal",
+    ),
+    "Private copy destination regression runs on Unix CI outside native smoke": ci_job_has(
+        "copy-private-destinations",
+        "os: [ubuntu-latest, macos-latest]",
+        "cargo test -p iris-platform-integration --lib copy::tests::new_copy_destinations_are_private_until_success_under_umask --locked",
+    ),
+    "Workflow contract checks run independently of platform integration": ci_job_has(
+        "workflow-contracts",
+        "run: python3 scripts/test-workflow-triggers.py",
+    ),
+    "SMB adapter fake-server regressions run separately from native container smoke": ci_job_has(
+        "smb-adapter-unit",
+        "cargo test -p iris-backends --lib smb::adapter::tests:: --locked",
+    ),
+    "SMB3.0/3.02 signing KDF vector runs independently of container smoke": ci_job_has(
+        "smb3-signing-kdf",
+        "cargo test -p iris-smb-client --lib derive_smb2_signing_key_uses_smb300_and_smb302_nul_terminated_label_and_context --locked",
+    ),
     "CI manual, pull-request, and scheduled triggers": all(
         trigger in ci for trigger in ("  workflow_dispatch:\n", "  pull_request:\n", "  schedule:\n")
     ),

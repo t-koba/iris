@@ -431,7 +431,7 @@ jobs:
       - name: Workflow contract regressions
         run: python3 scripts/test-workflow-triggers.py
 
-  smb-streamed-write-cleanup:
+  smb-adapter-unit:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -445,11 +445,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ubuntu-latest-smb-stream-cargo
+          shared-key: ubuntu-latest-smb-adapter-cargo
 
-      - name: Native SMB streamed-write cleanup regressions
+      - name: Native SMB adapter fake-server regressions
         run: |
-          cargo test -p iris-backends --lib smb::adapter::tests::native_streamed_ --locked
+          cargo test -p iris-backends --lib smb::adapter::tests:: --locked
 
   smb3-signing-kdf:
     runs-on: ubuntu-latest
