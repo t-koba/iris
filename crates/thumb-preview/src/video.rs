@@ -237,6 +237,9 @@ fn scale_to_rgb24(
 
     let dst_width = c_int::try_from(dst_w).ok()?;
     let dst_height = c_int::try_from(dst_h).ok()?;
+    // SWS_BILINEAR from libswscale/swscale.h; ffmpeg-sys-next does not
+    // expose this C macro consistently across target headers.
+    const SWS_BILINEAR: c_int = 2;
 
     // SAFETY: frame owns a live AVFrame supplied by the decoder. Its source
     // format is read only as a C int, never converted to a Rust pixel enum.
@@ -258,7 +261,7 @@ fn scale_to_rgb24(
             dst_width,
             dst_height,
             ffi::AVPixelFormat::AV_PIX_FMT_RGB24 as c_int,
-            ffi::SWS_BILINEAR,
+            SWS_BILINEAR,
             ptr::null_mut(),
             ptr::null_mut(),
             ptr::null(),
