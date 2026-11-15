@@ -15,10 +15,10 @@ use iris_core_domain::types::session::BackendSession;
 use iris_smb_client::{
     close, copy_file_chunks, create_directory, delete, list_directory_once, open_file_and_read,
     open_file_for_read, open_file_for_write, read_file_ranges_pipelined, rename, set_basic_info,
-    stat_path, write_file_at, write_file_chunks_pipelined, Smb2CreateDisposition,
+    stat_path, write_file_at, write_file_chunks_pipelined, Smb2Command, Smb2CreateDisposition,
     Smb2FileAttributes, Smb2FileBasicInformation, SmbConnectionActor, SmbConnectionError,
-    SmbDirectoryEntry, SmbDirectoryEnumeration, SmbHandle, SmbReadRange, DEFAULT_READ_CHUNK_LENGTH,
-    DEFAULT_WRITE_CHUNK_LENGTH,
+    SmbDirectoryEntry, SmbDirectoryEnumeration, SmbHandle, SmbReadRange,
+    DEFAULT_DIRECTORY_OUTPUT_BUFFER_LENGTH, DEFAULT_READ_CHUNK_LENGTH, DEFAULT_WRITE_CHUNK_LENGTH,
 };
 use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::HashMap;
@@ -329,7 +329,13 @@ impl SmbAdapter {
                 .enumeration
                 .next_page(remaining)
                 .await
-                .map_err(|error| smb_network_error("list directory", error))?;
+                .map_err(|error| {
+                    smb_list_directory_error(
+                        error,
+                        native.negotiated.dialect,
+                        native.negotiated.max_transact_size,
+                    )
+                })?;
             entries.extend(
                 page.into_iter()
                     .filter(|entry| entry.file_name != "." && entry.file_name != "..")
@@ -1351,6 +1357,25 @@ fn smb_network_error(operation: &'static str, error: SmbConnectionError) -> Back
     })
 }
 
+fn smb_list_directory_error(
+    error: SmbConnectionError,
+    dialect: iris_smb_client::Smb2Dialect,
+    max_transact_size: u32,
+) -> BackendError {
+    match error {
+        SmbConnectionError::UnexpectedStatus {
+            command: Smb2Command::QueryDirectory,
+            status,
+        } => BackendError::Internal(Box::new(std::io::Error::other(format!(
+            "SMB native list directory failed: SMB QueryDirectory returned unexpected status \
+             0x{status:08x} (dialect={dialect:?}, max_transact_size={max_transact_size}, \
+             output_buffer_length={DEFAULT_DIRECTORY_OUTPUT_BUFFER_LENGTH}, \
+             file_information_class=0x25)"
+        )))),
+        error => smb_network_error("list directory", error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1408,6 +1433,26 @@ mod tests {
 
             prop_assert!(smb_relative_path(&components.join("/")).is_err());
         }
+    }
+
+    #[test]
+    fn query_directory_status_reports_negotiated_limit_and_request_shape() {
+        let error = smb_list_directory_error(
+            SmbConnectionError::UnexpectedStatus {
+                command: Smb2Command::QueryDirectory,
+                status: 0xc000_000d,
+            },
+            Smb2Dialect::Smb311,
+            32 * 1024,
+        );
+        let BackendError::Internal(error) = error else {
+            panic!("server status must remain a non-retryable internal error");
+        };
+        let message = error.to_string();
+        assert!(message.contains("max_transact_size=32768"));
+        assert!(message.contains("output_buffer_length=65536"));
+        assert!(message.contains("file_information_class=0x25"));
+        assert!(message.contains("dialect=Smb311"));
     }
 
     #[test]
