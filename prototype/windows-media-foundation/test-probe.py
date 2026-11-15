@@ -214,6 +214,23 @@ class ProbeTests(unittest.TestCase):
             self.assertEqual(probe.main(), 1)
         self.assertEqual(output.getvalue(), "")
 
+    def test_resize_failure_reports_only_bounded_type_dimensions(self):
+        failure = dict(ok=False, stage="unexpected_resize", hresult="80004005", elapsed_ms=1,
+                       resize={"type": "native", "expected_width": 854, "expected_height": 480,
+                               "actual_width": 640, "actual_height": 360})
+        self.assertEqual(probe.validate_record(json.dumps(failure), 1, 2048, 16777216, 64), failure)
+        for change in (
+            {"resize": {"type": "private/path", "expected_width": 854, "expected_height": 480,
+                        "actual_width": 640, "actual_height": 360}},
+            {"resize": {"type": "output", "expected_width": 0, "expected_height": 480,
+                        "actual_width": 640, "actual_height": 360}},
+            {"resize": {"type": "output", "expected_width": 854, "expected_height": 480,
+                        "actual_width": 854, "actual_height": 480}},
+            {"resize": failure["resize"] | {"path": "private/path"}},
+        ):
+            with self.subTest(change=change), self.assertRaises(probe.ProbeError):
+                probe.validate_record(json.dumps(failure | change), 1, 2048, 16777216, 64)
+
     def test_decode_failure_flags_are_bounded_and_stage_specific(self):
         failure = dict(ok=False, stage="decode_flags", hresult="80004005", elapsed_ms=1)
         for flags in (1, 2, 4, 0x80000000, 2**32 - 1):
@@ -377,6 +394,17 @@ int main() {
             try { validate_read(&reader, flags, limits, input, frame); return 2; }
             catch (const Failure& f) {
                 assert(f.flags == 0 && frame.stride == input.stride);
+                if (invalid >= 2 && invalid <= 5) {
+                    const char* expected_type = invalid <= 3 ? "native" : "output";
+                    const UINT32 expected_width = input.width;
+                    const UINT32 expected_height = input.height;
+                    const UINT32 actual_width = (invalid == 2 || invalid == 4) ? 853 : 854;
+                    const UINT32 actual_height = (invalid == 3 || invalid == 5) ? 481 : 480;
+                    assert(std::strcmp(f.stage, "unexpected_resize") == 0);
+                    assert(std::strcmp(f.resize_type, expected_type) == 0);
+                    assert(f.expected_width == expected_width && f.expected_height == expected_height);
+                    assert(f.actual_width == actual_width && f.actual_height == actual_height);
+                }
             }
         }
     }

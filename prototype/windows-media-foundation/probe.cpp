@@ -26,6 +26,9 @@ struct Failure {
     const char* stage;
     HRESULT hr;
     DWORD flags = 0; // Only decode_flags failures retain the bounded DWORD mask.
+    const char* resize_type = nullptr;
+    UINT32 expected_width = 0, expected_height = 0;
+    UINT32 actual_width = 0, actual_height = 0;
 };
 
 void check(HRESULT hr, const char* stage) {
@@ -93,12 +96,14 @@ Layout checked_output(IMFSourceReader* reader, const Limits& limits, const Layou
     check(reader->GetNativeMediaType(kFirstVideoStream, kCurrentType, &native), "native_type");
     const auto current_input = layout(native.Get(), limits, false);
     if (current_input.width != input.width || current_input.height != input.height)
-        throw Failure{"unexpected_resize", E_FAIL};
+        throw Failure{"unexpected_resize", E_FAIL, 0, "native", input.width, input.height,
+                      current_input.width, current_input.height};
     ComPtr<IMFMediaType> output;
     check(reader->GetCurrentMediaType(kFirstVideoStream, &output), "output_type");
     const auto frame = layout(output.Get(), limits, true);
     if (frame.width != input.width || frame.height != input.height)
-        throw Failure{"unexpected_resize", E_FAIL};
+        throw Failure{"unexpected_resize", E_FAIL, 0, "output", input.width, input.height,
+                      frame.width, frame.height};
     return frame;
 }
 
@@ -217,6 +222,11 @@ int wmain(int argc, wchar_t** argv) {
         std::printf("{\"ok\":false,\"stage\":\"%s\",\"hresult\":\"%08lx\",\"elapsed_ms\":%.3f",
                     failure.stage, static_cast<unsigned long>(failure.hr), elapsed());
         if (failure.flags) std::printf(",\"flags\":%lu", failure.flags);
+        if (failure.resize_type)
+            std::printf(",\"resize\":{\"type\":\"%s\",\"expected_width\":%u,"
+                        "\"expected_height\":%u,\"actual_width\":%u,\"actual_height\":%u}",
+                        failure.resize_type, failure.expected_width, failure.expected_height,
+                        failure.actual_width, failure.actual_height);
         std::printf("}\n");
     } catch (const std::exception&) {
         std::printf("{\"ok\":false,\"stage\":\"arguments\",\"hresult\":\"80070057\",\"elapsed_ms\":%.3f}\n", elapsed());

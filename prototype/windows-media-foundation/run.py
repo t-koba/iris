@@ -83,6 +83,18 @@ def validate_record(data, code, dimension, max_bytes, reads):
             # DWORD is an intrinsic Windows ABI bound; bool is not an integer.
             if type(record.get("flags")) is not int or not 0 < record["flags"] < 2**32:
                 raise ProbeError("invalid_failure")
+        if record.get("stage") == "unexpected_resize":
+            fields.add("resize")
+            resize = record.get("resize")
+            if (not isinstance(resize, dict) or set(resize) != {
+                    "type", "expected_width", "expected_height", "actual_width", "actual_height"}
+                    or resize.get("type") not in ("native", "output")):
+                raise ProbeError("invalid_failure")
+            dimensions = [resize[key] for key in (
+                "expected_width", "expected_height", "actual_width", "actual_height")]
+            if (any(type(value) is not int or not 0 < value <= dimension for value in dimensions)
+                    or dimensions[:2] == dimensions[2:]):
+                raise ProbeError("invalid_failure")
         if (code == 0 or set(record) != fields
                 or type(record.get("stage")) is not str
                 or not re.fullmatch(r"[a-z][a-z0-9_]{0,39}", record["stage"])
