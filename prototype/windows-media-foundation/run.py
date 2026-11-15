@@ -77,8 +77,16 @@ def validate_record(data, code, dimension, max_bytes, reads):
     if type(elapsed) not in (int, float) or not math.isfinite(elapsed) or elapsed < 0:
         raise ProbeError("invalid_elapsed")
     if not record["ok"]:
-        if (code == 0 or set(record) != {"ok", "stage", "hresult", "elapsed_ms"}
+        fields = {"ok", "stage", "hresult", "elapsed_ms"}
+        if record.get("stage") == "decode_flags":
+            fields.add("flags")
+            # DWORD is an intrinsic Windows ABI bound; bool is not an integer.
+            if type(record.get("flags")) is not int or not 0 < record["flags"] < 2**32:
+                raise ProbeError("invalid_failure")
+        if (code == 0 or set(record) != fields
+                or type(record.get("stage")) is not str
                 or not re.fullmatch(r"[a-z][a-z0-9_]{0,39}", record["stage"])
+                or type(record.get("hresult")) is not str
                 or not re.fullmatch(r"[0-9a-f]{8}", record["hresult"])):
             raise ProbeError("invalid_failure")
         return record

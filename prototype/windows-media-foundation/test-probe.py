@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import sys
 import tempfile
@@ -213,12 +214,207 @@ class ProbeTests(unittest.TestCase):
             self.assertEqual(probe.main(), 1)
         self.assertEqual(output.getvalue(), "")
 
+    def test_decode_failure_flags_are_bounded_and_stage_specific(self):
+        failure = dict(ok=False, stage="decode_flags", hresult="80004005", elapsed_ms=1)
+        for flags in (1, 2, 4, 0x80000000, 2**32 - 1):
+            record = failure | {"flags": flags}
+            self.assertEqual(probe.validate_record(json.dumps(record), 1, 2048, 16777216, 64), record)
+        for change in ({}, {"flags": 0}, {"flags": -1}, {"flags": 2**32},
+                       {"flags": True}, {"flags": 1.5}, {"flags": "private/path"},
+                       {"flags": 1, "path": "private/path"},
+                       {"flags": 1, "stage": "source_open"},
+                       {"stage": None}, {"stage": []}, {"hresult": []}):
+            with self.subTest(change=change), self.assertRaises(probe.ProbeError):
+                probe.validate_record(json.dumps(failure | change), 1, 2048, 16777216, 64)
+
+    def test_flag_failure_logging_and_cleanup_rejects_extra_child_fields(self):
+        failure = dict(ok=False, stage="decode_flags", hresult="80004005", elapsed_ms=1, flags=4)
+        for extra in ({}, {"path": "private/path", "media": "raw child bytes"}):
+            paths = []
+            calls = []
+
+            def execute(argv, directory, timeout, max_log):
+                paths.append(directory)
+                calls.append(argv)
+                return (1, json.dumps(failure | extra).encode()) if len(calls) == 3 else (0, b"")
+
+            real_run = probe.run
+            output = io.StringIO()
+            with patch.dict(os.environ, {}, clear=True), \
+                    patch.object(probe, "run", side_effect=lambda: real_run(execute=execute)), \
+                    contextlib.redirect_stdout(output):
+                self.assertEqual(probe.main(), 1)
+            self.assertTrue(all(not path.exists() for path in paths))
+            self.assertEqual(len(output.getvalue().splitlines()), 1)
+            self.assertLessEqual(len(output.getvalue().encode()), 4096)
+            record = json.loads(output.getvalue())
+            if extra:
+                self.assertEqual(record["stage"], "decode_invalid_failure")
+                self.assertNotIn("flags", record)
+            else:
+                self.assertEqual(record, failure | {"fixture_sha256": record["fixture_sha256"]})
+            for forbidden in ("private", "path", "media", "raw child bytes"):
+                self.assertNotIn(forbidden, output.getvalue())
+
+    def test_native_notification_validation_with_fake_media_types(self):
+        # Execute the actual C++ validators, not a Python copy of their policy.
+        # This optional SDK-free harness cannot establish Windows compatibility.
+        compiler = shutil.which("c++") or shutil.which("g++")
+        if not compiler:
+            self.skipTest("SDK-free C++ compiler unavailable; source contracts still run")
+        source = (HERE / "probe.cpp").read_text()
+        validators = source.split("struct Failure {", 1)[1].split("struct Runtime {", 1)[0]
+        harness = r'''
+#include <cassert>
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <initializer_list>
+using DWORD = uint32_t;
+using UINT32 = uint32_t;
+using LONG = int32_t;
+using HRESULT = int32_t;
+constexpr HRESULT E_FAIL = -1, E_INVALIDARG = -2, MF_E_ATTRIBUTENOTFOUND = -3;
+bool FAILED(HRESULT hr) { return hr < 0; }
+struct GUID { int Data1; };
+bool operator!=(GUID a, GUID b) { return a.Data1 != b.Data1; }
+constexpr GUID MFMediaType_Video{1}, MFVideoFormat_RGB32{2}, MFVideoFormat_H264{3};
+constexpr int MF_MT_MAJOR_TYPE = 1, MF_MT_SUBTYPE = 2, MF_MT_FRAME_SIZE = 3,
+              MF_MT_DEFAULT_STRIDE = 4;
+constexpr DWORD kFirstVideoStream = 7, kCurrentType = 0xffffffff;
+constexpr DWORD MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED = 0x10,
+                MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED = 0x20,
+                MF_SOURCE_READERF_STREAMTICK = 0x100;
+struct IMFMediaType {
+    GUID major = MFMediaType_Video, subtype = MFVideoFormat_RGB32;
+    UINT32 width = 854, height = 480, stride = 3416;
+    HRESULT status = 0, stride_status = 0;
+    HRESULT GetGUID(int key, GUID* value) {
+        *value = key == MF_MT_MAJOR_TYPE ? major : subtype;
+        return status;
+    }
+    HRESULT GetUINT32(int, UINT32* value) { *value = stride; return stride_status; }
+};
+HRESULT MFGetAttributeSize(IMFMediaType* type, int, UINT32* w, UINT32* h) {
+    *w = type->width; *h = type->height; return type->status;
+}
+HRESULT MFGetStrideForBitmapInfoHeader(int, UINT32 w, LONG* stride) {
+    *stride = static_cast<LONG>(w * 4); return 0;
+}
+template<class T> struct ComPtr {
+    T* value = nullptr;
+    T* Get() { return value; }
+    T** operator&() { return &value; }
+};
+struct IMFSourceReader {
+    IMFMediaType native, output;
+    int native_queries = 0, output_queries = 0;
+    HRESULT native_status = 0, output_status = 0;
+    IMFSourceReader() { native.subtype = MFVideoFormat_H264; }
+    HRESULT GetNativeMediaType(DWORD stream, DWORD index, IMFMediaType** value) {
+        assert(stream == kFirstVideoStream && index == kCurrentType);
+        ++native_queries; *value = &native; return native_status;
+    }
+    HRESULT GetCurrentMediaType(DWORD stream, IMFMediaType** value) {
+        assert(stream == kFirstVideoStream);
+        ++output_queries; *value = &output; return output_status;
+    }
+};
+'''
+        cases = r'''
+int main() {
+    const Limits limits{2048, 16777216, 64};
+    const Layout input{854, 480, 3416, 1639680};
+    for (DWORD flags : {0u, 0x100u, 0x10u, 0x20u, 0x30u, 0x110u, 0x120u, 0x130u}) {
+        IMFSourceReader reader;
+        reader.output.stride = 3424; // Changed but still bounded padding is valid.
+        Layout frame = input;
+        validate_read(&reader, flags, limits, input, frame);
+        const bool changed = (flags & 0x30) != 0;
+        assert(reader.native_queries == changed && reader.output_queries == changed);
+        assert(frame.stride == (changed ? 3424u : 3416u));
+        assert(frame.bytes == frame.stride * frame.height);
+    }
+    // Every forbidden bit, alone or combined with notifications: ERROR=1,
+    // EOF=2, NEWSTREAM=4, ALLEFFECTSREMOVED=0x200 and all unknown bits.
+    for (unsigned bit = 0; bit < 32; ++bit) {
+        DWORD flag = DWORD(1) << bit;
+        if (flag & 0x130) continue;
+        for (DWORD flags : {flag, flag | 0x30}) {
+            IMFSourceReader reader;
+            Layout frame = input;
+            try { validate_read(&reader, flags, limits, input, frame); return 1; }
+            catch (const Failure& f) {
+                assert(std::strcmp(f.stage, "decode_flags") == 0 && f.flags == flags);
+                assert(reader.native_queries == 0 && reader.output_queries == 0);
+            }
+        }
+    }
+    for (DWORD flags : {0x10u, 0x20u, 0x30u}) {
+        for (int invalid = 0; invalid < 18; ++invalid) {
+            IMFSourceReader reader;
+            switch (invalid) {
+                case 0: reader.native.subtype = MFVideoFormat_RGB32; break;
+                case 1: reader.output.subtype = MFVideoFormat_H264; break;
+                case 2: reader.native.width = 853; break;
+                case 3: reader.native.height = 481; break;
+                case 4: reader.output.width = 853; break;
+                case 5: reader.output.height = 481; break;
+                case 6: reader.native.width = 0; break;
+                case 7: reader.output.height = 2049; break;
+                case 8: reader.output.stride = 3415; break;
+                case 9: reader.output.stride = 16777217; break;
+                case 10: reader.output.stride = 40000; break;
+                case 11: reader.native.major = GUID{99}; break;
+                case 12: reader.output.major = GUID{99}; break;
+                case 13: reader.native_status = E_FAIL; break;
+                case 14: reader.output_status = E_FAIL; break;
+                case 15: reader.output.status = E_FAIL; break;
+                case 16: reader.native.status = E_FAIL; break;
+                case 17: reader.output.stride_status = E_FAIL; break;
+            }
+            Layout frame = input;
+            try { validate_read(&reader, flags, limits, input, frame); return 2; }
+            catch (const Failure& f) {
+                assert(f.flags == 0 && frame.stride == input.stride);
+            }
+        }
+    }
+    // Signed and absent strides retain the same bounds as initial negotiation.
+    for (bool absent : {false, true}) {
+        IMFSourceReader reader;
+        reader.output.stride = static_cast<UINT32>(-3416);
+        if (absent) reader.output.stride_status = MF_E_ATTRIBUTENOTFOUND;
+        Layout frame = input;
+        validate_read(&reader, 0x30, limits, input, frame);
+        assert(frame.stride == 3416 && frame.bytes == input.bytes);
+    }
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="iris-mf-contract-") as temp:
+            directory = Path(temp)
+            (directory / "contract.cpp").write_text(harness + "struct Failure {" + validators + cases)
+            executable = directory / ("contract.exe" if os.name == "nt" else "contract")
+            code, _ = probe.command([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                                     "contract.cpp", "-o", str(executable)], directory,
+                                    probe.setting("IRIS_MF_BUILD_TIMEOUT_SECONDS", 120),
+                                    probe.setting("IRIS_MF_MAX_LOG_BYTES", 4096))
+            self.assertEqual(code, 0, "SDK-free validator harness did not compile (output suppressed)")
+            code, _ = probe.command([str(executable)], directory,
+                                    probe.setting("IRIS_MF_DECODE_TIMEOUT_SECONDS", 30),
+                                    probe.setting("IRIS_MF_MAX_LOG_BYTES", 4096))
+            self.assertEqual(code, 0, "SDK-free validator cases failed (output suppressed)")
+
     def test_native_checks_before_copy_and_system_libraries_only(self):
         source = (HERE / "probe.cpp").read_text()
         self.assertLess(source.index('layout(native.Get()'), source.index('reader->ReadSample('))
+        self.assertLess(source.index('validate_read(reader.Get(), flags'), source.index('if (!sample)'))
+        self.assertIn('if (flags & ~allowed)', source)
+        self.assertIn('if (flags & changes) frame = checked_output(reader, limits, input)', source)
+        self.assertIn('if (failure.flags) std::printf(",\\\"flags\\\":%lu", failure.flags)', source)
         self.assertLess(source.index('total > limits.bytes'), source.index('sample->ConvertToContiguousBuffer('))
         for contract in ("MFCreateSourceReaderFromURL", "MFVideoFormat_H264", "MFVideoFormat_RGB32",
-                         "MF_SOURCE_READERF_ENDOFSTREAM", "dimension_bound", "invalid_buffer",
+                         "MF_SOURCE_READER_CURRENT_TYPE_INDEX", "dimension_bound", "invalid_buffer",
                          "CoUninitialize", "MFShutdown", "buffer->Unlock()"):
             self.assertIn(contract, source)
 
