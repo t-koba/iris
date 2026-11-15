@@ -108,7 +108,7 @@ assert_absent() {
 
 printf 'peer diagnostic\n' >"$test_root/logs/log.172.17.0.1"
 printf 'nmbd diagnostic\n' >"$test_root/logs/log.nmbd"
-printf 'smbd iris diagnostic\nAuth: user [iris] with [NTLMv2] status [NT_STATUS_LOGON_FAILURE]\n' >"$test_root/logs/log.smbd"
+printf 'smbd iris diagnostic\nAuth: user [iris] with [NTLMv2] status [NT_STATUS_LOGON_FAILURE]\nmid 17, CreditCharge: 0, NeededCharge: 1\nCreditCharge too low, given 0, needed 1\nsmbd_smb2_request_find_done: in_output_buffer_length = 65536\nsmbd_smb2_request_find_done: out_output_buffer.length = 0\n' >"$test_root/logs/log.smbd"
 report_logs
 grep -Fxq '<--pull=never>' "$test_root/docker-args"
 grep -Fxq "<sha256:$(printf '%064d' 0)>" "$test_root/docker-args"
@@ -117,6 +117,10 @@ grep -Fxq '<log level = 2>' "$test_root/docker-args"
 grep -Fq 'smbd [redacted] diagnostic' "$test_root/report"
 grep -Fq 'NTLMv2] status [NT_STATUS_LOGON_FAILURE]' "$test_root/report"
 grep -Fq 'peer diagnostic' "$test_root/report"
+grep -Fq 'credit_check: charge=0 needed=1' "$test_root/report"
+grep -Fq 'credit_rejected: given=0 needed=1' "$test_root/report"
+grep -Fq 'query_output_limit=65536' "$test_root/report"
+grep -Fq 'query_response_bytes=0' "$test_root/report"
 assert_absent 'nmbd diagnostic'
 assert_absent 'iris'
 

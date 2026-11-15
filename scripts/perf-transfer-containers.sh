@@ -493,7 +493,21 @@ report_container() {
       count=$((count + 1))
       printf "\n--- %s ---\n" "$file"
       tail -c 4096 "$file"
-    done; [ "$found" -eq 1 ] || echo "no matching /var/log/samba/log.* files found"' \
+    done
+    [ "$found" -eq 1 ] || echo "no matching /var/log/samba/log.* files found"
+    printf "\nSMB2 QueryDirectory diagnostics (numeric fields only):\n"
+    count=0
+    for file in /var/log/samba/log.smbd /var/log/samba/log.*; do
+      [ -f "$file" ] || continue
+      if [ "$file" = /var/log/samba/log.smbd ] && [ "$count" -gt 0 ]; then continue; fi
+      [ "$count" -lt 2 ] || break
+      count=$((count + 1))
+      tail -c 4096 "$file" | sed -nE \
+        -e "s/.*mid [0-9]+, CreditCharge: ([0-9]+), NeededCharge: ([0-9]+).*/credit_check: charge=\\1 needed=\\2/p" \
+        -e "s/.*CreditCharge too low, given ([0-9]+), needed ([0-9]+).*/credit_rejected: given=\\1 needed=\\2/p" \
+        -e "s/.*smbd_smb2_request_find_done: in_output_buffer_length = ([0-9]+).*/query_output_limit=\\1/p" \
+        -e "s/.*smbd_smb2_request_find_done: out_output_buffer.length = ([0-9]+).*/query_response_bytes=\\1/p"
+    done' \
       2>&1 | tail -c 8192 | sed 's/iris/[redacted]/g' | tail -c 8192 >&2 || true
   fi
 }
