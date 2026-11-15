@@ -135,17 +135,23 @@ def validate_record(data, code, dimension, max_bytes, reads):
                 or not re.fullmatch(r"[0-9a-f]{8}", record["hresult"])):
             raise ProbeError("invalid_failure")
         return record
-    if (code != 0 or set(record) != {"ok", "backend", "codec", "pixel_format", "width", "height",
-                                    "stride", "bytes", "reads", "rgb_fnv1a64", "timestamp_100ns", "elapsed_ms"}
+    success_fields = {"ok", "backend", "codec", "pixel_format", "width", "height", "coded_width",
+                      "coded_height", "visible_x", "visible_y", "stride", "bytes", "reads",
+                      "rgb_fnv1a64", "timestamp_100ns", "elapsed_ms"}
+    if (code != 0 or set(record) != success_fields
             or record["backend"] != "mf-source-reader" or record["codec"] != "h264"
             or record["pixel_format"] != "rgb32"):
         raise ProbeError("invalid_success")
-    for key in ("width", "height", "stride", "bytes", "reads", "timestamp_100ns"):
+    for key in ("width", "height", "coded_width", "coded_height", "visible_x", "visible_y",
+                "stride", "bytes", "reads", "timestamp_100ns"):
         if type(record[key]) is not int:
             raise ProbeError("invalid_integer")
-    if (not 0 < record["width"] <= dimension or not 0 < record["height"] <= dimension
-            or not record["width"] * 4 <= record["stride"] <= max_bytes
-            or not record["stride"] * record["height"] <= record["bytes"] <= max_bytes
+    if (not 0 < record["width"] <= record["coded_width"] <= dimension
+            or not 0 < record["height"] <= record["coded_height"] <= dimension
+            or record["visible_x"] < 0 or record["visible_x"] + record["width"] > record["coded_width"]
+            or record["visible_y"] < 0 or record["visible_y"] + record["height"] > record["coded_height"]
+            or not record["coded_width"] * 4 <= record["stride"] <= max_bytes
+            or not record["stride"] * record["coded_height"] <= record["bytes"] <= max_bytes
             or not 0 < record["reads"] <= reads
             or not -(2**63) <= record["timestamp_100ns"] < 2**63
             or not re.fullmatch(r"[0-9a-f]{16}", record["rgb_fnv1a64"])):

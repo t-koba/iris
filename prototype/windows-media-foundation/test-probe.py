@@ -19,8 +19,9 @@ probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)
 
 FRAME = dict(ok=True, backend="mf-source-reader", codec="h264", pixel_format="rgb32",
-             width=854, height=480, stride=3416, bytes=1639680, reads=1,
-             rgb_fnv1a64="e46c6403198bdf25", timestamp_100ns=0, elapsed_ms=12.5)
+             width=854, height=480, coded_width=854, coded_height=480, visible_x=0, visible_y=0,
+             stride=3416, bytes=1639680, reads=1, rgb_fnv1a64="e46c6403198bdf25",
+             timestamp_100ns=0, elapsed_ms=12.5)
 
 
 class ProbeTests(unittest.TestCase):
@@ -105,7 +106,8 @@ class ProbeTests(unittest.TestCase):
     def test_record_validates_bounds_and_failure_hresult(self):
         for change in ({"width": 0}, {"width": 2049}, {"height": -1}, {"stride": 1},
                        {"bytes": 16777217}, {"bytes": 10}, {"reads": 65}, {"width": True},
-                       {"rgb_fnv1a64": "invalid"}, {"elapsed_ms": float("nan")},
+                       {"coded_width": 853}, {"coded_height": 479}, {"visible_x": 1},
+                       {"visible_y": 1}, {"stride": 3415}, {"rgb_fnv1a64": "invalid"}, {"elapsed_ms": float("nan")},
                        {"unexpected": "not retained"}):
             with self.subTest(change=change), self.assertRaises(probe.ProbeError):
                 probe.validate_record(json.dumps(FRAME | change), 0, 2048, 16777216, 64)
@@ -115,6 +117,14 @@ class ProbeTests(unittest.TestCase):
             probe.validate_record(json.dumps(failure), 0, 2048, 16777216, 64)
         with self.assertRaises(probe.ProbeError):
             probe.validate_record("[]", 0, 2048, 16777216, 64)
+
+    def test_record_accepts_coded_frame_with_exact_visible_aperture(self):
+        padded = FRAME | {"coded_width": 864, "visible_x": 0, "stride": 3456,
+                          "bytes": 1658880}
+        self.assertEqual(probe.validate_record(json.dumps(padded), 0, 2048, 16777216, 64), padded)
+        for change in ({"visible_x": 11}, {"coded_width": 853}, {"stride": 3452}):
+            with self.subTest(change=change), self.assertRaises(probe.ProbeError):
+                probe.validate_record(json.dumps(padded | change), 0, 2048, 16777216, 64)
 
     def test_command_suppresses_bounds_and_times_out(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -382,7 +392,7 @@ struct IMFSourceReader {
         cases = r'''
 int main() {
     const Limits limits{2048, 16777216, 64};
-    const Layout input{854, 480, 3416, 1639680};
+    const Layout input{854, 480, 3416, 1639680, {0, 0, 854, 480}};
     for (DWORD flags : {0u, 0x100u, 0x10u, 0x20u, 0x30u, 0x110u, 0x120u, 0x130u}) {
         IMFSourceReader reader;
         reader.output.stride = 3424; // Changed but still bounded padding is valid.
@@ -448,6 +458,22 @@ int main() {
                 }
             }
         }
+    }
+    // Coded-width padding is accepted only when both exact display apertures prove the visible frame.
+    {
+        IMFSourceReader reader;
+        reader.output.width = 864;
+        reader.output.stride = 3456;
+        reader.output.minimum_bytes = reader.output.geometric_bytes = sizeof(MFVideoArea);
+        reader.output.minimum_size_status = reader.output.geometric_size_status = 0;
+        reader.output.minimum_display.Area.cx = reader.output.geometric.Area.cx = 854;
+        reader.output.minimum_display.Area.cy = reader.output.geometric.Area.cy = 480;
+        Layout frame = input;
+        validate_read(&reader, 0x30, limits, input, frame);
+        assert(frame.width == 864 && frame.height == 480);
+        assert(frame.visible.x == 0 && frame.visible.y == 0);
+        assert(frame.visible.width == 854 && frame.visible.height == 480);
+        assert(frame.stride == 3456 && frame.bytes == 3456 * 480);
     }
     // Output mismatch diagnostics expose only fixed numeric apertures, never raw media bytes.
     {

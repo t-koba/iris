@@ -23,21 +23,30 @@ not opened by the probe. Fixture licenses/attribution remain in
 No media bytes belong in git.
 
 On success, one JSON log line records the fixture SHA-256, backend, codec,
-RGB32 dimensions/stride/buffer length, read count, sample timestamp, RGB FNV-1a
-fingerprint and elapsed milliseconds. FNV is a diagnostic, not a cryptographic
-or golden-image assertion. The probe bounds both native and negotiated output
-dimensions before decoding, checks sample length before allocating a contiguous
-copy, checks locked-buffer capacity/length, and visits every visible RGB byte.
-Padding and RGB32's undefined fourth byte are excluded from the fingerprint.
-A black first frame is valid for this sample's opening fade-in. Unexpected type
-changes, end-of-stream before a frame, invalid buffers and exhausted read limits
-fail. An output-size mismatch remains a failure and additionally reports the
-output media type's minimum-display and geometric apertures as bounded numeric
-`MFVideoArea` fields (or an explicit missing/unreadable/invalid-size status).
-These diagnostics distinguish coded dimensions from declared image regions;
-they do not crop, accept padding, or relax the exact negotiated-size assertion.
-Source Reader failures retain a fixed stage name and HRESULT (for example,
-`source_open` or `set_rgb32`) and return a nonzero process/job exit status.
+visible RGB32 dimensions, coded output dimensions, visible offset, stride/buffer
+length, read count, sample timestamp, RGB FNV-1a fingerprint and elapsed
+milliseconds. FNV is a diagnostic, not a cryptographic or golden-image
+assertion. The probe bounds native and coded output dimensions before decoding,
+checks sample length before allocating a contiguous copy, checks locked-buffer
+capacity/length, and fingerprints only the validated visible RGB bytes. Padding
+and RGB32's undefined fourth byte are excluded. A black first frame is valid for
+this sample's opening fade-in. Unexpected native type changes, end-of-stream
+before a frame, invalid buffers and exhausted read limits fail.
+
+The expected 854×480 input may have a larger coded RGB output only when both
+`MF_MT_MINIMUM_DISPLAY_APERTURE` and `MF_MT_GEOMETRIC_APERTURE` are present, agree
+on an integer rectangle fully inside the coded frame, and exactly match the
+input dimensions. The minimum display aperture defines the valid image region;
+pixels outside it are not displayed ([Microsoft documentation](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-mt-minimum-display-aperture-attribute)).
+The geometric aperture is separately checked for consistency
+([Microsoft documentation](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-mt-geometric-aperture-attribute)).
+This recognizes the pinned run's 864×480 coded frame with a 854×480 visible
+region; it does not tolerate a visible resize, synthesize a crop or prove that
+Iris's renderer consumes the aperture. For a larger coded output, missing,
+malformed, fractional, inconsistent or out-of-bounds apertures remain failures.
+Source Reader failures retain a
+fixed stage name and HRESULT (for example, `source_open` or `set_rgb32`) and
+return a nonzero process/job exit status.
 
 `elapsed_ms` on a native result is a single cold first-frame observation including
 COM/MF startup, source opening, negotiation, decode, pixel validation and teardown;

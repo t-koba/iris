@@ -70,11 +70,16 @@ struct Limits {
     uint64_t reads;
 };
 
+struct VisibleArea {
+    UINT32 x, y, width, height;
+};
+
 struct Layout {
     UINT32 width;
     UINT32 height;
     uint64_t stride;
     uint64_t bytes;
+    VisibleArea visible;
 };
 
 Layout layout(IMFMediaType* type, const Limits& limits, bool rgb) {
@@ -106,7 +111,7 @@ Layout layout(IMFMediaType* type, const Limits& limits, bool rgb) {
     }
     if (stride < row || stride > limits.bytes || height > limits.bytes / stride)
         throw Failure{"output_bound", E_INVALIDARG};
-    return {width, height, stride, stride * height};
+    return {width, height, stride, stride * height, {0, 0, width, height}};
 }
 
 ApertureReport read_aperture(IMFMediaType* type, REFGUID key) {
@@ -123,6 +128,31 @@ ApertureReport read_aperture(IMFMediaType* type, REFGUID key) {
             area.OffsetX.fract, area.OffsetY.fract, area.Area.cx, area.Area.cy};
 }
 
+bool exact_visible_apertures(const ApertureReport& minimum, const ApertureReport& geometric,
+                             const Layout& input, const Layout& output, VisibleArea& visible) {
+    if (minimum.status != ApertureStatus::present || geometric.status != ApertureStatus::present ||
+        minimum.offset_x_fraction || minimum.offset_y_fraction ||
+        minimum.offset_x_value < 0 || minimum.offset_y_value < 0 ||
+        minimum.width <= 0 || minimum.height <= 0 ||
+        minimum.offset_x_value != geometric.offset_x_value ||
+        minimum.offset_y_value != geometric.offset_y_value ||
+        minimum.offset_x_fraction != geometric.offset_x_fraction ||
+        minimum.offset_y_fraction != geometric.offset_y_fraction ||
+        minimum.width != geometric.width || minimum.height != geometric.height ||
+        static_cast<uint32_t>(minimum.width) != input.width ||
+        static_cast<uint32_t>(minimum.height) != input.height)
+        return false;
+
+    const auto x = static_cast<uint32_t>(minimum.offset_x_value);
+    const auto y = static_cast<uint32_t>(minimum.offset_y_value);
+    const auto width = static_cast<uint32_t>(minimum.width);
+    const auto height = static_cast<uint32_t>(minimum.height);
+    if (uint64_t(x) + width > output.width || uint64_t(y) + height > output.height)
+        return false;
+    visible = {x, y, width, height};
+    return true;
+}
+
 // Both notification kinds require both types to be checked, before using a
 // sample from that ReadSample call (or continuing after a notification alone).
 Layout checked_output(IMFSourceReader* reader, const Limits& limits, const Layout& input) {
@@ -134,14 +164,16 @@ Layout checked_output(IMFSourceReader* reader, const Limits& limits, const Layou
                       current_input.width, current_input.height};
     ComPtr<IMFMediaType> output;
     check(reader->GetCurrentMediaType(kFirstVideoStream, &output), "output_type");
-    const auto frame = layout(output.Get(), limits, true);
+    auto frame = layout(output.Get(), limits, true);
     if (frame.width != input.width || frame.height != input.height) {
         Failure failure{"unexpected_resize", E_FAIL, 0, "output", input.width, input.height,
                         frame.width, frame.height};
         failure.has_apertures = true;
         failure.minimum_display_aperture = read_aperture(output.Get(), MF_MT_MINIMUM_DISPLAY_APERTURE);
         failure.geometric_aperture = read_aperture(output.Get(), MF_MT_GEOMETRIC_APERTURE);
-        throw failure;
+        if (!exact_visible_apertures(failure.minimum_display_aperture,
+                                     failure.geometric_aperture, input, frame, frame.visible))
+            throw failure;
     }
     return frame;
 }
@@ -227,9 +259,9 @@ Result decode(const wchar_t* path, const Limits& limits) {
         // Read every visible RGB byte (ignore RGB32's undefined fourth byte and
         // row padding). Black is valid: the pinned sample begins with a fade-in.
         uint64_t checksum = 14695981039346656037ull;
-        for (UINT32 y = 0; y < frame.height; ++y) {
+        for (UINT32 y = frame.visible.y; y < frame.visible.y + frame.visible.height; ++y) {
             const BYTE* row = locked.data + uint64_t(y) * frame.stride;
-            for (UINT32 x = 0; x < frame.width; ++x)
+            for (UINT32 x = frame.visible.x; x < frame.visible.x + frame.visible.width; ++x)
                 for (unsigned c = 0; c < 3; ++c)
                     checksum = (checksum ^ row[uint64_t(x) * 4 + c]) * 1099511628211ull;
         }
@@ -277,10 +309,13 @@ int wmain(int argc, wchar_t** argv) {
             throw Failure{"arguments", E_INVALIDARG};
         const auto result = decode(argv[1], limits);
         std::printf("{\"ok\":true,\"backend\":\"mf-source-reader\",\"codec\":\"h264\",\"pixel_format\":\"rgb32\","
-                    "\"width\":%u,\"height\":%u,\"stride\":%llu,\"bytes\":%lu,\"reads\":%llu,"
+                    "\"width\":%u,\"height\":%u,\"coded_width\":%u,\"coded_height\":%u,"
+                    "\"visible_x\":%u,\"visible_y\":%u,\"stride\":%llu,\"bytes\":%lu,\"reads\":%llu,"
                     "\"rgb_fnv1a64\":\"%016llx\",\"timestamp_100ns\":%lld,\"elapsed_ms\":%.3f}\n",
-                    result.frame.width, result.frame.height, result.frame.stride, result.bytes,
-                    result.reads, result.checksum, result.timestamp, elapsed());
+                    result.frame.visible.width, result.frame.visible.height, result.frame.width,
+                    result.frame.height, result.frame.visible.x, result.frame.visible.y,
+                    result.frame.stride, result.bytes, result.reads, result.checksum,
+                    result.timestamp, elapsed());
         return 0;
     } catch (const Failure& failure) {
         std::printf("{\"ok\":false,\"stage\":\"%s\",\"hresult\":\"%08lx\",\"elapsed_ms\":%.3f",
