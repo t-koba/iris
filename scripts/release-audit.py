@@ -15,6 +15,24 @@ import threading
 from release_evidence import load_json, require, validate_closure
 
 
+# Keep in sync with fetch-pdfium-runtime.sh (checked by the offline contracts).
+# These are immutable upstream identity/asset pins, not operator tuning.
+PDFIUM_ARCHIVES = {
+    "pdfium-linux-x64.tgz": (3945444, "d6b1e28950a0392590d79bbdbb7eb19686872b688f8a36f170acb19e41473113"),
+    "pdfium-linux-arm64.tgz": (3811232, "c70b1ce4d13257f741af19e0aeee575890875995eb81370a65be942e601a1862"),
+}
+PDFIUM_COMMIT = "0eb94b28c2252d2baae3dfe15dc6b237131d8cd8"
+PDFIUM_ATTESTATION = {
+    "pin_sha256": "7526f4b934ab498d6206ac7f3d78dd4ce8e0f7d3175227ab3f4ecc255d950ad7",
+    "bundle_bytes": 18267,
+    "repo": "bblanchon/pdfium-binaries",
+    "signer_workflow": "github.com/bblanchon/pdfium-binaries/.github/workflows/build-all.yml",
+    "signer_digest": PDFIUM_COMMIT,
+    "source_digest": PDFIUM_COMMIT,
+    "source_ref": "refs/heads/master",
+}
+
+
 class Audit:
     def __init__(self, args):
         self.args = args
@@ -123,16 +141,23 @@ class Audit:
             asset_sha256 = archive.get("sha256")
             runtime_sha256 = runtime.get("sha256")
             attestation_pin_sha256 = attestation.get("pin_sha256")
-            if (archive.get("asset") not in ("pdfium-linux-x64.tgz", "pdfium-linux-arm64.tgz")
-                    or type(archive.get("bytes")) is not int or archive["bytes"] < 1
-                    or not isinstance(asset_sha256, str)
-                    or not re.fullmatch(r"[0-9a-f]{64}", asset_sha256)
+            expected_archive = PDFIUM_ARCHIVES.get(archive.get("asset"))
+            if (expected_archive is None
+                    or type(archive.get("bytes")) is not int
+                    or (archive["bytes"], asset_sha256) != expected_archive
                     or attestation.get("subject_sha256") != asset_sha256
-                    or not isinstance(attestation_pin_sha256, str)
-                    or not re.fullmatch(r"[0-9a-f]{64}", attestation_pin_sha256)
+                    or attestation_pin_sha256 != PDFIUM_ATTESTATION["pin_sha256"]
                     or runtime.get("path") != "usr/lib/iris/libpdfium.so"
                     or not isinstance(runtime_sha256, str)
                     or not re.fullmatch(r"[0-9a-f]{64}", runtime_sha256)):
+                return result
+            status = attestation.get("status")
+            if status == "verified":
+                if (any(attestation.get(key) != value for key, value in PDFIUM_ATTESTATION.items())
+                        or type(attestation.get("bundle_bytes")) is not int
+                        or attestation.get("bundle_sha256") != PDFIUM_ATTESTATION["pin_sha256"]):
+                    return result
+            elif status != "not_attempted":
                 return result
             actual_library_sha256 = self.sha256_file(library)
             if actual_library_sha256 != runtime_sha256:
@@ -140,15 +165,12 @@ class Audit:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
             return result
 
-        status = attestation.get("status")
-        if status not in ("verified", "not_attempted"):
-            return result
         result.update(attestation_status=status, asset_sha256=asset_sha256,
                       library_sha256=actual_library_sha256,
                       attestation_pin_sha256=attestation_pin_sha256)
         if status == "verified":
             result.update(attestation_verified=True,
-                          note="staged provenance records successful verification for this exact archive digest")
+                          note="staged provenance records verification of the pinned bundle, upstream identity and exact archive subject; staged library bytes match")
         else:
             result.update(note="staged provenance records that upstream attestation verification was not attempted")
         return result

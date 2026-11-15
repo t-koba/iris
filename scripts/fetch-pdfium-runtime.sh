@@ -23,6 +23,10 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 pdfium_release="chromium/8138"
 pdfium_version="159.0.8138.0"
 pdfium_commit="0eb94b28c2252d2baae3dfe15dc6b237131d8cd8"
+pdfium_attestation_bytes=18267
+pdfium_repo="bblanchon/pdfium-binaries"
+pdfium_signer_workflow="github.com/bblanchon/pdfium-binaries/.github/workflows/build-all.yml"
+pdfium_source_ref="refs/heads/master"
 pdfium_attestation_sha256="7526f4b934ab498d6206ac7f3d78dd4ce8e0f7d3175227ab3f4ecc255d950ad7"
 
 for tool in curl tar sha256sum mktemp; do
@@ -92,7 +96,12 @@ case "$verify_provenance" in
         ;;
 esac
 
+# One disposable directory owns the bundle and extracted files, even on failure.
+extract=$(mktemp -d)
+trap 'rm -rf -- "$extract"' EXIT
 attestation_status=not_attempted
+bundle_sha256=null
+bundle_bytes=null
 if [[ $verify_provenance == 1 ]]; then
     [[ -n ${GH_TOKEN:-} ]] || {
         echo "GH_TOKEN is required to verify PDFium build provenance" >&2
@@ -102,13 +111,26 @@ if [[ $verify_provenance == 1 ]]; then
         echo "gh is required to verify PDFium build provenance" >&2
         exit 1
     }
-    # With set -e, a failed verification exits before any successful status is recorded.
-    gh attestation verify "$tarball" --repo bblanchon/pdfium-binaries
+    bundle="$extract/pdfium-attestation.json"
+    curl --fail --location --silent --show-error \
+        --retry "$fetch_retries" --retry-delay "$fetch_retry_delay" --proto '=https' --tlsv1.2 \
+        --output "$bundle" \
+        "https://github.com/$pdfium_repo/releases/download/$pdfium_release/pdfium-attestation.json"
+    bundle_bytes=$(wc -c < "$bundle")
+    bundle_sha256=$(sha256sum "$bundle" | cut -d' ' -f1)
+    if [[ $bundle_bytes -ne $pdfium_attestation_bytes || $bundle_sha256 != "$pdfium_attestation_sha256" ]]; then
+        echo "PDFium attestation bundle does not match the pinned size/sha256" >&2
+        exit 1
+    fi
+    # gh binds the exact archive subject to the pinned bundle and upstream identity.
+    # With set -e, any verification failure exits before recording success or staging.
+    gh attestation verify "$tarball" --repo "$pdfium_repo" --bundle "$bundle" \
+        --signer-workflow "$pdfium_signer_workflow" --signer-digest "$pdfium_commit" \
+        --source-digest "$pdfium_commit" --source-ref "$pdfium_source_ref"
+    bundle_sha256="\"$bundle_sha256\""
     attestation_status=verified
 fi
 
-extract=$(mktemp -d)
-trap 'rm -rf -- "$extract"' EXIT
 tar -xzf "$tarball" -C "$extract" --no-same-owner --no-same-permissions
 
 for member in LICENSE VERSION args.gn licenses/pdfium.txt lib/libpdfium.so; do
@@ -147,6 +169,13 @@ Asset sha256:   $asset_sha256
 Download:       $url
 Release:        immutable GitHub release by bblanchon/pdfium-binaries
 Attestation digest pin: $pdfium_attestation_sha256
+Attestation size pin: $pdfium_attestation_bytes
+Attestation bundle sha256: $bundle_sha256
+Attestation bundle bytes: $bundle_bytes
+Attestation repository: $pdfium_repo
+Attestation signer workflow: $pdfium_signer_workflow
+Attestation signer/source digest: $pdfium_commit
+Attestation source ref: $pdfium_source_ref
 Attestation verification: $attestation_status (subject sha256 $asset_sha256)
 Library sha256: $library_sha256
 License:        see LICENSE and licenses/ in this directory
@@ -166,6 +195,13 @@ cat > "$doc_dir/PROVENANCE.json" <<PROVENANCE_JSON
   "attestation": {
     "status": "$attestation_status",
     "pin_sha256": "$pdfium_attestation_sha256",
+    "bundle_sha256": $bundle_sha256,
+    "bundle_bytes": $bundle_bytes,
+    "repo": "$pdfium_repo",
+    "signer_workflow": "$pdfium_signer_workflow",
+    "signer_digest": "$pdfium_commit",
+    "source_digest": "$pdfium_commit",
+    "source_ref": "$pdfium_source_ref",
     "subject_sha256": "$asset_sha256"
   }
 }

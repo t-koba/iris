@@ -542,6 +542,22 @@ class Reports(unittest.TestCase):
                 report.windows(path)
             self.assertTrue(any(r["kind"] == "missing" for r in report.records))
 
+    def test_pdfium_pins_match_fetch_policy(self):
+        fetch = (ROOT / "scripts/fetch-pdfium-runtime.sh").read_text()
+        def pin(name):
+            return re.search(r"^" + name + r'="?([^"\n]+)"?$', fetch, re.M)[1]
+        policy = module.PDFIUM_ATTESTATION
+        self.assertEqual(pin("pdfium_commit"), module.PDFIUM_COMMIT)
+        self.assertEqual(policy["signer_digest"], module.PDFIUM_COMMIT)
+        self.assertEqual(policy["source_digest"], module.PDFIUM_COMMIT)
+        for key, name in (("pin_sha256", "attestation_sha256"),
+                          ("bundle_bytes", "attestation_bytes"), ("repo", "repo"),
+                          ("signer_workflow", "signer_workflow"), ("source_ref", "source_ref")):
+            self.assertEqual(pin("pdfium_" + name), str(policy[key]))
+        archives = re.findall(r'asset="([^"]+)"\s+asset_bytes=(\d+)\s+asset_sha256="([^"]+)"', fetch)
+        self.assertEqual({name: (int(size), digest) for name, size, digest in archives},
+                         module.PDFIUM_ARCHIVES)
+
     def test_pdfium_attestation_requires_matching_staged_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
             docs = Path(directory) / "usr/share/doc/iris/pdfium"
@@ -549,44 +565,70 @@ class Reports(unittest.TestCase):
             docs.mkdir(parents=True)
             library.parent.mkdir(parents=True)
             library.write_bytes(b"staged PDFium bytes")
-            asset_sha256 = hashlib.sha256(b"pinned archive").hexdigest()
             library_sha256 = hashlib.sha256(library.read_bytes()).hexdigest()
+            policy = module.PDFIUM_ATTESTATION
             record = {
                 "schema": 1,
-                "archive": {"asset": "pdfium-linux-x64.tgz", "bytes": 1234,
-                            "sha256": asset_sha256},
-                "runtime": {"path": "usr/lib/iris/libpdfium.so",
-                            "sha256": library_sha256},
-                "attestation": {"status": "verified", "pin_sha256": "1" * 64,
-                                "subject_sha256": asset_sha256},
+                "runtime": {"path": "usr/lib/iris/libpdfium.so", "sha256": library_sha256},
+                "attestation": dict(policy, status="verified", bundle_sha256=policy["pin_sha256"]),
             }
             provenance = docs / "PROVENANCE.json"
             report = audit(max_command_bytes=4096)
-            provenance.write_text(json.dumps(record), encoding="utf-8")
-            verified = report.pdfium_attestation(docs, library)
-            self.assertTrue(verified["attestation_verified"])
-            self.assertEqual(verified["asset_sha256"], asset_sha256)
-            self.assertEqual(verified["library_sha256"], library_sha256)
-            self.assertEqual(verified["attestation_pin_sha256"], "1" * 64)
+            def check(value):
+                provenance.write_text(json.dumps(value), encoding="utf-8")
+                return report.pdfium_attestation(docs, library)
+            def rejected(value):
+                result = check(value)
+                self.assertFalse(result["attestation_verified"])
+                self.assertEqual(result["attestation_status"], "unknown")
 
-            record["attestation"]["status"] = "not_attempted"
-            provenance.write_text(json.dumps(record), encoding="utf-8")
-            manual = report.pdfium_attestation(docs, library)
+            for asset, (size, digest) in module.PDFIUM_ARCHIVES.items():
+                record["archive"] = dict(asset=asset, bytes=size, sha256=digest)
+                record["attestation"]["subject_sha256"] = digest
+                with self.subTest(asset=asset):
+                    verified = check(record)
+                    self.assertTrue(verified["attestation_verified"])
+                    self.assertEqual(verified["asset_sha256"], digest)
+                    self.assertEqual(verified["library_sha256"], library_sha256)
+                    self.assertEqual(verified["attestation_pin_sha256"], policy["pin_sha256"])
+
+            # Every required attestation field must be present and exact, including
+            # plausible but unpinned digests, signer workflow/ref, and archive subject.
+            for key, value in record["attestation"].items():
+                for replacement in (None, "0" * 64 if isinstance(value, str) else value + 1):
+                    with self.subTest(field=key, replacement=replacement):
+                        bad = copy.deepcopy(record)
+                        if replacement is None:
+                            del bad["attestation"][key]
+                        else:
+                            bad["attestation"][key] = replacement
+                        rejected(bad)
+            for section in ("archive", "runtime"):
+                for key, value in record[section].items():
+                    for replacement in (None, "0" * 64 if isinstance(value, str) else value + 1):
+                        with self.subTest(section=section, field=key, replacement=replacement):
+                            bad = copy.deepcopy(record)
+                            if replacement is None:
+                                del bad[section][key]
+                            else:
+                                bad[section][key] = replacement
+                            rejected(bad)
+            bad = copy.deepcopy(record)
+            # An internally consistent, but unpinned archive and subject is not enough.
+            bad["archive"]["sha256"] = bad["attestation"]["subject_sha256"] = "0" * 64
+            rejected(bad)
+            manual_record = copy.deepcopy(record)
+            manual_record["attestation"]["status"] = "not_attempted"
+            manual_record["attestation"]["bundle_sha256"] = None
+            manual_record["attestation"]["bundle_bytes"] = None
+            manual = check(manual_record)
             self.assertFalse(manual["attestation_verified"])
             self.assertEqual(manual["attestation_status"], "not_attempted")
-
-            record["attestation"]["status"] = "failed"
-            provenance.write_text(json.dumps(record), encoding="utf-8")
-            failed = report.pdfium_attestation(docs, library)
-            self.assertFalse(failed["attestation_verified"])
-            self.assertEqual(failed["attestation_status"], "unknown")
-
-            record["attestation"]["status"] = "verified"
-            record["runtime"]["sha256"] = "0" * 64
-            provenance.write_text(json.dumps(record), encoding="utf-8")
-            mismatch = report.pdfium_attestation(docs, library)
-            self.assertFalse(mismatch["attestation_verified"])
-            self.assertEqual(mismatch["attestation_status"], "unknown")
+            library.write_bytes(b"different staged library")
+            rejected(record)
+            rejected(manual_record)
+            library.unlink()
+            rejected(record)
 
     def test_native_evidence_binds_actual_stage_bytes_and_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -749,7 +791,7 @@ class Workflow(unittest.TestCase):
         fetch = (ROOT / "scripts/fetch-pdfium-runtime.sh").read_text()
         self.assertIn("set -euo pipefail", fetch)
         self.assertIn("[[ -n ${GH_TOKEN:-} ]]", fetch)
-        verify = fetch.index('gh attestation verify "$tarball" --repo bblanchon/pdfium-binaries')
+        verify = fetch.index('gh attestation verify "$tarball" --repo "$pdfium_repo" --bundle "$bundle"')
         success = fetch.index("attestation_status=verified")
         metadata = fetch.index('cat > "$doc_dir/PROVENANCE.json"')
         self.assertLess(verify, success)

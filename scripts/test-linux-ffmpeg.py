@@ -247,8 +247,8 @@ class RuntimeContracts(unittest.TestCase):
             root = Path(directory)
             tools = root / "bin"
             tools.mkdir()
-            # Fake only archive hashing, extraction, and gh; the real pinned bytes
-            # are neither downloaded nor retained outside this temporary directory.
+            # Mock downloads, upstream hashes, extraction and gh: synthetic bytes
+            # never leave this temporary directory. Staged library hashing is real.
             tarball = root / "pdfium-linux-x64.tgz"
             with tarball.open("wb") as stream:
                 stream.truncate(3945444)
@@ -261,9 +261,22 @@ class RuntimeContracts(unittest.TestCase):
                 "sha256sum": '''#!/bin/sh
 if [ "$1" = "$IRIS_PDFIUM_TARBALL" ]; then
     printf '%s  %s\\n' "$PDFIUM_TEST_ASSET_SHA256" "$1"
+elif [ "${1##*/}" = pdfium-attestation.json ]; then
+    printf '%s  %s\\n' "$PDFIUM_TEST_BUNDLE_SHA256" "$1"
 else
     exec "$PDFIUM_TEST_REAL_SHA256SUM" "$@"
 fi
+''',
+                "curl": '''#!/bin/sh
+printf '%s\\n' "$@" > "$PDFIUM_TEST_CURL_ARGS"
+output=
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = --output ]; then shift; output=$1; fi
+    shift
+done
+[ -n "$output" ] || exit 2
+truncate -s "$PDFIUM_TEST_BUNDLE_BYTES" "$output"
+exit "${PDFIUM_TEST_CURL_EXIT:-0}"
 ''',
                 "tar": '''#!/bin/sh
 extract=
@@ -282,6 +295,9 @@ printf 'synthetic runtime test bytes\\n' > "$extract/lib/libpdfium.so"
 ''',
                 "gh": '''#!/bin/sh
 printf '%s\\n' "$@" > "$PDFIUM_TEST_GH_ARGS"
+# The verified bundle and exact archive must still exist during verification.
+[ -f "$3" ] || exit 2
+[ "$6" = --bundle ] && [ -f "$7" ] || exit 2
 exit "${PDFIUM_TEST_GH_EXIT:-0}"
 ''',
             }
@@ -301,11 +317,17 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
                 PDFIUM_TEST_REAL_SHA256SUM=real_sha256sum,
             )
 
-            def run(name, verify, token=False, gh_exit="0"):
+            bundle_digest = "7526f4b934ab498d6206ac7f3d78dd4ce8e0f7d3175227ab3f4ecc255d950ad7"
+            def run(name, verify, token=False, gh_exit="0", bundle_size="18267",
+                    bundle_sha256=bundle_digest, curl_exit="0"):
                 appdir = root / name
                 gh_args = root / (name + "-gh-args")
                 env = dict(base_env)
                 env.update(
+                    PDFIUM_TEST_BUNDLE_BYTES=bundle_size,
+                    PDFIUM_TEST_BUNDLE_SHA256=bundle_sha256,
+                    PDFIUM_TEST_CURL_ARGS=str(root / (name + "-curl-args")),
+                    PDFIUM_TEST_CURL_EXIT=curl_exit,
                     IRIS_VERIFY_PDFIUM_PROVENANCE=verify,
                     PDFIUM_TEST_GH_ARGS=str(gh_args),
                     PDFIUM_TEST_GH_EXIT=gh_exit,
@@ -321,30 +343,66 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
             manual, appdir, gh_args = run("manual", "0")
             self.assertEqual(manual.returncode, 0, manual.stderr)
             self.assertFalse(gh_args.exists())
+            self.assertFalse((root / "manual-curl-args").exists())
             manual_record = json.loads(
                 (appdir / "usr/share/doc/iris/pdfium/PROVENANCE.json").read_text(encoding="utf-8")
             )
             self.assertEqual(manual_record["attestation"]["status"], "not_attempted")
             self.assertEqual(manual_record["attestation"]["subject_sha256"], asset_sha256)
+            self.assertIsNone(manual_record["attestation"]["bundle_sha256"])
+            self.assertIsNone(manual_record["attestation"]["bundle_bytes"])
 
             tagged, appdir, gh_args = run("tagged", "1", token=True)
             self.assertEqual(tagged.returncode, 0, tagged.stderr)
-            self.assertEqual(gh_args.read_text(encoding="utf-8").splitlines(), [
+            args = gh_args.read_text(encoding="utf-8").splitlines()
+            bundle = Path(args[6])
+            commit = "0eb94b28c2252d2baae3dfe15dc6b237131d8cd8"
+            workflow = "github.com/bblanchon/pdfium-binaries/.github/workflows/build-all.yml"
+            self.assertEqual(args, [
                 "attestation", "verify", str(tarball), "--repo", "bblanchon/pdfium-binaries",
+                "--bundle", str(bundle), "--signer-workflow", workflow,
+                "--signer-digest", commit, "--source-digest", commit,
+                "--source-ref", "refs/heads/master",
+            ])
+            self.assertEqual(bundle.name, "pdfium-attestation.json")
+            self.assertFalse(bundle.parent.exists())  # disposable on success
+            self.assertEqual((root / "tagged-curl-args").read_text().splitlines(), [
+                "--fail", "--location", "--silent", "--show-error", "--retry", "3",
+                "--retry-delay", "2", "--proto", "=https", "--tlsv1.2", "--output", str(bundle),
+                "https://github.com/bblanchon/pdfium-binaries/releases/download/"
+                "chromium/8138/pdfium-attestation.json",
             ])
             tagged_record = json.loads(
                 (appdir / "usr/share/doc/iris/pdfium/PROVENANCE.json").read_text(encoding="utf-8")
             )
             self.assertEqual(tagged_record["attestation"]["status"], "verified")
-            self.assertEqual(tagged_record["attestation"]["subject_sha256"], asset_sha256)
+            self.assertEqual(tagged_record["attestation"], {
+                "status": "verified", "pin_sha256": bundle_digest,
+                "bundle_sha256": bundle_digest, "bundle_bytes": 18267,
+                "repo": "bblanchon/pdfium-binaries", "signer_workflow": workflow,
+                "signer_digest": commit, "source_digest": commit,
+                "source_ref": "refs/heads/master", "subject_sha256": asset_sha256,
+            })
+            for name, settings in (("wrong-size", {"bundle_size": "18266"}),
+                                   ("wrong-bytes", {"bundle_sha256": "0" * 64}),
+                                   ("fetch-failure", {"curl_exit": "22"})):
+                with self.subTest(name=name):
+                    rejected, appdir, gh_args = run(name, "1", token=True, **settings)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertFalse(gh_args.exists())
+                    self.assertFalse(appdir.exists())
+                    curl_args = (root / (name + "-curl-args")).read_text().splitlines()
+                    self.assertFalse(Path(curl_args[-2]).parent.exists())
 
-            failed, appdir, _ = run("failed", "1", token=True, gh_exit="1")
+            failed, appdir, gh_args = run("failed", "1", token=True, gh_exit="1")
             self.assertNotEqual(failed.returncode, 0)
             self.assertFalse(appdir.exists())
+            self.assertFalse(Path(gh_args.read_text().splitlines()[6]).parent.exists())
 
             missing_token, appdir, gh_args = run("missing-token", "1")
             self.assertNotEqual(missing_token.returncode, 0)
             self.assertIn("GH_TOKEN is required", missing_token.stderr)
+            self.assertFalse((root / "missing-token-curl-args").exists())
             self.assertFalse(gh_args.exists())
             self.assertFalse(appdir.exists())
 

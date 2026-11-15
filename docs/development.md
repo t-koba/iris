@@ -159,7 +159,14 @@ fuzz 用のクレートは各 `fuzz/` ディレクトリで同じ操作をしま
 独立した revision 指定欄はなく、実行後に監査対象を別の commit へ差し替えることはできません。
 手動実行はタグを選んでも `publish` を実行せず、macOS の署名・公証 secret も使いません（ad-hoc 署名）。
 read-only GitHub token も渡さないため、手動 run は PDFium の固定サイズ・digest のみ確認し、upstream attestation は未検証と JSON に記録します。
-タグ push は従来どおり PDFium attestation を検証します。タグ push の `main` 到達性・バージョン一致チェックと公開ファイル名・チェックサム形式は変わりません。
+タグ push は PDFium `chromium/8138` の `pdfium-attestation.json` を取得し、18,267 bytes と
+SHA-256 `7526f4b934ab498d6206ac7f3d78dd4ce8e0f7d3175227ab3f4ecc255d950ad7` の一致を必須とします。
+`gh attestation verify --bundle` は固定 archive の subject、upstream repository、signer workflow
+`github.com/bblanchon/pdfium-binaries/.github/workflows/build-all.yml`、signer/source digest
+`0eb94b28c2252d2baae3dfe15dc6b237131d8cd8`、source ref `refs/heads/master` を検証します。
+失敗時は stage せず終了し、取得した bundle は一時 directory とともに削除します。
+手動 run は attestation の取得も `gh` の呼び出しも行わず、bundle digest/size は JSON の `null`、
+status は `not_attempted` です。タグ push の `main` 到達性・バージョン一致チェックと公開ファイル名・チェックサム形式は変わりません。
 
 実行の Actions artifacts に `release-macos` / `release-linux` / `release-windows` と、
 別名の `audit-macos` / `audit-linux` / `audit-windows`（JSON）が残ります。
@@ -255,6 +262,9 @@ product の Cargo flags、必要な native component と許可 license 名は JS
 未知・欠落の native evidence、未 review の LGPL は公開を阻止します。
 `ffmpeg-next` の license や別の `ffmpeg` executable では代用できません。
 Linux PDFium は `provenance-check.attestation_verified == true` が必須です。
+この値は staged `PROVENANCE.json` の archive pin、attestation bundle digest/size、signer/source identity、
+subject と実際の staged library hash が一致する場合に限ります。audit は記録を検査するもので、
+暗号学的検証は staging 時の `gh` が担当します。pin は fetch と audit で一致することを offline test で検査します。
 Windows は build と graph の `product` variant が必須で、現行 minimal release は公開できません。
 この gate は package 内容・build flags を変更しません。
 
