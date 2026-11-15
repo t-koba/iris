@@ -110,25 +110,44 @@ main_tag_guard = """      - name: Verify tag commit belongs to main
           fi
 """
 
-try:
-    ci_jobs_text = ci.split("jobs:\n", 1)[1]
-except IndexError:
-    ci_jobs_text = ""
-
-
-def ci_job_block(name):
-    starts = list(re.finditer(rf"(?m)^  {re.escape(name)}:\n", ci_jobs_text))
+def ci_job_block(name, workflow=ci):
+    try:
+        jobs_text = workflow.split("jobs:\n", 1)[1]
+    except IndexError:
+        return ""
+    starts = list(re.finditer(rf"(?m)^  {re.escape(name)}:\n", jobs_text))
     if len(starts) != 1:
         return ""
     start = starts[0]
-    following = re.search(r"(?m)^  [a-zA-Z0-9_-]+:\n", ci_jobs_text[start.end():])
-    end = start.end() + following.start() if following else len(ci_jobs_text)
-    return ci_jobs_text[start.start():end]
+    following = re.search(r"(?m)^  [a-zA-Z0-9_-]+:\n", jobs_text[start.end():])
+    end = start.end() + following.start() if following else len(jobs_text)
+    return jobs_text[start.start():end]
 
 
-def ci_job_has(name, *needles):
-    block = ci_job_block(name)
+def ci_job_has(name, *needles, workflow=ci):
+    block = ci_job_block(name, workflow)
     return bool(block) and all(needle in block for needle in needles)
+
+
+def ci_matrix_job_has(name, *needles, workflow=ci):
+    return ci_job_has(name, "runs-on: ${{ matrix.os }}", *needles, workflow=workflow)
+
+
+def matrix_runner_mutation_regression():
+    job = "trash-path-preflight"
+    block = ci_job_block(job)
+    runner = "runs-on: ${{ matrix.os }}"
+    if block.count(runner) != 1:
+        return False
+    mutated_block = block.replace(runner, "runs-on: ubuntu-latest", 1)
+    mutated_workflow = ci.replace(block, mutated_block, 1)
+    expected = (
+        "os: [ubuntu-latest, windows-latest]",
+        "cargo test -p iris-platform-integration --lib trash::exact_items::tests:: --locked",
+    )
+    return ci_matrix_job_has(job, *expected) and not ci_matrix_job_has(
+        job, *expected, workflow=mutated_workflow
+    )
 
 
 checks = {
@@ -284,21 +303,22 @@ permissions:
             for job in ("package-macos", "package-linux", "package-windows")
         )
     ),
-    "Trash path preflight regressions run on Ubuntu and Windows outside container smoke": ci_job_has(
+    "Trash path preflight regressions run on Ubuntu and Windows outside container smoke": ci_matrix_job_has(
         "trash-path-preflight",
         "os: [ubuntu-latest, windows-latest]",
         "cargo test -p iris-platform-integration --lib trash::exact_items::tests:: --locked",
     ),
-    "Trash redo receipt regression runs on Ubuntu and Windows outside container smoke": ci_job_has(
+    "Trash redo receipt regression runs on Ubuntu and Windows outside container smoke": ci_matrix_job_has(
         "trash-redo-receipts",
         "os: [ubuntu-latest, windows-latest]",
         "cargo test -p iris-ui-shell --lib update::undo_ops::tests::trash_redo_passes_fresh_receipts_to_next_undo --locked --no-default-features --features minimal",
     ),
-    "Private copy destination regression runs on Unix CI outside native smoke": ci_job_has(
+    "Private copy destination regression runs on Unix CI outside native smoke": ci_matrix_job_has(
         "copy-private-destinations",
         "os: [ubuntu-latest, macos-latest]",
         "cargo test -p iris-platform-integration --lib copy::tests::new_copy_destinations_are_private_until_success_under_umask --locked",
     ),
+    "Matrix runner contracts reject a forced single Ubuntu runner": matrix_runner_mutation_regression(),
     "Workflow contract checks run independently of platform integration": ci_job_has(
         "workflow-contracts",
         "run: python3 scripts/test-workflow-triggers.py",
