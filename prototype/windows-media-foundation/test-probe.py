@@ -20,7 +20,7 @@ spec.loader.exec_module(probe)
 
 FRAME = dict(ok=True, backend="mf-source-reader", codec="h264", pixel_format="rgb32",
              width=854, height=480, coded_width=854, coded_height=480, visible_x=0, visible_y=0,
-             stride=3416, bytes=1639680, reads=1, rgb_fnv1a64="e46c6403198bdf25",
+             stride=3416, bottom_up=False, bytes=1639680, reads=1, rgb_fnv1a64="e46c6403198bdf25",
              timestamp_100ns=0, elapsed_ms=12.5)
 
 
@@ -107,7 +107,8 @@ class ProbeTests(unittest.TestCase):
         for change in ({"width": 0}, {"width": 2049}, {"height": -1}, {"stride": 1},
                        {"bytes": 16777217}, {"bytes": 10}, {"reads": 65}, {"width": True},
                        {"coded_width": 853}, {"coded_height": 479}, {"visible_x": 1},
-                       {"visible_y": 1}, {"stride": 3415}, {"rgb_fnv1a64": "invalid"}, {"elapsed_ms": float("nan")},
+                       {"visible_y": 1}, {"stride": 3415}, {"bottom_up": 1},
+                       {"rgb_fnv1a64": "invalid"}, {"elapsed_ms": float("nan")},
                        {"unexpected": "not retained"}):
             with self.subTest(change=change), self.assertRaises(probe.ProbeError):
                 probe.validate_record(json.dumps(FRAME | change), 0, 2048, 16777216, 64)
@@ -392,7 +393,7 @@ struct IMFSourceReader {
         cases = r'''
 int main() {
     const Limits limits{2048, 16777216, 64};
-    const Layout input{854, 480, 3416, 1639680, {0, 0, 854, 480}};
+    const Layout input{854, 480, 3416, 1639680, {0, 0, 854, 480}, false};
     for (DWORD flags : {0u, 0x100u, 0x10u, 0x20u, 0x30u, 0x110u, 0x120u, 0x130u}) {
         IMFSourceReader reader;
         reader.output.stride = 3424; // Changed but still bounded padding is valid.
@@ -515,6 +516,29 @@ int main() {
         Layout frame = input;
         validate_read(&reader, 0x30, limits, input, frame);
         assert(frame.stride == 3416 && frame.bytes == input.bytes);
+        assert(frame.bottom_up == !absent);
+        assert(memory_row(frame, 0) == (absent ? 0u : 479u));
+        assert(memory_row(frame, frame.height - 1) == (absent ? 479u : 0u));
+    }
+    // Top-origin aperture rows must map over bottom-up storage when the coded frame is taller.
+    for (bool bottom_up : {false, true}) {
+        IMFSourceReader reader;
+        reader.native.width = reader.output.width = 1;
+        reader.native.height = 2;
+        reader.output.height = 3;
+        reader.output.stride = static_cast<UINT32>(bottom_up ? -4 : 4);
+        reader.output.minimum_bytes = reader.output.geometric_bytes = sizeof(MFVideoArea);
+        reader.output.minimum_size_status = reader.output.geometric_size_status = 0;
+        reader.output.minimum_display.Area.cx = reader.output.geometric.Area.cx = 1;
+        reader.output.minimum_display.Area.cy = reader.output.geometric.Area.cy = 2;
+        const Layout small_input{1, 2, 4, 8, {0, 0, 1, 2}, false};
+        const auto frame = checked_output(&reader, limits, small_input);
+        assert(frame.bottom_up == bottom_up);
+        const char* top_down_rows[] = {"A", "B", "C"};
+        const char* bottom_up_rows[] = {"C", "B", "A"};
+        const char* const* rows = bottom_up ? bottom_up_rows : top_down_rows;
+        assert(std::strcmp(rows[memory_row(frame, 0)], "A") == 0);
+        assert(std::strcmp(rows[memory_row(frame, 1)], "B") == 0);
     }
 }
 '''

@@ -136,7 +136,7 @@ def validate_record(data, code, dimension, max_bytes, reads):
             raise ProbeError("invalid_failure")
         return record
     success_fields = {"ok", "backend", "codec", "pixel_format", "width", "height", "coded_width",
-                      "coded_height", "visible_x", "visible_y", "stride", "bytes", "reads",
+                      "coded_height", "visible_x", "visible_y", "stride", "bottom_up", "bytes", "reads",
                       "rgb_fnv1a64", "timestamp_100ns", "elapsed_ms"}
     if (code != 0 or set(record) != success_fields
             or record["backend"] != "mf-source-reader" or record["codec"] != "h264"
@@ -146,7 +146,8 @@ def validate_record(data, code, dimension, max_bytes, reads):
                 "stride", "bytes", "reads", "timestamp_100ns"):
         if type(record[key]) is not int:
             raise ProbeError("invalid_integer")
-    if (not 0 < record["width"] <= record["coded_width"] <= dimension
+    if (type(record["bottom_up"]) is not bool
+            or not 0 < record["width"] <= record["coded_width"] <= dimension
             or not 0 < record["height"] <= record["coded_height"] <= dimension
             or record["visible_x"] < 0 or record["visible_x"] + record["width"] > record["coded_width"]
             or record["visible_y"] < 0 or record["visible_y"] + record["height"] > record["coded_height"]

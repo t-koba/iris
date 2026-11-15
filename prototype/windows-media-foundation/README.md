@@ -23,10 +23,12 @@ not opened by the probe. Fixture licenses/attribution remain in
 No media bytes belong in git.
 
 On success, one JSON log line records the fixture SHA-256, backend, codec,
-visible RGB32 dimensions, coded output dimensions, visible offset, stride/buffer
-length, read count, sample timestamp, RGB FNV-1a fingerprint and elapsed
-milliseconds. FNV is a diagnostic, not a cryptographic or golden-image
-assertion. The probe bounds native and coded output dimensions before decoding,
+visible RGB32 dimensions, coded output dimensions, visible offset, absolute
+stride, bottom-up orientation, buffer length, read count, sample timestamp, RGB
+FNV-1a fingerprint and elapsed milliseconds. The probe interprets
+`MF_MT_DEFAULT_STRIDE` as signed (negative means bottom-up) and maps the
+top-origin visible aperture to physical storage rows before fingerprinting.
+FNV is a diagnostic, not a cryptographic or golden-image assertion. The probe bounds native and coded output dimensions before decoding,
 checks sample length before allocating a contiguous copy, checks locked-buffer
 capacity/length, and fingerprints only the validated visible RGB bytes. Padding
 and RGB32's undefined fourth byte are excluded. A black first frame is valid for

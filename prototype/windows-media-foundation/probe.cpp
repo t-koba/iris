@@ -80,6 +80,7 @@ struct Layout {
     uint64_t stride;
     uint64_t bytes;
     VisibleArea visible;
+    bool bottom_up;
 };
 
 Layout layout(IMFMediaType* type, const Limits& limits, bool rgb) {
@@ -96,6 +97,7 @@ Layout layout(IMFMediaType* type, const Limits& limits, bool rgb) {
     // width/height are UINT32; guard multiplication before any output allocation.
     const uint64_t row = uint64_t(width) * 4;
     uint64_t stride = row;
+    bool bottom_up = false;
     if (rgb) {
         UINT32 encoded = 0;
         const auto hr = type->GetUINT32(MF_MT_DEFAULT_STRIDE, &encoded);
@@ -107,11 +109,17 @@ Layout layout(IMFMediaType* type, const Limits& limits, bool rgb) {
             check(hr, "output_stride");
         }
         const int64_t signed_stride = static_cast<LONG>(encoded);
-        stride = signed_stride < 0 ? uint64_t(-signed_stride) : uint64_t(signed_stride);
+        bottom_up = signed_stride < 0;
+        stride = bottom_up ? uint64_t(-signed_stride) : uint64_t(signed_stride);
     }
     if (stride < row || stride > limits.bytes || height > limits.bytes / stride)
         throw Failure{"output_bound", E_INVALIDARG};
-    return {width, height, stride, stride * height, {0, 0, width, height}};
+    return {width, height, stride, stride * height, {0, 0, width, height}, bottom_up};
+}
+
+UINT32 memory_row(const Layout& frame, UINT32 top_down_y) {
+    if (top_down_y >= frame.height) throw Failure{"row_bound", E_INVALIDARG};
+    return frame.bottom_up ? frame.height - 1 - top_down_y : top_down_y;
 }
 
 ApertureReport read_aperture(IMFMediaType* type, REFGUID key) {
@@ -260,7 +268,7 @@ Result decode(const wchar_t* path, const Limits& limits) {
         // row padding). Black is valid: the pinned sample begins with a fade-in.
         uint64_t checksum = 14695981039346656037ull;
         for (UINT32 y = frame.visible.y; y < frame.visible.y + frame.visible.height; ++y) {
-            const BYTE* row = locked.data + uint64_t(y) * frame.stride;
+            const BYTE* row = locked.data + uint64_t(memory_row(frame, y)) * frame.stride;
             for (UINT32 x = frame.visible.x; x < frame.visible.x + frame.visible.width; ++x)
                 for (unsigned c = 0; c < 3; ++c)
                     checksum = (checksum ^ row[uint64_t(x) * 4 + c]) * 1099511628211ull;
@@ -310,11 +318,12 @@ int wmain(int argc, wchar_t** argv) {
         const auto result = decode(argv[1], limits);
         std::printf("{\"ok\":true,\"backend\":\"mf-source-reader\",\"codec\":\"h264\",\"pixel_format\":\"rgb32\","
                     "\"width\":%u,\"height\":%u,\"coded_width\":%u,\"coded_height\":%u,"
-                    "\"visible_x\":%u,\"visible_y\":%u,\"stride\":%llu,\"bytes\":%lu,\"reads\":%llu,"
+                    "\"visible_x\":%u,\"visible_y\":%u,\"stride\":%llu,\"bottom_up\":%s,\"bytes\":%lu,\"reads\":%llu,"
                     "\"rgb_fnv1a64\":\"%016llx\",\"timestamp_100ns\":%lld,\"elapsed_ms\":%.3f}\n",
                     result.frame.visible.width, result.frame.visible.height, result.frame.width,
                     result.frame.height, result.frame.visible.x, result.frame.visible.y,
-                    result.frame.stride, result.bytes, result.reads, result.checksum,
+                    result.frame.stride, result.frame.bottom_up ? "true" : "false", result.bytes,
+                    result.reads, result.checksum,
                     result.timestamp, elapsed());
         return 0;
     } catch (const Failure& failure) {
