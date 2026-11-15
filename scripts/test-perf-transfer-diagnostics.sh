@@ -151,14 +151,22 @@ grep -Fq 'IRIS_PERF_SMB2_CREDITS_LEVEL must be an integer from 0 to 10' \
 # Oversized logs prove both the per-file tails and the final combined cap.
 for name in log.smbd log.172.17.0.1 log.nmbd; do
   printf 'discarded prefix\n' >"$test_root/logs/$name"
+  if [[ "$name" == log.smbd ]]; then
+    printf 'mid 17, CreditCharge: 0, NeededCharge: 1\nCreditCharge too low, given 0, needed 1\nsmbd_smb2_request_find_done: in_output_buffer_length = 65536\nsmbd_smb2_request_find_done: out_output_buffer.length = 0\n' >>"$test_root/logs/$name"
+  fi
   printf '%6000s' '' | tr ' ' x >>"$test_root/logs/$name"
   printf '\n%s iris diagnostic\n' "$name" >>"$test_root/logs/$name"
 done
 report_logs
 grep -Fq 'log.smbd [redacted] diagnostic' "$test_root/report"
 grep -Fq 'log.172.17.0.1 [redacted] diagnostic' "$test_root/report"
-assert_absent 'log.nmbd'
+grep -Fq 'credit_check: charge=0 needed=1' "$test_root/report"
+grep -Fq 'credit_rejected: given=0 needed=1' "$test_root/report"
+grep -Fq 'query_output_limit=65536' "$test_root/report"
+grep -Fq 'query_response_bytes=0' "$test_root/report"
+assert_absent 'nmbd diagnostic'
 assert_absent 'discarded prefix'
+assert_absent 'CreditCharge too low'
 [[ "$(wc -c <"$test_root/report")" -eq 8192 ]]
 # Redaction adds six bytes per selected file; headers are outside each file tail.
 awk '/^--- / || /^$/ {next} {size += length($0) + 1} /diagnostic$/ {
@@ -205,4 +213,4 @@ if printf '%s\n' 'SMB QueryDirectory returned status 0xc0000005' | grep -Eq "$wo
 fi
 
 printf 'Samba diagnostics bound inspect/log/testparm/smbcontrol streams before redaction filters\n'
-printf 'Samba diagnostics configure auth_audit and smb2_credits selectively, prioritize smbd, redact credentials, and retain 4096/8192-byte bounds\n'
+printf 'Samba diagnostics configure auth_audit and smb2_credits selectively, prioritize smbd, redact credentials, and use bounded 64KiB windows with 4096/8192-byte output limits\n'
