@@ -450,10 +450,23 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
         self.assertIn("toolchain: 1.97.1", workflow)
         self.assertIn('IRIS_MAX_LINUX_RELEASE_BYTES: "35651584"', workflow)
         self.assertIn("vars.IRIS_FFMPEG_MAX_REPORT_BYTES || 266240", workflow)
+        for setting, default in (("MAX_REPORT_BYTES", 2097152),
+                                 ("MAX_COMMAND_BYTES", 32768),
+                                 ("MAX_METADATA_BYTES", 8388608),
+                                 ("MAX_CARGO_PACKAGES", 1024),
+                                 ("MAX_NATIVE_FILES", 256),
+                                 ("COMMAND_SECONDS", 30)):
+            self.assertIn(f"vars.IRIS_RELEASE_AUDIT_{setting} || {default}", workflow)
+        native_audit = "python3 scripts/release-audit.py linux --output audit/linux-native-closure.json"
+        self.assertIn(native_audit, workflow)
+        self.assertNotIn(native_audit + " --native-evidence", workflow)
+        self.assertIn("path: audit/*.json", workflow)
+        self.assertNotIn("path: audit/linux-ffmpeg.json", workflow)
         self.assertIn('IRIS_FFMPEG_MAX_REPORT_BYTES", "266240"', (ROOT / "scripts/linux-ffmpeg.py").read_text())
         self.assertEqual(workflow.count("uses: actions/upload-artifact@"), 1)
         upload = workflow.split("uses: actions/upload-artifact@", 1)[1]
-        self.assertEqual(upload.split("path:", 1)[1].strip(), "audit/linux-ffmpeg.json")
+        self.assertIn("name: linux-runtime-audit", upload)
+        self.assertEqual(upload.split("path:", 1)[1].strip(), "audit/*.json")
         self.assertIn("--locked --offline", workflow)
         self.assertIn("staged == installed", workflow)
         self.assertIn('IRIS_VERIFY_PDFIUM_PROVENANCE: "0"', workflow)

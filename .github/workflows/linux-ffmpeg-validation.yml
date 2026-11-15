@@ -37,6 +37,12 @@ jobs:
       IRIS_FFMPEG_COMMAND_BYTES: ${{ vars.IRIS_FFMPEG_COMMAND_BYTES || 32768 }}
       IRIS_FFMPEG_JOBS: ${{ vars.IRIS_FFMPEG_JOBS || 2 }}
       IRIS_FFMPEG_MAX_REPORT_BYTES: ${{ vars.IRIS_FFMPEG_MAX_REPORT_BYTES || 266240 }}
+      IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES || 2097152 }}
+      IRIS_RELEASE_AUDIT_MAX_COMMAND_BYTES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_COMMAND_BYTES || 32768 }}
+      IRIS_RELEASE_AUDIT_MAX_METADATA_BYTES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_METADATA_BYTES || 8388608 }}
+      IRIS_RELEASE_AUDIT_MAX_CARGO_PACKAGES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_CARGO_PACKAGES || 1024 }}
+      IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES || 256 }}
+      IRIS_RELEASE_AUDIT_COMMAND_SECONDS: ${{ vars.IRIS_RELEASE_AUDIT_COMMAND_SECONDS || 30 }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -89,6 +95,9 @@ jobs:
           ./scripts/smoke-linux-deb.sh dist/linux/iris_*.deb dist/linux/Iris.AppDir \
             dist/linux/Iris.AppDir/usr/bin/iris-pdf-smoke \
             dist/linux/Iris.AppDir/usr/bin/iris-video-smoke "$RUNNER_TEMP/iris-video.avi"
+      - name: Audit full staged Linux native closure (report only)
+        # No reviewed manifest is supplied: the report records hashes and missing evidence, not approval.
+        run: python3 scripts/release-audit.py linux --output audit/linux-native-closure.json
       - name: Summarize bounded evidence (no packages or libraries)
         shell: bash
         run: |
@@ -140,6 +149,6 @@ jobs:
       - name: Retain JSON evidence only
         uses: actions/upload-artifact@v4
         with:
-          name: linux-ffmpeg-audit
+          name: linux-runtime-audit
           if-no-files-found: error
-          path: audit/linux-ffmpeg.json
+          path: audit/*.json
