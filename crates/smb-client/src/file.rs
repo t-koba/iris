@@ -563,6 +563,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn copychunk_target_open_requests_read_and_write_data_access() {
+        let (client, server) = duplex(4096);
+        let actor = SmbConnectionActor::spawn(client);
+        actor.set_ids(0, 0x1122_3344).await.expect("ids");
+        let file_id = Smb2FileId {
+            persistent: 0x0102_0304_0506_0708,
+            volatile: 0x1112_1314_1516_1718,
+        };
+        let server_task = tokio::spawn(async move {
+            let mut transport = DirectTcpTransport::new(server);
+            let request = transport.recv_packet().await.expect("create request");
+            let header = Smb2Header::decode(&request).expect("header");
+            assert_eq!(header.command, Smb2Command::Create);
+            assert_eq!(header.tree_id, 0x1122_3344);
+            let create = Smb2CreateRequest::decode(&request[SMB2_HEADER_BYTES..]).expect("create");
+            assert_eq!(create.name, "folder/copy-target.bin");
+            assert!(create
+                .desired_access
+                .contains(Smb2DesiredAccess::FILE_READ_DATA));
+            assert!(create
+                .desired_access
+                .contains(Smb2DesiredAccess::FILE_WRITE_DATA));
+            transport
+                .send_packet(&response_packet(
+                    Smb2Header::new(Smb2Command::Create, header.message_id),
+                    &create_response_body(file_id, Smb2FileAttributes::ARCHIVE, 0),
+                ))
+                .await
+                .expect("response");
+        });
+
+        let target = open_file_for_copychunk_target(
+            &actor,
+            "folder/copy-target.bin",
+            Smb2CreateDisposition::Create,
+        )
+        .await
+        .expect("open COPYCHUNK target");
+        assert_eq!(target.file_id, file_id);
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
     async fn actor_set_file_basic_info_uses_write_attributes_set_info_and_close() {
         let (client, server) = duplex(4096);
         let actor = SmbConnectionActor::spawn_with_initial_credits(client, 3);
