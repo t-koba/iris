@@ -612,6 +612,17 @@ class Policy(unittest.TestCase):
         preflight, publish = workflow.split("  publish:\n")
         self.assertIn("python scripts/test-release-policy.py", preflight)
         self.assertIn("github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')", publish)
+        # A tag push is releasable only when its exact commit is reachable from main.
+        self.assertIn("fetch-depth: 0", preflight)
+        guard_start = preflight.index("      - name: Verify tag commit belongs to main\n")
+        guard_end = preflight.index("\n      - name:", guard_start + 1)
+        guard = preflight[guard_start:guard_end]
+        self.assertIn("if: github.event_name == 'push'", guard)
+        self.assertIn('git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main', guard)
+        self.assertIn("exit 1", guard)
+        self.assertLess(guard_start, preflight.index("  package-macos:\n"))
+        for job in ("package-macos", "package-linux", "package-windows"):
+            self.assertIn(f"  {job}:\n    needs: release-preflight", preflight)
         for platform in POLICY["required_variants"]:
             self.assertIn("name: audit-" + platform, publish)
             self.assertIn(f"audit/{platform}/{platform}.json", publish)
