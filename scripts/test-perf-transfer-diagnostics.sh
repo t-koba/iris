@@ -68,6 +68,8 @@ report_logs() {
   local docker_log_bytes="${3:-}"
   local testparm_bytes="${4:-}"
   local smbcontrol_bytes="${5:-}"
+  local smb_log_level="${6:-2}"
+  local smb2_credits_level="${7:-}"
   local status=0
   : >"$test_root/docker-args"
   : >"$test_root/filter-observations"
@@ -88,8 +90,9 @@ report_logs() {
     IRIS_PERF_SAMBA_IMAGE="sha256:$(printf '%064d' 0)" \
     IRIS_PERF_SKIP_SFTP=1 \
     IRIS_PERF_SKIP_SMB=0 \
-    IRIS_PERF_SMB_LOG_LEVEL=2 \
+    IRIS_PERF_SMB_LOG_LEVEL="$smb_log_level" \
     IRIS_PERF_SMB_AUTH_AUDIT_LEVEL="$auth_audit_level" \
+    IRIS_PERF_SMB2_CREDITS_LEVEL="$smb2_credits_level" \
     IRIS_PERF_BYTES=1 \
     IRIS_PERF_SMALL_FILES=1 \
     IRIS_PERF_SMALL_BYTES=1 \
@@ -126,8 +129,24 @@ assert_absent 'iris'
 
 report_logs 3
 grep -Fxq '<log level = 2 auth_audit:3>' "$test_root/docker-args"
+report_logs 3 "" "" "" "" 10 10
+grep -Fxq '<log level = 10 auth_audit:3 smb2_credits:10>' "$test_root/docker-args"
 [[ "$(grep -c '^--- ' "$test_root/report")" == 2 ]]
 [[ "$(sed -n '2p' "$test_root/report")" == *'/log.smbd ---' ]]
+
+# Reject malformed debug-class values before invoking Docker or interpolating config.
+set +e
+PATH="$test_root/bin:$PATH" \
+  IRIS_PERF_SKIP_SFTP=1 \
+  IRIS_PERF_SKIP_SMB=0 \
+  IRIS_PERF_SMB2_CREDITS_LEVEL='10%
+server min protocol = NT1' \
+  bash "$script_dir/perf-transfer-containers.sh" >"$test_root/invalid-level-output" 2>&1
+invalid_level_status=$?
+set -e
+[[ "$invalid_level_status" == 2 ]]
+grep -Fq 'IRIS_PERF_SMB2_CREDITS_LEVEL must be an integer from 0 to 10' \
+  "$test_root/invalid-level-output"
 
 # Oversized logs prove both the per-file tails and the final combined cap.
 for name in log.smbd log.172.17.0.1 log.nmbd; do
@@ -171,4 +190,4 @@ awk '
   END { if (!inspect || !logs || !testparm || !smbcontrol || bad) exit 1 }
 ' "$test_root/filter-observations"
 printf 'Samba diagnostics bound inspect/log/testparm/smbcontrol streams before redaction filters\n'
-printf 'Samba diagnostics configure auth_audit selectively, prioritize smbd, redact credentials, and retain 4096/8192-byte bounds\n'
+printf 'Samba diagnostics configure auth_audit and smb2_credits selectively, prioritize smbd, redact credentials, and retain 4096/8192-byte bounds\n'

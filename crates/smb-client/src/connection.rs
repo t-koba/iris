@@ -35,6 +35,29 @@ pub enum SmbConnectionError {
     #[error("SMB {command:?} returned unexpected status 0x{status:08x}")]
     UnexpectedStatus { command: Smb2Command, status: u32 },
 
+    #[error(
+        "SMB QueryDirectory returned unexpected status 0x{status:08x} \
+         (message_id={message_id}, class=0x{file_information_class:02x}, \
+         flags=0x{flags:02x}, file_index={file_index}, \
+         file_id_persistent=0x{file_id_persistent:016x}, \
+         file_id_volatile=0x{file_id_volatile:016x}, file_name_bytes={file_name_bytes}, \
+         output_buffer_length={output_buffer_length}, request_credit_charge={request_credit_charge}, \
+         response_credits_granted={response_credits_granted})"
+    )]
+    UnexpectedQueryDirectoryStatus {
+        status: u32,
+        message_id: u64,
+        file_information_class: u8,
+        flags: u8,
+        file_index: u32,
+        file_id_persistent: u64,
+        file_id_volatile: u64,
+        file_name_bytes: usize,
+        output_buffer_length: u32,
+        request_credit_charge: u16,
+        response_credits_granted: u16,
+    },
+
     #[error("SMB Ioctl {name} (0x{ctl_code:08x}) returned unexpected status 0x{status:08x}")]
     UnexpectedFsctlStatus {
         name: &'static str,

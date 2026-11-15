@@ -15,10 +15,10 @@ use iris_core_domain::types::session::BackendSession;
 use iris_smb_client::{
     close, copy_file_chunks, create_directory, delete, list_directory_once, open_file_and_read,
     open_file_for_read, open_file_for_write, read_file_ranges_pipelined, rename, set_basic_info,
-    stat_path, write_file_at, write_file_chunks_pipelined, Smb2Command, Smb2CreateDisposition,
+    stat_path, write_file_at, write_file_chunks_pipelined, Smb2CreateDisposition,
     Smb2FileAttributes, Smb2FileBasicInformation, SmbConnectionActor, SmbConnectionError,
-    SmbDirectoryEntry, SmbDirectoryEnumeration, SmbHandle, SmbReadRange,
-    DEFAULT_DIRECTORY_OUTPUT_BUFFER_LENGTH, DEFAULT_READ_CHUNK_LENGTH, DEFAULT_WRITE_CHUNK_LENGTH,
+    SmbDirectoryEntry, SmbDirectoryEnumeration, SmbHandle, SmbReadRange, DEFAULT_READ_CHUNK_LENGTH,
+    DEFAULT_WRITE_CHUNK_LENGTH,
 };
 use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::HashMap;
@@ -1344,6 +1344,7 @@ fn smb_network_error(operation: &'static str, error: SmbConnectionError) -> Back
     if matches!(
         &error,
         SmbConnectionError::UnexpectedStatus { .. }
+            | SmbConnectionError::UnexpectedQueryDirectoryStatus { .. }
             | SmbConnectionError::UnexpectedFsctlStatus { .. }
             | SmbConnectionError::ShortWrite { .. }
     ) {
@@ -1363,14 +1364,26 @@ fn smb_list_directory_error(
     max_transact_size: u32,
 ) -> BackendError {
     match error {
-        SmbConnectionError::UnexpectedStatus {
-            command: Smb2Command::QueryDirectory,
+        SmbConnectionError::UnexpectedQueryDirectoryStatus {
             status,
+            message_id,
+            file_information_class,
+            flags,
+            file_index,
+            file_id_persistent,
+            file_id_volatile,
+            file_name_bytes,
+            output_buffer_length,
+            request_credit_charge,
+            response_credits_granted,
         } => BackendError::Internal(Box::new(std::io::Error::other(format!(
-            "SMB native list directory failed: SMB QueryDirectory returned unexpected status \
+            "SMB native list directory failed: SMB QueryDirectory returned status \
              0x{status:08x} (dialect={dialect:?}, max_transact_size={max_transact_size}, \
-             output_buffer_length={DEFAULT_DIRECTORY_OUTPUT_BUFFER_LENGTH}, \
-             file_information_class=0x25)"
+             message_id={message_id}, class=0x{file_information_class:02x}, flags=0x{flags:02x}, \
+             file_index={file_index}, file_id_persistent=0x{file_id_persistent:016x}, \
+             file_id_volatile=0x{file_id_volatile:016x}, file_name_bytes={file_name_bytes}, \
+             output_buffer_length={output_buffer_length}, request_credit_charge={request_credit_charge}, \
+             response_credits_granted={response_credits_granted})"
         )))),
         error => smb_network_error("list directory", error),
     }
@@ -1438,21 +1451,38 @@ mod tests {
     #[test]
     fn query_directory_status_reports_negotiated_limit_and_request_shape() {
         let error = smb_list_directory_error(
-            SmbConnectionError::UnexpectedStatus {
-                command: Smb2Command::QueryDirectory,
+            SmbConnectionError::UnexpectedQueryDirectoryStatus {
                 status: 0xc000_000d,
+                message_id: 17,
+                file_information_class: 0x25,
+                flags: 0x01,
+                file_index: 0,
+                file_id_persistent: 0x0102_0304_0506_0708,
+                file_id_volatile: 0x1112_1314_1516_1718,
+                file_name_bytes: 2,
+                output_buffer_length: 65_536,
+                request_credit_charge: 0,
+                response_credits_granted: 3,
             },
             Smb2Dialect::Smb311,
-            32 * 1024,
+            8 * 1024 * 1024,
         );
         let BackendError::Internal(error) = error else {
             panic!("server status must remain a non-retryable internal error");
         };
         let message = error.to_string();
-        assert!(message.contains("max_transact_size=32768"));
+        assert!(message.contains("max_transact_size=8388608"));
         assert!(message.contains("output_buffer_length=65536"));
-        assert!(message.contains("file_information_class=0x25"));
+        assert!(message.contains("class=0x25"));
+        assert!(message.contains("flags=0x01"));
+        assert!(message.contains("file_index=0"));
+        assert!(message.contains("file_id_persistent=0x0102030405060708"));
+        assert!(message.contains("file_id_volatile=0x1112131415161718"));
+        assert!(message.contains("file_name_bytes=2"));
+        assert!(message.contains("request_credit_charge=0"));
+        assert!(message.contains("response_credits_granted=3"));
         assert!(message.contains("dialect=Smb311"));
+        assert!(!message.contains("*"), "do not print filename patterns");
     }
 
     #[test]

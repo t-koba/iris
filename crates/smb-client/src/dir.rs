@@ -169,15 +169,36 @@ impl SmbDirectoryEnumeration {
                 break;
             };
             let request = query_directory_request(handle, self.first);
+            let file_name_bytes = request.file_name.encode_utf16().count() * 2;
+            let request_credit_charge = 0;
             let response = self
                 .connection
-                .request(Smb2Command::QueryDirectory, request.encode()?)
+                .request_with_credit_charge(
+                    Smb2Command::QueryDirectory,
+                    request.encode()?,
+                    request_credit_charge,
+                )
                 .await?;
             if response.status() == SmbNtStatus::NO_MORE_FILES {
                 self.close().await?;
                 break;
             }
-            response.ensure_success(Smb2Command::QueryDirectory)?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(SmbConnectionError::UnexpectedQueryDirectoryStatus {
+                    status: status.0,
+                    message_id: response.header.message_id,
+                    file_information_class: request.file_information_class.0,
+                    flags: request.flags.0,
+                    file_index: request.file_index,
+                    file_id_persistent: request.file_id.persistent,
+                    file_id_volatile: request.file_id.volatile,
+                    file_name_bytes,
+                    output_buffer_length: request.output_buffer_length,
+                    request_credit_charge,
+                    response_credits_granted: response.header.credit_request_response,
+                });
+            }
             let page = Smb2QueryDirectoryResponse::decode_packet(&response.to_packet())?;
             if page.output_buffer.is_empty() {
                 return Err(SmbClientError::EmptyQueryDirectoryResponse.into());
@@ -427,6 +448,95 @@ mod tests {
             "explicit refusal is not a lost handle"
         );
         actor.shutdown();
+        server_task.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn query_directory_refusal_preserves_numeric_request_context() {
+        let (client, server) = duplex(8192);
+        let actor = SmbConnectionActor::spawn(client);
+        let file_id = Smb2FileId {
+            persistent: 0x0102_0304_0506_0708,
+            volatile: 0x1112_1314_1516_1718,
+        };
+        let server_task = tokio::spawn(async move {
+            let mut transport = DirectTcpTransport::new(server);
+            let create_packet = transport.recv_packet().await.expect("create request");
+            let create_header = Smb2Header::decode(&create_packet).expect("create header");
+            assert_eq!(create_header.command, Smb2Command::Create);
+            transport
+                .send_packet(&response_packet(
+                    Smb2Header::new(Smb2Command::Create, create_header.message_id),
+                    &create_response_body(file_id, Smb2FileAttributes::DIRECTORY, 0),
+                ))
+                .await
+                .expect("create response");
+
+            let query_packet = transport.recv_packet().await.expect("query request");
+            let query_header = Smb2Header::decode(&query_packet).expect("query header");
+            assert_eq!(query_header.command, Smb2Command::QueryDirectory);
+            assert_eq!(query_header.credit_charge, 0);
+            let query = Smb2QueryDirectoryRequest::decode(&query_packet[SMB2_HEADER_BYTES..])
+                .expect("query body");
+            assert_eq!(query.file_information_class.0, 0x25);
+            assert_eq!(query.flags.0, 0x01);
+            assert_eq!(query.file_index, 0);
+            assert_eq!(query.file_id, file_id);
+            assert_eq!(query.file_name, "*");
+            assert_eq!(query.output_buffer_length, 65_536);
+
+            let mut query_response =
+                Smb2Header::new(Smb2Command::QueryDirectory, query_header.message_id);
+            query_response.status_or_channel_sequence = 0xc000_000d;
+            query_response.credit_request_response = 3;
+            transport
+                .send_packet(&response_packet(query_response, &[]))
+                .await
+                .expect("query refusal");
+
+            let close_packet = transport.recv_packet().await.expect("close request");
+            let close_header = Smb2Header::decode(&close_packet).expect("close header");
+            assert_eq!(close_header.command, Smb2Command::Close);
+            assert_eq!(
+                Smb2CloseRequest::decode(&close_packet[SMB2_HEADER_BYTES..])
+                    .expect("close body")
+                    .file_id,
+                file_id
+            );
+            transport
+                .send_packet(&response_packet(
+                    Smb2Header::new(Smb2Command::Close, close_header.message_id),
+                    &close_response_body(Smb2FileAttributes::DIRECTORY, 0),
+                ))
+                .await
+                .expect("close response");
+        });
+
+        let mut directory = SmbDirectoryEnumeration::open(&actor, "folder")
+            .await
+            .expect("open");
+        let error = directory
+            .next_page(std::num::NonZeroUsize::new(1).unwrap())
+            .await
+            .expect_err("query refusal");
+        assert!(matches!(
+            error,
+            SmbConnectionError::UnexpectedQueryDirectoryStatus {
+                status: 0xc000_000d,
+                file_information_class: 0x25,
+                flags: 0x01,
+                file_index: 0,
+                file_id_persistent: 0x0102_0304_0506_0708,
+                file_id_volatile: 0x1112_1314_1516_1718,
+                file_name_bytes: 2,
+                output_buffer_length: 65_536,
+                request_credit_charge: 0,
+                response_credits_granted: 3,
+                ..
+            }
+        ));
+        assert!(directory.is_closed());
+        assert!(actor.state().await.is_ok());
         server_task.await.expect("server task");
     }
 

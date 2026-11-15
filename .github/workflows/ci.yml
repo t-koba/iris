@@ -237,6 +237,7 @@ jobs:
               IRIS_PERF_SMALL_BYTES=1 \
               IRIS_PERF_SMB_PAGING_FILES=0 \
               IRIS_PERF_SMB_LOG_LEVEL=10 \
+              IRIS_PERF_SMB2_CREDITS_LEVEL=10 \
               bash ./scripts/perf-transfer-containers.sh || true
           fi
           exit "$status"
