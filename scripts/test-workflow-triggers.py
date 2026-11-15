@@ -288,6 +288,31 @@ permissions:
           cargo test -p iris-platform-integration --lib trash::exact_items::tests:: --locked
 
 """ in ci,
+    "Trash redo receipt regression runs on Ubuntu and Windows outside container smoke": """  trash-redo-receipts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.os }}-trash-redo-cargo
+
+      - name: Trash redo receipt regression
+        run: |
+          cargo test -p iris-ui-shell --lib update::undo_ops::tests::trash_redo_passes_fresh_receipts_to_next_undo --locked --no-default-features --features minimal
+
+""" in ci,
     "Workflow contract checks run independently of platform integration": """  workflow-contracts:
     runs-on: ubuntu-latest
     permissions:
