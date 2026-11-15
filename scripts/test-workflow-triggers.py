@@ -307,9 +307,9 @@ permissions:
         "smb-adapter-unit",
         "cargo test -p iris-backends --lib smb::adapter::tests:: --locked",
     ),
-    "SMB3.0/3.02 signing KDF vector runs independently of container smoke": ci_job_has(
+    "SMB client unit suite isolates SMB signing and encryption KDF vectors from container smoke": ci_job_has(
         "smb3-signing-kdf",
-        "cargo test -p iris-smb-client --lib derive_smb2_signing_key_uses_smb300_and_smb302_nul_terminated_label_and_context --locked",
+        "cargo test -p iris-smb-client --lib --locked",
     ),
     "CI manual, pull-request, and scheduled triggers": all(
         trigger in ci for trigger in ("  workflow_dispatch:\n", "  pull_request:\n", "  schedule:\n")

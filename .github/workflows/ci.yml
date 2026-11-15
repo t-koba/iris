@@ -465,11 +465,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ubuntu-latest-smb3-kdf-cargo
+          shared-key: ubuntu-latest-smb-client-cargo
 
-      - name: SMB 3.0/3.0.2 signing KDF vector regression
+      - name: SMB client unit regressions, including signing and encryption KDF vectors
         run: |
-          cargo test -p iris-smb-client --lib derive_smb2_signing_key_uses_smb300_and_smb302_nul_terminated_label_and_context --locked
+          cargo test -p iris-smb-client --lib --locked
 
   linux-ffmpeg-validation:
     if: github.event_name == 'workflow_dispatch'
