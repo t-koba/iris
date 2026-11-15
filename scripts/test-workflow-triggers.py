@@ -284,7 +284,8 @@ permissions:
           shared-key: ${{ matrix.os }}-trash-cargo
 
       - name: Trash path preflight regressions
-        run: cargo test -p iris-platform-integration --lib trash::exact_items::tests:: --locked
+        run: |
+          cargo test -p iris-platform-integration --lib trash::exact_items::tests:: --locked
 
 """ in ci,
     "CI manual, pull-request, and scheduled triggers": all(
