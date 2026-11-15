@@ -90,8 +90,16 @@ import re
 import sys
 with open(sys.argv[1], "rb") as stream:
     stream.seek(0, os.SEEK_END)
-    stream.seek(max(0, stream.tell() - 4096), os.SEEK_SET)
+    offset = max(0, stream.tell() - 4096)
+    if offset:
+        stream.seek(offset - 1, os.SEEK_SET)
+        at_line_start = stream.read(1) == b"\n"
+    else:
+        at_line_start = True
+    stream.seek(offset, os.SEEK_SET)
     data = stream.read(4096)
+if offset and not at_line_start:
+    data = data.partition(b"\n")[2]
 roots = [
     value.encode() for value in (
         *sys.argv[2:],
@@ -146,8 +154,8 @@ report_missing_failure_marker() {
 python3 - "$test_root/out" "$test_root/err" <<'PY'
 from pathlib import Path
 import sys
-Path(sys.argv[1]).write_bytes(b"x" * 6000 + b" benchuser:iris\n")
-Path(sys.argv[2]).write_bytes(b"y" * 7000 + b" A224A29E508493ECD70572422203EC18\n")
+Path(sys.argv[1]).write_bytes(b"x" * 6000 + b"\nstdout benchuser:iris\n")
+Path(sys.argv[2]).write_bytes(b"y" * 7000 + b"\nstderr A224A29E508493ECD70572422203EC18\n")
 PY
 report_harness_failure >"$test_root/bounded-report" 2>&1
 [[ "$(wc -c <"$test_root/bounded-report")" -le 9000 ]]
@@ -157,6 +165,43 @@ grep -Fq 'stderr (last at most 4096 sanitized bytes)' "$test_root/bounded-report
 ! grep -Fq 'benchuser' "$test_root/bounded-report"
 ! grep -Fq 'iris' "$test_root/bounded-report"
 ! grep -Fq 'A224A29E508493ECD70572422203EC18' "$test_root/bounded-report"
+grep -Fq 'stdout [redacted]' "$test_root/bounded-report"
+grep -Fq 'stderr [redacted]' "$test_root/bounded-report"
+
+python3 - "$test_root/path-cutoff" "$test_root/credential-cutoff" \
+  "$test_root/line-boundary" "$test_root" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+suffix = b"\nvisible diagnostic\n"
+def write_cutoff(path, sensitive):
+    prefix = b"prefix"
+    cut = len(sensitive) // 2
+    filler = 4096 - len(sensitive) - len(suffix) + cut
+    data = prefix + sensitive + b"y" * filler + suffix
+    assert len(data) - 4096 == len(prefix) + cut
+    Path(path).write_bytes(data)
+
+write_cutoff(sys.argv[1], os.fsencode(sys.argv[4]) + b"/private-project/confidential-file")
+write_cutoff(sys.argv[2], b"synthetic-boundary-password")
+boundary_prefix = b"ignored preceding line\n"
+boundary_line = b"boundary keep complete line\n"
+Path(sys.argv[3]).write_bytes(
+    boundary_prefix + boundary_line + b"z" * (4096 - len(boundary_line))
+)
+PY
+report_bounded_sanitized_tail "$test_root/path-cutoff" >"$test_root/path-tail" 2>&1
+grep -Fq 'visible diagnostic' "$test_root/path-tail"
+! grep -Fq '/private-project/confidential-file' "$test_root/path-tail"
+! grep -Fq "$test_root" "$test_root/path-tail"
+IRIS_SMB_PASSWORD='synthetic-boundary-password' \
+  report_bounded_sanitized_tail "$test_root/credential-cutoff" >"$test_root/credential-tail" 2>&1
+grep -Fq 'visible diagnostic' "$test_root/credential-tail"
+! grep -Fq 'synthetic-boundary-password' "$test_root/credential-tail"
+report_bounded_sanitized_tail "$test_root/line-boundary" >"$test_root/line-boundary-tail" 2>&1
+[[ "$(wc -c <"$test_root/line-boundary-tail" | tr -d ' ')" -le 4096 ]]
+grep -Fq 'boundary keep complete line' "$test_root/line-boundary-tail"
 
 printf 'private path: %s\n' "$test_root/private path" >"$test_root/synthetic-report"
 printf 'synthetic failure: benchuser:iris A224A29E508493ECD70572422203EC18\n' \
