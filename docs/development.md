@@ -265,6 +265,9 @@ Linux PDFium は `provenance-check.attestation_verified == true` が必須です
 この値は staged `PROVENANCE.json` の archive pin、attestation bundle digest/size、signer/source identity、
 subject と実際の staged library hash が一致する場合に限ります。audit は記録を検査するもので、
 暗号学的検証は staging 時の `gh` が担当します。pin は fetch と audit で一致することを offline test で検査します。
+staged `PROVENANCE.json` schema 2 は、tag-only 検証で実際に使った `gh` の X.Y.Z と実行ファイル SHA-256 も記録し、
+report-only の場合は両値を `null` にします。audit はこの verifier identity を表示しますが、それだけで TUF trust root の内容や法的承認を証明しません。
+TUF bootstrap の挙動は、記録された verifier binary に対応する upstream source で別途確認する必要があります。
 Windows は build と graph の `product` variant が必須で、現行 minimal release は公開できません。
 この gate は package 内容・build flags を変更しません。
 

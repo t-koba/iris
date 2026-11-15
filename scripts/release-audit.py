@@ -122,7 +122,7 @@ class Audit:
     def pdfium_attestation(self, docs, library):
         result = dict(attestation_verified=False, attestation_status="unknown",
                       asset_sha256=None, library_sha256=None,
-                      attestation_pin_sha256=None,
+                      attestation_pin_sha256=None, verifier_version=None, verifier_sha256=None,
                       note="staged PDFium provenance is missing or invalid")
         provenance = Path(docs) / "PROVENANCE.json"
         try:
@@ -131,7 +131,7 @@ class Audit:
             if len(raw) > self.args.max_command_bytes:
                 return result
             record = json.loads(raw)
-            if not isinstance(record, dict) or record.get("schema") != 1:
+            if not isinstance(record, dict) or record.get("schema") != 2:
                 return result
             archive = record.get("archive")
             runtime = record.get("runtime")
@@ -152,12 +152,23 @@ class Audit:
                     or not re.fullmatch(r"[0-9a-f]{64}", runtime_sha256)):
                 return result
             status = attestation.get("status")
+            verifier_version = attestation.get("verifier_version")
+            verifier_sha256 = attestation.get("verifier_sha256")
             if status == "verified":
                 if (any(attestation.get(key) != value for key, value in PDFIUM_ATTESTATION.items())
                         or type(attestation.get("bundle_bytes")) is not int
-                        or attestation.get("bundle_sha256") != PDFIUM_ATTESTATION["pin_sha256"]):
+                        or attestation.get("bundle_sha256") != PDFIUM_ATTESTATION["pin_sha256"]
+                        or not isinstance(verifier_version, str)
+                        or len(verifier_version) > 64
+                        or not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", verifier_version)
+                        or not isinstance(verifier_sha256, str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", verifier_sha256)):
                     return result
-            elif status != "not_attempted":
+            elif status == "not_attempted":
+                if any(key not in attestation or attestation[key] is not None
+                       for key in ("verifier_version", "verifier_sha256")):
+                    return result
+            else:
                 return result
             actual_library_sha256 = self.sha256_file(library)
             if actual_library_sha256 != runtime_sha256:
@@ -167,10 +178,11 @@ class Audit:
 
         result.update(attestation_status=status, asset_sha256=asset_sha256,
                       library_sha256=actual_library_sha256,
-                      attestation_pin_sha256=attestation_pin_sha256)
+                      attestation_pin_sha256=attestation_pin_sha256,
+                      verifier_version=verifier_version, verifier_sha256=verifier_sha256)
         if status == "verified":
             result.update(attestation_verified=True,
-                          note="staged provenance records verification of the pinned bundle, upstream identity and exact archive subject; staged library bytes match")
+                          note="staged provenance records verification of the pinned bundle, upstream identity and exact archive subject; staged library bytes match. Verifier identity is inventory evidence, not TUF-root or legal approval")
         else:
             result.update(note="staged provenance records that upstream attestation verification was not attempted")
         return result

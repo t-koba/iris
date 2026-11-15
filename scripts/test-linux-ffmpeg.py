@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Offline contracts: no source download, native compilation or package install."""
+import hashlib
 import importlib.util
 import json
 import os
@@ -263,9 +264,16 @@ if [ "$1" = "$IRIS_PDFIUM_TARBALL" ]; then
     printf '%s  %s\\n' "$PDFIUM_TEST_ASSET_SHA256" "$1"
 elif [ "${1##*/}" = pdfium-attestation.json ]; then
     printf '%s  %s\\n' "$PDFIUM_TEST_BUNDLE_SHA256" "$1"
+elif [ "$1" = "$PDFIUM_TEST_GH_EXECUTABLE" ] && [ "$PDFIUM_TEST_GH_HASH" != real ]; then
+    printf '%s\\n' "$PDFIUM_TEST_GH_HASH"
+    exit "$PDFIUM_TEST_GH_HASH_EXIT"
 else
     exec "$PDFIUM_TEST_REAL_SHA256SUM" "$@"
 fi
+''',
+                "realpath": '''#!/bin/sh
+[ "$PDFIUM_TEST_REALPATH_EXIT" = 0 ] || exit "$PDFIUM_TEST_REALPATH_EXIT"
+exec "$PDFIUM_TEST_REAL_REALPATH" "$@"
 ''',
                 "curl": '''#!/bin/sh
 printf '%s\\n' "$@" > "$PDFIUM_TEST_CURL_ARGS"
@@ -293,7 +301,16 @@ printf 'args\\n' > "$extract/args.gn"
 printf 'license test\\n' > "$extract/licenses/pdfium.txt"
 printf 'synthetic runtime test bytes\\n' > "$extract/lib/libpdfium.so"
 ''',
-                "gh": '''#!/bin/sh
+                "gh-real": '''#!/bin/sh
+if [ "$1" = version ]; then
+    printf '%s\\n' "$0" > "$PDFIUM_TEST_GH_VERSION_ARGS"
+    printf '%s\\n' "$PDFIUM_TEST_GH_VERSION"
+    # Retarget the PATH symlink to a different executable after version lookup.
+    # Verification must still invoke this resolved executable, not the new target.
+    ln -sfn "$PDFIUM_TEST_GH_OTHER" "$PDFIUM_TEST_GH_LINK"
+    exit "$PDFIUM_TEST_GH_VERSION_EXIT"
+fi
+printf '%s\\n' "$0" > "$PDFIUM_TEST_GH_INVOKED"
 printf '%s\\n' "$@" > "$PDFIUM_TEST_GH_ARGS"
 # The verified bundle and exact archive must still exist during verification.
 [ -f "$3" ] || exit 2
@@ -306,6 +323,12 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
                 tool.write_text(body, encoding="utf-8")
                 tool.chmod(0o755)
 
+            gh_executable = tools / "gh-real"
+            gh_link = tools / "gh"
+            gh_other = tools / "gh-other"
+            gh_other.write_text("#!/bin/sh\nexit 97\n", encoding="utf-8")
+            gh_other.chmod(0o755)
+            verifier_sha256 = hashlib.sha256(gh_executable.read_bytes()).hexdigest()
             base_env = {
                 key: value for key, value in os.environ.items()
                 if not key.startswith("IRIS_PDFIUM_") and key != "GH_TOKEN"
@@ -315,11 +338,19 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
                 IRIS_PDFIUM_TARBALL=str(tarball),
                 PDFIUM_TEST_ASSET_SHA256=asset_sha256,
                 PDFIUM_TEST_REAL_SHA256SUM=real_sha256sum,
+                PDFIUM_TEST_REAL_REALPATH=shutil.which("realpath"),
+                PDFIUM_TEST_GH_EXECUTABLE=str(gh_executable),
+                PDFIUM_TEST_GH_LINK=str(gh_link),
+                PDFIUM_TEST_GH_OTHER=str(gh_other),
             )
 
             bundle_digest = "7526f4b934ab498d6206ac7f3d78dd4ce8e0f7d3175227ab3f4ecc255d950ad7"
             def run(name, verify, token=False, gh_exit="0", bundle_size="18267",
-                    bundle_sha256=bundle_digest, curl_exit="0"):
+                    bundle_sha256=bundle_digest, curl_exit="0",
+                    gh_version="gh version 2.83.0 (2025-11-04)\nhttps://github.com/cli/cli/releases/tag/v2.83.0",
+                    gh_version_exit="0", gh_hash="real", gh_hash_exit="0", realpath_exit="0", gh_target=None):
+                gh_link.unlink(missing_ok=True)
+                gh_link.symlink_to(gh_target or gh_executable)
                 appdir = root / name
                 gh_args = root / (name + "-gh-args")
                 env = dict(base_env)
@@ -331,6 +362,13 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
                     IRIS_VERIFY_PDFIUM_PROVENANCE=verify,
                     PDFIUM_TEST_GH_ARGS=str(gh_args),
                     PDFIUM_TEST_GH_EXIT=gh_exit,
+                    PDFIUM_TEST_GH_VERSION=gh_version,
+                    PDFIUM_TEST_GH_VERSION_EXIT=gh_version_exit,
+                    PDFIUM_TEST_GH_HASH=gh_hash,
+                    PDFIUM_TEST_GH_HASH_EXIT=gh_hash_exit,
+                    PDFIUM_TEST_REALPATH_EXIT=realpath_exit,
+                    PDFIUM_TEST_GH_VERSION_ARGS=str(root / (name + "-gh-version-args")),
+                    PDFIUM_TEST_GH_INVOKED=str(root / (name + "-gh-invoked")),
                 )
                 if token:
                     env["GH_TOKEN"] = "test-only"
@@ -340,20 +378,30 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
                 )
                 return result, appdir, gh_args
 
-            manual, appdir, gh_args = run("manual", "0")
+            manual, appdir, gh_args = run("manual", "0", gh_target=root / "absent-gh")
             self.assertEqual(manual.returncode, 0, manual.stderr)
             self.assertFalse(gh_args.exists())
             self.assertFalse((root / "manual-curl-args").exists())
             manual_record = json.loads(
                 (appdir / "usr/share/doc/iris/pdfium/PROVENANCE.json").read_text(encoding="utf-8")
             )
+            self.assertEqual(manual_record["schema"], 2)
             self.assertEqual(manual_record["attestation"]["status"], "not_attempted")
             self.assertEqual(manual_record["attestation"]["subject_sha256"], asset_sha256)
             self.assertIsNone(manual_record["attestation"]["bundle_sha256"])
             self.assertIsNone(manual_record["attestation"]["bundle_bytes"])
+            for key in ("verifier_version", "verifier_sha256"):
+                self.assertIsNone(manual_record["attestation"][key])
+            self.assertFalse((root / "manual-gh-version-args").exists())
+            manual_text = (appdir / "usr/share/doc/iris/pdfium/PROVENANCE").read_text()
+            self.assertIn("Attestation verifier gh version: not_attempted", manual_text)
+            self.assertIn("Attestation verifier executable sha256: not_attempted", manual_text)
 
             tagged, appdir, gh_args = run("tagged", "1", token=True)
             self.assertEqual(tagged.returncode, 0, tagged.stderr)
+            self.assertEqual((root / "tagged-gh-version-args").read_text().strip(), str(gh_executable))
+            self.assertEqual((root / "tagged-gh-invoked").read_text().strip(), str(gh_executable))
+            self.assertEqual(gh_link.resolve(), gh_other)
             args = gh_args.read_text(encoding="utf-8").splitlines()
             bundle = Path(args[6])
             commit = "0eb94b28c2252d2baae3dfe15dc6b237131d8cd8"
@@ -375,14 +423,39 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
             tagged_record = json.loads(
                 (appdir / "usr/share/doc/iris/pdfium/PROVENANCE.json").read_text(encoding="utf-8")
             )
+            self.assertEqual(tagged_record["schema"], 2)
             self.assertEqual(tagged_record["attestation"]["status"], "verified")
             self.assertEqual(tagged_record["attestation"], {
                 "status": "verified", "pin_sha256": bundle_digest,
+                "verifier_version": "2.83.0", "verifier_sha256": verifier_sha256,
                 "bundle_sha256": bundle_digest, "bundle_bytes": 18267,
                 "repo": "bblanchon/pdfium-binaries", "signer_workflow": workflow,
                 "signer_digest": commit, "source_digest": commit,
                 "source_ref": "refs/heads/master", "subject_sha256": asset_sha256,
             })
+            tagged_text = (appdir / "usr/share/doc/iris/pdfium/PROVENANCE").read_text()
+            self.assertIn("Attestation verifier gh version: 2.83.0", tagged_text)
+            self.assertIn("Attestation verifier executable sha256: " + verifier_sha256, tagged_text)
+
+            bad_identity = [
+                ("missing-version", {"gh_version": ""}),
+                ("invalid-version", {"gh_version": "gh version nope"}),
+                ("leading-zero-version", {"gh_version": "gh version 02.83.0"}),
+                ("oversized-version", {"gh_version": "gh version " + "1" * 65 + ".0.0"}),
+                ("version-failure", {"gh_version_exit": "1"}),
+                ("missing-hash", {"gh_hash": ""}),
+                ("invalid-hash", {"gh_hash": "x" * 64}),
+                ("hash-failure", {"gh_hash": "0" * 64, "gh_hash_exit": "1"}),
+                ("unresolved-executable", {"realpath_exit": "1"}),
+            ]
+            for name, settings in bad_identity:
+                with self.subTest(name=name):
+                    rejected, appdir, gh_args = run(name, "1", token=True, **settings)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertFalse(gh_args.exists())
+                    self.assertFalse(appdir.exists())
+                    self.assertFalse((root / (name + "-curl-args")).exists())
+
             for name, settings in (("wrong-size", {"bundle_size": "18266"}),
                                    ("wrong-bytes", {"bundle_sha256": "0" * 64}),
                                    ("fetch-failure", {"curl_exit": "22"})):

@@ -570,9 +570,10 @@ class Reports(unittest.TestCase):
             library_sha256 = hashlib.sha256(library.read_bytes()).hexdigest()
             policy = module.PDFIUM_ATTESTATION
             record = {
-                "schema": 1,
+                "schema": 2,
                 "runtime": {"path": "usr/lib/iris/libpdfium.so", "sha256": library_sha256},
-                "attestation": dict(policy, status="verified", bundle_sha256=policy["pin_sha256"]),
+                "attestation": dict(policy, status="verified", bundle_sha256=policy["pin_sha256"],
+                                    verifier_version="2.83.0", verifier_sha256="a" * 64),
             }
             provenance = docs / "PROVENANCE.json"
             report = audit(max_command_bytes=4096)
@@ -593,10 +594,19 @@ class Reports(unittest.TestCase):
                     self.assertEqual(verified["asset_sha256"], digest)
                     self.assertEqual(verified["library_sha256"], library_sha256)
                     self.assertEqual(verified["attestation_pin_sha256"], policy["pin_sha256"])
+                    self.assertEqual(verified["verifier_version"], "2.83.0")
+                    self.assertEqual(verified["verifier_sha256"], "a" * 64)
+                    self.assertIn("not TUF-root or legal approval", verified["note"])
+
+            old_schema = copy.deepcopy(record)
+            old_schema["schema"] = 1
+            rejected(old_schema)
 
             # Every required attestation field must be present and exact, including
             # plausible but unpinned digests, signer workflow/ref, and archive subject.
             for key, value in record["attestation"].items():
+                if key in ("verifier_version", "verifier_sha256"):
+                    continue  # Observed verifier identity is validated, not pinned upstream.
                 for replacement in (None, "0" * 64 if isinstance(value, str) else value + 1):
                     with self.subTest(field=key, replacement=replacement):
                         bad = copy.deepcopy(record)
@@ -604,6 +614,18 @@ class Reports(unittest.TestCase):
                             del bad["attestation"][key]
                         else:
                             bad["attestation"][key] = replacement
+                        rejected(bad)
+            for key, invalid in (
+                ("verifier_version", (None, "", "v2.83.0", "02.83.0", "2.83", "2.83.0-dev",
+                                      "2.83.0\n", "1" * 65 + ".0.0", 283, [])),
+                ("verifier_sha256", (None, "", "a" * 63, "a" * 65, "g" * 64, "A" * 64, 123, [])),
+            ):
+                bad = copy.deepcopy(record)
+                del bad["attestation"][key]
+                rejected(bad)
+                for value in invalid:
+                    with self.subTest(field=key, value=value):
+                        bad["attestation"][key] = value
                         rejected(bad)
             for section in ("archive", "runtime"):
                 for key, value in record[section].items():
@@ -623,9 +645,21 @@ class Reports(unittest.TestCase):
             manual_record["attestation"]["status"] = "not_attempted"
             manual_record["attestation"]["bundle_sha256"] = None
             manual_record["attestation"]["bundle_bytes"] = None
+            manual_record["attestation"]["verifier_version"] = None
+            manual_record["attestation"]["verifier_sha256"] = None
             manual = check(manual_record)
             self.assertFalse(manual["attestation_verified"])
             self.assertEqual(manual["attestation_status"], "not_attempted")
+            for key in ("verifier_version", "verifier_sha256"):
+                self.assertIsNone(manual[key])
+                for value in ("absent", record["attestation"][key], "", False):
+                    with self.subTest(manual_field=key, value=value):
+                        bad = copy.deepcopy(manual_record)
+                        if value == "absent":
+                            del bad["attestation"][key]
+                        else:
+                            bad["attestation"][key] = value
+                        rejected(bad)
             library.write_bytes(b"different staged library")
             rejected(record)
             rejected(manual_record)
@@ -793,7 +827,7 @@ class Workflow(unittest.TestCase):
         fetch = (ROOT / "scripts/fetch-pdfium-runtime.sh").read_text()
         self.assertIn("set -euo pipefail", fetch)
         self.assertIn("[[ -n ${GH_TOKEN:-} ]]", fetch)
-        verify = fetch.index('gh attestation verify "$tarball" --repo "$pdfium_repo" --bundle "$bundle"')
+        verify = fetch.index('"$gh_executable" attestation verify "$tarball" --repo "$pdfium_repo" --bundle "$bundle"')
         success = fetch.index("attestation_status=verified")
         metadata = fetch.index('cat > "$doc_dir/PROVENANCE.json"')
         self.assertLess(verify, success)

@@ -102,15 +102,43 @@ trap 'rm -rf -- "$extract"' EXIT
 attestation_status=not_attempted
 bundle_sha256=null
 bundle_bytes=null
+verifier_version_json=null
+verifier_sha256_json=null
+verifier_version=not_attempted
+verifier_sha256=not_attempted
 if [[ $verify_provenance == 1 ]]; then
     [[ -n ${GH_TOKEN:-} ]] || {
         echo "GH_TOKEN is required to verify PDFium build provenance" >&2
         exit 1
     }
-    command -v gh >/dev/null 2>&1 || {
+    gh_command=$(command -v gh) || {
         echo "gh is required to verify PDFium build provenance" >&2
         exit 1
     }
+    # Resolve symlinks once: version, digest and verification must use one executable,
+    # not a PATH lookup (or a symlink target) that can differ between invocations.
+    gh_executable=$(realpath -e -- "$gh_command")
+    [[ $gh_command == */* && -f $gh_executable && -x $gh_executable ]] || {
+        echo "cannot resolve the gh verifier executable" >&2
+        exit 1
+    }
+    gh_version_output=$("$gh_executable" version)
+    gh_version_line=${gh_version_output%%$'\n'*}
+    # Provenance stores canonical stable X.Y.Z, at most 64 characters, without
+    # a leading v, leading zeroes, build metadata or the CLI's date/help suffix.
+    version_pattern='^gh version ((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))( \([^()]*\))?$'
+    if [[ ! $gh_version_line =~ $version_pattern || ${#BASH_REMATCH[1]} -gt 64 ]]; then
+        echo "cannot establish a canonical gh verifier version" >&2
+        exit 1
+    fi
+    verifier_version=${BASH_REMATCH[1]}
+    verifier_sha256=$(sha256sum "$gh_executable" | cut -d' ' -f1)
+    [[ $verifier_sha256 =~ ^[0-9a-f]{64}$ ]] || {
+        echo "cannot establish the gh verifier executable sha256" >&2
+        exit 1
+    }
+    verifier_version_json="\"$verifier_version\""
+    verifier_sha256_json="\"$verifier_sha256\""
     bundle="$extract/pdfium-attestation.json"
     curl --fail --location --silent --show-error \
         --retry "$fetch_retries" --retry-delay "$fetch_retry_delay" --proto '=https' --tlsv1.2 \
@@ -124,7 +152,7 @@ if [[ $verify_provenance == 1 ]]; then
     fi
     # gh binds the exact archive subject to the pinned bundle and upstream identity.
     # With set -e, any verification failure exits before recording success or staging.
-    gh attestation verify "$tarball" --repo "$pdfium_repo" --bundle "$bundle" \
+    "$gh_executable" attestation verify "$tarball" --repo "$pdfium_repo" --bundle "$bundle" \
         --signer-workflow "$pdfium_signer_workflow" --signer-digest "$pdfium_commit" \
         --source-digest "$pdfium_commit" --source-ref "$pdfium_source_ref"
     bundle_sha256="\"$bundle_sha256\""
@@ -176,13 +204,15 @@ Attestation repository: $pdfium_repo
 Attestation signer workflow: $pdfium_signer_workflow
 Attestation signer/source digest: $pdfium_commit
 Attestation source ref: $pdfium_source_ref
+Attestation verifier gh version: $verifier_version
+Attestation verifier executable sha256: $verifier_sha256
 Attestation verification: $attestation_status (subject sha256 $asset_sha256)
 Library sha256: $library_sha256
 License:        see LICENSE and licenses/ in this directory
 PROVENANCE
 cat > "$doc_dir/PROVENANCE.json" <<PROVENANCE_JSON
 {
-  "schema": 1,
+  "schema": 2,
   "archive": {
     "asset": "$asset",
     "bytes": $asset_bytes,
@@ -194,6 +224,8 @@ cat > "$doc_dir/PROVENANCE.json" <<PROVENANCE_JSON
   },
   "attestation": {
     "status": "$attestation_status",
+    "verifier_version": $verifier_version_json,
+    "verifier_sha256": $verifier_sha256_json,
     "pin_sha256": "$pdfium_attestation_sha256",
     "bundle_sha256": $bundle_sha256,
     "bundle_bytes": $bundle_bytes,
