@@ -200,7 +200,7 @@ metadata の未評価 target predicates は graph に載せません。
 （dev/bench 由来の image/avif、tokio/test-util、iris-thumb-preview/test-fixtures 等）ので、
 resolve の features は記録しません。`iris-ui-shell` を起点とする normal/build closure だけを記録し、
 dev-only・未到達の workspace package・他 target の依存は含めません。package ID/source/version、
-tree の有効 features、宣言された license/license-file（未指定は null と `missing_metadata`）、
+tree の有効 features は同じ package ID の全出現から union して保持します（runtime/build context ごとの feature set 自体は個別に出しません）。宣言された license/license-file（未指定は null と `missing_metadata`）、
 依存 edges を保持します。`dependency_kind` は normal/build/ambiguous（同一 package edge が両方に出た場合）を区別し、
 分類を `dependency_kinds` に残します。`proc_macro` は依存先の proc-macro target を表し、
 package の `contexts` は runtime/build/proc-macro を区別します。build tool・proc-macro の

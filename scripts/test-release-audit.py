@@ -97,13 +97,14 @@ class Reports(unittest.TestCase):
 
         def tree_text(minimal):
             lines = ["iris-ui-shell v1.2.3 (/workspace/crates/ui-shell)|" + ("minimal" if minimal else "default,video"),
-                     "|-- common v1.2.3|",
-                     "|   `-- common-child v1.2.3|",
+                     "|-- common v1.2.3|runtime",
+                     "|   `-- common-child v1.2.3|runtime-child",
                      "|-- macro v1.2.3 (proc-macro)|",
                      "|   `-- helper v1.2.3|",
                      "|-- git-dep v1.2.3 (https://example.invalid/dependency#abc)|",
                      "[build-dependencies]",
-                     "|-- common v1.2.3| (*)",
+                     "|-- common v1.2.3|host",
+                     "|   `-- common-child v1.2.3|host-child",
                      "`-- build-tool v1.2.3|",
                      "    `-- helper v1.2.3| (*)"]
             if not minimal:
@@ -137,7 +138,8 @@ class Reports(unittest.TestCase):
                                  | (set() if minimal else {"video"}))
                 # Tree features win; workspace-wide leaked features are absent.
                 self.assertEqual(selected["iris-ui-shell"]["features"], ["minimal"] if minimal else ["default", "video"])
-                self.assertEqual(selected["common"]["features"], [])
+                self.assertEqual(selected["common"]["features"], ["host", "runtime"])
+                self.assertEqual(selected["common-child"]["features"], ["host-child", "runtime-child"])
                 for pkg in selected.values():
                     self.assertNotIn("leaked", pkg["features"])
                 self.assertEqual(selected["macro"]["contexts"], ["proc-macro"])
@@ -224,7 +226,7 @@ class Reports(unittest.TestCase):
                 root = packages["iris-ui-shell"]
                 self.assertEqual(graph["root"], root["id"])
                 self.assertEqual(root["tree_identity"], report.clean("iris-ui-shell v0.4.0 (/workspace/crates/ui-shell)"))
-                self.assertEqual(root["features"], ["minimal"] if minimal else ["default", "video", "pdf"])
+                self.assertEqual(root["features"], ["minimal"] if minimal else ["default", "pdf", "video"])
                 self.assertEqual(root["source_kind"], "path")
                 self.assertEqual(root["source"], report.clean("/workspace/crates/ui-shell"))
                 self.assertEqual(packages["git-dep"]["source"], "https://example.invalid/repo#abc")

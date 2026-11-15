@@ -358,7 +358,11 @@ class Audit:
                 if pid not in seen:
                     seen.add(pid)
                     order.append(pid)
-                    tree_features[pid] = feats
+                    tree_features[pid] = set()
+                # Resolver 2 can compile one package ID in separate target/host
+                # contexts with different feature sets. Keep every observed
+                # feature instead of silently trusting the first tree occurrence.
+                tree_features[pid].update(feats)
                 if depth == 0:
                     if stack:
                         raise ValueError("multiple tree roots")
@@ -433,7 +437,7 @@ class Audit:
                     id=pid, name=package["name"], version=package["version"],
                     source=package.get("source"),
                     source_kind="path" if package.get("source") is None else "registry-or-git",
-                    features=tree_features[pid], contexts=sorted(contexts[pid]),
+                    features=sorted(tree_features[pid]), contexts=sorted(contexts[pid]),
                     target_kinds=sorted({k for t in package["targets"] for k in t.get("kind", [])}),
                     license=package.get("license"), license_file=package.get("license_file"),
                     missing_metadata=[k for k in ("license", "license_file") if not package.get(k)]))
@@ -448,7 +452,7 @@ class Audit:
                 context["metadata_error"] = catalog_error
             if self.add("cargo-graph", **context, status="partial" if context["truncated"] or metadata is None else "captured",
                         packages=projected, edges=edges,
-                        note=("Package catalog unavailable: tree display identities and source locations only, not metadata package IDs or registry URLs; licenses and non-proc-macro target kinds are unavailable. " if metadata is None else "") + "Cargo tree features for the selected target/variant and declared license metadata only; path source is not a registry. Edges are tree package relationships once each; dependency_kinds retains normal/build group membership and dependency_kind is ambiguous when both apply. Unfiltered metadata target predicates are never serialized. Dev-only and unreachable packages are excluded via -p and -e. Runtime/build contexts propagate through normal dependencies, preserving both for dual-kind edges; proc-macro dependencies run at build time. No legal conclusion or native-code closure is inferred."):
+                        note=("Package catalog unavailable: tree display identities and source locations only, not metadata package IDs or registry URLs; licenses and non-proc-macro target kinds are unavailable. " if metadata is None else "") + "Cargo tree features are unioned across selected-target/variant occurrences of each package; declared license metadata only; path source is not a registry. Edges are tree package relationships once each; dependency_kinds retains normal/build group membership and dependency_kind is ambiguous when both apply. Unfiltered metadata target predicates are never serialized. Dev-only and unreachable packages are excluded via -p and -e. Runtime/build contexts propagate through normal dependencies, preserving both for dual-kind edges; proc-macro dependencies run at build time. No legal conclusion or native-code closure is inferred."):
                 return
             context["truncated"] = True
             reason = "rooted graph omitted: serialized report byte budget exceeded"
