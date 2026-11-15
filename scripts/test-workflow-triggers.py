@@ -313,6 +313,31 @@ permissions:
           cargo test -p iris-ui-shell --lib update::undo_ops::tests::trash_redo_passes_fresh_receipts_to_next_undo --locked --no-default-features --features minimal
 
 """ in ci,
+    "Private copy destination regression runs on Unix CI outside native smoke": """  copy-private-destinations:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.os }}-private-copy-cargo
+
+      - name: Private destination during copy regression
+        run: |
+          cargo test -p iris-platform-integration --lib copy::tests::new_copy_destinations_are_private_until_success_under_umask --locked
+
+""" in ci,
     "Workflow contract checks run independently of platform integration": """  workflow-contracts:
     runs-on: ubuntu-latest
     permissions:
