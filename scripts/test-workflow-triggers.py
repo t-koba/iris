@@ -263,6 +263,30 @@ permissions:
             for job in ("package-macos", "package-linux", "package-windows")
         )
     ),
+    "Trash path preflight regressions run on Ubuntu and Windows outside container smoke": """  trash-path-preflight:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.os }}-trash-cargo
+
+      - name: Trash path preflight regressions
+        run: cargo test -p iris-platform-integration --lib trash::exact_items::tests:: --locked
+
+""" in ci,
     "CI manual, pull-request, and scheduled triggers": all(
         trigger in ci for trigger in ("  workflow_dispatch:\n", "  pull_request:\n", "  schedule:\n")
     ),
