@@ -13,7 +13,8 @@ use crate::packet::query_directory::{
 use crate::wire::{checked_slice, decode_utf16le, le_u32, le_u64};
 use crate::SmbClientError;
 
-pub const DEFAULT_DIRECTORY_OUTPUT_BUFFER_LENGTH: u32 = 1024 * 1024;
+/// Single-credit limit; native SMB negotiation does not advertise LARGE_MTU.
+pub const DEFAULT_DIRECTORY_OUTPUT_BUFFER_LENGTH: u32 = 64 * 1024;
 
 const FILE_ID_BOTH_DIRECTORY_INFORMATION_FIXED_BYTES: usize = 104;
 const FILE_ID_BOTH_DIRECTORY_INFORMATION_SHORT_NAME_OFFSET: usize = 70;
@@ -618,6 +619,7 @@ mod tests {
                         create_response_body(file_id, Smb2FileAttributes::DIRECTORY, 0)
                     }
                     Smb2Command::QueryDirectory => {
+                        assert_eq!(header.credit_charge, 0);
                         let query = Smb2QueryDirectoryRequest::decode(body).expect("query");
                         assert_eq!(
                             query.file_information_class,
@@ -633,6 +635,7 @@ mod tests {
                             query.output_buffer_length,
                             DEFAULT_DIRECTORY_OUTPUT_BUFFER_LENGTH
                         );
+                        assert!(query.output_buffer_length <= 64 * 1024);
                         if step == 1 {
                             query_directory_response_body(&directory_entry_record(
                                 7,
