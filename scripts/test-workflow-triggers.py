@@ -288,6 +288,18 @@ permissions:
           cargo test -p iris-platform-integration --lib trash::exact_items::tests:: --locked
 
 """ in ci,
+    "Workflow contract checks run independently of platform integration": """  workflow-contracts:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Workflow contract regressions
+        run: python3 scripts/test-workflow-triggers.py
+
+""" in ci,
     "SMB streamed-write cleanup regressions run separately from native container smoke": """  smb-streamed-write-cleanup:
     runs-on: ubuntu-latest
     permissions:
