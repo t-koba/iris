@@ -76,7 +76,9 @@ fn query_directory_request(handle: &SmbHandle, first: bool) -> Smb2QueryDirector
         },
         file_index: 0,
         file_id: handle.file_id,
-        file_name: if first { "*" } else { "" }.to_string(),
+        // Samba rejects a zero-length FileName even on continuation requests.
+        // The server retains the initial search pattern when RestartScan is clear.
+        file_name: "*".to_string(),
         output_buffer_length: DEFAULT_DIRECTORY_OUTPUT_BUFFER_LENGTH,
     }
 }
@@ -740,7 +742,10 @@ mod tests {
                             step == 1
                         );
                         assert_eq!(query.file_id, file_id);
-                        assert_eq!(query.file_name, if step == 1 { "*" } else { "" });
+                        // Repeating the pattern is compatible with servers that reject
+                        // an empty continuation pattern; without RESTART_SCANS, the
+                        // server continues the existing enumeration.
+                        assert_eq!(query.file_name, "*");
                         assert_eq!(
                             query.output_buffer_length,
                             DEFAULT_DIRECTORY_OUTPUT_BUFFER_LENGTH
