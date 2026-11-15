@@ -31,7 +31,12 @@ copy, checks locked-buffer capacity/length, and visits every visible RGB byte.
 Padding and RGB32's undefined fourth byte are excluded from the fingerprint.
 A black first frame is valid for this sample's opening fade-in. Unexpected type
 changes, end-of-stream before a frame, invalid buffers and exhausted read limits
-fail. Source Reader failures retain a fixed stage name and HRESULT (for example,
+fail. An output-size mismatch remains a failure and additionally reports the
+output media type's minimum-display and geometric apertures as bounded numeric
+`MFVideoArea` fields (or an explicit missing/unreadable/invalid-size status).
+These diagnostics distinguish coded dimensions from declared image regions;
+they do not crop, accept padding, or relax the exact negotiated-size assertion.
+Source Reader failures retain a fixed stage name and HRESULT (for example,
 `source_open` or `set_rgb32`) and return a nonzero process/job exit status.
 
 `elapsed_ms` on a native result is a single cold first-frame observation including

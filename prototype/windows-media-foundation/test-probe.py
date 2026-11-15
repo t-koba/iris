@@ -214,22 +214,42 @@ class ProbeTests(unittest.TestCase):
             self.assertEqual(probe.main(), 1)
         self.assertEqual(output.getvalue(), "")
 
-    def test_resize_failure_reports_only_bounded_type_dimensions(self):
+    def test_resize_failure_reports_only_bounded_type_dimensions_and_apertures(self):
+        missing = {"status": "missing"}
+        valid = {"status": "present", "offset_x_value": 0, "offset_x_fraction": 0,
+                 "offset_y_value": 0, "offset_y_fraction": 0, "width": 854, "height": 480}
+        apertures = {"minimum_display": valid, "geometric": missing}
         failure = dict(ok=False, stage="unexpected_resize", hresult="80004005", elapsed_ms=1,
                        resize={"type": "native", "expected_width": 854, "expected_height": 480,
                                "actual_width": 640, "actual_height": 360})
         self.assertEqual(probe.validate_record(json.dumps(failure), 1, 2048, 16777216, 64), failure)
-        for change in (
-            {"resize": {"type": "private/path", "expected_width": 854, "expected_height": 480,
-                        "actual_width": 640, "actual_height": 360}},
-            {"resize": {"type": "output", "expected_width": 0, "expected_height": 480,
-                        "actual_width": 640, "actual_height": 360}},
-            {"resize": {"type": "output", "expected_width": 854, "expected_height": 480,
-                        "actual_width": 854, "actual_height": 480}},
-            {"resize": failure["resize"] | {"path": "private/path"}},
-        ):
-            with self.subTest(change=change), self.assertRaises(probe.ProbeError):
-                probe.validate_record(json.dumps(failure | change), 1, 2048, 16777216, 64)
+        output_failure = failure | {"resize": {"type": "output", "expected_width": 854,
+                                                  "expected_height": 480, "actual_width": 864,
+                                                  "actual_height": 480, "apertures": apertures}}
+        self.assertEqual(probe.validate_record(json.dumps(output_failure), 1, 2048, 16777216, 64),
+                         output_failure)
+        malformed = (
+            {"type": "private/path", "expected_width": 854, "expected_height": 480,
+             "actual_width": 640, "actual_height": 360},
+            {"type": "output", "expected_width": 854, "expected_height": 480,
+             "actual_width": 864, "actual_height": 480},
+            output_failure["resize"] | {"path": "private/path"},
+            output_failure["resize"] | {"apertures": {"minimum_display": missing,
+                                                        "geometric": missing, "extra": missing}},
+            output_failure["resize"] | {"apertures": {"minimum_display": {"status": "invalid_size",
+                                                                                "blob_bytes": 16},
+                                                        "geometric": missing}},
+            output_failure["resize"] | {"apertures": {"minimum_display": valid | {"raw": "bytes"},
+                                                        "geometric": missing}},
+            output_failure["resize"] | {"apertures": {"minimum_display": valid | {"width": True},
+                                                        "geometric": missing}},
+            output_failure["resize"] | {"apertures": {"minimum_display": valid | {"offset_x_value": 32768},
+                                                        "geometric": missing}},
+        )
+        for resize in malformed:
+            with self.subTest(resize=resize), self.assertRaises(probe.ProbeError):
+                probe.validate_record(json.dumps(failure | {"resize": resize}), 1,
+                                      2048, 16777216, 64)
 
     def test_decode_failure_flags_are_bounded_and_stage_specific(self):
         failure = dict(ok=False, stage="decode_flags", hresult="80004005", elapsed_ms=1)
@@ -280,7 +300,7 @@ class ProbeTests(unittest.TestCase):
         if not compiler:
             self.skipTest("SDK-free C++ compiler unavailable; source contracts still run")
         source = (HERE / "probe.cpp").read_text()
-        validators = source.split("struct Failure {", 1)[1].split("struct Runtime {", 1)[0]
+        validators = source[source.index("enum class ApertureStatus"):source.index("struct Runtime {")]
         harness = r'''
 #include <cassert>
 #include <cstdint>
@@ -289,15 +309,20 @@ class ProbeTests(unittest.TestCase):
 #include <initializer_list>
 using DWORD = uint32_t;
 using UINT32 = uint32_t;
+using UINT8 = uint8_t;
 using LONG = int32_t;
 using HRESULT = int32_t;
+using REFGUID = int;
 constexpr HRESULT E_FAIL = -1, E_INVALIDARG = -2, MF_E_ATTRIBUTENOTFOUND = -3;
 bool FAILED(HRESULT hr) { return hr < 0; }
 struct GUID { int Data1; };
+struct MFOffset { int16_t value = 0; uint16_t fract = 0; };
+struct MFVideoArea { MFOffset OffsetX, OffsetY; struct { LONG cx = 0, cy = 0; } Area; };
 bool operator!=(GUID a, GUID b) { return a.Data1 != b.Data1; }
 constexpr GUID MFMediaType_Video{1}, MFVideoFormat_RGB32{2}, MFVideoFormat_H264{3};
 constexpr int MF_MT_MAJOR_TYPE = 1, MF_MT_SUBTYPE = 2, MF_MT_FRAME_SIZE = 3,
-              MF_MT_DEFAULT_STRIDE = 4;
+              MF_MT_DEFAULT_STRIDE = 4, MF_MT_MINIMUM_DISPLAY_APERTURE = 5,
+              MF_MT_GEOMETRIC_APERTURE = 6;
 constexpr DWORD kFirstVideoStream = 7, kCurrentType = 0xffffffff;
 constexpr DWORD MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED = 0x10,
                 MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED = 0x20,
@@ -306,11 +331,27 @@ struct IMFMediaType {
     GUID major = MFMediaType_Video, subtype = MFVideoFormat_RGB32;
     UINT32 width = 854, height = 480, stride = 3416;
     HRESULT status = 0, stride_status = 0;
+    MFVideoArea minimum_display{}, geometric{};
+    UINT32 minimum_bytes = 0, geometric_bytes = 0;
+    HRESULT minimum_size_status = MF_E_ATTRIBUTENOTFOUND, geometric_size_status = MF_E_ATTRIBUTENOTFOUND;
+    HRESULT minimum_blob_status = 0, geometric_blob_status = 0;
     HRESULT GetGUID(int key, GUID* value) {
         *value = key == MF_MT_MAJOR_TYPE ? major : subtype;
         return status;
     }
     HRESULT GetUINT32(int, UINT32* value) { *value = stride; return stride_status; }
+    HRESULT GetBlobSize(int key, UINT32* bytes) {
+        if (key == MF_MT_MINIMUM_DISPLAY_APERTURE) { *bytes = minimum_bytes; return minimum_size_status; }
+        *bytes = geometric_bytes; return geometric_size_status;
+    }
+    HRESULT GetBlob(int key, UINT8* data, UINT32 capacity, UINT32* bytes) {
+        const auto status = key == MF_MT_MINIMUM_DISPLAY_APERTURE ? minimum_blob_status : geometric_blob_status;
+        const auto size = key == MF_MT_MINIMUM_DISPLAY_APERTURE ? minimum_bytes : geometric_bytes;
+        const auto& area = key == MF_MT_MINIMUM_DISPLAY_APERTURE ? minimum_display : geometric;
+        if (FAILED(status)) return status;
+        if (capacity < sizeof(area) || size != sizeof(area)) return E_FAIL;
+        std::memcpy(data, &area, sizeof(area)); *bytes = sizeof(area); return 0;
+    }
 };
 HRESULT MFGetAttributeSize(IMFMediaType* type, int, UINT32* w, UINT32* h) {
     *w = type->width; *h = type->height; return type->status;
@@ -408,6 +449,38 @@ int main() {
             }
         }
     }
+    // Output mismatch diagnostics expose only fixed numeric apertures, never raw media bytes.
+    {
+        IMFSourceReader reader;
+        reader.output.width = 864;
+        reader.output.stride = 3456;
+        reader.output.minimum_bytes = sizeof(MFVideoArea);
+        reader.output.minimum_size_status = 0;
+        reader.output.minimum_display.OffsetX.value = 1;
+        reader.output.minimum_display.OffsetX.fract = 2;
+        reader.output.minimum_display.OffsetY.value = -3;
+        reader.output.minimum_display.OffsetY.fract = 4;
+        reader.output.minimum_display.Area.cx = 854;
+        reader.output.minimum_display.Area.cy = 480;
+        try { checked_output(&reader, limits, input); return 3; }
+        catch (const Failure& f) {
+            assert(std::strcmp(f.stage, "unexpected_resize") == 0 && f.has_apertures);
+            assert(f.minimum_display_aperture.status == ApertureStatus::present);
+            assert(f.minimum_display_aperture.offset_x_value == 1);
+            assert(f.minimum_display_aperture.offset_x_fraction == 2);
+            assert(f.minimum_display_aperture.offset_y_value == -3);
+            assert(f.minimum_display_aperture.offset_y_fraction == 4);
+            assert(f.minimum_display_aperture.width == 854 && f.minimum_display_aperture.height == 480);
+            assert(f.geometric_aperture.status == ApertureStatus::missing);
+        }
+        reader.output.minimum_bytes = 1;
+        assert(read_aperture(&reader.output, MF_MT_MINIMUM_DISPLAY_APERTURE).status ==
+               ApertureStatus::invalid_size);
+        reader.output.minimum_bytes = sizeof(MFVideoArea);
+        reader.output.minimum_blob_status = E_FAIL;
+        assert(read_aperture(&reader.output, MF_MT_MINIMUM_DISPLAY_APERTURE).status ==
+               ApertureStatus::unreadable);
+    }
     // Signed and absent strides retain the same bounds as initial negotiation.
     for (bool absent : {false, true}) {
         IMFSourceReader reader;
@@ -421,7 +494,7 @@ int main() {
 '''
         with tempfile.TemporaryDirectory(prefix="iris-mf-contract-") as temp:
             directory = Path(temp)
-            (directory / "contract.cpp").write_text(harness + "struct Failure {" + validators + cases)
+            (directory / "contract.cpp").write_text(harness + validators + cases)
             executable = directory / ("contract.exe" if os.name == "nt" else "contract")
             code, _ = probe.command([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
                                      "contract.cpp", "-o", str(executable)], directory,

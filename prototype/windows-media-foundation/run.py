@@ -86,15 +86,48 @@ def validate_record(data, code, dimension, max_bytes, reads):
         if record.get("stage") == "unexpected_resize":
             fields.add("resize")
             resize = record.get("resize")
-            if (not isinstance(resize, dict) or set(resize) != {
-                    "type", "expected_width", "expected_height", "actual_width", "actual_height"}
-                    or resize.get("type") not in ("native", "output")):
+            resize_fields = {"type", "expected_width", "expected_height", "actual_width", "actual_height"}
+            if (not isinstance(resize, dict)
+                    or resize.get("type") not in ("native", "output")
+                    or set(resize) != resize_fields | ({"apertures"} if resize.get("type") == "output" else set())):
                 raise ProbeError("invalid_failure")
             dimensions = [resize[key] for key in (
                 "expected_width", "expected_height", "actual_width", "actual_height")]
             if (any(type(value) is not int or not 0 < value <= dimension for value in dimensions)
                     or dimensions[:2] == dimensions[2:]):
                 raise ProbeError("invalid_failure")
+            if resize.get("type") == "output":
+                apertures = resize["apertures"]
+                if not isinstance(apertures, dict) or set(apertures) != {"minimum_display", "geometric"}:
+                    raise ProbeError("invalid_failure")
+                for aperture in apertures.values():
+                    if not isinstance(aperture, dict) or aperture.get("status") not in (
+                            "missing", "present", "invalid_size", "unreadable"):
+                        raise ProbeError("invalid_failure")
+                    status = aperture["status"]
+                    if status in ("missing", "unreadable"):
+                        if set(aperture) != {"status"}:
+                            raise ProbeError("invalid_failure")
+                    elif status == "invalid_size":
+                        size = aperture.get("blob_bytes")
+                        if (set(aperture) != {"status", "blob_bytes"} or type(size) is not int
+                                or not 0 <= size < 2**32 or size == 16):
+                            raise ProbeError("invalid_failure")
+                    else:
+                        keys = {"status", "offset_x_value", "offset_x_fraction", "offset_y_value",
+                                "offset_y_fraction", "width", "height"}
+                        if set(aperture) != keys:
+                            raise ProbeError("invalid_failure")
+                        values = [aperture[key] for key in keys - {"status"}]
+                        if any(type(value) is not int for value in values):
+                            raise ProbeError("invalid_failure")
+                        if (not -32768 <= aperture["offset_x_value"] <= 32767
+                                or not -32768 <= aperture["offset_y_value"] <= 32767
+                                or not 0 <= aperture["offset_x_fraction"] <= 65535
+                                or not 0 <= aperture["offset_y_fraction"] <= 65535
+                                or not -(2**31) <= aperture["width"] < 2**31
+                                or not -(2**31) <= aperture["height"] < 2**31):
+                            raise ProbeError("invalid_failure")
         if (code == 0 or set(record) != fields
                 or type(record.get("stage")) is not str
                 or not re.fullmatch(r"[a-z][a-z0-9_]{0,39}", record["stage"])

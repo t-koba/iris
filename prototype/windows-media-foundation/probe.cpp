@@ -22,6 +22,16 @@ constexpr DWORD kAllStreams = static_cast<DWORD>(MF_SOURCE_READER_ALL_STREAMS);
 constexpr DWORD kCurrentType = static_cast<DWORD>(MF_SOURCE_READER_CURRENT_TYPE_INDEX);
 constexpr DWORD kFirstVideoStream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
 
+enum class ApertureStatus : uint8_t { missing, present, invalid_size, unreadable };
+
+struct ApertureReport {
+    ApertureStatus status = ApertureStatus::missing;
+    UINT32 blob_bytes = 0;
+    int32_t offset_x_value = 0, offset_y_value = 0;
+    uint16_t offset_x_fraction = 0, offset_y_fraction = 0;
+    int32_t width = 0, height = 0;
+};
+
 struct Failure {
     const char* stage;
     HRESULT hr;
@@ -29,6 +39,16 @@ struct Failure {
     const char* resize_type = nullptr;
     UINT32 expected_width = 0, expected_height = 0;
     UINT32 actual_width = 0, actual_height = 0;
+    bool has_apertures = false;
+    ApertureReport minimum_display_aperture, geometric_aperture;
+
+    Failure(const char* stage_value, HRESULT hr_value, DWORD flags_value = 0,
+            const char* resize_type_value = nullptr, UINT32 expected_width_value = 0,
+            UINT32 expected_height_value = 0, UINT32 actual_width_value = 0,
+            UINT32 actual_height_value = 0)
+        : stage(stage_value), hr(hr_value), flags(flags_value), resize_type(resize_type_value),
+          expected_width(expected_width_value), expected_height(expected_height_value),
+          actual_width(actual_width_value), actual_height(actual_height_value) {}
 };
 
 void check(HRESULT hr, const char* stage) {
@@ -89,6 +109,20 @@ Layout layout(IMFMediaType* type, const Limits& limits, bool rgb) {
     return {width, height, stride, stride * height};
 }
 
+ApertureReport read_aperture(IMFMediaType* type, REFGUID key) {
+    UINT32 bytes = 0;
+    const auto size_hr = type->GetBlobSize(key, &bytes);
+    if (size_hr == MF_E_ATTRIBUTENOTFOUND) return {};
+    if (FAILED(size_hr)) return {ApertureStatus::unreadable};
+    if (bytes != sizeof(MFVideoArea)) return {ApertureStatus::invalid_size, bytes};
+    MFVideoArea area{};
+    UINT32 read = 0;
+    const auto blob_hr = type->GetBlob(key, reinterpret_cast<UINT8*>(&area), sizeof(area), &read);
+    if (FAILED(blob_hr) || read != sizeof(area)) return {ApertureStatus::unreadable};
+    return {ApertureStatus::present, bytes, area.OffsetX.value, area.OffsetY.value,
+            area.OffsetX.fract, area.OffsetY.fract, area.Area.cx, area.Area.cy};
+}
+
 // Both notification kinds require both types to be checked, before using a
 // sample from that ReadSample call (or continuing after a notification alone).
 Layout checked_output(IMFSourceReader* reader, const Limits& limits, const Layout& input) {
@@ -101,9 +135,14 @@ Layout checked_output(IMFSourceReader* reader, const Limits& limits, const Layou
     ComPtr<IMFMediaType> output;
     check(reader->GetCurrentMediaType(kFirstVideoStream, &output), "output_type");
     const auto frame = layout(output.Get(), limits, true);
-    if (frame.width != input.width || frame.height != input.height)
-        throw Failure{"unexpected_resize", E_FAIL, 0, "output", input.width, input.height,
-                      frame.width, frame.height};
+    if (frame.width != input.width || frame.height != input.height) {
+        Failure failure{"unexpected_resize", E_FAIL, 0, "output", input.width, input.height,
+                        frame.width, frame.height};
+        failure.has_apertures = true;
+        failure.minimum_display_aperture = read_aperture(output.Get(), MF_MT_MINIMUM_DISPLAY_APERTURE);
+        failure.geometric_aperture = read_aperture(output.Get(), MF_MT_GEOMETRIC_APERTURE);
+        throw failure;
+    }
     return frame;
 }
 
@@ -199,6 +238,31 @@ Result decode(const wchar_t* path, const Limits& limits) {
     throw Failure{"read_limit", E_FAIL};
 }
 
+const char* aperture_status_name(ApertureStatus status) {
+    switch (status) {
+        case ApertureStatus::missing: return "missing";
+        case ApertureStatus::present: return "present";
+        case ApertureStatus::invalid_size: return "invalid_size";
+        case ApertureStatus::unreadable: return "unreadable";
+    }
+    return "unreadable";
+}
+
+void print_aperture(const ApertureReport& aperture) {
+    std::printf("{\"status\":\"%s\"", aperture_status_name(aperture.status));
+    if (aperture.status == ApertureStatus::invalid_size) {
+        std::printf(",\"blob_bytes\":%lu", static_cast<unsigned long>(aperture.blob_bytes));
+    } else if (aperture.status == ApertureStatus::present) {
+        std::printf(",\"offset_x_value\":%ld,\"offset_x_fraction\":%u,"
+                    "\"offset_y_value\":%ld,\"offset_y_fraction\":%u,"
+                    "\"width\":%ld,\"height\":%ld",
+                    static_cast<long>(aperture.offset_x_value), static_cast<unsigned>(aperture.offset_x_fraction),
+                    static_cast<long>(aperture.offset_y_value), static_cast<unsigned>(aperture.offset_y_fraction),
+                    static_cast<long>(aperture.width), static_cast<long>(aperture.height));
+    }
+    std::printf("}");
+}
+
 int wmain(int argc, wchar_t** argv) {
     const auto start = std::chrono::steady_clock::now();
     const auto elapsed = [&]() {
@@ -222,11 +286,20 @@ int wmain(int argc, wchar_t** argv) {
         std::printf("{\"ok\":false,\"stage\":\"%s\",\"hresult\":\"%08lx\",\"elapsed_ms\":%.3f",
                     failure.stage, static_cast<unsigned long>(failure.hr), elapsed());
         if (failure.flags) std::printf(",\"flags\":%lu", failure.flags);
-        if (failure.resize_type)
+        if (failure.resize_type) {
             std::printf(",\"resize\":{\"type\":\"%s\",\"expected_width\":%u,"
-                        "\"expected_height\":%u,\"actual_width\":%u,\"actual_height\":%u}",
+                        "\"expected_height\":%u,\"actual_width\":%u,\"actual_height\":%u",
                         failure.resize_type, failure.expected_width, failure.expected_height,
                         failure.actual_width, failure.actual_height);
+            if (failure.has_apertures) {
+                std::printf(",\"apertures\":{\"minimum_display\":");
+                print_aperture(failure.minimum_display_aperture);
+                std::printf(",\"geometric\":");
+                print_aperture(failure.geometric_aperture);
+                std::printf("}");
+            }
+            std::printf("}");
+        }
         std::printf("}\n");
     } catch (const std::exception&) {
         std::printf("{\"ok\":false,\"stage\":\"arguments\",\"hresult\":\"80070057\",\"elapsed_ms\":%.3f}\n", elapsed());
