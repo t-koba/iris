@@ -83,19 +83,63 @@ export IRIS_PERF_KEEP_CONTAINERS=0 IRIS_PERF_SMB_MOUNT=''
 export IRIS_PERF_SMB_MIN_PROTOCOL='' IRIS_PERF_SMB_MAX_PROTOCOL=''
 export IRIS_PERF_SMB_SERVER_SIGNING='' IRIS_PERF_SMB_ENCRYPTION=''
 export IRIS_PERF_SMB_LOG_LEVEL=2 IRIS_PERF_SMB_AUTH_AUDIT_LEVEL=''
+report_bounded_sanitized_tail() {
+  python3 - "$1" "$test_root" "$expected_work_root" <<'PY' >&2
+import os
+import re
+import sys
+with open(sys.argv[1], "rb") as stream:
+    stream.seek(0, os.SEEK_END)
+    stream.seek(max(0, stream.tell() - 4096), os.SEEK_SET)
+    data = stream.read(4096)
+roots = [
+    value.encode() for value in (
+        *sys.argv[2:],
+        os.environ.get("IRIS_PERF_WORK_ROOT", ""),
+        os.environ.get("TMPDIR", ""),
+        os.environ.get("HOME", ""),
+        os.environ.get("CARGO_HOME", ""),
+    ) if value
+]
+secrets = [
+    value.encode() for value in (
+        os.environ.get("IRIS_SMB_USER", ""),
+        os.environ.get("IRIS_SMB_PASSWORD", ""),
+        "benchuser:iris",
+        "benchuser",
+        "iris",
+        "A224A29E508493ECD70572422203EC18",
+    ) if value
+]
+output = []
+for line in data.splitlines(keepends=True):
+    if any(root in line for root in roots):
+        line = b"[redacted path-bearing line]" + (b"\n" if line.endswith(b"\n") else b"")
+    else:
+        for secret in secrets:
+            line = line.replace(secret, b"[redacted]")
+        line = re.sub(rb"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", b"?", line)
+    output.append(line)
+sys.stdout.buffer.write(b"".join(output))
+PY
+}
+
 report_harness_failure() {
   local stream file
   for stream in stdout stderr; do
     file="$test_root/out"
     [[ "$stream" == stdout ]] || file="$test_root/err"
     [[ -s "$file" ]] || continue
-    echo "--- Darwin harness $stream (last at most 4096 bytes) ---" >&2
-    tail -c 4096 "$file" | sed \
-      -e 's/benchuser:iris/[redacted]/g' \
-      -e 's/benchuser/[redacted]/g' \
-      -e 's/iris/[redacted]/g' \
-      -e 's/A224A29E508493ECD70572422203EC18/[redacted]/g' >&2
+    echo "--- Darwin harness $stream (last at most 4096 sanitized bytes) ---" >&2
+    report_bounded_sanitized_tail "$file"
   done
+}
+
+report_missing_failure_marker() {
+  local file="$1"
+  printf 'Expected failure marker absent (bash=%s); bounded sanitized report follows:\n' \
+    "$BASH_VERSION" >&2
+  report_bounded_sanitized_tail "$file"
 }
 
 # Exercise the diagnostic reader itself with oversized byte streams.
@@ -107,12 +151,26 @@ Path(sys.argv[2]).write_bytes(b"y" * 7000 + b" A224A29E508493ECD70572422203EC18\
 PY
 report_harness_failure >"$test_root/bounded-report" 2>&1
 [[ "$(wc -c <"$test_root/bounded-report")" -le 9000 ]]
-grep -Fq 'stdout (last at most 4096 bytes)' "$test_root/bounded-report"
-grep -Fq 'stderr (last at most 4096 bytes)' "$test_root/bounded-report"
+grep -Fq 'stdout (last at most 4096 sanitized bytes)' "$test_root/bounded-report"
+grep -Fq 'stderr (last at most 4096 sanitized bytes)' "$test_root/bounded-report"
 ! grep -Fq 'benchuser:iris' "$test_root/bounded-report"
 ! grep -Fq 'benchuser' "$test_root/bounded-report"
 ! grep -Fq 'iris' "$test_root/bounded-report"
 ! grep -Fq 'A224A29E508493ECD70572422203EC18' "$test_root/bounded-report"
+
+printf 'private path: %s\n' "$test_root/private path" >"$test_root/synthetic-report"
+printf 'synthetic failure: benchuser:iris A224A29E508493ECD70572422203EC18\n' \
+  >>"$test_root/synthetic-report"
+printf 'private root: %s\n' "$expected_work_root" >>"$test_root/synthetic-report"
+report_missing_failure_marker "$test_root/synthetic-report" >"$test_root/sanitized-report" 2>&1
+[[ "$(wc -c <"$test_root/sanitized-report" | tr -d ' ')" -le 4600 ]]
+grep -Fq "Expected failure marker absent (bash=$BASH_VERSION);" "$test_root/sanitized-report"
+grep -Fq '[redacted path-bearing line]' "$test_root/sanitized-report"
+grep -Fq 'synthetic failure: [redacted] [redacted]' "$test_root/sanitized-report"
+! grep -Fq "$test_root" "$test_root/sanitized-report"
+! grep -Fq "$expected_work_root" "$test_root/sanitized-report"
+! grep -Fq 'benchuser:iris' "$test_root/sanitized-report"
+! grep -Fq 'A224A29E508493ECD70572422203EC18' "$test_root/sanitized-report"
 
 run_harness() {
   # A process-group deadline also bounds regressions in daemon cleanup.
@@ -183,6 +241,9 @@ export TEST_SMOKE_STATUS=42 IRIS_PERF_KEEP_CONTAINERS=1
 status=0
 run_harness >"$test_root/failure-report" 2>&1 || status=$?
 [[ "$status" == 42 && ! -e "$CAPTURE/forbidden" ]]
+if ! grep -Fq 'Darwin harness failed (exit=42)' "$test_root/failure-report"; then
+  report_missing_failure_marker "$test_root/failure-report"
+fi
 grep -Fq 'Darwin harness failed (exit=42)' "$test_root/failure-report"
 grep -Fq 'synthetic [redacted] credential diagnostic' "$test_root/failure-report"
 ! grep -Fq 'synthetic iris credential diagnostic' "$test_root/failure-report"
