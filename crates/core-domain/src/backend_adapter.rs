@@ -25,6 +25,28 @@ const WRITE_FROM_READER_LENGTH_EXCEEDED_OPERATION: &str =
     "write_from_reader stream exceeds content length";
 const WRITE_FROM_READER_BUFFER_BYTES: usize = 8 * 1024;
 
+/// An exclusively owned staging object, never the public destination. Persisted
+/// chunks are reusable only in a reopened session with the exact identity binding;
+/// checksums or matching public-destination bytes alone never establish ownership.
+#[async_trait]
+pub trait RangeWriteSession: Send + Sync {
+    async fn write_range(
+        &self,
+        reader: Pin<Box<dyn AsyncRead + Send>>,
+        range: ByteRange,
+    ) -> Result<(), BackendError>;
+
+    /// Read only this owned stage to validate a persisted completed range.
+    async fn read_range(&self, _range: ByteRange) -> Result<Vec<u8>, BackendError> {
+        Err(BackendError::Unsupported {
+            operation: "read owned staging range",
+        })
+    }
+
+    /// Install the completed staging object using the conflict policy selected at creation.
+    async fn complete(self: Box<Self>) -> Result<(), BackendError>;
+}
+
 /// Common trait implemented by every storage backend.
 #[async_trait]
 pub trait BackendAdapter: Send + Sync {
@@ -101,16 +123,41 @@ pub trait BackendAdapter: Send + Sync {
         self.write_object(dst, data, on_conflict).await
     }
 
-    /// Used by resumable chunked transfers; backends without support return `Unsupported`.
-    async fn write_range_from_reader(
+    /// Return an opaque, lossless local staging locator before bytes are created.
+    /// The journal persists this locator and an exact identity binding before opening
+    /// the session. Only the local staging implementation interprets the locator.
+    fn range_staging_path(
         &self,
         _dst: &ObjectRef,
-        _reader: Pin<Box<dyn AsyncRead + Send>>,
-        _range: ByteRange,
-        _final_size: u64,
-    ) -> Result<OperationTicket, BackendError> {
+        _session_id: &str,
+    ) -> Result<String, BackendError> {
         Err(BackendError::Unsupported {
-            operation: "write_range_from_reader",
+            operation: "persistent range staging",
+        })
+    }
+
+    async fn open_range_write(
+        &self,
+        _dst: &ObjectRef,
+        _final_size: u64,
+        _session_id: &str,
+        _binding: &str,
+    ) -> Result<Box<dyn RangeWriteSession + '_>, BackendError> {
+        Err(BackendError::Unsupported {
+            operation: "persistent range staging",
+        })
+    }
+
+    /// Begin a fresh, non-resumable owned stage. Drop cleans uninstalled data;
+    /// no writes touch the final name before `complete`. Unsupported policies fail closed.
+    async fn begin_range_write(
+        &self,
+        _dst: &ObjectRef,
+        _final_size: u64,
+        _on_conflict: ConflictResolution,
+    ) -> Result<Box<dyn RangeWriteSession + '_>, BackendError> {
+        Err(BackendError::Unsupported {
+            operation: "begin_range_write",
         })
     }
 

@@ -74,6 +74,18 @@ pub struct PersistedMultipartUpload {
     pub cleanup_pending: bool,
 }
 
+/// The row is durable before staging is created. Its binding covers the exact
+/// job, entry, source version, destination and range layout.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersistedRangeSession {
+    pub job_id: JobId,
+    pub entry_index: u64,
+    pub session_id: String,
+    pub binding: String,
+    pub staging_path: String,
+    pub total_len: u64,
+}
+
 /// The job store is small; 16 MB of mmap is enough.
 const JOBSTORE_MMAP_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -98,10 +110,16 @@ impl JobStoreRepository {
     /// Finished (completed or canceled) jobs cannot be resumed, so saving one deletes it.
     pub fn save_job(&self, job: &PersistedJob) -> Result<(), JobStoreError> {
         if matches!(job.state, JobState::Completed | JobState::Canceled) {
+            let tx = rusqlite::Transaction::new_unchecked(
+                &self.conn,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            self.cleanup_range_sessions(&job.id)?;
             self.conn.execute(
                 "DELETE FROM persisted_jobs WHERE id = ?1",
                 [job.id.0 as i64],
             )?;
+            tx.commit()?;
             debug!(job_id = job.id.0, "jobstore.delete_finished_job");
             return Ok(());
         }
@@ -255,10 +273,18 @@ impl JobStoreRepository {
         state: &JobState,
         updated_at: &str,
     ) -> Result<(), JobStoreError> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        if matches!(state, JobState::Completed | JobState::Canceled) {
+            self.cleanup_range_sessions(job_id)?;
+        }
         self.conn.execute(
             "UPDATE persisted_jobs SET state = ?1, updated_at = ?2 WHERE id = ?3",
             rusqlite::params![job_state_to_str(state), updated_at, job_id.0 as i64],
         )?;
+        tx.commit()?;
         debug!(
             job_id = job_id.0,
             state = ?state,
@@ -328,6 +354,138 @@ impl JobStoreRepository {
             chunks.push(row?);
         }
         Ok(chunks)
+    }
+
+    pub fn save_range_session(&self, session: &PersistedRangeSession) -> Result<(), JobStoreError> {
+        // Insert only: a competing attempt must not replace another owner's journal.
+        let inserted = self.conn.execute(
+            "INSERT INTO persisted_range_sessions (job_id, entry_index, session_id, binding, staging_path, total_len)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6 FROM persisted_jobs WHERE id = ?1 AND state NOT IN ('Completed', 'Canceled')",
+            rusqlite::params![session.job_id.0 as i64, session.entry_index as i64, session.session_id, session.binding, session.staging_path, session.total_len as i64],
+        )?;
+        if inserted != 1 {
+            return Err(JobStoreError::Io(std::io::Error::other(
+                "range session requires a resumable job",
+            )));
+        }
+        // The row is committed before filesystem creation. Reacquire a write
+        // transaction and recheck it so deletion cannot race creation, while a
+        // crash can never leave unjournaled staging behind.
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        if self
+            .load_range_session(&session.job_id, session.entry_index)?
+            .as_ref()
+            != Some(session)
+        {
+            return Err(JobStoreError::Io(std::io::Error::other(
+                "range session was removed before creation",
+            )));
+        }
+        if let Err(error) = iris_platform_integration::staging::OwnedStage::create(
+            &iris_platform_integration::staging::decode_path(&session.staging_path)?,
+            &session.binding,
+            session.total_len,
+        ) {
+            // Creation cleans its own partial directory. If cleanup cannot finish,
+            // retain the durable intent so a later attempt can safely recover it.
+            if error.kind() != std::io::ErrorKind::AlreadyExists
+                && self
+                    .cleanup_range_session(&session.job_id, session.entry_index)
+                    .is_ok()
+            {
+                tx.commit()?;
+            }
+            return Err(error.into());
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn load_range_session(
+        &self,
+        job_id: &JobId,
+        entry_index: u64,
+    ) -> Result<Option<PersistedRangeSession>, JobStoreError> {
+        use rusqlite::OptionalExtension;
+        Ok(self.conn.query_row(
+            "SELECT session_id, binding, staging_path, total_len FROM persisted_range_sessions WHERE job_id = ?1 AND entry_index = ?2",
+            rusqlite::params![job_id.0 as i64, entry_index as i64],
+            |row| Ok(PersistedRangeSession { job_id: job_id.clone(), entry_index, session_id: row.get(0)?, binding: row.get(1)?, staging_path: row.get(2)?, total_len: row.get::<_, i64>(3)? as u64 }),
+        ).optional()?)
+    }
+
+    pub fn remove_range_session(
+        &self,
+        job_id: &JobId,
+        entry_index: u64,
+    ) -> Result<(), JobStoreError> {
+        self.remove_range_session_checked(job_id, entry_index, None)
+    }
+
+    /// A transfer may discard only the exact session it observed, not a successor
+    /// admitted by another attempt between its read and this write transaction.
+    pub fn discard_range_session(
+        &self,
+        session: &PersistedRangeSession,
+    ) -> Result<(), JobStoreError> {
+        self.remove_range_session_checked(&session.job_id, session.entry_index, Some(session))
+    }
+
+    fn remove_range_session_checked(
+        &self,
+        job_id: &JobId,
+        entry_index: u64,
+        expected: Option<&PersistedRangeSession>,
+    ) -> Result<(), JobStoreError> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        if let Some(expected) = expected {
+            if self.load_range_session(job_id, entry_index)?.as_ref() != Some(expected) {
+                return Err(JobStoreError::Io(std::io::Error::other(
+                    "range session changed before cleanup",
+                )));
+            }
+        }
+        self.cleanup_range_session(job_id, entry_index)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Caller holds the write transaction, excluding new session admission until
+    /// both filesystem cleanup and journal deletion have completed.
+    fn cleanup_range_session(&self, job_id: &JobId, entry_index: u64) -> Result<(), JobStoreError> {
+        if let Some(session) = self.load_range_session(job_id, entry_index)? {
+            iris_platform_integration::staging::remove(
+                &iris_platform_integration::staging::decode_path(&session.staging_path)?,
+                &session.binding,
+                session.total_len,
+            )?;
+        }
+        for table in ["persisted_range_sessions", "persisted_task_chunks"] {
+            self.conn.execute(
+                &format!("DELETE FROM {table} WHERE job_id = ?1 AND entry_index = ?2"),
+                rusqlite::params![job_id.0 as i64, entry_index as i64],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn cleanup_range_sessions(&self, job_id: &JobId) -> Result<(), JobStoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT entry_index FROM persisted_range_sessions WHERE job_id = ?1")?;
+        let entries = stmt
+            .query_map([job_id.0 as i64], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for entry in entries {
+            self.cleanup_range_session(job_id, entry as u64)?;
+        }
+        Ok(())
     }
 
     pub fn save_multipart_upload(
@@ -574,6 +732,41 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn range_creation_failure_and_stale_cleanup_do_not_strand_or_replace_sessions() {
+        use iris_platform_integration::staging::encode_path;
+        let repo = JobStoreRepository::open_in_memory().unwrap();
+        let job = make_test_job();
+        repo.save_job(&job).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("stage");
+        let mut session = PersistedRangeSession {
+            job_id: job.id.clone(),
+            entry_index: 0,
+            session_id: "a".into(),
+            binding: "bound".into(),
+            staging_path: encode_path(&path),
+            total_len: u64::MAX,
+        };
+        // A real partial create: intent and data are created, but this length
+        // cannot be allocated by the local filesystem API.
+        assert!(repo.save_range_session(&session).is_err());
+        assert!(!path.exists());
+        assert!(repo.load_range_session(&job.id, 0).unwrap().is_none());
+        session.total_len = 4;
+        repo.save_range_session(&session).unwrap();
+        let mut stale = session.clone();
+        stale.session_id = "b".into();
+        assert!(repo.discard_range_session(&stale).is_err());
+        assert!(path.join("data").exists());
+        assert_eq!(
+            repo.load_range_session(&job.id, 0).unwrap(),
+            Some(session.clone())
+        );
+        repo.discard_range_session(&session).unwrap();
+        assert!(!path.exists());
     }
 
     #[test]

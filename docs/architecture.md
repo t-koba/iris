@@ -136,3 +136,36 @@ graph TD
 | パスワード・トークン | OS の資格情報ストア | — |
 
 古い形式を読み込むための互換処理は持ちません。形式を変えるときは版を上げ、古いデータは作り直します。
+
+## Owned range-write staging
+
+Local range copies never write to the public destination before installation. For a
+journaled transfer, the job store records a session before creating its private
+sibling staging directory. The session binds the job and entry, source backend,
+object and version (ETag or modification-time/size), destination backend and object,
+and range layout. Sources without a version identity and non-journaled copies use
+fresh attempt-local staging without range reuse. Native staging paths are journaled
+as lossless opaque locators, not Unicode display paths.
+
+An OS file lock excludes concurrent session owners, including across processes.
+Restart opens existing staging only and checks its manifest, file identity, length,
+and binding. A completed range is reused only when its row names this session and
+its checksum matches bytes read from this owned stage. Legacy or stale range rows
+are not reused; public-destination bytes are never resume evidence. Missing or
+incomplete owned staging is discarded with its chunk rows and restarted fresh.
+Cleanup requires the exact intent binding and an exclusive lock; replaced data,
+mismatched bindings and live owners fail closed. Creation durably records immutable
+intent before data and its file identity, so interrupted creation is recoverable.
+Parallel source range reads and per-range retries remain active for missing ranges.
+
+Cancellation of the transfer control or a dropped transfer future retains the
+session for restart; outstanding filesystem work retains its lock until finished.
+Transport/authentication errors, storage exhaustion and internal errors also retain
+it. Successful atomic no-replace installation and definitive conflict, unsupported,
+missing-source or permission failures remove staging and session/chunk rows.
+Explicit session abandonment and job deletion also remove owned staging before
+removing its journal; a live owner or identity mismatch refuses cleanup and keeps
+the journal for diagnosis. Marking a job completed or canceled cleans remaining sessions.
+Saving a finished job deletes it; a cancellation token alone does not delete a job.
+If installation was interrupted after moving staging, restart does not infer success
+from the final path; terminal cleanup can still remove the remaining owner manifest.

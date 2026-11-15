@@ -1,6 +1,6 @@
 use crate::repository::{
     JobStoreError, JobStoreRepository, PersistedChunkStateRow, PersistedJob,
-    PersistedMultipartUpload,
+    PersistedMultipartUpload, PersistedRangeSession,
 };
 use iris_core_domain::types::transfer::{JobId, JobState, TaskId, TaskState};
 use std::path::Path;
@@ -34,6 +34,16 @@ enum WriteCommand {
     },
     UpsertChunkState {
         chunk: PersistedChunkStateRow,
+    },
+    SaveRangeSession {
+        session: PersistedRangeSession,
+        ack: mpsc::Sender<Result<(), JobStoreError>>,
+    },
+    RemoveRangeSession {
+        job_id: JobId,
+        entry_index: u64,
+        expected: Option<PersistedRangeSession>,
+        ack: mpsc::Sender<Result<(), JobStoreError>>,
     },
     SaveMultipartUpload {
         upload: PersistedMultipartUpload,
@@ -134,6 +144,49 @@ impl JobStore {
         job_id: &JobId,
     ) -> Result<Vec<PersistedChunkStateRow>, JobStoreError> {
         self.with_reader(|reader| reader.load_chunk_states(job_id))
+    }
+
+    pub fn save_range_session(&self, session: &PersistedRangeSession) -> Result<(), JobStoreError> {
+        self.writer
+            .send_with_ack(|ack| WriteCommand::SaveRangeSession {
+                session: session.clone(),
+                ack,
+            })
+    }
+
+    pub fn load_range_session(
+        &self,
+        job_id: &JobId,
+        entry_index: u64,
+    ) -> Result<Option<PersistedRangeSession>, JobStoreError> {
+        self.with_reader(|reader| reader.load_range_session(job_id, entry_index))
+    }
+
+    pub fn remove_range_session(
+        &self,
+        job_id: &JobId,
+        entry_index: u64,
+    ) -> Result<(), JobStoreError> {
+        self.writer
+            .send_with_ack(|ack| WriteCommand::RemoveRangeSession {
+                job_id: job_id.clone(),
+                entry_index,
+                expected: None,
+                ack,
+            })
+    }
+
+    pub fn discard_range_session(
+        &self,
+        session: &PersistedRangeSession,
+    ) -> Result<(), JobStoreError> {
+        self.writer
+            .send_with_ack(|ack| WriteCommand::RemoveRangeSession {
+                job_id: session.job_id.clone(),
+                entry_index: session.entry_index,
+                expected: Some(session.clone()),
+                ack,
+            })
     }
 
     pub fn save_multipart_upload(
@@ -376,6 +429,21 @@ fn apply_command(
             updated_at,
         } => repository.update_job_state(&job_id, &state, &updated_at),
         WriteCommand::UpsertChunkState { chunk } => repository.upsert_chunk_state(&chunk),
+        WriteCommand::SaveRangeSession { session, ack } => {
+            send_repository_result(ack, repository.save_range_session(&session))
+        }
+        WriteCommand::RemoveRangeSession {
+            job_id,
+            entry_index,
+            expected,
+            ack,
+        } => send_repository_result(
+            ack,
+            match expected {
+                Some(session) => repository.discard_range_session(&session),
+                None => repository.remove_range_session(&job_id, entry_index),
+            },
+        ),
         WriteCommand::SaveMultipartUpload { upload, ack } => {
             send_repository_result(ack, repository.save_multipart_upload(&upload))
         }

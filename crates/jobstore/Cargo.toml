@@ -4,6 +4,7 @@ version.workspace = true
 edition = "2021"
 
 [dependencies]
+iris-platform-integration = { workspace = true }
 iris-core-domain = { workspace = true, features = ["sqlite"] }
 rusqlite = { workspace = true }
 thiserror = { workspace = true }

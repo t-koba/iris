@@ -231,6 +231,9 @@ pub struct MoveRelayOptions<'a> {
     pub retry_policy: Option<&'a RetryPolicy>,
 }
 
+/// Journal for recoverable multipart and owned local range sessions. Cancellation
+/// retains staging; restart validates its binding and checksums before reusing ranges.
+/// Successful installation, definitive abandonment and job deletion remove staging.
 #[derive(Clone)]
 pub struct ResumableTransferContext {
     pub job_store: Arc<JobStore>,
@@ -390,6 +393,7 @@ async fn relay_copy_data(
                 dst_backend,
                 dst,
                 total_len: total_bytes,
+                source_identity: range_metadata.and_then(source_resume_identity),
                 requested_in_flight: max_in_flight,
                 recorder,
                 progress_tx,
@@ -568,9 +572,7 @@ mod tests {
     use iris_core_domain::types::session::BackendSession;
 
     use iris_core_domain::types::transfer::{JobState, TaskId, TaskKind, TaskState};
-    use iris_jobstore::repository::{
-        PersistedChunkState, PersistedChunkStateRow, PersistedJob, PersistedTask,
-    };
+    use iris_jobstore::repository::{PersistedChunkState, PersistedJob, PersistedTask};
     use std::collections::HashMap;
     use std::io::Cursor;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -636,6 +638,136 @@ mod tests {
             .await
             .expect("read copied file");
         assert_eq!(copied, b"relay-copy-regression");
+    }
+
+    #[tokio::test]
+    async fn local_range_relay_cleans_partial_staging_without_touching_final() {
+        for outcome in ["failure", "cancel", "concurrent"] {
+            let total_len = CHUNKED_RANGE_MIN_BYTES + 1;
+            let root = tempdir().unwrap();
+            let final_path = root.path().join("final");
+            let original = vec![0xa5; total_len as usize + 37];
+            if outcome != "concurrent" {
+                std::fs::write(&final_path, &original).unwrap();
+            }
+            let control = TransferControl::new();
+            let mut source = MockBackend::new("source", false);
+            source.put("source", &vec![7; total_len as usize]);
+            let (tx, _rx) = watch::channel(ProgressInfo::single_file(0, Some(total_len), false));
+            let cancel = control.cancel_token();
+            let progress = tx.clone();
+            let path = final_path.clone();
+            let competing = original.clone();
+            source.on_second_range = Some(Box::new(move || {
+                // One worker makes the hook deterministic: the first range is staged
+                // before the second source read, without sleeps or scheduling races.
+                assert_eq!(
+                    progress.borrow().bytes_completed,
+                    crate::chunked::CHUNKED_RANGE_CHUNK_BYTES
+                );
+                match outcome {
+                    "failure" => {
+                        return Err(BackendError::Unsupported {
+                            operation: "injected read failure",
+                        })
+                    }
+                    "cancel" => cancel.cancel(),
+                    _ => {
+                        use std::io::Write;
+                        let mut creator = std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&path)
+                            .unwrap();
+                        creator.write_all(&competing).unwrap();
+                    }
+                }
+                Ok(())
+            }));
+            let destination =
+                LocalFsAdapter::new(root.path().into(), BackendId("local-dst".into()));
+            let dst = make_ref("local-dst", "final");
+            let result = copy_chunked_with_range_writes(ChunkedRangeWriteRequest {
+                src_backend: &source,
+                src: make_ref("source", "source"),
+                dst_backend: &destination,
+                dst: &dst,
+                total_len,
+                source_identity: None,
+                requested_in_flight: 1,
+                recorder: None,
+                progress_tx: &tx,
+                pause_rx: control.pause_receiver(),
+                cancel_token: control.cancel_token(),
+                retry_policy: RetryPolicy::default(),
+            })
+            .await;
+            if outcome == "concurrent" {
+                assert!(matches!(result, Err(BackendError::Conflict { .. })));
+            } else {
+                assert!(result.is_err());
+            }
+            assert_eq!(std::fs::read(final_path).unwrap(), original, "{outcome}");
+            assert_eq!(
+                std::fs::read_dir(root.path()).unwrap().count(),
+                1,
+                "{outcome}"
+            );
+            assert_eq!(tx.borrow().files_completed, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn local_relay_conflicts_and_installs_across_range_threshold() {
+        for total_len in [
+            CHUNKED_RANGE_MIN_BYTES - 1,
+            CHUNKED_RANGE_MIN_BYTES,
+            CHUNKED_RANGE_MIN_BYTES + 1,
+        ] {
+            let src_root = tempdir().unwrap();
+            let dst_root = tempdir().unwrap();
+            let payload: Vec<_> = (0..total_len).map(|i| (i % 251) as u8).collect();
+            std::fs::write(src_root.path().join("source"), &payload).unwrap();
+            let source = LocalFsAdapter::new(src_root.path().into(), BackendId("local-src".into()));
+            let destination =
+                LocalFsAdapter::new(dst_root.path().into(), BackendId("local-dst".into()));
+            let src = make_ref("local-src", "source");
+            let dst = make_ref("local-dst", "final");
+            let final_path = dst_root.path().join("final");
+            // A larger, different existing file detects truncation as well as range overwrites.
+            let original = vec![0xa5; total_len as usize + 37];
+            std::fs::write(&final_path, &original).unwrap();
+            let (tx, _rx) = watch::channel(ProgressInfo::single_file(0, Some(total_len), false));
+            let result = client_relay_copy(
+                &source,
+                &src,
+                &destination,
+                &dst,
+                &tx,
+                CopyRelayOptions::default(),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(BackendError::Conflict { .. })),
+                "{result:?}"
+            );
+            assert_eq!(std::fs::read(&final_path).unwrap(), original);
+            assert_eq!(std::fs::read_dir(dst_root.path()).unwrap().count(), 1);
+            std::fs::remove_file(&final_path).unwrap();
+            let result = client_relay_copy(
+                &source,
+                &src,
+                &destination,
+                &dst,
+                &tx,
+                CopyRelayOptions::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.bytes_transferred, total_len);
+            assert_eq!(std::fs::read(&final_path).unwrap(), payload);
+            assert_eq!(std::fs::read_dir(dst_root.path()).unwrap().count(), 1);
+        }
     }
 
     fn set_file_mtime(path: &std::path::Path, mtime: std::time::SystemTime) {
@@ -758,6 +890,7 @@ mod tests {
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
         deleted: Arc<Mutex<Vec<String>>>,
         read_ranges: Arc<Mutex<Vec<Option<ByteRange>>>>,
+        on_second_range: Option<Box<dyn Fn() -> Result<(), BackendError> + Send + Sync>>,
         stream_writes: Arc<Mutex<u32>>,
         range_writes: Arc<AtomicU32>,
         read_failures_remaining: Arc<AtomicU32>,
@@ -784,6 +917,7 @@ mod tests {
                 files: Arc::new(Mutex::new(HashMap::new())),
                 deleted: Arc::new(Mutex::new(Vec::new())),
                 read_ranges: Arc::new(Mutex::new(Vec::new())),
+                on_second_range: None,
                 stream_writes: Arc::new(Mutex::new(0)),
                 range_writes: Arc::new(AtomicU32::new(0)),
                 read_failures_remaining: Arc::new(AtomicU32::new(0)),
@@ -873,6 +1007,71 @@ mod tests {
         }
     }
 
+    struct MockRangeWrite<'a> {
+        backend: &'a MockBackend,
+        staging: ObjectRef,
+        dst: ObjectRef,
+        final_size: u64,
+    }
+
+    impl Drop for MockRangeWrite<'_> {
+        fn drop(&mut self) {
+            self.backend
+                .files
+                .lock()
+                .unwrap()
+                .remove(&self.staging.display_path);
+        }
+    }
+
+    #[async_trait]
+    impl iris_core_domain::backend_adapter::RangeWriteSession for MockRangeWrite<'_> {
+        async fn write_range(
+            &self,
+            mut reader: Pin<Box<dyn AsyncRead + Send>>,
+            range: ByteRange,
+        ) -> Result<(), BackendError> {
+            self.backend.range_writes.fetch_add(1, Ordering::Relaxed);
+            if consume_failure(&self.backend.range_write_failures_remaining) {
+                return Err(injected_network_error("range write"));
+            }
+            let mut bytes = Vec::new();
+            reader
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|e| BackendError::Internal(Box::new(e)))?;
+            if self.backend.corrupt_writes {
+                bytes.truncate(1);
+            }
+            let expected = range.length.unwrap_or(self.final_size - range.offset);
+            if bytes.len() as u64 != expected {
+                return Err(BackendError::Internal(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "short mock range write",
+                ))));
+            }
+            let mut files = self.backend.files.lock().unwrap();
+            let file = files
+                .entry(self.staging.display_path.clone())
+                .or_insert_with(|| vec![0; self.final_size as usize]);
+            let start = range.offset as usize;
+            file[start..start + bytes.len()].copy_from_slice(&bytes);
+            Ok(())
+        }
+
+        async fn complete(self: Box<Self>) -> Result<(), BackendError> {
+            let mut files = self.backend.files.lock().unwrap();
+            if files.contains_key(&self.dst.display_path) {
+                return Err(BackendError::Conflict {
+                    object: self.dst.clone(),
+                });
+            }
+            let data = files.remove(&self.staging.display_path).expect("staging");
+            files.insert(self.dst.display_path.clone(), data);
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl BackendAdapter for MockBackend {
         async fn connect(&self) -> Result<BackendSession, BackendError> {
@@ -903,6 +1102,14 @@ mod tests {
                 .lock()
                 .expect("read_ranges lock")
                 .push(range.clone());
+            if range
+                .as_ref()
+                .is_some_and(|range| range.offset == crate::chunked::CHUNKED_RANGE_CHUNK_BYTES)
+            {
+                if let Some(hook) = &self.on_second_range {
+                    hook()?;
+                }
+            }
             if consume_failure(&self.read_failures_remaining) {
                 return Err(injected_network_error("range read"));
             }
@@ -993,77 +1200,25 @@ mod tests {
             })
         }
 
-        async fn write_range_from_reader(
+        async fn begin_range_write(
             &self,
             dst: &ObjectRef,
-            mut reader: Pin<Box<dyn AsyncRead + Send>>,
-            range: ByteRange,
             final_size: u64,
-        ) -> Result<OperationTicket, BackendError> {
-            self.range_writes.fetch_add(1, Ordering::Relaxed);
-            if consume_failure(&self.range_write_failures_remaining) {
-                return Err(injected_network_error("range write"));
-            }
-            let expected_len = range
-                .length
-                .unwrap_or_else(|| final_size.saturating_sub(range.offset));
-            let mut data = Vec::new();
-            reader
-                .read_to_end(&mut data)
-                .await
-                .map_err(|e| BackendError::Internal(Box::new(e)))?;
-            let bytes = if self.corrupt_writes {
-                data.into_iter().take(1).collect::<Vec<_>>()
-            } else {
-                data
-            };
-            if bytes.len() as u64 != expected_len {
-                return Err(BackendError::Internal(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    format!(
-                        "range write received {} bytes for expected {expected_len}",
-                        bytes.len()
-                    ),
-                ))));
-            }
-
-            let final_size = usize::try_from(final_size).map_err(|_| {
-                BackendError::Internal(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "final range-write size does not fit usize",
-                )))
-            })?;
-            let start = usize::try_from(range.offset).map_err(|_| {
-                BackendError::Internal(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "range offset does not fit usize",
-                )))
-            })?;
-            let end = start.checked_add(bytes.len()).ok_or_else(|| {
-                BackendError::Internal(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "range write end offset overflowed",
-                )))
-            })?;
-            if end > final_size {
-                return Err(BackendError::Internal(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "range write exceeds final object size",
-                ))));
-            }
-
-            let mut files = self.files.lock().expect("files lock");
-            let file = files
-                .entry(dst.display_path.clone())
-                .or_insert_with(|| vec![0; final_size]);
-            if file.len() != final_size {
-                file.resize(final_size, 0);
-            }
-            file[start..end].copy_from_slice(&bytes);
-            Ok(OperationTicket {
-                id: TicketId(1),
-                kind: OperationKind::Copy,
-            })
+            on_conflict: ConflictResolution,
+        ) -> Result<Box<dyn iris_core_domain::backend_adapter::RangeWriteSession + '_>, BackendError>
+        {
+            assert!(matches!(on_conflict, ConflictResolution::Fail));
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let staging = make_ref(
+                &self.backend_id,
+                &format!("stage-{}", NEXT.fetch_add(1, Ordering::Relaxed)),
+            );
+            Ok(Box::new(MockRangeWrite {
+                backend: self,
+                staging,
+                dst: dst.clone(),
+                final_size,
+            }))
         }
 
         fn multipart_part_size(&self) -> Option<u64> {
@@ -1420,10 +1575,8 @@ mod tests {
             std::io::ErrorKind::UnexpectedEof
         );
         assert!(matches!(src_backend.read_ranges().as_slice(), [None]));
-        assert_eq!(
-            fs::read(dst_root.path().join("to.bin")).await.unwrap(),
-            b"abc"
-        );
+        assert!(!dst_root.path().join("to.bin").exists());
+        assert_eq!(std::fs::read_dir(dst_root.path()).unwrap().count(), 0);
         let progress = rx.borrow();
         assert_eq!(progress.files_completed, 0);
         assert!(progress.bytes_completed < 6);
@@ -1561,9 +1714,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_relay_copy_records_resumable_chunk_states() {
+    async fn completed_range_copy_cleans_journal_and_refuses_final_path_resume() {
         let src_backend = MockBackend::new("s3", false);
-        let dst_backend = MockBackend::new("local", false);
+        let dst_root = tempdir().unwrap();
+        let dst_backend = LocalFsAdapter::new(dst_root.path().into(), BackendId("local".into()));
         let store_dir = tempdir().expect("jobstore tempdir");
         let job_store = Arc::new(
             JobStore::open(&store_dir.path().join("jobs.sqlite3")).expect("open jobstore"),
@@ -1630,22 +1784,363 @@ mod tests {
         let chunks = job_store
             .load_chunk_states(&job_id)
             .expect("load chunk states");
-        assert_eq!(chunks.len(), 3);
-        assert!(chunks.iter().all(|chunk| chunk.entry_index == 7));
-        assert!(chunks
-            .iter()
-            .all(|chunk| chunk.state == PersistedChunkState::Completed));
-        assert_eq!(
-            chunks.iter().map(|chunk| chunk.offset).collect::<Vec<_>>(),
-            vec![
-                0,
-                crate::chunked::CHUNKED_RANGE_CHUNK_BYTES,
-                crate::chunked::CHUNKED_RANGE_CHUNK_BYTES * 2
-            ]
+        assert!(
+            chunks.is_empty(),
+            "successful installation removes range state"
         );
-        assert!(chunks
-            .iter()
-            .all(|chunk| chunk.etag == Some(format!("etag-{total_len}"))));
+        assert!(job_store.load_range_session(&job_id, 7).unwrap().is_none());
+        // Legacy completed rows with matching checksums and source etags are not
+        // evidence of stage ownership, even if the final destination matches.
+        for offset in (0..total_len).step_by(crate::chunked::CHUNKED_RANGE_CHUNK_BYTES as usize) {
+            let len = (total_len - offset).min(crate::chunked::CHUNKED_RANGE_CHUNK_BYTES);
+            job_store
+                .upsert_chunk_state(&iris_jobstore::repository::PersistedChunkStateRow {
+                    job_id: job_id.clone(),
+                    entry_index: 7,
+                    offset,
+                    len,
+                    state: PersistedChunkState::Completed,
+                    etag: Some(format!("etag-{total_len}")),
+                    checksum: Some(crate::chunked::range_checksum(
+                        &payload[offset as usize..(offset + len) as usize],
+                    )),
+                })
+                .unwrap();
+        }
+        job_store.flush().unwrap();
+        // A completed journal and byte-identical final file still do not establish
+        // an owned staging object. A new attempt must conflict, never resume from it.
+        let result = client_relay_copy(
+            &src_backend,
+            &src,
+            &dst_backend,
+            &dst,
+            &tx,
+            CopyRelayOptions {
+                resumable: Some(&resumable),
+                ..CopyRelayOptions::default()
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(BackendError::Conflict { .. })));
+        assert_eq!(
+            std::fs::read(dst_root.path().join("resume-copy.bin")).unwrap(),
+            payload
+        );
+        assert_eq!(
+            src_backend.read_ranges().len(),
+            6,
+            "all ranges belong to the fresh staging session"
+        );
+        assert_eq!(std::fs::read_dir(dst_root.path()).unwrap().count(), 1);
+    }
+
+    async fn owned_range_attempt(
+        source: &MockBackend,
+        destination: &LocalFsAdapter,
+        dst: &ObjectRef,
+        store: &Arc<JobStore>,
+        control: &TransferControl,
+        tx: &watch::Sender<ProgressInfo>,
+        version: Option<&str>,
+    ) -> Result<(), BackendError> {
+        let total_len = source
+            .stat(&make_ref("source", "source"))
+            .await?
+            .size
+            .unwrap();
+        copy_chunked_with_range_writes(ChunkedRangeWriteRequest {
+            src_backend: source,
+            src: make_ref("source", "source"),
+            dst_backend: destination,
+            dst,
+            total_len,
+            source_identity: version.map(str::to_owned),
+            requested_in_flight: 1,
+            recorder: Some(ChunkStateRecorder::new(
+                Arc::clone(store),
+                JobId(45),
+                0,
+                None,
+            )),
+            progress_tx: tx,
+            pause_rx: control.pause_receiver(),
+            cancel_token: control.cancel_token(),
+            retry_policy: RetryPolicy {
+                max_retries: 0,
+                ..RetryPolicy::default()
+            },
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn owned_range_restart_resume_validates_session_and_cleans_lifecycle() {
+        for scenario in [
+            "resume",
+            "stale row",
+            "stale length",
+            "corrupt range",
+            "source mismatch",
+            "destination mismatch",
+            "stage replaced",
+            "missing stage",
+            "missing data",
+            "short data",
+            "partial intent",
+            "partial identity",
+            "empty stage",
+            "canceled transition",
+            "no identity",
+            "lossless path",
+            "concurrent",
+            "final conflict",
+            "terminal failure",
+        ] {
+            let total_len = CHUNKED_RANGE_MIN_BYTES + 1;
+            let root = tempdir().unwrap();
+            let destination_root = {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::ffi::OsStringExt;
+                    if scenario == "lossless path" {
+                        root.path()
+                            .join(std::ffi::OsString::from_vec(b"native-\xff".to_vec()))
+                    } else {
+                        root.path().to_owned()
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    root.path().to_owned()
+                }
+            };
+            std::fs::create_dir_all(&destination_root).unwrap();
+            let store_dir = tempdir().unwrap();
+            let db = store_dir.path().join("jobs.sqlite3");
+            let store = Arc::new(JobStore::open(&db).unwrap());
+            let mut job = PersistedJob {
+                id: JobId(45),
+                state: JobState::Running,
+                created_at: String::new(),
+                updated_at: String::new(),
+                description: "owned range".into(),
+                tasks: vec![],
+            };
+            store.save_job(&job).unwrap();
+            let mut source = MockBackend::new("source", false);
+            let payload = vec![9; total_len as usize];
+            source.put("source", &payload);
+            let destination =
+                LocalFsAdapter::new(destination_root.clone(), BackendId("destination".into()));
+            let dst = make_ref("destination", "final");
+            let control = TransferControl::new();
+            let cancel = control.cancel_token();
+            source.on_second_range = Some(Box::new(move || {
+                cancel.cancel();
+                Ok(())
+            }));
+            let (tx, _rx) = watch::channel(ProgressInfo::single_file(0, Some(total_len), false));
+            assert!(owned_range_attempt(
+                &source,
+                &destination,
+                &dst,
+                &store,
+                &control,
+                &tx,
+                Some("v1")
+            )
+            .await
+            .is_err());
+            store.flush().unwrap();
+            assert_eq!(
+                tx.borrow().bytes_completed,
+                crate::chunked::CHUNKED_RANGE_CHUNK_BYTES,
+                "{scenario}"
+            );
+            assert!(!destination_root.join("final").exists());
+            let session = store.load_range_session(&job.id, 0).unwrap().unwrap();
+            let stage_path = destination_root.join(format!(".iris-range-{}", session.session_id));
+            assert!(stage_path.join("data").is_file());
+            let rows = store.load_chunk_states(&job.id).unwrap();
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row.state == PersistedChunkState::Completed)
+                    .count(),
+                1
+            );
+            drop(store);
+            let store = Arc::new(JobStore::open(&db).unwrap());
+            source.on_second_range = None;
+            source.read_ranges.lock().unwrap().clear();
+            let mut version = Some("v1");
+            let mut retry_dst = dst.clone();
+            let mut old_data = None;
+            match scenario {
+                "stale row" => {
+                    let mut row = rows[0].clone();
+                    row.etag = Some("stage:other-session".into());
+                    store.upsert_chunk_state(&row).unwrap();
+                    store.flush().unwrap();
+                }
+                "stale length" => {
+                    let mut row = rows[0].clone();
+                    row.len -= 1;
+                    store.upsert_chunk_state(&row).unwrap();
+                    store.flush().unwrap();
+                }
+                "corrupt range" => {
+                    use std::io::Write;
+                    let mut data = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(stage_path.join("data"))
+                        .unwrap();
+                    data.write_all(b"different").unwrap();
+                }
+                "source mismatch" => version = Some("v2"),
+                "no identity" => version = None,
+                "destination mismatch" => retry_dst.display_path = "elsewhere".into(),
+                "stage replaced" => {
+                    // Keep the old inode alive so replacement cannot reuse it.
+                    old_data = Some(std::fs::File::open(stage_path.join("data")).unwrap());
+                    std::fs::remove_file(stage_path.join("data")).unwrap();
+                    std::fs::write(stage_path.join("data"), &payload).unwrap();
+                }
+                "missing stage" => std::fs::remove_dir_all(&stage_path).unwrap(),
+                "missing data" => std::fs::remove_file(stage_path.join("data")).unwrap(),
+                "short data" => std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(stage_path.join("data"))
+                    .unwrap()
+                    .set_len(1)
+                    .unwrap(),
+                "partial identity" => std::fs::write(stage_path.join("identity"), b"[").unwrap(),
+                "partial intent" => {
+                    std::fs::remove_file(stage_path.join("data")).unwrap();
+                    std::fs::remove_file(stage_path.join("identity")).unwrap();
+                    let owner = std::fs::read(stage_path.join("owner")).unwrap();
+                    std::fs::write(stage_path.join("owner"), &owner[..owner.len() / 2]).unwrap();
+                }
+                "empty stage" => {
+                    std::fs::remove_dir_all(&stage_path).unwrap();
+                    std::fs::create_dir(&stage_path).unwrap();
+                }
+                "canceled transition" => {
+                    store
+                        .update_job_state(&job.id, &JobState::Canceled, "now")
+                        .unwrap();
+                    store.flush().unwrap();
+                    assert!(!stage_path.exists());
+                    assert!(store.load_range_session(&job.id, 0).unwrap().is_none());
+                    assert!(store.load_chunk_states(&job.id).unwrap().is_empty());
+                    assert!(store.save_range_session(&session).is_err());
+                    continue;
+                }
+                "final conflict" => {
+                    std::fs::write(destination_root.join("final"), &payload).unwrap()
+                }
+                "terminal failure" => {
+                    source.on_second_range = Some(Box::new(|| {
+                        Err(BackendError::Unsupported {
+                            operation: "terminal read failure",
+                        })
+                    }))
+                }
+                "concurrent" => {
+                    let owner = destination
+                        .open_range_write(&dst, total_len, &session.session_id, &session.binding)
+                        .await
+                        .unwrap();
+                    let result = owned_range_attempt(
+                        &source,
+                        &destination,
+                        &dst,
+                        &store,
+                        &TransferControl::new(),
+                        &tx,
+                        version,
+                    )
+                    .await;
+                    assert!(result.is_err());
+                    assert!(source.read_ranges().is_empty());
+                    // Job deletion must not remove a live owner's stage or its journal.
+                    job.state = JobState::Canceled;
+                    assert!(store.save_job(&job).is_err());
+                    assert!(store.load_range_session(&job.id, 0).unwrap().is_some());
+                    drop(owner);
+                    store.save_job(&job).unwrap();
+                    assert!(!stage_path.exists());
+                    assert!(store.load_job(&job.id).unwrap().is_none());
+                    continue;
+                }
+                _ => (),
+            }
+            let result = owned_range_attempt(
+                &source,
+                &destination,
+                &retry_dst,
+                &store,
+                &TransferControl::new(),
+                &tx,
+                version,
+            )
+            .await;
+            match scenario {
+                "resume" | "stale row" | "stale length" | "missing stage" | "missing data"
+                | "short data" | "partial intent" | "partial identity" | "empty stage"
+                | "corrupt range" | "no identity" | "lossless path" => {
+                    result.unwrap();
+                    let reads = source.read_ranges();
+                    assert_eq!(
+                        reads.len(),
+                        if matches!(scenario, "resume" | "lossless path") {
+                            2
+                        } else {
+                            3
+                        },
+                        "{scenario}"
+                    );
+                    if scenario == "resume" {
+                        assert!(reads.iter().all(|r| r.as_ref().unwrap().offset > 0));
+                    }
+                    assert_eq!(
+                        std::fs::read(destination_root.join("final")).unwrap(),
+                        payload
+                    );
+                    assert!(!stage_path.exists());
+                    assert!(store.load_range_session(&job.id, 0).unwrap().is_none());
+                    assert!(store.load_chunk_states(&job.id).unwrap().is_empty());
+                }
+                "final conflict" | "terminal failure" => {
+                    assert!(result.is_err());
+                    if scenario == "final conflict" {
+                        assert!(matches!(result, Err(BackendError::Conflict { .. })));
+                        assert_eq!(
+                            std::fs::read(destination_root.join("final")).unwrap(),
+                            payload
+                        );
+                    }
+                    assert!(!stage_path.exists());
+                    assert!(store.load_range_session(&job.id, 0).unwrap().is_none());
+                    assert!(store.load_chunk_states(&job.id).unwrap().is_empty());
+                }
+                _ => {
+                    assert!(result.is_err(), "{scenario}");
+                    assert!(source.read_ranges().is_empty(), "{scenario}");
+                    assert!(store.load_range_session(&job.id, 0).unwrap().is_some());
+                    if scenario != "stage replaced" {
+                        store.remove_range_session(&job.id, 0).unwrap();
+                        assert!(!stage_path.exists());
+                    } else {
+                        assert!(
+                            store.remove_range_session(&job.id, 0).is_err(),
+                            "never delete an unowned replacement"
+                        );
+                    }
+                }
+            }
+            drop(old_data);
+        }
     }
 
     #[tokio::test]
@@ -2201,152 +2696,5 @@ mod tests {
             .load_multipart_upload(&job_id, 9)
             .expect("load completed upload")
             .is_none());
-    }
-
-    #[tokio::test]
-    async fn client_relay_copy_validates_resumable_chunk_checksums() {
-        use sha2::{Digest, Sha256};
-
-        for (corrupt_first_chunk, legacy_rows) in [(true, false), (false, false), (false, true)] {
-            let src_backend = MockBackend::new("s3", false);
-            let dst_backend = MockBackend::new("local", false);
-            let store_dir = tempdir().expect("jobstore tempdir");
-            let job_store = Arc::new(
-                JobStore::open(&store_dir.path().join("jobs.sqlite3")).expect("open jobstore"),
-            );
-            let job_id = JobId(42);
-            job_store
-                .save_job(&PersistedJob {
-                    id: job_id.clone(),
-                    state: JobState::Running,
-                    created_at: "2026-07-09T00:00:00Z".into(),
-                    updated_at: "2026-07-09T00:00:00Z".into(),
-                    description: "resumable copy with completed chunk".into(),
-                    tasks: vec![PersistedTask {
-                        id: TaskId(7),
-                        job_id: job_id.clone(),
-                        kind: TaskKind::Copy,
-                        state: TaskState::Running,
-                        src_backend: Some("s3".into()),
-                        src_stable_id: Some("test".into()),
-                        src_display_path: Some("resume.bin".into()),
-                        dst_backend: Some("local".into()),
-                        dst_stable_id: Some("test".into()),
-                        dst_display_path: Some("resume-copy.bin".into()),
-                        bytes_total: 0,
-                        bytes_completed: 0,
-                        error_message: None,
-                    }],
-                })
-                .expect("save job");
-
-            let total_len = crate::chunked::CHUNKED_RANGE_MIN_BYTES + 1;
-            let mut payload = vec![0u8; total_len as usize];
-            for (index, byte) in payload.iter_mut().enumerate() {
-                *byte = (index % 251) as u8;
-            }
-            src_backend.put("resume.bin", &payload);
-
-            let first_chunk_len = crate::chunked::CHUNKED_RANGE_CHUNK_BYTES as usize;
-            let mut partial = vec![0u8; total_len as usize];
-            partial[..first_chunk_len * 2].copy_from_slice(&payload[..first_chunk_len * 2]);
-            if corrupt_first_chunk {
-                partial[0] ^= 0xff;
-            }
-            dst_backend.put("resume-copy.bin", &partial);
-            for index in 0..2 {
-                let offset = index * first_chunk_len;
-                job_store
-                    .upsert_chunk_state(&PersistedChunkStateRow {
-                        job_id: job_id.clone(),
-                        entry_index: 7,
-                        offset: offset as u64,
-                        len: crate::chunked::CHUNKED_RANGE_CHUNK_BYTES,
-                        state: PersistedChunkState::Completed,
-                        etag: Some(format!("etag-{total_len}")),
-                        checksum: (!legacy_rows).then(|| {
-                            Sha256::digest(&payload[offset..offset + first_chunk_len])
-                                .iter()
-                                .map(|byte| format!("{byte:02x}"))
-                                .collect()
-                        }),
-                    })
-                    .expect("save completed chunk");
-            }
-            job_store.flush().expect("flush completed chunk");
-
-            let src = make_ref("s3", "resume.bin");
-            let dst = make_ref("local", "resume-copy.bin");
-            let resumable = ResumableTransferContext {
-                job_store: Arc::clone(&job_store),
-                job_id: job_id.clone(),
-                entry_index: 7,
-            };
-            let (tx, _rx) = watch::channel(ProgressInfo {
-                bytes_completed: 0,
-                bytes_total: None,
-                files_completed: 0,
-                files_total: None,
-            });
-
-            client_relay_copy(
-                &src_backend,
-                &src,
-                &dst_backend,
-                &dst,
-                &tx,
-                CopyRelayOptions {
-                    control: None,
-                    resumable: Some(&resumable),
-                    retry_policy: None,
-                },
-            )
-            .await
-            .expect("resumable chunked copy should succeed");
-
-            assert!(
-                dst_backend.get("resume-copy.bin").as_ref() == Some(&payload),
-                "destination must match source (corrupt={corrupt_first_chunk}, legacy={legacy_rows})"
-            );
-            let mut read_offsets = src_backend
-                .read_ranges()
-                .into_iter()
-                .map(|range| range.expect("range read").offset)
-                .collect::<Vec<_>>();
-            read_offsets.sort_unstable();
-            let expected_offsets = if corrupt_first_chunk || legacy_rows {
-                // A broken prefix cannot retain the later intact completed chunk.
-                vec![0, first_chunk_len as u64, (first_chunk_len * 2) as u64]
-            } else {
-                // Both verified chunks are reused without reading the source again.
-                vec![(first_chunk_len * 2) as u64]
-            };
-            assert_eq!(read_offsets, expected_offsets);
-            assert_eq!(
-                dst_backend.range_write_count() as usize,
-                expected_offsets.len()
-            );
-
-            let chunks = job_store
-                .load_chunk_states(&job_id)
-                .expect("load chunk states");
-            assert_eq!(chunks.len(), 3);
-            assert!(chunks
-                .iter()
-                .all(|chunk| chunk.state == PersistedChunkState::Completed));
-            for chunk in chunks {
-                let start = chunk.offset as usize;
-                let end = start + chunk.len as usize;
-                assert_eq!(
-                    chunk.checksum,
-                    Some(
-                        Sha256::digest(&payload[start..end])
-                            .iter()
-                            .map(|byte| format!("{byte:02x}"))
-                            .collect()
-                    )
-                );
-            }
-        }
     }
 }

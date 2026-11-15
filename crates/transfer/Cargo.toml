@@ -4,6 +4,7 @@ version.workspace = true
 edition = "2021"
 
 [dependencies]
+serde_json = { workspace = true }
 iris-core-domain = { workspace = true }
 iris-backends = { workspace = true }
 iris-jobstore = { workspace = true }

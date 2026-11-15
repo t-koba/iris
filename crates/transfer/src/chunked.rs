@@ -12,10 +12,11 @@ use iris_core_domain::types::progress::{ByteRange, ProgressInfo};
 use iris_core_domain::types::transfer::JobId;
 use iris_jobstore::repository::{
     JobStoreError, PersistedChunkState, PersistedChunkStateRow, PersistedMultipartUpload,
+    PersistedRangeSession,
 };
 use iris_jobstore::writer_task::JobStore;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::io::Cursor;
 use std::pin::Pin;
@@ -230,49 +231,6 @@ impl ChunkStateRecorder {
         Ok(())
     }
 
-    fn record_pending_ranges(
-        &self,
-        plan: &ChunkedTransferPlan,
-        completed_offsets: &HashSet<u64>,
-    ) -> Result<(), BackendError> {
-        for range in &plan.ranges {
-            if !completed_offsets.contains(&range.offset) {
-                self.record(range, PersistedChunkState::Pending, None)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn completed_checksums(
-        &self,
-        plan: &ChunkedTransferPlan,
-    ) -> Result<HashMap<u64, String>, BackendError> {
-        if self.etag.is_none() {
-            return Ok(HashMap::new());
-        }
-
-        let rows = self
-            .job_store
-            .load_chunk_states(&self.job_id)
-            .map_err(jobstore_error_to_backend_error)?;
-        let planned = plan
-            .ranges
-            .iter()
-            .map(|range| (range.offset, range.length.unwrap_or(0)))
-            .collect::<HashSet<_>>();
-
-        Ok(rows
-            .into_iter()
-            .filter(|row| {
-                row.entry_index == self.entry_index
-                    && row.state == PersistedChunkState::Completed
-                    && row.etag == self.etag
-                    && planned.contains(&(row.offset, row.len))
-            })
-            .filter_map(|row| row.checksum.map(|checksum| (row.offset, checksum)))
-            .collect())
-    }
-
     pub(crate) fn record_transfer_outcome(
         &self,
         total_len: u64,
@@ -329,6 +287,7 @@ pub(crate) struct ChunkedRangeWriteRequest<'a> {
     pub(crate) dst_backend: &'a dyn BackendAdapter,
     pub(crate) dst: &'a ObjectRef,
     pub(crate) total_len: u64,
+    pub(crate) source_identity: Option<String>,
     pub(crate) requested_in_flight: usize,
     pub(crate) recorder: Option<ChunkStateRecorder>,
     pub(crate) progress_tx: &'a watch::Sender<ProgressInfo>,
@@ -721,7 +680,8 @@ pub(crate) async fn copy_chunked_with_range_writes(
         dst,
         total_len,
         requested_in_flight,
-        recorder,
+        mut recorder,
+        source_identity,
         progress_tx,
         pause_rx,
         cancel_token,
@@ -734,119 +694,297 @@ pub(crate) async fn copy_chunked_with_range_writes(
         pause_rx: pause_rx.clone(),
         cancel_token: cancel_token.clone(),
     };
-    let completed_offsets =
-        resumable_completed_offsets(dst_backend, dst, &plan, recorder.as_ref(), &retry).await?;
-
-    if let Some(recorder) = &recorder {
-        recorder.record_pending_ranges(&plan, &completed_offsets)?;
-        recorder
-            .job_store
-            .flush()
-            .map_err(jobstore_error_to_backend_error)?;
+    wait_for_resume_or_cancel(pause_rx.clone(), cancel_token.clone()).await?;
+    if source_identity.is_none() {
+        if let Some(recorder) = &recorder {
+            // No stable source version means no persisted ranges are reusable.
+            if let Some(session) = recorder
+                .job_store
+                .load_range_session(&recorder.job_id, recorder.entry_index)
+                .map_err(jobstore_error_to_backend_error)?
+            {
+                recorder
+                    .job_store
+                    .discard_range_session(&session)
+                    .map_err(jobstore_error_to_backend_error)?;
+            }
+        }
+        recorder = None;
     }
-
+    let mut persisted_session = None;
+    let mut resumed = vec![false; plan.ranges.len()];
+    let staging = if let (Some(recorder), Some(source_identity)) = (&mut recorder, source_identity)
+    {
+        let binding = serde_json::to_string(&(
+            recorder.job_id.0,
+            recorder.entry_index,
+            &src.key.backend_id.0,
+            &src.key.stable_id.0,
+            &src.display_path,
+            source_identity,
+            &dst.key.backend_id.0,
+            &dst.key.stable_id.0,
+            &dst.display_path,
+            total_len,
+            CHUNKED_RANGE_CHUNK_BYTES,
+        ))
+        .map_err(|e| BackendError::Internal(Box::new(e)))?;
+        let mut retried_stage = false;
+        let staging = loop {
+            let session = match recorder
+                .job_store
+                .load_range_session(&recorder.job_id, recorder.entry_index)
+                .map_err(jobstore_error_to_backend_error)?
+            {
+                Some(session) => {
+                    if session.binding != binding
+                        || session.total_len != total_len
+                        || session.staging_path
+                            != dst_backend.range_staging_path(dst, &session.session_id)?
+                    {
+                        return Err(BackendError::Internal(Box::new(std::io::Error::other(
+                            "persisted range session identity mismatch",
+                        ))));
+                    }
+                    session
+                }
+                None => {
+                    static NEXT: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let session_id = format!(
+                        "{:x}-{:x}-{:x}",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos(),
+                        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    );
+                    let session = PersistedRangeSession {
+                        job_id: recorder.job_id.clone(),
+                        entry_index: recorder.entry_index,
+                        staging_path: dst_backend.range_staging_path(dst, &session_id)?,
+                        session_id,
+                        binding: binding.clone(),
+                        total_len,
+                    };
+                    recorder
+                        .job_store
+                        .save_range_session(&session)
+                        .map_err(jobstore_error_to_backend_error)?;
+                    session
+                }
+            };
+            let staging = match dst_backend
+                .open_range_write(dst, total_len, &session.session_id, &session.binding)
+                .await
+            {
+                Ok(staging) => staging,
+                Err(error) => {
+                    // Cleanup validates ownership and excludes live owners. Missing or
+                    // incomplete owned staging is discarded with its chunk rows, never
+                    // reconstructed from public destination bytes.
+                    recorder
+                        .job_store
+                        .discard_range_session(&session)
+                        .map_err(jobstore_error_to_backend_error)?;
+                    if retried_stage {
+                        return Err(error);
+                    }
+                    retried_stage = true;
+                    continue;
+                }
+            };
+            // The nonce in each range row binds it to this stage, not to similarly
+            // shaped ranges left by an earlier attempt or bytes at the public path.
+            recorder.etag = Some(format!("stage:{}", session.session_id));
+            recorder
+                .job_store
+                .flush()
+                .map_err(jobstore_error_to_backend_error)?;
+            let rows = recorder
+                .job_store
+                .load_chunk_states(&recorder.job_id)
+                .map_err(jobstore_error_to_backend_error)?;
+            let rows: HashMap<_, _> = rows
+                .into_iter()
+                .filter(|row| row.entry_index == recorder.entry_index)
+                .map(|row| (row.offset, row))
+                .collect();
+            let mut invalid_stage = false;
+            for (index, range) in plan.ranges.iter().enumerate() {
+                if let Some(row) = rows.get(&range.offset).filter(|row| {
+                    row.len == range.length.unwrap_or(0)
+                        && row.etag == recorder.etag
+                        && row.state == PersistedChunkState::Completed
+                }) {
+                    if let Some(checksum) = &row.checksum {
+                        let _permit = MemoryBudget::global()
+                            .acquire(row.len as usize)
+                            .await
+                            .ok_or(BackendError::Unsupported {
+                                operation: TRANSFER_MEMORY_BUDGET_EXCEEDED_OPERATION,
+                            })?;
+                        let bytes = staging.read_range(range.clone()).await?;
+                        if range_checksum(&bytes) != *checksum {
+                            invalid_stage = true;
+                            break;
+                        }
+                        resumed[index] = true;
+                        continue;
+                    }
+                }
+                recorder.record(range, PersistedChunkState::Pending, None)?;
+            }
+            if invalid_stage {
+                drop(staging);
+                recorder
+                    .job_store
+                    .discard_range_session(&session)
+                    .map_err(jobstore_error_to_backend_error)?;
+                if retried_stage {
+                    return Err(BackendError::Internal(Box::new(std::io::Error::other(
+                        "owned staging range checksum mismatch",
+                    ))));
+                }
+                resumed.fill(false);
+                retried_stage = true;
+                continue;
+            }
+            persisted_session = Some(session);
+            break staging;
+        };
+        staging
+    } else {
+        dst_backend
+            .begin_range_write(dst, total_len, ConflictResolution::Fail)
+            .await?
+    };
     let mut completed_bytes = plan
         .ranges
         .iter()
-        .filter(|range| completed_offsets.contains(&range.offset))
-        .map(|range| range.length.unwrap_or(0))
+        .zip(&resumed)
+        .filter(|(_, done)| **done)
+        .map(|(range, _)| range.length.unwrap_or(0))
         .sum::<u64>();
-    if completed_bytes > 0 {
-        let _ = progress_tx.send(ProgressInfo::single_file(
-            completed_bytes,
-            Some(total_len),
-            false,
-        ));
-    }
+    let _ = progress_tx.send(ProgressInfo::single_file(
+        completed_bytes,
+        Some(total_len),
+        false,
+    ));
+    let recorder_ref = &recorder;
+    let result = async move {
+        let recorder = recorder_ref;
+        let mut next_to_schedule = 0usize;
+        let mut in_flight = FuturesUnordered::<ChunkFuture<'_>>::new();
+        loop {
+            wait_for_resume_or_cancel(pause_rx.clone(), cancel_token.clone()).await?;
 
-    let mut next_to_schedule = 0usize;
-    let mut in_flight = FuturesUnordered::<ChunkFuture<'_>>::new();
-    loop {
-        wait_for_resume_or_cancel(pause_rx.clone(), cancel_token.clone()).await?;
-
-        while in_flight.len() < plan.max_in_flight && next_to_schedule < plan.ranges.len() {
-            let range = plan.ranges[next_to_schedule].clone();
-            let index = next_to_schedule;
-            next_to_schedule += 1;
-            if completed_offsets.contains(&range.offset) {
-                continue;
-            }
-            in_flight.push(read_range_chunk(
-                src_backend,
-                src.clone(),
-                index,
-                range,
-                recorder.clone(),
-                retry.clone(),
-            ));
-        }
-
-        let Some(chunk) = in_flight.next().await else {
-            break;
-        };
-        let chunk = chunk?;
-        wait_for_resume_or_cancel(pause_rx.clone(), cancel_token.clone()).await?;
-        let write_bytes: Arc<[u8]> = chunk.bytes.into();
-        let write_result = retry_backend_operation(
-            &retry.policy,
-            retry.pause_rx.clone(),
-            retry.cancel_token.clone(),
-            || {
-                let reader = Cursor::new(Arc::clone(&write_bytes));
-                dst_backend.write_range_from_reader(
-                    dst,
-                    Box::pin(reader),
-                    chunk.range.clone(),
-                    total_len,
-                )
-            },
-        )
-        .await;
-        match write_result {
-            Ok(_) => {
-                if let Some(recorder) = &recorder {
-                    recorder.record(
-                        &chunk.range,
-                        PersistedChunkState::Completed,
-                        Some(range_checksum(&write_bytes)),
-                    )?;
+            while in_flight.len() < plan.max_in_flight && next_to_schedule < plan.ranges.len() {
+                let range = plan.ranges[next_to_schedule].clone();
+                let index = next_to_schedule;
+                next_to_schedule += 1;
+                if resumed[index] {
+                    continue;
                 }
-                completed_bytes = completed_bytes.saturating_add(chunk.range.length.unwrap_or(0));
-                let _ = progress_tx.send(ProgressInfo::single_file(
-                    completed_bytes,
-                    Some(total_len),
-                    false,
+                in_flight.push(read_range_chunk(
+                    src_backend,
+                    src.clone(),
+                    index,
+                    range,
+                    recorder.clone(),
+                    retry.clone(),
                 ));
             }
-            Err(error) => {
-                if let Some(recorder) = &recorder {
-                    recorder.record(&chunk.range, PersistedChunkState::Failed, None)?;
-                    recorder
-                        .job_store
-                        .flush()
-                        .map_err(jobstore_error_to_backend_error)?;
+
+            let Some(chunk) = in_flight.next().await else {
+                break;
+            };
+            let chunk = chunk?;
+            wait_for_resume_or_cancel(pause_rx.clone(), cancel_token.clone()).await?;
+            let write_bytes: Arc<[u8]> = chunk.bytes.into();
+            let write_result = retry_backend_operation(
+                &retry.policy,
+                retry.pause_rx.clone(),
+                retry.cancel_token.clone(),
+                || {
+                    let reader = Cursor::new(Arc::clone(&write_bytes));
+                    staging.write_range(Box::pin(reader), chunk.range.clone())
+                },
+            )
+            .await;
+            match write_result {
+                Ok(_) => {
+                    if let Some(recorder) = &recorder {
+                        recorder.record(
+                            &chunk.range,
+                            PersistedChunkState::Completed,
+                            Some(range_checksum(&write_bytes)),
+                        )?;
+                    }
+                    completed_bytes =
+                        completed_bytes.saturating_add(chunk.range.length.unwrap_or(0));
+                    let _ = progress_tx.send(ProgressInfo::single_file(
+                        completed_bytes,
+                        Some(total_len),
+                        false,
+                    ));
                 }
-                return Err(error);
+                Err(error) => {
+                    if let Some(recorder) = &recorder {
+                        recorder.record(&chunk.range, PersistedChunkState::Failed, None)?;
+                        recorder
+                            .job_store
+                            .flush()
+                            .map_err(jobstore_error_to_backend_error)?;
+                    }
+                    return Err(error);
+                }
             }
         }
-    }
 
-    if let Some(recorder) = &recorder {
-        recorder
-            .job_store
-            .flush()
-            .map_err(jobstore_error_to_backend_error)?;
-    }
-    if completed_bytes != total_len {
-        return Err(BackendError::Internal(Box::new(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            format!(
-                "chunked range copy completed {completed_bytes} bytes for expected {total_len}"
-            ),
-        ))));
-    }
+        if let Some(recorder) = &recorder {
+            recorder
+                .job_store
+                .flush()
+                .map_err(jobstore_error_to_backend_error)?;
+        }
+        if completed_bytes != total_len {
+            return Err(BackendError::Internal(Box::new(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "chunked range copy completed {completed_bytes} bytes for expected {total_len}"
+                ),
+            ))));
+        }
 
-    Ok(())
+        wait_for_resume_or_cancel(pause_rx, cancel_token).await?;
+        staging.complete().await
+    }
+    .await;
+    // Cancellation (including a dropped future), transport errors and resource
+    // exhaustion retain the session. Definitive abandonment removes it and its rows.
+    if result.is_ok()
+        || matches!(
+            &result,
+            Err(BackendError::Conflict { .. }
+                | BackendError::Unsupported { .. }
+                | BackendError::NotFound { .. }
+                | BackendError::PermissionDenied { .. })
+        )
+    {
+        if let (Some(recorder), Some(session)) = (&recorder, &persisted_session) {
+            recorder
+                .job_store
+                .flush()
+                .map_err(jobstore_error_to_backend_error)?;
+            recorder
+                .job_store
+                .discard_range_session(session)
+                .map_err(jobstore_error_to_backend_error)?;
+        }
+    }
+    result
 }
 
 pub(crate) async fn read_chunked_to_vec(
@@ -1031,58 +1169,11 @@ fn jobstore_error_to_backend_error(error: JobStoreError) -> BackendError {
     BackendError::Internal(Box::new(std::io::Error::other(error.to_string())))
 }
 
-fn range_checksum(bytes: &[u8]) -> String {
+pub(crate) fn range_checksum(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
-}
-
-async fn resumable_completed_offsets(
-    dst_backend: &dyn BackendAdapter,
-    dst: &ObjectRef,
-    plan: &ChunkedTransferPlan,
-    recorder: Option<&ChunkStateRecorder>,
-    retry: &ChunkRetryControls,
-) -> Result<HashSet<u64>, BackendError> {
-    let Some(recorder) = recorder else {
-        return Ok(HashSet::new());
-    };
-    let Some(destination_size) = dst_backend
-        .stat(dst)
-        .await
-        .ok()
-        .and_then(|metadata| (!metadata.is_dir).then_some(metadata.size).flatten())
-    else {
-        return Ok(HashSet::new());
-    };
-    let persisted = recorder.completed_checksums(plan)?;
-    let mut completed = HashSet::new();
-    // Only a verified contiguous prefix is safe to retain. Legacy rows without
-    // checksums are absent from `persisted` and must be copied again.
-    for (index, range) in plan.ranges.iter().enumerate() {
-        let Some(checksum) = persisted.get(&range.offset) else {
-            break;
-        };
-        let length = range.length.unwrap_or(0);
-        if range.offset.saturating_add(length) > destination_size {
-            break;
-        }
-        let chunk = read_range_chunk(
-            dst_backend,
-            dst.clone(),
-            index,
-            range.clone(),
-            None,
-            retry.clone(),
-        )
-        .await?;
-        if range_checksum(&chunk.bytes) != *checksum {
-            break;
-        }
-        completed.insert(range.offset);
-    }
-    Ok(completed)
 }
 
 async fn wait_for_resume_or_cancel(

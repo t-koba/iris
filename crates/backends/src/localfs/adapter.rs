@@ -6,7 +6,7 @@ use crate::localfs::capabilities::localfs_capabilities;
 use crate::localfs::reflink::{platform_may_support_reflink, try_reflink_copy};
 use crate::localfs::stable_id::get_stable_id;
 use async_trait::async_trait;
-use iris_core_domain::backend_adapter::BackendAdapter;
+use iris_core_domain::backend_adapter::{BackendAdapter, RangeWriteSession};
 use iris_core_domain::types::capability::CapabilitySet;
 use iris_core_domain::types::error::BackendError;
 use iris_core_domain::types::list::{EntryNameOnly, ListCursor, ListPage, ListedEntry};
@@ -545,24 +545,82 @@ impl BackendAdapter for LocalFsAdapter {
         Ok(self.next_ticket(OperationKind::Copy))
     }
 
-    async fn write_range_from_reader(
+    fn range_staging_path(
         &self,
         dst: &ObjectRef,
-        reader: Pin<Box<dyn AsyncRead + Send>>,
-        range: ByteRange,
+        session_id: &str,
+    ) -> Result<String, BackendError> {
+        if session_id.is_empty()
+            || !session_id
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b'-')
+        {
+            return Err(BackendError::Internal(Box::new(std::io::Error::other(
+                "invalid staging session id",
+            ))));
+        }
+        let path = self.resolve(dst)?;
+        let parent = path.parent().ok_or_else(|| {
+            BackendError::Internal(Box::new(std::io::Error::other("destination has no parent")))
+        })?;
+        Ok(iris_platform_integration::staging::encode_path(
+            &parent.join(format!(".iris-range-{session_id}")),
+        ))
+    }
+
+    async fn open_range_write(
+        &self,
+        dst: &ObjectRef,
         final_size: u64,
-    ) -> Result<OperationTicket, BackendError> {
+        session_id: &str,
+        binding: &str,
+    ) -> Result<Box<dyn RangeWriteSession + '_>, BackendError> {
+        self.check_conflict_support(&ConflictResolution::Fail)?;
         let dst_path = self.resolve(dst)?;
-        debug!(
-            backend_id = %self.backend_id,
-            path_hash = %iris_core_domain::observability::path_hash(&dst.display_path),
-            range_offset = range.offset,
-            range_length = range.length,
+        let dir = iris_platform_integration::staging::decode_path(
+            &self.range_staging_path(dst, session_id)?,
+        )
+        .map_err(|e| BackendError::Internal(Box::new(e)))?;
+        std::fs::create_dir_all(dir.parent().expect("staging parent"))
+            .map_err(|e| BackendError::Internal(Box::new(e)))?;
+        let stage =
+            iris_platform_integration::staging::OwnedStage::reopen(&dir, binding, final_size)
+                .map_err(|e| BackendError::Internal(Box::new(e)))?;
+        Ok(Box::new(PersistentLocalRangeWrite {
+            stage: std::sync::Arc::new(stage),
+            dst_path,
             final_size,
-            "backend.localfs.write_range"
-        );
-        write_range_to_file(&dst_path, reader, range, final_size).await?;
-        Ok(self.next_ticket(OperationKind::Copy))
+        }))
+    }
+
+    async fn begin_range_write(
+        &self,
+        dst: &ObjectRef,
+        final_size: u64,
+        on_conflict: ConflictResolution,
+    ) -> Result<Box<dyn RangeWriteSession + '_>, BackendError> {
+        let dst_path = self.resolve(dst)?;
+        self.check_conflict_support(&on_conflict)?;
+        // Range sessions always stage, including overwrite, so their ownership contract holds.
+        let staging = tokio::task::spawn_blocking(move || {
+            let target = WriteDestination::new(&dst_path, &ConflictResolution::Fail)?;
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(target.path())
+                .map_err(|e| BackendError::Internal(Box::new(e)))?;
+            file.set_len(final_size)
+                .map_err(|e| BackendError::Internal(Box::new(e)))?;
+            Ok::<_, BackendError>(LocalRangeWrite {
+                target,
+                dst_path,
+                final_size,
+                on_conflict,
+            })
+        })
+        .await
+        .map_err(|e| BackendError::Internal(Box::new(e)))??;
+        Ok(Box::new(staging))
     }
 
     async fn mkdir(&self, parent: &ObjectRef, name: &str) -> Result<ObjectRef, BackendError> {
@@ -767,6 +825,102 @@ fn invalid_cursor_error(cursor: &str, reason: &str) -> BackendError {
     )))
 }
 
+struct PersistentLocalRangeWrite {
+    stage: std::sync::Arc<iris_platform_integration::staging::OwnedStage>,
+    dst_path: PathBuf,
+    final_size: u64,
+}
+
+#[async_trait]
+impl RangeWriteSession for PersistentLocalRangeWrite {
+    async fn write_range(
+        &self,
+        reader: Pin<Box<dyn AsyncRead + Send>>,
+        range: ByteRange,
+    ) -> Result<(), BackendError> {
+        let stage = std::sync::Arc::clone(&self.stage);
+        let final_size = self.final_size;
+        // The task retains the lock even if the caller's future is dropped while
+        // Tokio has filesystem work in flight. No new owner can race that work.
+        tokio::spawn(async move {
+            let file = stage
+                .open_data()
+                .map_err(|e| BackendError::Internal(Box::new(e)))?;
+            write_range_to_file(file, reader, range, final_size).await?;
+            stage
+                .data
+                .sync_data()
+                .map_err(|e| BackendError::Internal(Box::new(e)))
+        })
+        .await
+        .map_err(|e| BackendError::Internal(Box::new(e)))?
+    }
+
+    async fn read_range(&self, range: ByteRange) -> Result<Vec<u8>, BackendError> {
+        let stage = std::sync::Arc::clone(&self.stage);
+        tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Seek};
+            let mut file = stage.open_data()?;
+            file.seek(std::io::SeekFrom::Start(range.offset))?;
+            let mut bytes = vec![0; range.length.unwrap_or(0) as usize];
+            file.read_exact(&mut bytes)?;
+            Ok::<_, std::io::Error>(bytes)
+        })
+        .await
+        .map_err(|e| BackendError::Internal(Box::new(e)))?
+        .map_err(|e| BackendError::Internal(Box::new(e)))
+    }
+
+    async fn complete(self: Box<Self>) -> Result<(), BackendError> {
+        self.stage
+            .validate()
+            .map_err(|e| BackendError::Internal(Box::new(e)))?;
+        self.stage
+            .data
+            .sync_all()
+            .map_err(|e| BackendError::Internal(Box::new(e)))?;
+        let stage = std::sync::Arc::try_unwrap(self.stage).map_err(|_| {
+            BackendError::Internal(Box::new(std::io::Error::other(
+                "staging IO is still active",
+            )))
+        })?;
+        install_with_conflict(&stage.path(), &self.dst_path, &ConflictResolution::Fail)?;
+        stage
+            .remove_after_install()
+            .map_err(|e| BackendError::Internal(Box::new(e)))
+    }
+}
+
+struct LocalRangeWrite {
+    target: WriteDestination,
+    dst_path: PathBuf,
+    final_size: u64,
+    on_conflict: ConflictResolution,
+}
+
+#[async_trait]
+impl RangeWriteSession for LocalRangeWrite {
+    async fn write_range(
+        &self,
+        reader: Pin<Box<dyn AsyncRead + Send>>,
+        range: ByteRange,
+    ) -> Result<(), BackendError> {
+        // Open without creation while the owner is alive. Cancellation cannot leave a
+        // detached path-creating operation that resurrects staging after its cleanup.
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(self.target.path())
+            .map_err(|e| BackendError::Internal(Box::new(e)))?;
+        write_range_to_file(file, reader, range, self.final_size).await
+    }
+
+    async fn complete(self: Box<Self>) -> Result<(), BackendError> {
+        tokio::task::spawn_blocking(move || self.target.install(&self.dst_path, &self.on_conflict))
+            .await
+            .map_err(|e| BackendError::Internal(Box::new(e)))?
+    }
+}
+
 /// Non-overwrite operations build complete data in an exclusively owned sibling directory.
 /// Nothing under the destination name is opened before atomic installation. Overwrite retains
 /// the existing direct-write/copy behavior. Drop also runs on errors and cancelled futures.
@@ -920,6 +1074,120 @@ mod tests {
         ObjectRef {
             display_path: name.into(),
             ..root_ref(backend_id)
+        }
+    }
+
+    #[tokio::test]
+    async fn range_staging_preserves_existing_and_concurrent_destinations() {
+        const CHUNK: u64 = 8 * 1024 * 1024;
+        struct WaitingReader(std::sync::Arc<tokio::sync::Notify>);
+        impl AsyncRead for WaitingReader {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                _: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                self.0.notify_one();
+                std::task::Poll::Pending
+            }
+        }
+        for total_len in [CHUNK * 2, CHUNK * 2 + 1] {
+            for outcome in ["reject", "read-failure", "cancel", "concurrent"] {
+                let temp = TempDir::new().unwrap();
+                let id = BackendId("range-staging".into());
+                let adapter = LocalFsAdapter::new(temp.path().into(), id.clone());
+                let dst = file_ref(&id, "final");
+                let final_path = temp.path().join("final");
+                let original = vec![0xa5; total_len as usize + 37];
+                if outcome != "concurrent" {
+                    std::fs::write(&final_path, &original).unwrap();
+                }
+                let staging = adapter
+                    .begin_range_write(&dst, total_len, ConflictResolution::Fail)
+                    .await
+                    .unwrap();
+                staging
+                    .write_range(
+                        Box::pin(std::io::Cursor::new(vec![7; CHUNK as usize])),
+                        ByteRange {
+                            offset: 0,
+                            length: Some(CHUNK),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                if outcome == "concurrent" {
+                    assert!(
+                        !final_path.exists(),
+                        "ranges must not create the public name"
+                    );
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&final_path)
+                        .unwrap();
+                    std::fs::write(&final_path, &original).unwrap();
+                }
+                match outcome {
+                    "read-failure" => {
+                        let result = staging
+                            .write_range(
+                                Box::pin(std::io::Cursor::new(vec![9])),
+                                ByteRange {
+                                    offset: CHUNK,
+                                    length: Some(total_len - CHUNK),
+                                },
+                            )
+                            .await;
+                        assert!(result.is_err());
+                        drop(staging);
+                    }
+                    "cancel" => {
+                        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+                        let reader = WaitingReader(started.clone());
+                        {
+                            let writing = staging.write_range(
+                                Box::pin(reader),
+                                ByteRange {
+                                    offset: CHUNK,
+                                    length: Some(total_len - CHUNK),
+                                },
+                            );
+                            tokio::pin!(writing);
+                            tokio::select! {
+                                result = &mut writing => panic!("pending read completed: {result:?}"),
+                                () = started.notified() => {}
+                            }
+                        } // Drop the in-progress write, then its staging owner.
+                        drop(staging);
+                    }
+                    _ => {
+                        staging
+                            .write_range(
+                                Box::pin(std::io::Cursor::new(vec![
+                                    8;
+                                    (total_len - CHUNK) as usize
+                                ])),
+                                ByteRange {
+                                    offset: CHUNK,
+                                    length: Some(total_len - CHUNK),
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        assert!(matches!(
+                            staging.complete().await,
+                            Err(BackendError::Conflict { .. })
+                        ));
+                    }
+                }
+                assert_eq!(std::fs::read(&final_path).unwrap(), original, "{outcome}");
+                assert_eq!(
+                    std::fs::read_dir(temp.path()).unwrap().count(),
+                    1,
+                    "staging cleanup: {outcome}"
+                );
+            }
         }
     }
 

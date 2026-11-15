@@ -47,6 +47,17 @@ CREATE TABLE IF NOT EXISTS persisted_task_chunks (
 CREATE INDEX IF NOT EXISTS idx_persisted_task_chunks_job_id
     ON persisted_task_chunks (job_id);
 
+CREATE TABLE IF NOT EXISTS persisted_range_sessions (
+    job_id INTEGER NOT NULL,
+    entry_index INTEGER NOT NULL,
+    session_id TEXT NOT NULL,
+    binding TEXT NOT NULL,
+    staging_path TEXT NOT NULL,
+    total_len INTEGER NOT NULL,
+    PRIMARY KEY (job_id, entry_index),
+    FOREIGN KEY (job_id) REFERENCES persisted_jobs (id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS persisted_multipart_uploads (
     job_id          INTEGER NOT NULL,
     entry_index     INTEGER NOT NULL,

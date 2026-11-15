@@ -25,8 +25,9 @@ pub fn open_file_for_read(path: &Path, sequential: bool) -> Result<fs::File, Bac
     Ok(fs::File::from_std(std_file))
 }
 
+/// Write only through an already opened staging file; never create paths on a detached worker.
 pub async fn write_range_to_file(
-    final_dst: &Path,
+    std_file: std::fs::File,
     reader: Pin<Box<dyn AsyncRead + Send>>,
     range: iris_core_domain::types::progress::ByteRange,
     final_size: u64,
@@ -48,19 +49,7 @@ pub async fn write_range_to_file(
         ))));
     }
 
-    if let Some(parent) = final_dst.parent() {
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|e| BackendError::Internal(Box::new(e)))?;
-    }
-
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(final_dst)
-        .await
-        .map_err(|e| BackendError::Internal(Box::new(e)))?;
+    let mut file = fs::File::from_std(std_file);
     file.set_len(final_size)
         .await
         .map_err(|e| BackendError::Internal(Box::new(e)))?;
@@ -551,7 +540,7 @@ mod tests {
             Box::pin(std::io::Cursor::new(b"range".to_vec()));
 
         write_range_to_file(
-            &dst,
+            std::fs::File::create(&dst).expect("create staging"),
             reader,
             iris_core_domain::types::progress::ByteRange {
                 offset: 4,
@@ -577,7 +566,7 @@ mod tests {
             Box::pin(std::io::Cursor::new(b"overflow".to_vec()));
 
         let result = write_range_to_file(
-            &dst,
+            std::fs::File::create(&dst).expect("create staging"),
             reader,
             iris_core_domain::types::progress::ByteRange {
                 offset: 8,
@@ -588,7 +577,7 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert!(!dst.exists());
+        assert_eq!(std::fs::metadata(&dst).unwrap().len(), 0);
     }
 
     #[test]

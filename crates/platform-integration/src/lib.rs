@@ -10,3 +10,5 @@ pub mod file_watch;
 pub mod mount;
 pub mod path;
 pub mod trash;
+
+pub mod staging;

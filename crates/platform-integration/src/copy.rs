@@ -80,19 +80,19 @@ fn file_identity(_path: &Path) -> io::Result<(u64, u64)> {
 }
 
 #[cfg(unix)]
-fn handle_identity(file: &std::fs::File) -> io::Result<(u64, u64)> {
+pub(crate) fn handle_identity(file: &std::fs::File) -> io::Result<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata()?;
     Ok((metadata.dev(), metadata.ino()))
 }
 
 #[cfg(windows)]
-fn handle_identity(file: &std::fs::File) -> io::Result<(u64, u64)> {
+pub(crate) fn handle_identity(file: &std::fs::File) -> io::Result<(u64, u64)> {
     windows_file_identity(file.try_clone()?)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn handle_identity(_file: &std::fs::File) -> io::Result<(u64, u64)> {
+pub(crate) fn handle_identity(_file: &std::fs::File) -> io::Result<(u64, u64)> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "filesystem identity is unavailable on this platform",
