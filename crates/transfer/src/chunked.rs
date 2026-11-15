@@ -670,6 +670,54 @@ fn multipart_session_from_persisted(upload: &PersistedMultipartUpload) -> Multip
     }
 }
 
+fn range_session_source_version_changed(
+    session: &PersistedRangeSession,
+    job_id: &JobId,
+    entry_index: u64,
+    src: &ObjectRef,
+    source_identity: &str,
+    dst: &ObjectRef,
+) -> Result<bool, BackendError> {
+    let (
+        saved_job_id,
+        saved_entry_index,
+        saved_source_backend,
+        saved_source_stable_id,
+        saved_source_display_path,
+        saved_source_identity,
+        saved_destination_backend,
+        saved_destination_stable_id,
+        saved_destination_display_path,
+        saved_total_len,
+        saved_chunk_size,
+    ): (
+        u64,
+        u64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        u64,
+        u64,
+    ) = serde_json::from_str(&session.binding)
+        .map_err(|error| BackendError::Internal(Box::new(error)))?;
+
+    Ok(saved_job_id == job_id.0
+        && saved_entry_index == entry_index
+        && saved_source_backend == src.key.backend_id.0
+        && saved_source_stable_id == src.key.stable_id.0
+        && saved_source_display_path == src.display_path
+        && saved_source_identity != source_identity
+        && saved_destination_backend == dst.key.backend_id.0
+        && saved_destination_stable_id == dst.key.stable_id.0
+        && saved_destination_display_path == dst.display_path
+        && saved_total_len == session.total_len
+        && saved_chunk_size == CHUNKED_RANGE_CHUNK_BYTES)
+}
+
 pub(crate) async fn copy_chunked_with_range_writes(
     request: ChunkedRangeWriteRequest<'_>,
 ) -> Result<(), BackendError> {
@@ -721,7 +769,7 @@ pub(crate) async fn copy_chunked_with_range_writes(
             &src.key.backend_id.0,
             &src.key.stable_id.0,
             &src.display_path,
-            source_identity,
+            &source_identity,
             &dst.key.backend_id.0,
             &dst.key.stable_id.0,
             &dst.display_path,
@@ -737,11 +785,37 @@ pub(crate) async fn copy_chunked_with_range_writes(
                 .map_err(jobstore_error_to_backend_error)?
             {
                 Some(session) => {
-                    if session.binding != binding
-                        || session.total_len != total_len
-                        || session.staging_path
-                            != dst_backend.range_staging_path(dst, &session.session_id)?
+                    if session.staging_path
+                        != dst_backend.range_staging_path(dst, &session.session_id)?
                     {
+                        return Err(BackendError::Internal(Box::new(std::io::Error::other(
+                            "persisted range session identity mismatch",
+                        ))));
+                    }
+                    if session.binding != binding {
+                        if retried_stage
+                            || !range_session_source_version_changed(
+                                &session,
+                                &recorder.job_id,
+                                recorder.entry_index,
+                                &src,
+                                &source_identity,
+                                dst,
+                            )?
+                        {
+                            return Err(BackendError::Internal(Box::new(std::io::Error::other(
+                                "persisted range session identity mismatch",
+                            ))));
+                        }
+                        recorder
+                            .job_store
+                            .discard_range_session(&session)
+                            .map_err(jobstore_error_to_backend_error)?;
+                        resumed.fill(false);
+                        retried_stage = true;
+                        continue;
+                    }
+                    if session.total_len != total_len {
                         return Err(BackendError::Internal(Box::new(std::io::Error::other(
                             "persisted range session identity mismatch",
                         ))));

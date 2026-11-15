@@ -1894,6 +1894,7 @@ mod tests {
             "no identity",
             "lossless path",
             "concurrent",
+            "concurrent source mismatch",
             "final conflict",
             "terminal failure",
         ] {
@@ -1930,6 +1931,7 @@ mod tests {
             store.save_job(&job).unwrap();
             let mut source = MockBackend::new("source", false);
             let payload = vec![9; total_len as usize];
+            let mut changed_payload = None;
             source.put("source", &payload);
             let destination =
                 LocalFsAdapter::new(destination_root.clone(), BackendId("destination".into()));
@@ -1997,9 +1999,16 @@ mod tests {
                         .unwrap();
                     data.write_all(b"different").unwrap();
                 }
-                "source mismatch" => version = Some("v2"),
+                "source mismatch" => {
+                    version = Some("v2");
+                    changed_payload = Some(vec![7; total_len as usize]);
+                    source.put("source", changed_payload.as_ref().unwrap());
+                }
                 "no identity" => version = None,
-                "destination mismatch" => retry_dst.display_path = "elsewhere".into(),
+                "destination mismatch" => {
+                    version = Some("v2");
+                    retry_dst.display_path = "elsewhere".into();
+                }
                 "stage replaced" => {
                     // Keep the old inode alive so replacement cannot reuse it.
                     old_data = Some(std::fs::File::open(stage_path.join("data")).unwrap());
@@ -2046,7 +2055,10 @@ mod tests {
                         })
                     }))
                 }
-                "concurrent" => {
+                "concurrent" | "concurrent source mismatch" => {
+                    if scenario == "concurrent source mismatch" {
+                        version = Some("v2");
+                    }
                     let owner = destination
                         .open_range_write(&dst, total_len, &session.session_id, &session.binding)
                         .await
@@ -2088,7 +2100,7 @@ mod tests {
             match scenario {
                 "resume" | "stale row" | "stale length" | "missing stage" | "missing data"
                 | "short data" | "partial intent" | "partial identity" | "empty stage"
-                | "corrupt range" | "no identity" | "lossless path" => {
+                | "corrupt range" | "no identity" | "lossless path" | "source mismatch" => {
                     result.unwrap();
                     let reads = source.read_ranges();
                     assert_eq!(
@@ -2104,10 +2116,32 @@ mod tests {
                         assert!(reads.iter().all(|r| r.as_ref().unwrap().offset > 0));
                     }
                     assert_eq!(
-                        std::fs::read(destination_root.join("final")).unwrap(),
-                        payload
+                        std::fs::read(destination_root.join("final"))
+                            .unwrap()
+                            .as_slice(),
+                        changed_payload.as_deref().unwrap_or(&payload)
                     );
+                    if scenario == "source mismatch" {
+                        assert_eq!(
+                            reads
+                                .iter()
+                                .filter_map(|range| range.as_ref().map(|range| range.offset))
+                                .collect::<Vec<_>>(),
+                            vec![
+                                0,
+                                crate::chunked::CHUNKED_RANGE_CHUNK_BYTES,
+                                crate::chunked::CHUNKED_RANGE_CHUNK_BYTES * 2
+                            ]
+                        );
+                    }
                     assert!(!stage_path.exists());
+                    assert!(std::fs::read_dir(&destination_root).unwrap().all(|entry| {
+                        !entry
+                            .unwrap()
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".iris-range-")
+                    }));
                     assert!(store.load_range_session(&job.id, 0).unwrap().is_none());
                     assert!(store.load_chunk_states(&job.id).unwrap().is_empty());
                 }
