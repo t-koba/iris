@@ -288,6 +288,27 @@ permissions:
           cargo test -p iris-platform-integration --lib trash::exact_items::tests:: --locked
 
 """ in ci,
+    "SMB streamed-write cleanup regressions run separately from native container smoke": """  smb-streamed-write-cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-latest-smb-stream-cargo
+
+      - name: Native SMB streamed-write cleanup regressions
+        run: |
+          cargo test -p iris-backends --lib smb::adapter::tests::native_streamed_ --locked
+
+""" in ci,
     "SMB3.0/3.02 signing KDF vector runs independently of container smoke": """  smb3-signing-kdf:
     runs-on: ubuntu-latest
     permissions:
