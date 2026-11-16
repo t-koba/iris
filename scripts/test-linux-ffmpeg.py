@@ -568,6 +568,17 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
         package = (ROOT / "scripts/package-linux-appdir.sh").read_text()
         self.assertIn('PKG_CONFIG_LIBDIR="$IRIS_FFMPEG_PREFIX/lib/pkgconfig"', package)
         self.assertIn('linux-ffmpeg.py" stage', package)
+        # The release budget bounds the compiled product binary, the same
+        # target/release/Iris artifact the workflow size gate measures. It must
+        # not measure the AppDir copy after patchelf rewrites its ELF, and a
+        # budget failure must be reported rather than a silent `set -e` exit.
+        self.assertIn('product_binary="$target_dir/release/$binary_name"', package)
+        self.assertIn('actual=$(stat -c %s "$product_binary")', package)
+        self.assertIn('echo "Iris packaged binary: $actual bytes (limit: $max_bytes)"', package)
+        self.assertIn('Iris packaged binary exceeds the $max_bytes-byte release budget', package)
+        self.assertLess(package.index('product_binary="$target_dir/release/$binary_name"'),
+                        package.index('fetch-pdfium-runtime.sh'))
+        self.assertNotIn('stat -c %s "$appdir/usr/bin/$binary_name"', package)
         self.assertIn('dpkg-shlibdeps -O -xiris', package)
         self.assertNotIn('--ignore-missing-info', package.split('cat > "$deb_build_dir/debian/control"')[1])
         release_linux = (ROOT / ".github/workflows/release.yml").read_text().split('  package-linux:', 1)[1].split('  package-windows:', 1)[0]

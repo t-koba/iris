@@ -62,11 +62,21 @@ EOF
 chmod +x "$appdir/AppRun" "$appdir/usr/bin/$binary_name"
 
 if [[ "$build_variant" = product ]]; then
+    # Bound the compiled product binary, the same artifact the workflow's
+    # "Product binary size upper bound" step measures. Checking the AppDir copy
+    # here would also count the ELF bytes patchelf adds while setting RUNPATH,
+    # which are packaging metadata rather than product code. Report the numbers
+    # so a budget failure is diagnosable instead of a silent `set -e` exit.
+    max_bytes=${IRIS_MAX_LINUX_RELEASE_BYTES:-35651584}
+    product_binary="$target_dir/release/$binary_name"
+    actual=$(stat -c %s "$product_binary")
+    echo "Iris packaged binary: $actual bytes (limit: $max_bytes)"
+    if [[ "$actual" -gt "$max_bytes" ]]; then
+        echo "Iris packaged binary exceeds the $max_bytes-byte release budget" >&2
+        exit 1
+    fi
     "$repo_root/scripts/fetch-pdfium-runtime.sh" "$appdir"
     python3 "$script_dir/linux-ffmpeg.py" stage "$IRIS_FFMPEG_PREFIX" "$appdir"
-    max_bytes=${IRIS_MAX_LINUX_RELEASE_BYTES:-35651584}
-    actual=$(stat -c %s "$appdir/usr/bin/$binary_name")
-    [[ "$actual" -le "$max_bytes" ]]
 fi
 
 # Minimal builds still produce an AppDir, but only the default-feature product
