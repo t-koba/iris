@@ -27,6 +27,7 @@ use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info_span, warn, Instrument};
 
+type CancelFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 type PauseFuture = Pin<Box<dyn Future<Output = Result<(), watch::error::RecvError>> + Send>>;
 
 #[derive(Debug)]
@@ -44,6 +45,7 @@ struct ProgressReader {
     bytes_total: Option<u64>,
     pause_rx: watch::Receiver<bool>,
     cancel_token: CancellationToken,
+    cancel_wait: CancelFuture,
     wait_for_resume: Option<PauseFuture>,
 }
 
@@ -70,6 +72,7 @@ impl ProgressReader {
             last_notify_at: Instant::now(),
             bytes_total,
             pause_rx,
+            cancel_wait: Box::pin(cancel_token.clone().cancelled_owned()),
             cancel_token,
             wait_for_resume: None,
         }
@@ -102,6 +105,13 @@ impl AsyncRead for ProgressReader {
         let this = self.get_mut();
 
         if this.cancel_token.is_cancelled() {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "transfer canceled",
+            )));
+        }
+
+        if this.cancel_wait.as_mut().poll(cx).is_ready() {
             return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "transfer canceled",
@@ -594,6 +604,95 @@ mod tests {
     use tempfile::tempdir;
     use tokio::fs;
     use tokio::io::AsyncReadExt;
+
+    struct StalledReader {
+        first_poll: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    impl AsyncRead for StalledReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if let Some(first_poll) = self.first_poll.take() {
+                first_poll.notify_one();
+            }
+            Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn progress_reader_cancel_wakes_stalled_read() {
+        let control = TransferControl::new();
+        let first_poll = Arc::new(tokio::sync::Notify::new());
+        let (tx, _rx) = watch::channel(ProgressInfo::single_file(0, None, false));
+        let mut reader = ProgressReader::new(
+            Box::pin(StalledReader {
+                first_poll: Some(first_poll.clone()),
+            }),
+            None,
+            tx,
+            control.pause_receiver(),
+            control.cancel_token(),
+        );
+        let task = tokio::spawn(async move { reader.read(&mut [0; 1]).await });
+        tokio::time::timeout(Duration::from_secs(2), first_poll.notified())
+            .await
+            .expect("source should be polled");
+        control.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("cancellation should wake stalled read")
+            .expect("read task should not panic")
+            .expect_err("canceled read should fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(error.to_string(), "transfer canceled");
+    }
+
+    #[tokio::test]
+    async fn progress_reader_cancel_wakes_paused_read() {
+        let control = TransferControl::new();
+        control.pause_tx.send_replace(true);
+        let first_poll = Arc::new(tokio::sync::Notify::new());
+        let polled = first_poll.clone();
+        let (tx, _rx) = watch::channel(ProgressInfo::single_file(0, None, false));
+        let mut reader = ProgressReader::new(
+            Box::pin(StalledReader { first_poll: None }),
+            None,
+            tx,
+            control.pause_receiver(),
+            control.cancel_token(),
+        );
+        let task = tokio::spawn(async move {
+            let mut buf = [0; 1];
+            let read = reader.read(&mut buf);
+            tokio::pin!(read);
+            futures_util::future::poll_fn(|cx| {
+                let result = read.as_mut().poll(cx);
+                // The paused reader never polls its source. Signal only after the
+                // read itself has registered its waits, using the task's real waker.
+                polled.notify_one();
+                result
+            })
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), first_poll.notified())
+            .await
+            .expect("paused read should be polled");
+        control.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("cancellation should wake paused read")
+            .expect("read task should not panic")
+            .expect_err("canceled read should fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(error.to_string(), "transfer canceled");
+        assert!(
+            *control.pause_tx.borrow(),
+            "cancellation must not resume the reader"
+        );
+    }
 
     fn make_ref(backend_id: &str, display_path: &str) -> ObjectRef {
         ObjectRef {
