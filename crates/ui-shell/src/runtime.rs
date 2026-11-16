@@ -59,7 +59,7 @@ use iris_platform_integration::default_app;
 use iris_platform_integration::mount::{
     list_mounted_volumes, MountedVolume, NetworkMountProtocol, VolumeKind,
 };
-use iris_platform_integration::path::unique_sibling_path;
+use iris_platform_integration::path::{numbered_sibling_path, unique_sibling_path};
 use iris_thumb_preview::encoded::probe_encoded_image_bytes;
 use iris_thumb_preview::metadata::ImageMetadata;
 use iris_thumb_preview::pipeline::ThumbnailPipeline;
@@ -316,17 +316,35 @@ async fn wait_if_paused_or_canceled(control: &TransferControl) -> Result<(), Str
     Ok(())
 }
 
+/// Interpret a no-follow local metadata probe: only NotFound establishes absence.
+fn directory_entry_exists(metadata: std::io::Result<std::fs::Metadata>) -> Result<bool, String> {
+    match metadata {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 fn resolve_destination_path(
     requested_dst: &Path,
     resolution: &ConflictResolution,
 ) -> Result<PathBuf, String> {
-    if !requested_dst.exists() {
+    if !directory_entry_exists(std::fs::symlink_metadata(requested_dst))? {
         return Ok(requested_dst.to_path_buf());
     }
 
     match resolution {
         ConflictResolution::Overwrite | ConflictResolution::Skip => Ok(requested_dst.to_path_buf()),
-        ConflictResolution::Rename => Ok(unique_sibling_path(requested_dst)),
+        ConflictResolution::Rename => {
+            let mut index = 1u64;
+            loop {
+                let candidate = numbered_sibling_path(requested_dst, index);
+                if !directory_entry_exists(std::fs::symlink_metadata(&candidate))? {
+                    return Ok(candidate);
+                }
+                index += 1;
+            }
+        }
         ConflictResolution::Fail => Err(format!(
             "destination already exists: {}",
             requested_dst.display()

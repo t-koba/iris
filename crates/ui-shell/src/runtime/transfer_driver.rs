@@ -149,6 +149,7 @@ impl AppRuntime {
         source: &ObjectRef,
         destination: &Path,
         is_move: bool,
+        resolution: &ConflictResolution,
     ) -> Result<SymlinkTransfer, String> {
         if self.is_virtual_display_path(&source.display_path) {
             return Ok(SymlinkTransfer::NotHandled);
@@ -168,9 +169,11 @@ impl AppRuntime {
 
         if !self.is_virtual_display_path(destination.to_string_lossy().as_ref()) {
             let (link, dst) = (src_path.clone(), destination.to_path_buf());
-            let recreated = tokio::task::spawn_blocking(move || recreate_symlink(&link, &dst))
-                .await
-                .map_err(|error| error.to_string())?;
+            let overwrite = matches!(resolution, ConflictResolution::Overwrite);
+            let recreated =
+                tokio::task::spawn_blocking(move || recreate_symlink(&link, &dst, overwrite))
+                    .await
+                    .map_err(|error| error.to_string())?;
             match recreated {
                 Ok(()) => {
                     if is_move {
@@ -179,6 +182,11 @@ impl AppRuntime {
                             .map_err(|error| error.to_string())?;
                     }
                     return Ok(SymlinkTransfer::Recreated);
+                }
+                // A conflict (including an entry appearing after preflight) is not a
+                // lack of symlink support: never fall back to copying through that entry.
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(error.to_string());
                 }
                 Err(error) => tracing::debug!(
                     "destination cannot hold a symlink ({error}); copying its target instead"
@@ -334,7 +342,9 @@ impl AppRuntime {
                 self.update_task_state(job_id, task_index, TaskState::Running, None);
             }
 
-            if matches!(resolution, ConflictResolution::Skip) && self.path_exists(dst_path).await? {
+            if matches!(resolution, ConflictResolution::Skip)
+                && self.destination_entry_exists(dst_path).await?
+            {
                 self.update_task_state(job_id, task_index, TaskState::Skipped, None);
                 return Ok(TransferItemOutcome { bytes_completed: 0 });
             }
@@ -344,7 +354,7 @@ impl AppRuntime {
                 .await?;
 
             match self
-                .transfer_local_symlink(source, &final_dst, is_move)
+                .transfer_local_symlink(source, &final_dst, is_move, &resolution)
                 .await?
             {
                 SymlinkTransfer::Recreated => {
@@ -806,17 +816,22 @@ fn record_transfer_sample(
 }
 
 /// Creates at `dst` a symlink with the same target as `link`. An existing file or link at `dst`
-/// is replaced (the conflict was already resolved as overwrite); a directory is not.
-fn recreate_symlink(link: &Path, dst: &Path) -> std::io::Result<()> {
+/// is replaced only with explicit overwrite authorization; a directory is never removed.
+fn recreate_symlink(link: &Path, dst: &Path, overwrite: bool) -> std::io::Result<()> {
     let target = std::fs::read_link(link)?;
-    if let Ok(existing) = std::fs::symlink_metadata(dst) {
-        if existing.is_dir() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "a directory already exists at the destination",
-            ));
+    // Without explicit Overwrite, creation itself atomically rejects any occupied entry.
+    if overwrite {
+        match std::fs::symlink_metadata(dst) {
+            Ok(existing) if existing.is_dir() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "a directory already exists at the destination",
+                ));
+            }
+            Ok(_) => std::fs::remove_file(dst)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
-        std::fs::remove_file(dst)?;
     }
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1050,6 +1065,172 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn dangling_destination_symlink_honors_copy_conflict_policies() {
+        let runtime = app_runtime();
+        for (index, resolution) in [
+            ConflictResolution::Fail,
+            ConflictResolution::Skip,
+            ConflictResolution::Rename,
+            ConflictResolution::Overwrite,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join("source");
+            let destination = temp.path().join("copy.txt");
+            let first_candidate = temp.path().join("copy (1).txt");
+            let renamed = temp.path().join("copy (2).txt");
+            std::fs::write(temp.path().join("payload"), b"source content").unwrap();
+            std::os::unix::fs::symlink("payload", &source).unwrap();
+            std::os::unix::fs::symlink("old-missing-target", &destination).unwrap();
+            std::os::unix::fs::symlink("other-missing-target", &first_candidate).unwrap();
+
+            // Read metadata still follows links and may cache a missing target. Neither
+            // that negative cache nor a dangling Rename candidate may hide occupied entries.
+            assert!(runtime
+                .stat_path(destination.to_str().unwrap())
+                .await
+                .unwrap()
+                .is_none());
+            assert!(runtime
+                .destination_entry_exists(&destination)
+                .await
+                .unwrap());
+            assert!(!runtime.destination_entry_exists(&renamed).await.unwrap());
+            let sync = resolve_destination_path(&destination, &resolution);
+            let asynchronous = runtime
+                .resolve_destination_path_async(&destination, &resolution)
+                .await;
+            if matches!(resolution, ConflictResolution::Fail) {
+                assert!(sync.unwrap_err().contains("destination already exists"));
+                assert!(asynchronous
+                    .unwrap_err()
+                    .contains("destination already exists"));
+            } else {
+                let expected = if matches!(resolution, ConflictResolution::Rename) {
+                    &renamed
+                } else {
+                    &destination
+                };
+                assert_eq!(sync.unwrap(), *expected);
+                assert_eq!(asynchronous.unwrap(), *expected);
+            }
+
+            let result = Arc::clone(runtime)
+                .apply_pending_item(
+                    JobId(9_000_010 + index as u64),
+                    0,
+                    PendingFileItem {
+                        source: local_ref(&source),
+                        destination_path: destination.to_string_lossy().into_owned(),
+                    },
+                    false,
+                    resolution.clone(),
+                    0,
+                )
+                .await;
+            if matches!(resolution, ConflictResolution::Fail) {
+                assert!(result.unwrap_err().contains("destination already exists"));
+            } else {
+                result.unwrap();
+            }
+            let expected_target = if matches!(resolution, ConflictResolution::Overwrite) {
+                Path::new("payload")
+            } else {
+                Path::new("old-missing-target")
+            };
+            assert_eq!(std::fs::read_link(&destination).unwrap(), expected_target);
+            assert_eq!(
+                std::fs::read_link(&first_candidate).unwrap(),
+                Path::new("other-missing-target")
+            );
+            if matches!(resolution, ConflictResolution::Rename) {
+                assert_eq!(std::fs::read_link(&renamed).unwrap(), Path::new("payload"));
+            } else {
+                assert!(std::fs::symlink_metadata(&renamed).is_err());
+            }
+            assert_eq!(std::fs::read_link(&source).unwrap(), Path::new("payload"));
+            assert_eq!(std::fs::read(&source).unwrap(), b"source content");
+            assert!(!temp.path().join("old-missing-target").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_recreation_rejects_conflicts_appearing_after_preflight() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        std::fs::write(temp.path().join("payload"), b"content").unwrap();
+        std::os::unix::fs::symlink("payload", &source).unwrap();
+        std::os::unix::fs::symlink("missing", &destination).unwrap();
+        for resolution in [
+            ConflictResolution::Fail,
+            ConflictResolution::Skip,
+            ConflictResolution::Rename,
+        ] {
+            // Invoke the mutation branch directly, as if the entry appeared after resolution.
+            assert!(app_runtime()
+                .transfer_local_symlink(&local_ref(&source), &destination, false, &resolution)
+                .await
+                .is_err());
+            assert_eq!(
+                std::fs::read_link(&destination).unwrap(),
+                Path::new("missing")
+            );
+            assert!(!temp.path().join("missing").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn destination_probe_errors_are_not_absence() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let parent = temp.path().join("loop");
+        let destination = parent.join("destination");
+        std::os::unix::fs::symlink("missing", &source).unwrap();
+        // Unlike chmod-based denial, a looping parent reliably errors even as root.
+        std::os::unix::fs::symlink("loop", &parent).unwrap();
+        let probe_error = std::fs::symlink_metadata(&destination).unwrap_err();
+        assert_ne!(probe_error.kind(), std::io::ErrorKind::NotFound);
+        assert!(app_runtime()
+            .destination_entry_exists(&destination)
+            .await
+            .is_err());
+        for resolution in [
+            ConflictResolution::Fail,
+            ConflictResolution::Skip,
+            ConflictResolution::Rename,
+            ConflictResolution::Overwrite,
+        ] {
+            assert!(resolve_destination_path(&destination, &resolution).is_err());
+            assert!(app_runtime()
+                .resolve_destination_path_async(&destination, &resolution)
+                .await
+                .is_err());
+            assert!(Arc::clone(app_runtime())
+                .apply_pending_item(
+                    JobId(9_000_020),
+                    0,
+                    PendingFileItem {
+                        source: local_ref(&source),
+                        destination_path: destination.to_string_lossy().into_owned(),
+                    },
+                    false,
+                    resolution,
+                    0,
+                )
+                .await
+                .is_err());
+        }
+        assert_eq!(std::fs::read_link(&parent).unwrap(), Path::new("loop"));
+        assert_eq!(std::fs::read_link(&source).unwrap(), Path::new("missing"));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn recreating_a_symlink_replaces_a_file_but_never_a_directory() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1058,7 +1239,7 @@ mod tests {
 
         let over_file = temp.path().join("over-file");
         std::fs::write(&over_file, b"old").expect("write file");
-        recreate_symlink(&link, &over_file).expect("replace file");
+        recreate_symlink(&link, &over_file, true).expect("replace file");
         assert_eq!(
             std::fs::read_link(&over_file).expect("read link"),
             Path::new("target.txt")
@@ -1066,7 +1247,7 @@ mod tests {
 
         let over_dir = temp.path().join("over-dir");
         std::fs::create_dir(&over_dir).expect("create dir");
-        assert!(recreate_symlink(&link, &over_dir).is_err());
+        assert!(recreate_symlink(&link, &over_dir, true).is_err());
         assert!(over_dir.is_dir());
     }
 }

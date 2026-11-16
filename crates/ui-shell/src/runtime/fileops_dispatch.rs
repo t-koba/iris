@@ -296,12 +296,24 @@ impl AppRuntime {
             .is_some())
     }
 
+    /// Destination occupancy is about the entry, not its target. Local probes bypass
+    /// metadata/negative caches so a dangling link (including one just created) is occupied.
+    pub(super) async fn destination_entry_exists(&self, path: &Path) -> Result<bool, String> {
+        let resolved = self.resolve_backend(path);
+        if resolved.kind == VolumeKind::Local
+            && !self.is_virtual_display_path(path.to_string_lossy().as_ref())
+        {
+            return directory_entry_exists(tokio::fs::symlink_metadata(path).await);
+        }
+        self.path_exists(path).await
+    }
+
     pub(super) async fn resolve_destination_path_async(
         &self,
         requested_dst: &Path,
         resolution: &ConflictResolution,
     ) -> Result<PathBuf, String> {
-        if !self.path_exists(requested_dst).await? {
+        if !self.destination_entry_exists(requested_dst).await? {
             return Ok(requested_dst.to_path_buf());
         }
         if !self.is_virtual_display_path(requested_dst.to_string_lossy().as_ref()) {
@@ -317,19 +329,10 @@ impl AppRuntime {
                 requested_dst.display()
             )),
             ConflictResolution::Rename => {
-                let stem = requested_dst
-                    .file_stem()
-                    .map(|segment| segment.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let ext = requested_dst
-                    .extension()
-                    .map(|segment| format!(".{}", segment.to_string_lossy()))
-                    .unwrap_or_default();
-                let mut index = 1u32;
+                let mut index = 1u64;
                 loop {
-                    let candidate =
-                        requested_dst.with_file_name(format!("{} ({}){}", stem, index, ext));
-                    if !self.path_exists(&candidate).await? {
+                    let candidate = numbered_sibling_path(requested_dst, index);
+                    if !self.destination_entry_exists(&candidate).await? {
                         return Ok(candidate);
                     }
                     index += 1;
