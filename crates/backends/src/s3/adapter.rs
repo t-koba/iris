@@ -840,29 +840,10 @@ impl BackendAdapter for S3Adapter {
     }
 
     async fn get_stable_id(&self, object: &ObjectRef) -> Result<StableId, BackendError> {
-        // The ETag serves as the stable id.
-        let key = self.object_key(object);
-        let response = self
-            .client()
-            .await?
-            .head_object()
-            .bucket(&self.config.bucket)
-            .key(&key)
-            .send()
-            .await
-            .map_err(|e| {
-                BackendError::Network(NetworkErrorDetail {
-                    message: format!("S3 head for stable_id failed: {}", e),
-                    is_timeout: false,
-                })
-            })?;
-
-        let etag = response
-            .e_tag()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| key.clone());
-
-        Ok(StableId(etag))
+        // S3 has no rename-stable file id. Use the exact object key so this
+        // agrees with list_names; an ETag is version metadata and is shared
+        // between distinct objects with identical content.
+        Ok(StableId(self.object_key(object)))
     }
 
     fn capabilities(&self) -> CapabilitySet {

@@ -598,6 +598,46 @@ async fn listing_identity_uses_exact_keys_not_shared_or_changed_etags() {
 }
 
 #[tokio::test]
+async fn stable_id_agrees_with_listing_and_ignores_etag() {
+    // Listing reports foo/file.txt with an ETag; a HEAD (if it were issued)
+    // would report a different ETag. Identity must be the exact key on both
+    // paths, so refresh/rename reconciliation cannot assign a second StableId.
+    let mut head_response = aws_smithy_runtime_api::http::Response::new(
+        aws_smithy_runtime_api::http::StatusCode::try_from(200).unwrap(),
+        SdkBody::empty(),
+    );
+    head_response.headers_mut().insert("etag", "\"head-etag\"");
+    let (adapter, http) = adapter_with_prefix(
+        vec![response(200, PREFIX_LIST_RESPONSE), Ok(head_response)],
+        Some("foo"),
+    );
+
+    let page = adapter.list_names(&object(""), None).await.unwrap();
+    let listed = page
+        .entries
+        .iter()
+        .find_map(|entry| match entry {
+            ListedEntry::WithMeta(entry) if entry.name.name == "file.txt" => {
+                Some(entry.name.object_ref.key.stable_id.clone())
+            }
+            _ => None,
+        })
+        .expect("listed file.txt");
+    assert_eq!(listed, StableId("foo/file.txt".to_string()));
+
+    let resolved = adapter.get_stable_id(&object("file.txt")).await.unwrap();
+    assert_eq!(resolved, listed);
+    assert_ne!(resolved, StableId("file-etag".to_string()));
+    assert_ne!(resolved, StableId("\"file-etag\"".to_string()));
+    assert_ne!(resolved, StableId("\"head-etag\"".to_string()));
+
+    // get_stable_id needs no HEAD request; the listing consumed the first
+    // response and the HEAD response must remain unconsumed.
+    assert_eq!(http.responses.lock().unwrap().len(), 1);
+    assert_eq!(http.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn configured_prefix_is_a_slash_delimited_root_for_listing_and_keys() {
     for configured_prefix in ["foo", "foo/"] {
         let (adapter, http) = adapter_with_prefix(
