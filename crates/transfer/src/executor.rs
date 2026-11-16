@@ -1875,6 +1875,223 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owned_range_installed_recovery_verifies_identity_chunks_and_move() {
+        for scenario in [
+            "copy",
+            "identity removed",
+            "owner removed",
+            "stage removed",
+            "replacement",
+            "checksum",
+            "incomplete",
+            "source mismatch",
+            "move",
+            "move replacement",
+            "move checksum",
+            "move verify failure",
+        ] {
+            let total_len = CHUNKED_RANGE_MIN_BYTES + 1;
+            let root = tempdir().unwrap();
+            let db = root.path().join("jobs.sqlite3");
+            let store = Arc::new(JobStore::open(&db).unwrap());
+            let job_id = JobId(45);
+            store
+                .save_job(&PersistedJob {
+                    id: job_id.clone(),
+                    state: JobState::Running,
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                    description: "installed range recovery".into(),
+                    tasks: vec![],
+                })
+                .unwrap();
+            let payload = vec![9; total_len as usize];
+            let mut source = MockBackend::new("source", false);
+            source.put("source", &payload);
+            let src = make_ref("source", "source");
+            let version = source_resume_identity(&source.stat(&src).await.unwrap()).unwrap();
+            let destination =
+                LocalFsAdapter::new(root.path().into(), BackendId("destination".into()));
+            let dst = make_ref("destination", "final");
+            let control = TransferControl::new();
+            let cancel = control.cancel_token();
+            source.on_second_range = Some(Box::new(move || {
+                cancel.cancel();
+                Ok(())
+            }));
+            let (tx, _rx) = watch::channel(ProgressInfo::single_file(0, Some(total_len), false));
+            assert!(owned_range_attempt(
+                &source,
+                &destination,
+                &dst,
+                &store,
+                &control,
+                &tx,
+                Some(&version)
+            )
+            .await
+            .is_err());
+            source.on_second_range = None;
+            let session = store.load_range_session(&job_id, 0).unwrap().unwrap();
+            assert!(session.file_identity.is_some());
+            let stage_path = root
+                .path()
+                .join(format!(".iris-range-{}", session.session_id));
+            // Prepare every chunk and durable journal row, then simulate the precise
+            // no-replace install boundary without a timing hook or process kill.
+            let stage = destination
+                .open_range_write(
+                    &dst,
+                    total_len,
+                    &session.session_id,
+                    &session.binding,
+                    session.file_identity.as_deref(),
+                )
+                .await
+                .unwrap();
+            for offset in (0..total_len).step_by(crate::chunked::CHUNKED_RANGE_CHUNK_BYTES as usize)
+            {
+                let len = (total_len - offset).min(crate::chunked::CHUNKED_RANGE_CHUNK_BYTES);
+                let bytes = payload[offset as usize..(offset + len) as usize].to_vec();
+                stage
+                    .write_range(
+                        Box::pin(std::io::Cursor::new(bytes.clone())),
+                        ByteRange {
+                            offset,
+                            length: Some(len),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                store
+                    .upsert_chunk_state(&iris_jobstore::repository::PersistedChunkStateRow {
+                        job_id: job_id.clone(),
+                        entry_index: 0,
+                        offset,
+                        len,
+                        state: PersistedChunkState::Completed,
+                        etag: Some(format!("stage:{}", session.session_id)),
+                        checksum: Some(crate::chunked::range_checksum(&bytes)),
+                    })
+                    .unwrap();
+            }
+            drop(stage);
+            store.flush().unwrap();
+            let final_path = root.path().join("final");
+            assert!(!final_path.exists());
+            std::fs::rename(stage_path.join("data"), &final_path).unwrap();
+            let mut original = None;
+            match scenario {
+                "identity removed" => std::fs::remove_file(stage_path.join("identity")).unwrap(),
+                "owner removed" => {
+                    std::fs::remove_file(stage_path.join("identity")).unwrap();
+                    std::fs::remove_file(stage_path.join("owner")).unwrap();
+                }
+                "stage removed" => std::fs::remove_dir_all(&stage_path).unwrap(),
+                "replacement" | "move replacement" => {
+                    // Keep the installed inode alive so even identical bytes/size
+                    // cannot accidentally reuse the recorded identity.
+                    let displaced = root.path().join("displaced");
+                    std::fs::rename(&final_path, &displaced).unwrap();
+                    original = Some(displaced);
+                    std::fs::write(&final_path, &payload).unwrap();
+                }
+                "checksum" | "move checksum" => {
+                    use std::io::Write;
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&final_path)
+                        .unwrap();
+                    file.write_all(b"corrupt").unwrap();
+                }
+                "incomplete" => {
+                    let mut row = store.load_chunk_states(&job_id).unwrap().pop().unwrap();
+                    row.state = PersistedChunkState::Pending;
+                    store.upsert_chunk_state(&row).unwrap();
+                    store.flush().unwrap();
+                }
+                "move verify failure" => source.put("source", &vec![7; total_len as usize]),
+                _ => (),
+            }
+            // A fresh store exercises durable proof, not an in-memory session.
+            drop(store);
+            let store = Arc::new(JobStore::open(&db).unwrap());
+            source.read_ranges.lock().unwrap().clear();
+            let result = if scenario.starts_with("move") {
+                let context = ResumableTransferContext {
+                    job_store: Arc::clone(&store),
+                    job_id: job_id.clone(),
+                    entry_index: 0,
+                };
+                move_via_relay_with_verify_and_control(
+                    &source,
+                    &src,
+                    &destination,
+                    &dst,
+                    &tx,
+                    MoveRelayOptions {
+                        resumable: Some(&context),
+                        user_requested_strong_verify: true,
+                        ..MoveRelayOptions::default()
+                    },
+                )
+                .await
+                .map(|_| ())
+            } else {
+                owned_range_attempt(
+                    &source,
+                    &destination,
+                    &dst,
+                    &store,
+                    &TransferControl::new(),
+                    &tx,
+                    Some(if scenario == "source mismatch" {
+                        "changed"
+                    } else {
+                        &version
+                    }),
+                )
+                .await
+            };
+            let succeeds = matches!(
+                scenario,
+                "copy" | "identity removed" | "owner removed" | "stage removed" | "move"
+            );
+            assert_eq!(result.is_ok(), succeeds, "{scenario}: {result:?}");
+            if succeeds {
+                assert_eq!(std::fs::read(&final_path).unwrap(), payload, "{scenario}");
+                assert!(
+                    store.load_range_session(&job_id, 0).unwrap().is_none(),
+                    "{scenario}"
+                );
+                assert!(
+                    store.load_chunk_states(&job_id).unwrap().is_empty(),
+                    "{scenario}"
+                );
+                assert!(!stage_path.exists(), "{scenario}");
+                if scenario == "move" {
+                    assert_eq!(source.deleted_paths(), vec!["source".to_owned()]);
+                    // No range reads for copying; the full read is move verification.
+                    assert_eq!(source.read_ranges().len(), 1);
+                    assert!(source.read_ranges()[0].is_none());
+                } else {
+                    assert!(
+                        source.read_ranges().is_empty(),
+                        "recovery reread source: {scenario}"
+                    );
+                }
+            } else {
+                assert!(source.deleted_paths().is_empty(), "{scenario}");
+                assert!(source.get("source").is_some(), "{scenario}");
+                if !matches!(scenario, "checksum" | "move checksum") {
+                    assert_eq!(std::fs::read(&final_path).unwrap(), payload, "{scenario}");
+                }
+            }
+            drop(original);
+        }
+    }
+
+    #[tokio::test]
     async fn owned_range_restart_resume_validates_session_and_cleans_lifecycle() {
         for scenario in [
             "resume",
@@ -2060,7 +2277,13 @@ mod tests {
                         version = Some("v2");
                     }
                     let owner = destination
-                        .open_range_write(&dst, total_len, &session.session_id, &session.binding)
+                        .open_range_write(
+                            &dst,
+                            total_len,
+                            &session.session_id,
+                            &session.binding,
+                            session.file_identity.as_deref(),
+                        )
                         .await
                         .unwrap();
                     let result = owned_range_attempt(

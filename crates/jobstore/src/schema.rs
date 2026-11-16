@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS persisted_range_sessions (
     binding TEXT NOT NULL,
     staging_path TEXT NOT NULL,
     total_len INTEGER NOT NULL,
+    file_identity TEXT,
     PRIMARY KEY (job_id, entry_index),
     FOREIGN KEY (job_id) REFERENCES persisted_jobs (id) ON DELETE CASCADE
 );
@@ -88,6 +89,15 @@ pub fn open(path: Option<&Path>, mmap_bytes: u64) -> rusqlite::Result<Connection
             "ALTER TABLE persisted_multipart_uploads
              ADD COLUMN cleanup_pending INTEGER NOT NULL DEFAULT 0;",
         )?;
+    }
+    let has_file_identity: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('persisted_range_sessions')
+         WHERE name = 'file_identity')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_file_identity {
+        conn.execute_batch("ALTER TABLE persisted_range_sessions ADD COLUMN file_identity TEXT;")?;
     }
     Ok(conn)
 }

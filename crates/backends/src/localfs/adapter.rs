@@ -574,6 +574,7 @@ impl BackendAdapter for LocalFsAdapter {
         final_size: u64,
         session_id: &str,
         binding: &str,
+        file_identity: Option<&str>,
     ) -> Result<Box<dyn RangeWriteSession + '_>, BackendError> {
         self.check_conflict_support(&ConflictResolution::Fail)?;
         let dst_path = self.resolve(dst)?;
@@ -583,9 +584,38 @@ impl BackendAdapter for LocalFsAdapter {
         .map_err(|e| BackendError::Internal(Box::new(e)))?;
         std::fs::create_dir_all(dir.parent().expect("staging parent"))
             .map_err(|e| BackendError::Internal(Box::new(e)))?;
-        let stage =
-            iris_platform_integration::staging::OwnedStage::reopen(&dir, binding, final_size)
-                .map_err(|e| BackendError::Internal(Box::new(e)))?;
+        use iris_platform_integration::staging::{InstalledStage, OwnedStage};
+        let stage = match OwnedStage::reopen(&dir, binding, final_size) {
+            Ok(stage) => {
+                if let Some(recorded) = file_identity {
+                    if stage
+                        .file_identity()
+                        .map_err(|e| BackendError::Internal(Box::new(e)))?
+                        != recorded
+                    {
+                        return Err(BackendError::Internal(Box::new(std::io::Error::other(
+                            "range file identity mismatch",
+                        ))));
+                    }
+                }
+                PersistentRangeFile::Staged(stage)
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && file_identity.is_some() =>
+            {
+                PersistentRangeFile::Installed(
+                    InstalledStage::reopen(
+                        &dir,
+                        binding,
+                        final_size,
+                        &dst_path,
+                        file_identity.unwrap(),
+                    )
+                    .map_err(|e| BackendError::Internal(Box::new(e)))?,
+                )
+            }
+            Err(error) => return Err(BackendError::Internal(Box::new(error))),
+        };
         Ok(Box::new(PersistentLocalRangeWrite {
             stage: std::sync::Arc::new(stage),
             dst_path,
@@ -825,19 +855,51 @@ fn invalid_cursor_error(cursor: &str, reason: &str) -> BackendError {
     )))
 }
 
+enum PersistentRangeFile {
+    Staged(iris_platform_integration::staging::OwnedStage),
+    Installed(iris_platform_integration::staging::InstalledStage),
+}
+
+impl PersistentRangeFile {
+    fn open_data(&self) -> std::io::Result<std::fs::File> {
+        match self {
+            Self::Staged(stage) => stage.open_data(),
+            Self::Installed(stage) => stage.open_data(),
+        }
+    }
+}
+
 struct PersistentLocalRangeWrite {
-    stage: std::sync::Arc<iris_platform_integration::staging::OwnedStage>,
+    stage: std::sync::Arc<PersistentRangeFile>,
     dst_path: PathBuf,
     final_size: u64,
 }
 
 #[async_trait]
 impl RangeWriteSession for PersistentLocalRangeWrite {
+    fn file_identity(&self) -> Result<Option<String>, BackendError> {
+        match &*self.stage {
+            PersistentRangeFile::Staged(stage) => stage.file_identity(),
+            PersistentRangeFile::Installed(stage) => Ok(stage.file_identity().to_owned()),
+        }
+        .map(Some)
+        .map_err(|e| BackendError::Internal(Box::new(e)))
+    }
+
+    fn is_installed(&self) -> bool {
+        matches!(&*self.stage, PersistentRangeFile::Installed(_))
+    }
+
     async fn write_range(
         &self,
         reader: Pin<Box<dyn AsyncRead + Send>>,
         range: ByteRange,
     ) -> Result<(), BackendError> {
+        if self.is_installed() {
+            return Err(BackendError::Unsupported {
+                operation: "write installed range session",
+            });
+        }
         let stage = std::sync::Arc::clone(&self.stage);
         let final_size = self.final_size;
         // The task retains the lock even if the caller's future is dropped while
@@ -848,8 +910,8 @@ impl RangeWriteSession for PersistentLocalRangeWrite {
                 .map_err(|e| BackendError::Internal(Box::new(e)))?;
             write_range_to_file(file, reader, range, final_size).await?;
             stage
-                .data
-                .sync_data()
+                .open_data()
+                .and_then(|file| file.sync_data())
                 .map_err(|e| BackendError::Internal(Box::new(e)))
         })
         .await
@@ -872,22 +934,27 @@ impl RangeWriteSession for PersistentLocalRangeWrite {
     }
 
     async fn complete(self: Box<Self>) -> Result<(), BackendError> {
-        self.stage
-            .validate()
-            .map_err(|e| BackendError::Internal(Box::new(e)))?;
-        self.stage
-            .data
-            .sync_all()
-            .map_err(|e| BackendError::Internal(Box::new(e)))?;
         let stage = std::sync::Arc::try_unwrap(self.stage).map_err(|_| {
             BackendError::Internal(Box::new(std::io::Error::other(
                 "staging IO is still active",
             )))
         })?;
-        install_with_conflict(&stage.path(), &self.dst_path, &ConflictResolution::Fail)?;
-        stage
-            .remove_after_install()
-            .map_err(|e| BackendError::Internal(Box::new(e)))
+        match stage {
+            PersistentRangeFile::Staged(stage) => {
+                stage
+                    .validate()
+                    .and_then(|()| stage.data.sync_all())
+                    .map_err(|e| BackendError::Internal(Box::new(e)))?;
+                install_with_conflict(&stage.path(), &self.dst_path, &ConflictResolution::Fail)?;
+                // Jobstore owns filesystem cleanup. Its durable identity survives
+                // every cleanup boundary until both session and chunks are removed.
+                Ok(())
+            }
+            PersistentRangeFile::Installed(stage) => stage
+                .open_data()
+                .map(|_| ())
+                .map_err(|e| BackendError::Internal(Box::new(e))),
+        }
     }
 }
 
@@ -1075,6 +1142,72 @@ mod tests {
             display_path: name.into(),
             ..root_ref(backend_id)
         }
+    }
+
+    #[tokio::test]
+    async fn persistent_range_installed_recovery_is_read_only_and_rechecks_identity() {
+        use iris_platform_integration::staging::{decode_path, remove, OwnedStage};
+        let root = TempDir::new().unwrap();
+        let id = BackendId("range-recovery".into());
+        let adapter = LocalFsAdapter::new(root.path().into(), id.clone());
+        let dst = file_ref(&id, "final");
+        let dir = decode_path(&adapter.range_staging_path(&dst, "a-1").unwrap()).unwrap();
+        let stage = OwnedStage::create(&dir, "binding", 4).unwrap();
+        let identity = stage.file_identity().unwrap();
+        drop(stage);
+        assert!(adapter
+            .open_range_write(&dst, 4, "a-1", "binding", Some("[0,0]"))
+            .await
+            .is_err());
+        // Nullable legacy proof can be established only by normal stage validation.
+        let session = adapter
+            .open_range_write(&dst, 4, "a-1", "binding", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            session.file_identity().unwrap().as_deref(),
+            Some(identity.as_str())
+        );
+        session
+            .write_range(
+                Box::pin(std::io::Cursor::new(b"data".to_vec())),
+                ByteRange {
+                    offset: 0,
+                    length: Some(4),
+                },
+            )
+            .await
+            .unwrap();
+        drop(session);
+        std::fs::rename(dir.join("data"), root.path().join("final")).unwrap();
+        assert!(adapter
+            .open_range_write(&dst, 4, "a-1", "binding", None)
+            .await
+            .is_err());
+        assert!(adapter
+            .open_range_write(&dst, 4, "a-1", "binding", Some("[0,0]"))
+            .await
+            .is_err());
+        let session = adapter
+            .open_range_write(&dst, 4, "a-1", "binding", Some(&identity))
+            .await
+            .unwrap();
+        assert!(session.is_installed());
+        let range = ByteRange {
+            offset: 0,
+            length: Some(4),
+        };
+        assert_eq!(session.read_range(range.clone()).await.unwrap(), b"data");
+        assert!(session
+            .write_range(Box::pin(std::io::Cursor::new(b"oops".to_vec())), range)
+            .await
+            .is_err());
+        // Replace after verified reads: completion must reopen and compare identity.
+        std::fs::rename(root.path().join("final"), root.path().join("original")).unwrap();
+        std::fs::write(root.path().join("final"), b"data").unwrap();
+        assert!(session.complete().await.is_err());
+        assert_eq!(std::fs::read(root.path().join("final")).unwrap(), b"data");
+        remove(&dir, "binding", 4).unwrap();
     }
 
     #[tokio::test]

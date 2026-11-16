@@ -25,18 +25,28 @@ const WRITE_FROM_READER_LENGTH_EXCEEDED_OPERATION: &str =
     "write_from_reader stream exceeds content length";
 const WRITE_FROM_READER_BUFFER_BYTES: usize = 8 * 1024;
 
-/// An exclusively owned staging object, never the public destination. Persisted
+/// An exclusively owned staging object, or its identity-proven installed file. Persisted
 /// chunks are reusable only in a reopened session with the exact identity binding;
 /// checksums or matching public-destination bytes alone never establish ownership.
 #[async_trait]
 pub trait RangeWriteSession: Send + Sync {
+    /// Opaque stable OS file identity, persisted before any write or install.
+    fn file_identity(&self) -> Result<Option<String>, BackendError> {
+        Ok(None)
+    }
+
+    /// Installed recovery is read-only and requires every journaled range to verify.
+    fn is_installed(&self) -> bool {
+        false
+    }
+
     async fn write_range(
         &self,
         reader: Pin<Box<dyn AsyncRead + Send>>,
         range: ByteRange,
     ) -> Result<(), BackendError>;
 
-    /// Read only this owned stage to validate a persisted completed range.
+    /// Read only this owned file to validate a persisted completed range.
     async fn read_range(&self, _range: ByteRange) -> Result<Vec<u8>, BackendError> {
         Err(BackendError::Unsupported {
             operation: "read owned staging range",
@@ -142,6 +152,7 @@ pub trait BackendAdapter: Send + Sync {
         _final_size: u64,
         _session_id: &str,
         _binding: &str,
+        _file_identity: Option<&str>,
     ) -> Result<Box<dyn RangeWriteSession + '_>, BackendError> {
         Err(BackendError::Unsupported {
             operation: "persistent range staging",

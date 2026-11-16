@@ -150,9 +150,12 @@ as lossless opaque locators, not Unicode display paths.
 An OS file lock excludes concurrent session owners, including across processes.
 Restart opens existing staging only and checks its manifest, file identity, length,
 and binding. A completed range is reused only when its row names this session and
-its checksum matches bytes read from this owned stage. Legacy or stale range rows
-are not reused; public-destination bytes are never resume evidence. Missing or
-incomplete owned staging is discarded with its chunk rows and restarted fresh.
+its checksum matches bytes read from this owned file. Before any range write or
+installation, the stage's stable OS identity (Unix device/inode or Windows file
+identity) is durably CAS-bound to the exact journal session. A nullable additive
+field lets older sessions establish this proof only through normal stage validation.
+Legacy or stale range rows are not reused. Missing or incomplete owned staging
+without installation proof is discarded with its chunk rows and restarted fresh.
 Cleanup requires the exact intent binding and an exclusive lock; replaced data,
 mismatched bindings and live owners fail closed. Creation durably records immutable
 intent before data and its file identity, so interrupted creation is recoverable.
@@ -167,5 +170,12 @@ Explicit session abandonment and job deletion also remove owned staging before
 removing its journal; a live owner or identity mismatch refuses cleanup and keeps
 the journal for diagnosis. Marking a job completed or canceled cleans remaining sessions.
 Saving a finished job deletes it; a cancellation token alone does not delete a job.
-If installation was interrupted after moving staging, restart does not infer success
-from the final path; terminal cleanup can still remove the remaining owner manifest.
+If installation was interrupted after moving staging, missing stage data or metadata
+permits read-only recovery only when the final path opens as the journal's exact
+recorded OS file identity. Path, length, timestamps and matching bytes alone never
+prove ownership. The source/session binding and every completed chunk checksum must
+still verify; incomplete journals fail closed without writes. Completion rechecks
+the final identity and does not install again. Jobstore cleanup owns stage removal
+and retains the durable proof until session/chunk cleanup commits, including across
+interrupted filesystem cleanup. No recovery path overwrites or deletes the public
+destination; move still verifies the recovered copy before deleting its source.

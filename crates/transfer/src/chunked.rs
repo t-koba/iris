@@ -779,7 +779,7 @@ pub(crate) async fn copy_chunked_with_range_writes(
         .map_err(|e| BackendError::Internal(Box::new(e)))?;
         let mut retried_stage = false;
         let staging = loop {
-            let session = match recorder
+            let mut session = match recorder
                 .job_store
                 .load_range_session(&recorder.job_id, recorder.entry_index)
                 .map_err(jobstore_error_to_backend_error)?
@@ -835,6 +835,7 @@ pub(crate) async fn copy_chunked_with_range_writes(
                         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     );
                     let session = PersistedRangeSession {
+                        file_identity: None,
                         job_id: recorder.job_id.clone(),
                         entry_index: recorder.entry_index,
                         staging_path: dst_backend.range_staging_path(dst, &session_id)?,
@@ -850,7 +851,13 @@ pub(crate) async fn copy_chunked_with_range_writes(
                 }
             };
             let staging = match dst_backend
-                .open_range_write(dst, total_len, &session.session_id, &session.binding)
+                .open_range_write(
+                    dst,
+                    total_len,
+                    &session.session_id,
+                    &session.binding,
+                    session.file_identity.as_deref(),
+                )
                 .await
             {
                 Ok(staging) => staging,
@@ -869,6 +876,15 @@ pub(crate) async fn copy_chunked_with_range_writes(
                     continue;
                 }
             };
+            if session.file_identity.is_none() {
+                if let Some(identity) = staging.file_identity()? {
+                    recorder
+                        .job_store
+                        .bind_range_file_identity(&session, &identity)
+                        .map_err(jobstore_error_to_backend_error)?;
+                    session.file_identity = Some(identity);
+                }
+            }
             // The nonce in each range row binds it to this stage, not to similarly
             // shaped ranges left by an earlier attempt or bytes at the public path.
             recorder.etag = Some(format!("stage:{}", session.session_id));
@@ -909,6 +925,11 @@ pub(crate) async fn copy_chunked_with_range_writes(
                     }
                 }
                 recorder.record(range, PersistedChunkState::Pending, None)?;
+            }
+            if staging.is_installed() && (invalid_stage || resumed.iter().any(|done| !done)) {
+                return Err(BackendError::Internal(Box::new(std::io::Error::other(
+                    "installed range session requires every completed chunk checksum",
+                ))));
             }
             if invalid_stage {
                 drop(staging);

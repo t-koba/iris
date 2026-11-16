@@ -44,7 +44,7 @@ struct Owner {
 
 pub struct OwnedStage {
     dir: PathBuf,
-    owner: File,
+    _owner: File,
     pub data: File,
 }
 
@@ -170,7 +170,7 @@ impl OwnedStage {
         cleanup.0 = None;
         Ok(Self {
             dir: dir.into(),
-            owner,
+            _owner: owner,
             data,
         })
     }
@@ -178,6 +178,10 @@ impl OwnedStage {
     pub fn reopen(dir: &Path, binding: &str, len: u64) -> io::Result<Self> {
         // Never recreate a deleted journal's staging directory.
         Self::open_inner(dir, binding, len, false)
+    }
+
+    pub fn file_identity(&self) -> io::Result<String> {
+        file_identity(&self.data)
     }
 
     pub fn path(&self) -> PathBuf {
@@ -200,22 +204,79 @@ impl OwnedStage {
         }
         Ok(file)
     }
+}
 
-    /// Call only after the data was atomically moved, or while retaining this lock.
-    pub fn remove_after_install(self) -> io::Result<()> {
-        let dir = self.dir.clone();
-        match std::fs::symlink_metadata(self.path()) {
+/// A read-only installed file proven by the journal's stable OS identity.
+/// Hold any surviving owner lock until verification/completion has finished.
+pub struct InstalledStage {
+    path: PathBuf,
+    identity: String,
+    len: u64,
+    _owner: Option<File>,
+}
+
+fn file_identity(file: &File) -> io::Result<String> {
+    Ok(serde_json::to_string(&handle_identity(file)?)?)
+}
+
+impl InstalledStage {
+    pub fn reopen(
+        dir: &Path,
+        binding: &str,
+        len: u64,
+        path: &Path,
+        recorded: &str,
+    ) -> io::Result<Self> {
+        // Never bypass normal ownership validation while stage data still exists.
+        match std::fs::symlink_metadata(dir.join("data")) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => (),
-            Ok(_) => return Err(invalid()), // never remove a post-install replacement
             Err(e) => return Err(e),
+            Ok(_) => return Err(invalid()),
         }
-        // Delete the owner pathname while its OS lock is still held. Reopen is
-        // existing-only, so no new owner can enter during terminal removal.
-        std::fs::remove_file(dir.join("identity"))?;
-        std::fs::remove_file(dir.join("owner"))?;
-        drop(self.data);
-        drop(self.owner);
-        std::fs::remove_dir(dir)
+        match std::fs::symlink_metadata(dir) {
+            Ok(meta) if meta.file_type().is_dir() => (),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e),
+            Ok(_) => return Err(invalid()),
+        }
+        let owner = match regular(&dir.join("owner")) {
+            Ok(()) => {
+                let mut owner = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(dir.join("owner"))?;
+                owner.try_lock().map_err(io::Error::other)?;
+                let saved: Owner = serde_json::from_reader(&mut owner)?;
+                if saved.binding != binding || saved.len != len {
+                    return Err(invalid());
+                }
+                Some(owner)
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        let installed = Self {
+            path: path.into(),
+            identity: recorded.into(),
+            len,
+            _owner: owner,
+        };
+        installed.open_data()?;
+        Ok(installed)
+    }
+
+    pub fn file_identity(&self) -> &str {
+        &self.identity
+    }
+
+    /// Reopen and compare the handle, including at completion, never just the path.
+    pub fn open_data(&self) -> io::Result<File> {
+        regular(&self.path)?;
+        let file = File::open(&self.path)?;
+        if file_identity(&file)? != self.identity || file.metadata()?.len() != self.len {
+            return Err(invalid());
+        }
+        Ok(file)
     }
 }
 
@@ -340,8 +401,8 @@ mod tests {
         assert!(OwnedStage::reopen(&path, "another identity", 4).is_err());
         assert!(remove(&path, "another identity", 4).is_err());
         let stage = OwnedStage::reopen(&path, "job-entry-version-destination", 4).unwrap();
-        // An interrupted atomic install leaves the owner manifest, not resumable
-        // data. Cleanup may discard the manifest but never consults the final path.
+        // A normal stage reopen rejects installed data. Terminal cleanup may
+        // discard the manifest but never consults the final path.
         std::fs::rename(stage.path(), root.path().join("final")).unwrap();
         drop(stage);
         assert!(OwnedStage::reopen(&path, "job-entry-version-destination", 4).is_err());

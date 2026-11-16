@@ -39,6 +39,11 @@ enum WriteCommand {
         session: PersistedRangeSession,
         ack: mpsc::Sender<Result<(), JobStoreError>>,
     },
+    BindRangeFileIdentity {
+        session: PersistedRangeSession,
+        identity: String,
+        ack: mpsc::Sender<Result<(), JobStoreError>>,
+    },
     RemoveRangeSession {
         job_id: JobId,
         entry_index: u64,
@@ -150,6 +155,19 @@ impl JobStore {
         self.writer
             .send_with_ack(|ack| WriteCommand::SaveRangeSession {
                 session: session.clone(),
+                ack,
+            })
+    }
+
+    pub fn bind_range_file_identity(
+        &self,
+        session: &PersistedRangeSession,
+        identity: &str,
+    ) -> Result<(), JobStoreError> {
+        self.writer
+            .send_with_ack(|ack| WriteCommand::BindRangeFileIdentity {
+                session: session.clone(),
+                identity: identity.into(),
                 ack,
             })
     }
@@ -432,6 +450,14 @@ fn apply_command(
         WriteCommand::SaveRangeSession { session, ack } => {
             send_repository_result(ack, repository.save_range_session(&session))
         }
+        WriteCommand::BindRangeFileIdentity {
+            session,
+            identity,
+            ack,
+        } => send_repository_result(
+            ack,
+            repository.bind_range_file_identity(&session, &identity),
+        ),
         WriteCommand::RemoveRangeSession {
             job_id,
             entry_index,

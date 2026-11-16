@@ -83,6 +83,7 @@ pub struct PersistedRangeSession {
     pub session_id: String,
     pub binding: String,
     pub staging_path: String,
+    pub file_identity: Option<String>,
     pub total_len: u64,
 }
 
@@ -357,6 +358,11 @@ impl JobStoreRepository {
     }
 
     pub fn save_range_session(&self, session: &PersistedRangeSession) -> Result<(), JobStoreError> {
+        if session.file_identity.is_some() {
+            return Err(JobStoreError::Io(std::io::Error::other(
+                "new range session already has file identity",
+            )));
+        }
         // Insert only: a competing attempt must not replace another owner's journal.
         let inserted = self.conn.execute(
             "INSERT INTO persisted_range_sessions (job_id, entry_index, session_id, binding, staging_path, total_len)
@@ -404,6 +410,43 @@ impl JobStoreRepository {
         Ok(())
     }
 
+    /// Bind only the exact observed session; never replace an existing proof.
+    pub fn bind_range_file_identity(
+        &self,
+        session: &PersistedRangeSession,
+        identity: &str,
+    ) -> Result<(), JobStoreError> {
+        // The file may be installed immediately after this acknowledgement.
+        // Unlike ordinary progress rows, this proof must survive a power loss.
+        let synchronous: i64 = self
+            .conn
+            .pragma_query_value(None, "synchronous", |row| row.get(0))?;
+        self.conn.pragma_update(None, "synchronous", "FULL")?;
+        let result = self.conn.execute(
+            "UPDATE persisted_range_sessions SET file_identity = ?1
+             WHERE job_id = ?2 AND entry_index = ?3 AND session_id = ?4
+             AND binding = ?5 AND staging_path = ?6 AND total_len = ?7
+             AND file_identity IS ?8 AND (file_identity IS NULL OR file_identity = ?1)",
+            rusqlite::params![
+                identity,
+                session.job_id.0 as i64,
+                session.entry_index as i64,
+                session.session_id,
+                session.binding,
+                session.staging_path,
+                session.total_len as i64,
+                session.file_identity
+            ],
+        );
+        self.conn.pragma_update(None, "synchronous", synchronous)?;
+        if result? != 1 {
+            return Err(JobStoreError::Io(std::io::Error::other(
+                "range file identity changed",
+            )));
+        }
+        Ok(())
+    }
+
     pub fn load_range_session(
         &self,
         job_id: &JobId,
@@ -411,9 +454,9 @@ impl JobStoreRepository {
     ) -> Result<Option<PersistedRangeSession>, JobStoreError> {
         use rusqlite::OptionalExtension;
         Ok(self.conn.query_row(
-            "SELECT session_id, binding, staging_path, total_len FROM persisted_range_sessions WHERE job_id = ?1 AND entry_index = ?2",
+            "SELECT session_id, binding, staging_path, total_len, file_identity FROM persisted_range_sessions WHERE job_id = ?1 AND entry_index = ?2",
             rusqlite::params![job_id.0 as i64, entry_index as i64],
-            |row| Ok(PersistedRangeSession { job_id: job_id.clone(), entry_index, session_id: row.get(0)?, binding: row.get(1)?, staging_path: row.get(2)?, total_len: row.get::<_, i64>(3)? as u64 }),
+            |row| Ok(PersistedRangeSession { job_id: job_id.clone(), entry_index, session_id: row.get(0)?, binding: row.get(1)?, staging_path: row.get(2)?, total_len: row.get::<_, i64>(3)? as u64, file_identity: row.get(4)? }),
         ).optional()?)
     }
 
@@ -743,6 +786,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("stage");
         let mut session = PersistedRangeSession {
+            file_identity: None,
             job_id: job.id.clone(),
             entry_index: 0,
             session_id: "a".into(),
@@ -767,6 +811,73 @@ mod tests {
         );
         repo.discard_range_session(&session).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn range_identity_migration_cas_and_interrupted_cleanup_preserve_proof() {
+        use iris_platform_integration::staging::{encode_path, OwnedStage};
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("jobs.sqlite3");
+        let stage_path = root.path().join("stage");
+        let repo = JobStoreRepository::open(&db).unwrap();
+        let job = make_test_job();
+        repo.save_job(&job).unwrap();
+        let mut session = PersistedRangeSession {
+            job_id: job.id.clone(),
+            entry_index: 0,
+            session_id: "session".into(),
+            binding: "job-entry-source-destination-layout".into(),
+            staging_path: encode_path(&stage_path),
+            total_len: 4,
+            file_identity: None,
+        };
+        repo.save_range_session(&session).unwrap();
+        // A v1 store predating the additive proof field must retain its jobs
+        // and journal, but cannot prove installation until normal stage validation.
+        repo.conn
+            .execute_batch("ALTER TABLE persisted_range_sessions DROP COLUMN file_identity;")
+            .unwrap();
+        drop(repo);
+        let repo = JobStoreRepository::open(&db).unwrap();
+        assert_eq!(
+            repo.load_range_session(&job.id, 0).unwrap(),
+            Some(session.clone())
+        );
+        assert_eq!(
+            repo.load_job(&job.id).unwrap().unwrap().tasks.len(),
+            job.tasks.len()
+        );
+        let stage = OwnedStage::reopen(&stage_path, &session.binding, 4).unwrap();
+        let identity = stage.file_identity().unwrap();
+        let mut stale = session.clone();
+        stale.binding = "other".into();
+        assert!(repo.bind_range_file_identity(&stale, &identity).is_err());
+        repo.bind_range_file_identity(&session, &identity).unwrap();
+        assert!(repo.bind_range_file_identity(&session, &identity).is_err());
+        session.file_identity = Some(identity.clone());
+        repo.bind_range_file_identity(&session, &identity).unwrap();
+        assert!(repo.bind_range_file_identity(&session, "[0,0]").is_err());
+        assert_eq!(
+            repo.conn
+                .pragma_query_value(None, "synchronous", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        std::fs::rename(stage.path(), root.path().join("final")).unwrap();
+        drop(stage);
+        // Simulate the first deletion in filesystem cleanup, before SQLite's
+        // session/chunk deletion commits. Installation proof stays in the journal.
+        std::fs::remove_file(stage_path.join("identity")).unwrap();
+        drop(repo);
+        let repo = JobStoreRepository::open(&db).unwrap();
+        assert_eq!(
+            repo.load_range_session(&job.id, 0).unwrap(),
+            Some(session.clone())
+        );
+        repo.discard_range_session(&session).unwrap();
+        assert!(repo.load_range_session(&job.id, 0).unwrap().is_none());
+        assert!(!stage_path.exists());
+        assert_eq!(std::fs::read(root.path().join("final")).unwrap(), [0; 4]);
     }
 
     #[test]
