@@ -1,5 +1,7 @@
 use rusqlite::Connection;
-use std::path::Path;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 
 const SCHEMA_VERSION: i64 = 2;
 
@@ -73,6 +75,312 @@ CREATE INDEX IF NOT EXISTS idx_directory_snapshot_entries_generation
 ";
 
 /// A database with a different schema version is a disposable cache; it is rebuilt.
+/// Retire its owned thumbnail files first so rebuilding cannot lose their ownership.
 pub fn open(path: Option<&Path>, mmap_bytes: u64) -> rusqlite::Result<Connection> {
-    iris_core_domain::sqlite::open(path, mmap_bytes, SCHEMA_VERSION, SCHEMA)
+    let owned = path
+        .map(|path| {
+            real_directory(
+                &path
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join("thumbnail-cache"),
+            )
+        })
+        .transpose()
+        .map_err(io_error)?
+        .flatten();
+    if let (Some(path), Some(owned)) = (path, owned.as_deref()) {
+        retire_before_rebuild(path, owned)?;
+    }
+    let conn = iris_core_domain::sqlite::open(path, mmap_bytes, SCHEMA_VERSION, SCHEMA)?;
+    if let Some(owned) = owned {
+        // Failed deletions remain owned by this directory and are retried on every open,
+        // including opens where the schema already has the current version.
+        reclaim_retired(&owned);
+    }
+    Ok(conn)
+}
+
+fn io_error(error: io::Error) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+}
+
+/// Do not follow a cache/retirement directory symlink to someone else's files.
+fn real_directory(path: &Path) -> io::Result<Option<PathBuf>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => fs::canonicalize(path).map(Some),
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn retire_before_rebuild(db_path: &Path, owned: &Path) -> rusqlite::Result<()> {
+    if !db_path.try_exists().map_err(io_error)? {
+        return Ok(());
+    }
+    let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version == SCHEMA_VERSION
+        || !conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'thumbnail_entries')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare("SELECT cache_file_path FROM thumbnail_entries")?;
+    for path in stmt.query_map([], |row| row.get::<_, String>(0))? {
+        retire_file(Path::new(&path?), owned).map_err(io_error)?;
+    }
+    Ok(())
+}
+
+fn retire_file(path: &Path, owned: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(()), // Never move symlinks or directories from SQL rows.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    let path = fs::canonicalize(path)?;
+    let retired = owned.join(".retired");
+    if !path.starts_with(owned) || path.starts_with(&retired) {
+        return Ok(());
+    }
+    match fs::create_dir(&retired) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            if real_directory(&retired)?.as_deref() != Some(retired.as_path()) {
+                return Err(io::Error::other(
+                    "thumbnail retirement path is not a real directory",
+                ));
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    // Reserve a unique filename, then replace only our own empty placeholder.
+    // Closing its handle before rename also permits replacement on Windows.
+    let destination = tempfile::NamedTempFile::new_in(&retired)?.into_temp_path();
+    fs::rename(path, &destination)?;
+    destination.keep().map_err(|error| error.error)?;
+    Ok(())
+}
+
+fn reclaim_retired(owned: &Path) {
+    let retired = owned.join(".retired");
+    if !matches!(real_directory(&retired), Ok(Some(_))) {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(&retired) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            if let Err(error) = fs::remove_file(entry.path()) {
+                tracing::warn!(%error, "thumbnail retirement deletion will be retried");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn old_catalog(db: &Path, paths: &[&Path]) {
+        let conn = Connection::open(db).unwrap();
+        conn.execute_batch(
+            "PRAGMA user_version = 1;
+             CREATE TABLE thumbnail_entries (cache_file_path TEXT NOT NULL);",
+        )
+        .unwrap();
+        for path in paths {
+            conn.execute(
+                "INSERT INTO thumbnail_entries VALUES (?1)",
+                [path.to_str().unwrap()],
+            )
+            .unwrap();
+        }
+    }
+
+    fn version(conn: &Connection) -> i64 {
+        conn.pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn rebuild_reclaims_only_owned_thumbnails_and_preserves_caching() {
+        let runtime = tempfile::tempdir().unwrap();
+        let db = runtime.path().join("catalog.sqlite3");
+        let cache = runtime.path().join("thumbnail-cache");
+        fs::create_dir(&cache).unwrap();
+        let owned = cache.join("old.jpg");
+        let outside = runtime.path().join("unrelated.jpg");
+        let unindexed = cache.join("unindexed.jpg");
+        for path in [&owned, &outside, &unindexed] {
+            fs::write(path, b"thumbnail").unwrap();
+        }
+        // Also exercise missing and duplicate rows, and a lexical prefix sibling.
+        let sibling = runtime.path().join("thumbnail-cache-other");
+        fs::create_dir(&sibling).unwrap();
+        let sibling_file = sibling.join("unrelated.jpg");
+        fs::write(&sibling_file, b"unrelated").unwrap();
+        old_catalog(
+            &db,
+            &[
+                &owned,
+                &owned,
+                &cache.join("missing.jpg"),
+                &outside,
+                &sibling_file,
+                &cache,
+            ],
+        );
+
+        let conn = open(Some(&db), 0).unwrap();
+        assert_eq!(version(&conn), SCHEMA_VERSION);
+        assert!(!owned.exists());
+        assert_eq!(fs::read(&outside).unwrap(), b"thumbnail");
+        assert_eq!(fs::read(&unindexed).unwrap(), b"thumbnail");
+        assert_eq!(fs::read(&sibling_file).unwrap(), b"unrelated");
+        assert_eq!(fs::read_dir(cache.join(".retired")).unwrap().count(), 0);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM thumbnail_entries", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+
+        let fresh = cache.join("new.jpg");
+        fs::write(&fresh, b"new").unwrap();
+        conn.execute_batch(
+            "INSERT INTO cached_objects (backend_id, stable_id, display_path, last_accessed_secs)
+             VALUES ('local', 'new', 'new.jpg', 1);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO thumbnail_entries
+             (backend_id, stable_id, dimension, format, cache_file_path, byte_size, generated_at_secs)
+             VALUES ('local', 'new', 256, 'jpeg', ?1, 3, 1)",
+            [fresh.to_str().unwrap()],
+        ).unwrap();
+        // An ordinary reopen must retain the new generation, and eviction still owns it.
+        drop(conn);
+        let conn = open(Some(&db), 0).unwrap();
+        assert_eq!(fs::read(&fresh).unwrap(), b"new");
+        let policy = crate::cache_policy::CachePolicy {
+            max_thumbnail_bytes: 0,
+            ..Default::default()
+        };
+        assert_eq!(policy.evict_thumbnail_bytes(&conn).unwrap(), 1);
+        assert!(!fresh.exists());
+    }
+
+    #[test]
+    fn failed_retirement_preserves_rows_until_retry() {
+        let runtime = tempfile::tempdir().unwrap();
+        let db = runtime.path().join("catalog.sqlite3");
+        let cache = runtime.path().join("thumbnail-cache");
+        fs::create_dir(&cache).unwrap();
+        let owned = cache.join("old.jpg");
+        fs::write(&owned, b"old").unwrap();
+        old_catalog(&db, &[&owned]);
+        // A file blocking the retirement directory fails regardless of permissions/root.
+        let retired = cache.join(".retired");
+        fs::write(&retired, b"obstacle").unwrap();
+        assert!(open(Some(&db), 0).is_err());
+        let conn = Connection::open(&db).unwrap();
+        assert_eq!(version(&conn), 1);
+        assert_eq!(
+            conn.query_row("SELECT cache_file_path FROM thumbnail_entries", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+            owned.to_str().unwrap()
+        );
+        assert_eq!(fs::read(&owned).unwrap(), b"old");
+        drop(conn);
+        fs::remove_file(retired).unwrap();
+        assert_eq!(version(&open(Some(&db), 0).unwrap()), SCHEMA_VERSION);
+        assert!(!owned.exists());
+    }
+
+    #[test]
+    fn reopens_reclaim_pending_retirement_without_removing_directories() {
+        let runtime = tempfile::tempdir().unwrap();
+        let db = runtime.path().join("catalog.sqlite3");
+        drop(open(Some(&db), 0).unwrap());
+        let retired = runtime.path().join("thumbnail-cache/.retired");
+        let nested = retired.join("keep-directory");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("keep-file"), b"keep").unwrap();
+        let pending = retired.join("pending");
+        fs::write(&pending, b"retry").unwrap();
+        drop(open(Some(&db), 0).unwrap());
+        assert!(!pending.exists());
+        assert_eq!(fs::read(nested.join("keep-file")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn absent_old_thumbnail_table_and_in_memory_opens_work() {
+        assert_eq!(version(&open(None, 0).unwrap()), SCHEMA_VERSION);
+        let runtime = tempfile::tempdir().unwrap();
+        let db = runtime.path().join("catalog.sqlite3");
+        fs::create_dir(runtime.path().join("thumbnail-cache")).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("PRAGMA user_version = 1; CREATE TABLE obsolete (id INTEGER);")
+            .unwrap();
+        drop(conn);
+        let conn = open(Some(&db), 0).unwrap();
+        assert_eq!(version(&conn), SCHEMA_VERSION);
+        assert!(conn.prepare("SELECT * FROM obsolete").is_err());
+        assert!(conn.prepare("SELECT * FROM thumbnail_entries").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_and_escaping_paths_are_not_retired() {
+        use std::os::unix::fs::symlink;
+
+        let runtime = tempfile::tempdir().unwrap();
+        let db = runtime.path().join("catalog.sqlite3");
+        let cache = runtime.path().join("thumbnail-cache");
+        fs::create_dir(&cache).unwrap();
+        let outside = runtime.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let file = outside.join("keep.jpg");
+        fs::write(&file, b"keep").unwrap();
+        let link = cache.join("link.jpg");
+        let directory_link = cache.join("escape");
+        symlink(&file, &link).unwrap();
+        symlink(&outside, &directory_link).unwrap();
+        old_catalog(
+            &db,
+            &[
+                &link,
+                &directory_link.join("keep.jpg"),
+                &cache.join("../outside/keep.jpg"),
+            ],
+        );
+        drop(open(Some(&db), 0).unwrap());
+        assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(&file).unwrap(), b"keep");
+
+        // A retirement-directory symlink must neither receive moves nor be cleaned.
+        symlink(&outside, cache.join(".retired")).unwrap();
+        drop(open(Some(&db), 0).unwrap());
+        assert_eq!(fs::read(&file).unwrap(), b"keep");
+        let owned = cache.join("old.jpg");
+        fs::write(&owned, b"old").unwrap();
+        let conn = Connection::open(&db).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute("INSERT INTO cached_objects (backend_id, stable_id, display_path, last_accessed_secs) VALUES ('local', 'old', 'old.jpg', 1)", []).unwrap();
+        conn.execute("INSERT INTO thumbnail_entries (backend_id, stable_id, dimension, format, cache_file_path, generated_at_secs) VALUES ('local', 'old', 256, 'jpeg', ?1, 1)", [owned.to_str().unwrap()]).unwrap();
+        drop(conn);
+        assert!(open(Some(&db), 0).is_err());
+        assert!(owned.exists());
+        assert_eq!(fs::read(&file).unwrap(), b"keep");
+    }
 }
