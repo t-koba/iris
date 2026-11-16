@@ -1,7 +1,7 @@
 use crate::chunked::{
     copy_chunked_to_multipart, copy_chunked_with_range_writes, read_chunked_to_vec,
-    should_use_chunked_range, should_use_chunked_range_write, ChunkRetryControls,
-    ChunkStateRecorder, ChunkedRangeWriteRequest, MultipartCopyRequest,
+    should_use_chunked_range, should_use_chunked_range_write, transfer_canceled,
+    ChunkRetryControls, ChunkStateRecorder, ChunkedRangeWriteRequest, MultipartCopyRequest,
     CHUNKED_RANGE_DEFAULT_IN_FLIGHT, CHUNKED_RANGE_MIN_BYTES,
 };
 use crate::error_handler::RetryPolicy;
@@ -532,7 +532,7 @@ pub async fn move_via_relay_with_verify_and_control(
     .await?;
 
     let verify_span = info_span!("transfer.verify");
-    let verdict = async {
+    let verification = async {
         verify_copy(
             src_backend,
             src,
@@ -543,14 +543,28 @@ pub async fn move_via_relay_with_verify_and_control(
         )
         .await
     }
-    .instrument(verify_span)
-    .await?;
+    .instrument(verify_span);
+    let verdict = if let Some(control) = control {
+        let cancel_token = control.cancel_token();
+        tokio::select! {
+            biased;
+            () = cancel_token.cancelled() => return transfer_canceled(),
+            verdict = verification => verdict?,
+        }
+    } else {
+        verification.await?
+    };
     if let Err(reason) = verdict {
         return Err(BackendError::Internal(Box::new(std::io::Error::other(
             reason,
         ))));
     }
 
+    // Cancellation can arrive in the same poll that completes verification. Keep both
+    // copies unless deletion has already begun; never interrupt an issued delete.
+    if control.is_some_and(|control| control.cancel_token().is_cancelled()) {
+        return transfer_canceled();
+    }
     delete_source_after_verify(src_backend, src).await?;
     Ok(copy_result)
 }
@@ -886,6 +900,12 @@ mod tests {
 
     type MockMultipartUploads = Arc<Mutex<HashMap<String, (String, HashMap<i32, Vec<u8>>)>>>;
 
+    struct VerificationReadGate {
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        cancel_on_finish: Option<TransferControl>,
+    }
+
     struct MockBackend {
         backend_id: String,
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
@@ -909,6 +929,7 @@ mod tests {
         multipart_interrupt_after_completion: bool,
         multipart_interrupted: tokio::sync::Notify,
         corrupt_writes: bool,
+        verification_read_gate: Option<Arc<VerificationReadGate>>,
     }
 
     impl MockBackend {
@@ -936,6 +957,7 @@ mod tests {
                 multipart_interrupt_after_completion: false,
                 multipart_interrupted: tokio::sync::Notify::new(),
                 corrupt_writes,
+                verification_read_gate: None,
             }
         }
 
@@ -1099,6 +1121,13 @@ mod tests {
             object: &ObjectRef,
             range: Option<ByteRange>,
         ) -> Result<ReadHandle, BackendError> {
+            if let Some(gate) = &self.verification_read_gate {
+                gate.started.notify_one();
+                gate.release.notified().await;
+                if let Some(control) = &gate.cancel_on_finish {
+                    control.cancel();
+                }
+            }
             self.read_ranges
                 .lock()
                 .expect("read_ranges lock")
@@ -1509,6 +1538,118 @@ mod tests {
             message: format!("injected {operation} failure"),
             is_timeout: false,
         })
+    }
+
+    async fn relay_move_with_blocked_verification(
+        cancel_while_pending: bool,
+        cancel_on_finish: bool,
+    ) {
+        let control = TransferControl::new();
+        let gate = Arc::new(VerificationReadGate {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            cancel_on_finish: cancel_on_finish.then(|| control.clone()),
+        });
+        let src_backend = Arc::new(MockBackend::new("src", false));
+        let mut dst_backend = MockBackend::new("dst", false);
+        // Only strong verification reads the destination, after the copy finishes.
+        dst_backend.verification_read_gate = Some(Arc::clone(&gate));
+        let dst_backend = Arc::new(dst_backend);
+        let payload = b"keep the completed destination";
+        src_backend.put("a.bin", payload);
+        let mut task = tokio::spawn({
+            let src_backend = Arc::clone(&src_backend);
+            let dst_backend = Arc::clone(&dst_backend);
+            let control = control.clone();
+            async move {
+                let (tx, _rx) = watch::channel(ProgressInfo::single_file(0, None, false));
+                move_via_relay_with_verify_and_control(
+                    src_backend.as_ref(),
+                    &make_ref("src", "a.bin"),
+                    dst_backend.as_ref(),
+                    &make_ref("dst", "b.bin"),
+                    &tx,
+                    MoveRelayOptions {
+                        control: Some(&control),
+                        user_requested_strong_verify: true,
+                        ..MoveRelayOptions::default()
+                    },
+                )
+                .await
+            }
+        });
+        let deadline = Duration::from_secs(2);
+        tokio::time::timeout(deadline, gate.started.notified())
+            .await
+            .expect("strong verification must start");
+        assert_eq!(
+            dst_backend.get("b.bin").as_deref(),
+            Some(payload.as_slice())
+        );
+        assert_eq!(dst_backend.stream_write_count(), 1);
+        assert!(src_backend.deleted_paths().is_empty());
+
+        let result = if cancel_while_pending {
+            control.cancel();
+            // The independent task must wake and return before we release verification.
+            let completed = tokio::time::timeout(deadline, &mut task).await;
+            gate.release.notify_one();
+            if completed.is_err() {
+                task.abort();
+            }
+            completed.expect("cancellation must wake blocked verification")
+        } else {
+            gate.release.notify_one();
+            tokio::time::timeout(deadline, &mut task)
+                .await
+                .expect("released verification must finish")
+        }
+        .expect("transfer task must not panic");
+
+        if cancel_while_pending || cancel_on_finish {
+            assert!(
+                src_backend.deleted_paths().is_empty(),
+                "canceled source was deleted"
+            );
+            let error = result.expect_err("canceled move must not succeed");
+            assert_eq!(error.to_string(), "internal error: transfer canceled");
+            let BackendError::Internal(inner) = error else {
+                panic!("expected the existing copy-cancellation representation");
+            };
+            assert_eq!(
+                inner.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::Interrupted
+            );
+            assert_eq!(
+                src_backend.get("a.bin").as_deref(),
+                Some(payload.as_slice())
+            );
+        } else {
+            assert_eq!(result.unwrap().bytes_transferred, payload.len() as u64);
+            assert_eq!(src_backend.deleted_paths(), vec!["a.bin"]);
+            assert!(src_backend.get("a.bin").is_none());
+        }
+        assert_eq!(
+            dst_backend.get("b.bin").as_deref(),
+            Some(payload.as_slice())
+        );
+        assert_eq!(dst_backend.stream_write_count(), 1);
+        assert!(dst_backend.deleted_paths().is_empty());
+    }
+
+    #[tokio::test]
+    async fn relay_move_cancellation_wakes_blocked_verification_and_retains_both_copies() {
+        relay_move_with_blocked_verification(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn relay_move_cancellation_at_verification_completion_skips_delete() {
+        relay_move_with_blocked_verification(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn relay_move_uncancelled_verifies_before_deleting_once() {
+        relay_move_with_blocked_verification(false, false).await;
     }
 
     #[tokio::test]

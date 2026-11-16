@@ -289,13 +289,49 @@ async fn verify_and_delete_move(
     dst_backend: &dyn BackendAdapter,
     dst: &ObjectRef,
     high_risk_path: bool,
+    control: &TransferControl,
 ) -> Result<(), String> {
-    transfer_verify::verify_object_copy(src_backend, src, dst_backend, dst, high_risk_path).await?;
+    verify_before_move_delete(
+        control,
+        transfer_verify::verify_object_copy(src_backend, src, dst_backend, dst, high_risk_path),
+    )
+    .await?;
     src_backend
         .delete(src, DeleteMode::Permanent)
         .await
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+// Verification is read-only and may be dropped; the subsequent irreversible delete is not.
+async fn verify_before_move_delete(
+    control: &TransferControl,
+    verification: impl std::future::Future<Output = Result<(), String>>,
+) -> Result<(), String> {
+    let cancel_token = control.cancel_token();
+    tokio::select! {
+        biased;
+        () = cancel_token.cancelled() => return Err("transfer canceled".to_string()),
+        result = verification => result?,
+    }
+    if cancel_token.is_cancelled() {
+        return Err("transfer canceled".to_string());
+    }
+    Ok(())
+}
+
+fn relay_move_error(error: BackendError) -> String {
+    // BackendError's Display prefixes Internal errors, while the job driver recognizes
+    // this bare cancellation marker. Normalize only the copy path's exact representation.
+    if let BackendError::Internal(inner) = &error {
+        if inner.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            error.kind() == std::io::ErrorKind::Interrupted
+                && error.to_string() == "transfer canceled"
+        }) {
+            return "transfer canceled".to_string();
+        }
+    }
+    error.to_string()
 }
 
 async fn wait_if_paused_or_canceled(control: &TransferControl) -> Result<(), String> {
@@ -610,6 +646,81 @@ fn cloud_account_backend_id(config: &CloudAccountConfig) -> &str {
 
 fn is_cloud_backend_id(backend_id: &BackendId) -> bool {
     backend_id.0.starts_with("s3:") || backend_id.0.starts_with("pcloud:")
+}
+
+#[cfg(test)]
+mod move_cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn relay_move_cancellation_maps_to_driver_marker_only() {
+        for (kind, message, expected) in [
+            (
+                std::io::ErrorKind::Interrupted,
+                "transfer canceled",
+                "transfer canceled",
+            ),
+            (
+                std::io::ErrorKind::Other,
+                "transfer canceled",
+                "internal error: transfer canceled",
+            ),
+            (
+                std::io::ErrorKind::Interrupted,
+                "another interruption",
+                "internal error: another interruption",
+            ),
+        ] {
+            let error = BackendError::Internal(Box::new(std::io::Error::new(kind, message)));
+            assert_eq!(relay_move_error(error), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn move_verification_guard_wakes_on_cancellation() {
+        let control = TransferControl::new();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn({
+            let control = control.clone();
+            async move {
+                verify_before_move_delete(&control, async {
+                    started_tx.send(()).unwrap();
+                    std::future::pending().await
+                })
+                .await
+            }
+        });
+        started_rx.await.unwrap();
+        control.cancel();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err("transfer canceled".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn move_verification_guard_rechecks_and_preserves_uncancelled_results() {
+        let control = TransferControl::new();
+        assert_eq!(
+            verify_before_move_delete(&control, async { Ok(()) }).await,
+            Ok(())
+        );
+        assert_eq!(
+            verify_before_move_delete(&control, async { Err("mismatch".to_string()) }).await,
+            Err("mismatch".to_string())
+        );
+        assert_eq!(
+            verify_before_move_delete(&control, async {
+                control.cancel();
+                Ok(())
+            })
+            .await,
+            Err("transfer canceled".to_string())
+        );
+    }
 }
 
 #[cfg(test)]

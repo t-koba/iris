@@ -497,22 +497,26 @@ impl AppRuntime {
 
             if is_move {
                 let dst_ref = self.object_ref_for_path(destination, &dst_resolved)?;
-                if src_resolved.kind == VolumeKind::Local
-                    && dst_resolved.kind == VolumeKind::Local
-                    && !self.is_virtual_display_path(&source.display_path)
-                    && !self.is_virtual_display_path(destination.to_string_lossy().as_ref())
-                {
-                    verify_directory_mirror(src_path, destination, high_risk_path).await?;
-                } else {
-                    self.verify_directory_copy(
-                        source,
-                        &src_resolved,
-                        &dst_ref,
-                        &dst_resolved,
-                        high_risk_path,
-                    )
-                    .await?;
-                }
+                verify_before_move_delete(control, async {
+                    if src_resolved.kind == VolumeKind::Local
+                        && dst_resolved.kind == VolumeKind::Local
+                        && !self.is_virtual_display_path(&source.display_path)
+                        && !self.is_virtual_display_path(destination.to_string_lossy().as_ref())
+                    {
+                        verify_directory_mirror(src_path, destination, high_risk_path).await?;
+                    } else {
+                        self.verify_directory_copy(
+                            source,
+                            &src_resolved,
+                            &dst_ref,
+                            &dst_resolved,
+                            high_risk_path,
+                        )
+                        .await?;
+                    }
+                    Ok(())
+                })
+                .await?;
                 self.delete_object(source, false).await?;
             }
 
@@ -594,6 +598,7 @@ impl AppRuntime {
                         dst_resolved.adapter.as_ref(),
                         &dst_ref,
                         high_risk_path,
+                        control,
                     )
                     .await?;
                     self.reconcile_cache_after_move(src, &src_resolved, dst, &dst_resolved)
@@ -624,7 +629,7 @@ impl AppRuntime {
                         },
                     )
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(relay_move_error)?;
 
                     self.reconcile_cache_after_move(src, &src_resolved, dst, &dst_resolved)
                         .await;

@@ -1317,7 +1317,7 @@ async fn wait_for_resume_or_cancel(
     }
 }
 
-fn transfer_canceled<T>() -> Result<T, BackendError> {
+pub(crate) fn transfer_canceled<T>() -> Result<T, BackendError> {
     Err(BackendError::Internal(Box::new(std::io::Error::new(
         std::io::ErrorKind::Interrupted,
         "transfer canceled",
