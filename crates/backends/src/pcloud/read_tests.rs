@@ -66,7 +66,10 @@ fn response(status: u16, headers: &str, body: &str) -> String {
 fn assert_safe(error: &BackendError) {
     let details = format!("{error}\n{error:?}");
     for forbidden in [SECRET, BODY, "http://", "127.0.0.1"] {
-        assert!(!details.contains(forbidden), "unsafe error: {details}");
+        assert!(
+            !details.contains(forbidden),
+            "sensitive response details escaped: {details}"
+        );
     }
     assert!(details.len() < 4096, "bounded error details");
 }
