@@ -819,7 +819,44 @@ fn record_transfer_sample(
 /// is replaced only with explicit overwrite authorization; a directory is never removed.
 fn recreate_symlink(link: &Path, dst: &Path, overwrite: bool) -> std::io::Result<()> {
     let target = std::fs::read_link(link)?;
-    // Without explicit Overwrite, creation itself atomically rejects any occupied entry.
+    recreate_symlink_with(
+        dst,
+        overwrite,
+        |destination| {
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&target, destination)
+            }
+            #[cfg(windows)]
+            {
+                // Windows needs to know the kind; creating links needs Developer Mode or elevation.
+                if std::fs::metadata(link).is_ok_and(|metadata| metadata.is_dir()) {
+                    std::os::windows::fs::symlink_dir(&target, destination)
+                } else {
+                    std::os::windows::fs::symlink_file(&target, destination)
+                }
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                let _ = (&target, destination);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "symlinks are unsupported on this platform",
+                ))
+            }
+        },
+        |staged, destination| std::fs::rename(staged, destination),
+    )
+}
+
+/// `create` must atomically create a new link or leave its path untouched on error, just
+/// like the platform symlink APIs. In particular, AlreadyExists never grants ownership.
+fn recreate_symlink_with(
+    dst: &Path,
+    overwrite: bool,
+    create: impl Fn(&Path) -> std::io::Result<()>,
+    replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     if overwrite {
         match std::fs::symlink_metadata(dst) {
             Ok(existing) if existing.is_dir() => {
@@ -828,34 +865,62 @@ fn recreate_symlink(link: &Path, dst: &Path, overwrite: bool) -> std::io::Result
                     "a directory already exists at the destination",
                 ));
             }
-            Ok(_) => std::fs::remove_file(dst)?,
+            Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
     }
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent)?;
+    let parent = dst
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    // Without explicit Overwrite, creation itself atomically rejects any occupied entry.
+    if !overwrite {
+        return create(dst);
     }
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(&target, dst)
-    }
-    #[cfg(windows)]
-    {
-        // Windows needs to know the kind; creating links needs Developer Mode or elevation.
-        if std::fs::metadata(link).is_ok_and(|metadata| metadata.is_dir()) {
-            std::os::windows::fs::symlink_dir(&target, dst)
-        } else {
-            std::os::windows::fs::symlink_file(&target, dst)
+
+    static NEXT_LINK: AtomicU64 = AtomicU64::new(0);
+    let staged = loop {
+        let candidate = parent.join(format!(
+            ".iris-link-{}-{}",
+            std::process::id(),
+            NEXT_LINK.fetch_add(1, Ordering::Relaxed)
+        ));
+        match create(&candidate) {
+            Ok(()) => break candidate,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+
+    // Same-filesystem replace-rename: Unix rename / Windows MoveFileExW with
+    // REPLACE_EXISTING (via std). If Windows refuses replacement (e.g. a sharing lock
+    // or directory link), fail closed, never unlink or move the original aside. This
+    // avoids a fallible backup/restore window altogether. A directory racing with
+    // our earlier check also cannot be replaced by a non-directory link on Unix.
+    match replace(&staged, dst) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // Only this successfully created entry belongs to us; never remove a collision.
+            remove_symlink_sync(&staged)?;
+            // A conflicting entry must not turn a failed commit into target-copy fallback.
+            if std::fs::symlink_metadata(dst).is_ok() {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    error,
+                ))
+            } else {
+                Err(error)
+            }
         }
     }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = (target, dst);
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "symlinks are unsupported on this platform",
-        ))
+}
+
+fn remove_symlink_sync(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(error) if cfg!(windows) => std::fs::remove_dir(path).map_err(|_| error),
+        result => result,
     }
 }
 
@@ -1228,6 +1293,105 @@ mod tests {
         }
         assert_eq!(std::fs::read_link(&parent).unwrap(), Path::new("loop"));
         assert_eq!(std::fs::read_link(&source).unwrap(), Path::new("missing"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_creation_failure_preserves_existing_file_or_dangling_link() {
+        for dangling in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let destination = temp.path().join("destination");
+            if dangling {
+                std::os::unix::fs::symlink("old-missing-target", &destination).unwrap();
+            } else {
+                std::fs::write(&destination, b"original bytes").unwrap();
+            }
+            let error = recreate_symlink_with(
+                &destination,
+                true,
+                |staged| {
+                    assert_ne!(staged, destination);
+                    assert_eq!(staged.parent(), destination.parent());
+                    // A missing parent forces a real creation error even when run as root.
+                    std::os::unix::fs::symlink("new-target", staged.join("missing/link"))
+                },
+                |_, _| panic!("creation failed: must not commit"),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+            if dangling {
+                assert_eq!(
+                    std::fs::read_link(&destination).unwrap(),
+                    Path::new("old-missing-target")
+                );
+            } else {
+                assert_eq!(std::fs::read(&destination).unwrap(), b"original bytes");
+            }
+            assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_commit_failure_preserves_destination_and_removes_staging() {
+        for dangling in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let destination = temp.path().join("destination");
+            if dangling {
+                std::os::unix::fs::symlink("old-missing-target", &destination).unwrap();
+            } else {
+                std::fs::write(&destination, b"original bytes").unwrap();
+            }
+            let error = recreate_symlink_with(
+                &destination,
+                true,
+                |staged| std::os::unix::fs::symlink("new-target", staged),
+                |staged, dst| {
+                    assert_eq!(dst, destination);
+                    assert_eq!(std::fs::read_link(staged).unwrap(), Path::new("new-target"));
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected replace failure (e.g. Windows sharing lock)",
+                    ))
+                },
+            )
+            .unwrap_err();
+            // Occupancy must stop the caller from falling back through the original entry.
+            assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+            if dangling {
+                assert_eq!(
+                    std::fs::read_link(&destination).unwrap(),
+                    Path::new("old-missing-target")
+                );
+            } else {
+                assert_eq!(std::fs::read(&destination).unwrap(), b"original bytes");
+            }
+            assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_commit_refuses_a_racing_directory_and_removes_staging() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("destination");
+        let error = recreate_symlink_with(
+            &destination,
+            true,
+            |staged| {
+                std::fs::create_dir(&destination).unwrap();
+                std::fs::write(destination.join("keep"), b"original bytes").unwrap();
+                std::os::unix::fs::symlink("new-target", staged)
+            },
+            |staged, dst| std::fs::rename(staged, dst),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(destination.join("keep")).unwrap(),
+            b"original bytes"
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
     }
 
     #[cfg(unix)]
