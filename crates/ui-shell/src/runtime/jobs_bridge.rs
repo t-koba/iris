@@ -14,6 +14,12 @@ impl AppRuntime {
         items: &[PendingFileItem],
         is_move: bool,
     ) -> Result<(), String> {
+        // Do not persist a lossy source and restore it later as an unmarked Unicode alias.
+        for item in items {
+            item.source
+                .ensure_operable()
+                .map_err(|error| error.to_string())?;
+        }
         let created_at = chrono::Utc::now().to_rfc3339();
         let tasks = items
             .iter()
@@ -100,6 +106,7 @@ impl AppRuntime {
 
             items.push(PendingFileItem {
                 source: ObjectRef {
+                    local_path_is_lossy: false,
                     key: ObjectKey {
                         backend_id: source_backend,
                         stable_id: StableId(

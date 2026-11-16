@@ -3,7 +3,7 @@ use crate::i18n::tr;
 
 pub fn current_dnd_operation(state: &AppState) -> Option<DndOperation> {
     let target = state.dnd_state.target()?;
-    let target_dir = dnd_target_directory(state, target)?;
+    let target_dir = dnd_target_directory(state, target).ok().flatten()?;
 
     match &state.dnd_state {
         DndState::Dragging {
@@ -57,8 +57,10 @@ pub fn perform_dnd_drop(state: &mut AppState) -> Task<Message> {
 
     state.dnd_state = DndState::Idle;
 
-    let Some(target_dir) = dnd_target_directory(state, target) else {
-        return Task::none();
+    let target_dir = match dnd_target_directory(state, target) {
+        Ok(Some(path)) => path,
+        Ok(None) => return Task::none(),
+        Err(error) => return Task::done(Message::OpenObjectCompleted(Err(error))),
     };
 
     let source_entries: Vec<_> = source_indices
@@ -116,8 +118,10 @@ pub fn perform_external_drop(
     let target = target.unwrap_or(DndTarget::PaneDirectory {
         pane: state.active_pane,
     });
-    let Some(target_dir) = dnd_target_directory(state, target) else {
-        return Task::none();
+    let target_dir = match dnd_target_directory(state, target) {
+        Ok(Some(path)) => path,
+        Ok(None) => return Task::none(),
+        Err(error) => return Task::done(Message::OpenObjectCompleted(Err(error))),
     };
 
     if source_paths.is_empty() {
@@ -171,26 +175,27 @@ pub fn perform_external_drop(
     start_pending_file_operation(state, items, is_move)
 }
 
-fn dnd_target_directory(state: &AppState, target: DndTarget) -> Option<PathBuf> {
-    match target {
-        DndTarget::PaneDirectory { pane } => {
-            let current_path = state.pane_checked(pane)?.current_path.trim();
-            if current_path.is_empty() {
-                None
-            } else {
-                Some(PathBuf::from(current_path))
-            }
-        }
+fn dnd_target_directory(state: &AppState, target: DndTarget) -> Result<Option<PathBuf>, String> {
+    let directory = match target {
+        DndTarget::PaneDirectory { pane } => state.pane_checked(pane).and_then(|pane| {
+            let current_path = pane.current_path.trim();
+            (!current_path.is_empty()).then(|| PathBuf::from(current_path))
+        }),
         DndTarget::Entry { pane, index } => {
-            let pane_state = state.pane_checked(pane)?;
-            let entry = pane_state.entry(index)?;
-            if entry.is_dir && !entry.is_inaccessible {
-                Some(PathBuf::from(&pane_state.current_path).join(&entry.name))
+            let entry = state.pane_checked(pane).and_then(|pane| pane.entry(index));
+            if let Some(entry) = entry {
+                entry
+                    .object_ref
+                    .ensure_operable()
+                    .map_err(|error| error.to_string())?;
+                (entry.is_dir && !entry.is_inaccessible)
+                    .then(|| PathBuf::from(&entry.object_ref.display_path))
             } else {
                 None
             }
         }
-    }
+    };
+    Ok(directory)
 }
 
 /// A move into the folder the item is already in does nothing, and a folder cannot be copied

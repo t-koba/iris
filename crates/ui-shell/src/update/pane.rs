@@ -207,6 +207,10 @@ pub fn handle_pane_message(
 
             if is_double_click {
                 if let Some(entry) = state.pane(pane_idx).entry(index) {
+                    if entry.object_ref.ensure_operable().is_err() {
+                        // Surface the normal open error instead of navigating into its alias.
+                        return open_object_task(entry.object_ref.clone());
+                    }
                     let entry_name = entry.name.clone();
                     let is_dir = entry.is_dir;
                     if is_dir {
@@ -260,6 +264,10 @@ pub fn handle_pane_message(
         PaneMessage::ActivateFocused => {
             if let Some(index) = state.pane(pane_idx).focused_index {
                 if let Some(entry) = state.pane(pane_idx).entry(index) {
+                    if entry.object_ref.ensure_operable().is_err() {
+                        // Surface the normal open error instead of navigating into its alias.
+                        return open_object_task(entry.object_ref.clone());
+                    }
                     let entry_name = entry.name.clone();
                     let object_ref = entry.object_ref.clone();
                     if entry.is_dir {

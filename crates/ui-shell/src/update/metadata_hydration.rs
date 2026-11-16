@@ -187,6 +187,7 @@ mod tests {
             metadata_level: level,
             ..ListEntry::new(
                 ObjectRef {
+                    local_path_is_lossy: false,
                     key: ObjectKey {
                         backend_id: BackendId("local".to_string()),
                         stable_id: StableId(format!("stable-{index}")),
@@ -238,6 +239,7 @@ mod tests {
             .insert("/tmp/b.txt".to_string());
 
         let stale_a = ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: BackendId("local".to_string()),
                 stable_id: StableId("stale-a".to_string()),

@@ -36,6 +36,9 @@ impl AppRuntime {
     }
 
     pub async fn rename_object(&self, target: &ObjectRef, new_name: &str) -> Result<(), String> {
+        target
+            .ensure_operable()
+            .map_err(|error| error.to_string())?;
         let old_path = PathBuf::from(&target.display_path);
         let new_path = old_path
             .parent()
@@ -182,6 +185,9 @@ impl AppRuntime {
         object: &ObjectRef,
         use_trash: bool,
     ) -> Result<(), String> {
+        object
+            .ensure_operable()
+            .map_err(|error| error.to_string())?;
         let path = Path::new(&object.display_path);
         let resolved = self.resolve_backend(path);
         let object_ref = self.source_object_ref(object, &resolved)?;
@@ -232,6 +238,9 @@ impl AppRuntime {
     }
 
     pub(super) async fn is_directory_object(&self, object: &ObjectRef) -> Result<bool, String> {
+        object
+            .ensure_operable()
+            .map_err(|error| error.to_string())?;
         let path = Path::new(&object.display_path);
         let resolved = self.resolve_backend(path);
         if resolved.kind == VolumeKind::Local && !self.is_virtual_display_path(&object.display_path)
@@ -253,6 +262,9 @@ impl AppRuntime {
         &self,
         object: &ObjectRef,
     ) -> Result<PathBuf, String> {
+        object
+            .ensure_operable()
+            .map_err(|error| error.to_string())?;
         let path = Path::new(&object.display_path);
         let resolved = self.resolve_backend(path);
         if resolved.kind == VolumeKind::Local && !self.is_virtual_display_path(&object.display_path)
@@ -346,6 +358,7 @@ impl AppRuntime {
         dir: &ObjectRef,
         resolved: &ResolvedBackend,
     ) -> Result<Vec<ListEntry>, String> {
+        dir.ensure_operable().map_err(|error| error.to_string())?;
         if self.negative_cache_contains(
             &resolved.backend_id,
             &dir.display_path,
@@ -455,9 +468,16 @@ pub(crate) async fn local_list_entry(
             let size = if is_dir { None } else { Some(metadata.len()) };
             let mtime = metadata.modified().ok();
             let ctime = metadata.created().ok();
-            let stable_id = get_stable_id_from_metadata(&full_path, &metadata)
-                .unwrap_or_else(|_| StableId(display_path.clone()));
+            let stable_id = if full_path.to_str().is_none() {
+                // Even hard-linked native names with the same display label stay distinct.
+                StableId(iris_platform_integration::staging::encode_path(&full_path))
+            } else {
+                get_stable_id_from_metadata(&full_path, &metadata).unwrap_or_else(|_| {
+                    StableId(iris_platform_integration::staging::encode_path(&full_path))
+                })
+            };
             let object_ref = ObjectRef {
+                local_path_is_lossy: full_path.to_str().is_none(),
                 key: ObjectKey {
                     backend_id: backend_id.clone(),
                     stable_id,
@@ -477,11 +497,12 @@ pub(crate) async fn local_list_entry(
         }
         Err(_) => {
             // Metadata could not be read (e.g. permission denied).
-            let stable_id = StableId(display_path.clone());
+            let stable_id = StableId(iris_platform_integration::staging::encode_path(&full_path));
             ListEntry {
                 is_inaccessible: true,
                 ..ListEntry::new(
                     ObjectRef {
+                        local_path_is_lossy: full_path.to_str().is_none(),
                         key: ObjectKey {
                             backend_id: backend_id.clone(),
                             stable_id,
@@ -502,6 +523,120 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_name_ui_listing_cache_and_operations_refuse_lossy_alias() {
+        use std::os::unix::ffi::OsStringExt;
+        let temp = tempfile::tempdir().unwrap();
+        let native = temp
+            .path()
+            .join(std::ffi::OsString::from_vec(b"native-\xff.txt".to_vec()));
+        let alias = temp.path().join("native-\u{fffd}.txt");
+        fs::write(&native, b"A").unwrap();
+        fs::write(&alias, b"replacement sibling B").unwrap();
+        let runtime = app_runtime();
+        let root = temp.path().to_str().unwrap();
+        // Exercise the progressive L0 listing and its persistent directory snapshot.
+        let entries = crate::update::helpers::read_directory(root.into(), true)
+            .await
+            .unwrap();
+        let cached = runtime.cached_directory_entries(root, true);
+        for entries in [&entries, &cached] {
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].name, entries[1].name);
+            assert_ne!(entries[0].object_ref.key, entries[1].object_ref.key);
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| entry.object_ref.local_path_is_lossy)
+                    .count(),
+                1
+            );
+        }
+        // L1 runtime enumeration must preserve the same refusal, not just the L0 path.
+        let l1 = local_list_entry(
+            native.clone(),
+            "native-\u{fffd}.txt".into(),
+            &runtime.backend_id_for_path(temp.path()),
+            &runtime.stable_id_for_path(temp.path()),
+        )
+        .await;
+        assert!(l1.object_ref.local_path_is_lossy);
+        for object in [
+            l1.object_ref,
+            cached
+                .iter()
+                .find(|entry| entry.object_ref.local_path_is_lossy)
+                .unwrap()
+                .object_ref
+                .clone(),
+        ] {
+            let expected = "local path cannot be represented losslessly as Unicode";
+            assert!(runtime
+                .stat_object(&object)
+                .await
+                .unwrap_err()
+                .contains(expected));
+            let updates = runtime.stat_objects(vec![object.clone()]).await;
+            assert!(updates[0].1.as_ref().unwrap_err().contains(expected));
+            assert!(runtime
+                .materialize_object_for_open(&object)
+                .await
+                .unwrap_err()
+                .contains(expected));
+            assert!(runtime
+                .rename_object(&object, "renamed.txt")
+                .await
+                .unwrap_err()
+                .contains(expected));
+            assert!(runtime
+                .delete_objects(std::slice::from_ref(&object), false)
+                .await
+                .unwrap_err()
+                .contains(expected));
+            assert!(runtime
+                .ensure_safe_transfer_destination(&object, &temp.path().join("copy.txt"))
+                .await
+                .unwrap_err()
+                .contains(expected));
+            for is_move in [false, true] {
+                let error = Arc::clone(runtime)
+                    .apply_pending_item(
+                        JobId(9_900_002),
+                        0,
+                        PendingFileItem {
+                            source: object.clone(),
+                            destination_path: temp.path().join("copy.txt").to_str().unwrap().into(),
+                        },
+                        is_move,
+                        ConflictResolution::Overwrite,
+                        0,
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(error.contains(expected));
+            }
+            let id = JobId(9_900_001);
+            assert!(runtime
+                .persist_pending_job(
+                    &id,
+                    "native path refusal",
+                    &[PendingFileItem {
+                        source: object,
+                        destination_path: temp.path().join("copy.txt").to_str().unwrap().into(),
+                    }],
+                    false
+                )
+                .unwrap_err()
+                .contains(expected));
+            assert!(runtime.job_store.load_job(&id).unwrap().is_none());
+        }
+        assert!(!temp.path().join("renamed.txt").exists());
+        assert!(!temp.path().join("copy.txt").exists());
+        assert_eq!(fs::read(native).unwrap(), b"A");
+        assert_eq!(fs::read(alias).unwrap(), b"replacement sibling B");
+    }
+
     #[tokio::test]
     async fn rename_object_refuses_existing_local_destination() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -511,6 +646,7 @@ mod tests {
         fs::write(&dst_path, b"existing").expect("write destination");
 
         let source = ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: BackendId("local".to_string()),
                 stable_id: StableId("src".to_string()),

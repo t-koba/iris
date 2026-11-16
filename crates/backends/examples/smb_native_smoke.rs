@@ -248,6 +248,7 @@ fn env_or(name: &str, default: &str) -> String {
 
 fn object_ref(backend_id: &BackendId, display_path: &str) -> ObjectRef {
     ObjectRef {
+        local_path_is_lossy: false,
         key: ObjectKey {
             backend_id: backend_id.clone(),
             stable_id: StableId(display_path.to_string()),

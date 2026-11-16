@@ -56,6 +56,13 @@ impl AppRuntime {
             ));
         }
 
+        // Name strings are safe keys only after all local names round-trip.
+        for entry in src_children.iter().chain(&dst_children) {
+            entry
+                .object_ref
+                .ensure_operable()
+                .map_err(|error| error.to_string())?;
+        }
         let dst_by_name = dst_children
             .into_iter()
             .map(|entry| (entry.name.clone(), entry))

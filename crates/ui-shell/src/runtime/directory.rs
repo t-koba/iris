@@ -31,6 +31,7 @@ impl AppRuntime {
             .filter(|entry| show_hidden || !entry.name.starts_with('.'))
             .map(|entry| iris_core_domain::types::list::ListEntry {
                 object_ref: ObjectRef {
+                    local_path_is_lossy: entry.local_path_is_lossy,
                     key: ObjectKey {
                         backend_id: backend_id.clone(),
                         stable_id: StableId(entry.stable_id),
@@ -105,6 +106,7 @@ impl AppRuntime {
         let cached = entries
             .iter()
             .map(|entry| CachedDirectoryEntry {
+                local_path_is_lossy: entry.object_ref.local_path_is_lossy,
                 stable_id: entry.object_ref.key.stable_id.0.clone(),
                 display_path: entry.object_ref.display_path.clone(),
                 name: entry.name.clone(),
@@ -447,6 +449,9 @@ impl AppRuntime {
     }
 
     pub async fn stat_object(&self, object: &ObjectRef) -> Result<MetadataResult, String> {
+        object
+            .ensure_operable()
+            .map_err(|error| error.to_string())?;
         let path = Path::new(&object.display_path);
         let resolved = self.resolve_backend(path);
         if resolved.kind == VolumeKind::Local && !self.is_virtual_display_path(&object.display_path)
@@ -478,6 +483,10 @@ impl AppRuntime {
         let mut remote_jobs = Vec::new();
 
         for object in objects {
+            if let Err(error) = object.ensure_operable() {
+                updates.push((object, Err(error.to_string())));
+                continue;
+            }
             let path = PathBuf::from(&object.display_path);
             let resolved = self.resolve_backend(&path);
             if resolved.kind == VolumeKind::Local
@@ -601,6 +610,9 @@ impl AppRuntime {
         &self,
         object: &ObjectRef,
     ) -> Result<ImageMetadata, String> {
+        object
+            .ensure_operable()
+            .map_err(|error| error.to_string())?;
         let path = Path::new(&object.display_path);
         let resolved = self.resolve_backend(path);
         if resolved.kind == VolumeKind::Local && path.exists() {
@@ -1013,6 +1025,7 @@ mod tests {
         let parent_stable_id = runtime.stable_id_for_path(temp.path());
         let entry = |name: &str, stable_id: &str| iris_core_domain::types::list::ListEntry {
             object_ref: ObjectRef {
+                local_path_is_lossy: false,
                 key: ObjectKey {
                     backend_id: backend_id.clone(),
                     stable_id: StableId(stable_id.to_string()),

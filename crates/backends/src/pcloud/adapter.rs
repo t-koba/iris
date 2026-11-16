@@ -218,6 +218,7 @@ impl PCloudAdapter {
         };
 
         Ok(ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: self.backend_id.clone(),
                 stable_id,
@@ -330,6 +331,7 @@ impl PCloudAdapter {
                 };
                 Err(BackendError::Conflict {
                     object: ObjectRef {
+                        local_path_is_lossy: false,
                         key: ObjectKey {
                             backend_id: self.backend_id.clone(),
                             stable_id: StableId("unknown".to_string()),
@@ -996,6 +998,7 @@ mod tests {
             format!("http://{address}"),
         );
         let directory = ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id,
                 stable_id: StableId("folder:0".into()),

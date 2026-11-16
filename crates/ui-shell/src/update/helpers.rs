@@ -557,11 +557,14 @@ async fn build_local_l0_entry_safe(
     backend_id: &BackendId,
     parent_stable_id: &StableId,
 ) -> ListEntry {
-    let display_path = entry.path().to_string_lossy().to_string();
+    let path = entry.path();
+    let display_path = path.to_string_lossy().to_string();
+    let stable_id = StableId(iris_platform_integration::staging::encode_path(&path));
     let object_ref = ObjectRef {
+        local_path_is_lossy: path.to_str().is_none(),
         key: ObjectKey {
             backend_id: backend_id.clone(),
-            stable_id: StableId(display_path.clone()),
+            stable_id,
         },
         parent_stable_id: Some(parent_stable_id.clone()),
         display_path,

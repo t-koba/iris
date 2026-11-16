@@ -662,6 +662,16 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
             state.active_dialog = None;
             if let Some((targets, use_trash)) = delete_info {
                 state.active_pane_mut().clear_selection();
+                // Trash bypasses the adapter and flattens refs into paths for undo.
+                if let Some(error) = targets
+                    .iter()
+                    .find_map(|target| target.ensure_operable().err())
+                {
+                    return Task::done(Message::DeleteCompleted {
+                        trashed_items: Vec::new(),
+                        result: Err(error.to_string()),
+                    });
+                }
                 if use_trash {
                     let paths = targets
                         .iter()
@@ -1052,6 +1062,7 @@ mod tests {
 
     fn object_ref(path: &str) -> ObjectRef {
         ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: BackendId("local:test".to_string()),
                 stable_id: StableId(path.to_string()),

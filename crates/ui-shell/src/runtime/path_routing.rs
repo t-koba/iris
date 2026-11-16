@@ -122,6 +122,7 @@ impl AppRuntime {
                     }
                 });
             return Ok(ObjectRef {
+                local_path_is_lossy: false,
                 key: ObjectKey {
                     backend_id: resolved.backend_id.clone(),
                     stable_id,
@@ -139,6 +140,7 @@ impl AppRuntime {
             .and_then(|_| get_local_stable_id(path).ok())
             .unwrap_or_else(|| StableId(format!("pending:{}", path.to_string_lossy())));
         Ok(ObjectRef {
+            local_path_is_lossy: path.to_str().is_none(),
             key: ObjectKey {
                 backend_id: resolved.backend_id.clone(),
                 stable_id,
@@ -225,6 +227,9 @@ impl AppRuntime {
         source: &ObjectRef,
         resolved: &ResolvedBackend,
     ) -> Result<ObjectRef, String> {
+        source
+            .ensure_operable()
+            .map_err(|error| error.to_string())?;
         let path = Path::new(&source.display_path);
         let mut object = self.object_ref_for_path(path, resolved)?;
         object.key.stable_id = source.key.stable_id.clone();

@@ -158,6 +158,7 @@ impl FakeApi {
 
 fn object(stable_id: &str, name: &str) -> ObjectRef {
     ObjectRef {
+        local_path_is_lossy: false,
         key: ObjectKey {
             backend_id: BackendId("pcloud:test".into()),
             stable_id: StableId(stable_id.into()),

@@ -58,6 +58,7 @@ pub struct DirectorySnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CachedDirectoryEntry {
+    pub local_path_is_lossy: bool,
     pub stable_id: String,
     pub display_path: String,
     pub name: String,
@@ -252,6 +253,7 @@ mod tests {
     fn snapshot_generation_stays_visible_until_replacement_completes() {
         let mut repo = CatalogRepository::open_in_memory().unwrap();
         let first = CachedDirectoryEntry {
+            local_path_is_lossy: false,
             stable_id: "first-id".to_string(),
             display_path: "/root/first.txt".to_string(),
             name: "first.txt".to_string(),
@@ -292,6 +294,7 @@ mod tests {
         );
 
         let second = CachedDirectoryEntry {
+            local_path_is_lossy: false,
             stable_id: "second-id".to_string(),
             display_path: "/root/second".to_string(),
             name: "second".to_string(),
@@ -335,6 +338,7 @@ mod tests {
     fn snapshot_keeps_distinct_paths_that_share_a_stable_id() {
         let mut repo = CatalogRepository::open_in_memory().unwrap();
         let entry = |name: &str| CachedDirectoryEntry {
+            local_path_is_lossy: false,
             stable_id: "shared-inode".to_string(),
             display_path: format!("/root/{name}"),
             name: name.to_string(),

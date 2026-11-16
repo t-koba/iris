@@ -37,4 +37,19 @@ pub struct ObjectRef {
     pub key: ObjectKey,
     pub parent_stable_id: Option<StableId>,
     pub display_path: String,
+    /// The local native path could not round-trip through `display_path`. This marker
+    /// must survive cloning and caching; string-addressed operations must refuse it.
+    pub local_path_is_lossy: bool,
+}
+
+impl ObjectRef {
+    /// Until the operation/job layer carries native paths, never address their lossy alias.
+    pub fn ensure_operable(&self) -> Result<(), super::error::BackendError> {
+        if self.local_path_is_lossy {
+            return Err(super::error::BackendError::Unsupported {
+                operation: "local path cannot be represented losslessly as Unicode",
+            });
+        }
+        Ok(())
+    }
 }

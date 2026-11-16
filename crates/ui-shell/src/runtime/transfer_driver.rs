@@ -77,6 +77,9 @@ impl AppRuntime {
         source: &ObjectRef,
         destination: &Path,
     ) -> Result<(), String> {
+        source
+            .ensure_operable()
+            .map_err(|error| error.to_string())?;
         let is_directory = if !self.is_virtual_display_path(&source.display_path) {
             tokio::fs::symlink_metadata(&source.display_path)
                 .await
@@ -324,6 +327,9 @@ impl AppRuntime {
                 is_move,
                 resolution,
             } = request;
+            source
+                .ensure_operable()
+                .map_err(|error| error.to_string())?;
             let dst_path = Path::new(destination);
             wait_if_paused_or_canceled(control).await?;
             if self.job_manager.get_state(job_id) != Some(JobState::Running) {
@@ -463,6 +469,10 @@ impl AppRuntime {
 
             let mut total_bytes = 0u64;
             for child in self.list_directory_children(source, &src_resolved).await? {
+                child
+                    .object_ref
+                    .ensure_operable()
+                    .map_err(|error| error.to_string())?;
                 let child_dst = destination.join(&child.name);
                 let child_dst_string = child_dst.to_string_lossy().to_string();
                 let outcome = self
@@ -938,6 +948,7 @@ mod tests {
 
     fn local_ref(path: &Path) -> ObjectRef {
         ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: BackendId("local".to_string()),
                 stable_id: StableId(path.to_string_lossy().into_owned()),

@@ -639,6 +639,7 @@ fn list_entry(backend_id: &str, display_path: &str, is_dir: bool, size: Option<u
 
 fn object_ref(backend_id: &str, display_path: &str) -> ObjectRef {
     ObjectRef {
+        local_path_is_lossy: false,
         key: ObjectKey {
             backend_id: BackendId(backend_id.into()),
             stable_id: StableId(display_path.into()),

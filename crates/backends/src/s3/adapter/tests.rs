@@ -113,6 +113,7 @@ fn adapter_with_prefix(
 
 fn object(path: &str) -> ObjectRef {
     ObjectRef {
+        local_path_is_lossy: false,
         key: ObjectKey {
             backend_id: BackendId("s3:test".into()),
             stable_id: StableId(path.into()),

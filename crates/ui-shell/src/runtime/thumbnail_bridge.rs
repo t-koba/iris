@@ -93,6 +93,9 @@ impl AppRuntime {
         content_type: Option<&str>,
         cancel_token: &CancellationToken,
     ) -> Result<ThumbnailResult, ThumbnailGenerationError> {
+        object
+            .ensure_operable()
+            .map_err(ThumbnailGenerationError::from_backend_error)?;
         let path = Path::new(&object.display_path);
         let resolved = self.resolve_backend(path);
         let source_metadata = self
@@ -570,6 +573,7 @@ mod tests {
     #[test]
     fn encrypted_session_key_tracks_source_changes() {
         let object = ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: BackendId("local".to_string()),
                 stable_id: StableId("inode-1".to_string()),

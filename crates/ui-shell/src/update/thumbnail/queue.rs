@@ -282,6 +282,7 @@ mod tests {
             size: Some(1),
             ..ListEntry::new(
                 ObjectRef {
+                    local_path_is_lossy: false,
                     key: ObjectKey {
                         backend_id: BackendId("local".to_string()),
                         stable_id: StableId(path.to_string()),

@@ -13,6 +13,7 @@ use tokio::runtime::Runtime;
 
 fn root_ref(backend_id: &BackendId) -> ObjectRef {
     ObjectRef {
+        local_path_is_lossy: false,
         key: ObjectKey {
             backend_id: backend_id.clone(),
             stable_id: StableId("root".to_string()),

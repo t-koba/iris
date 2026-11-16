@@ -583,6 +583,7 @@ mod tests {
 
     fn make_ref(backend_id: &str, display_path: &str) -> ObjectRef {
         ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: BackendId(backend_id.to_string()),
                 stable_id: StableId("test".to_string()),
@@ -1243,6 +1244,7 @@ mod tests {
             Ok(MultipartUploadSession {
                 upload_id: id.clone(),
                 destination: ObjectRef {
+                    local_path_is_lossy: false,
                     key: ObjectKey {
                         backend_id: BackendId(self.backend_id.clone()),
                         stable_id: StableId(id),

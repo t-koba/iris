@@ -258,6 +258,7 @@ async fn create_local_directory_if_missing(
         .parent()
         .ok_or_else(|| format!("{} has no parent", path.display()))?;
     let parent_ref = ObjectRef {
+        local_path_is_lossy: parent.to_str().is_none(),
         key: ObjectKey {
             backend_id: resolved.backend_id.clone(),
             stable_id: get_local_stable_id(parent)
@@ -544,7 +545,7 @@ fn verify_path_mirror(src: &Path, dst: &Path, high_risk_path: bool) -> Result<()
         let Some(dst_child) = dst_children.get(&name) else {
             return Err(format!(
                 "verify failed: missing destination child '{}' under {}",
-                name,
+                name.to_string_lossy(),
                 dst.display()
             ));
         };
@@ -554,14 +555,11 @@ fn verify_path_mirror(src: &Path, dst: &Path, high_risk_path: bool) -> Result<()
     Ok(())
 }
 
-fn read_dir_map(path: &Path) -> Result<HashMap<String, PathBuf>, String> {
+fn read_dir_map(path: &Path) -> Result<HashMap<std::ffi::OsString, PathBuf>, String> {
     let mut entries = HashMap::new();
     for entry in std::fs::read_dir(path).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
-        entries.insert(
-            entry.file_name().to_string_lossy().to_string(),
-            entry.path(),
-        );
+        entries.insert(entry.file_name(), entry.path());
     }
     Ok(entries)
 }
@@ -676,5 +674,34 @@ mod cloud_config_tests {
         }
         saved["custom_endpoint_conditional_writes_confirmed"] = "true".into();
         assert!(serde_json::from_value::<CloudAccountConfig>(saved).is_err());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod native_path_tests {
+    use super::*;
+
+    #[test]
+    fn native_name_directory_mirror_keeps_distinct_keys() {
+        use std::os::unix::ffi::OsStringExt;
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        let native = std::ffi::OsString::from_vec(b"native-\xff.txt".to_vec());
+        let alias = std::ffi::OsString::from("native-\u{fffd}.txt");
+        for dir in [src.path(), dst.path()] {
+            std::fs::write(dir.join(&native), b"A").unwrap();
+            std::fs::write(dir.join(&alias), b"replacement sibling B").unwrap();
+            let entries = read_dir_map(dir).unwrap();
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[&native], dir.join(&native));
+            assert_eq!(entries[&alias], dir.join(&alias));
+        }
+        verify_path_mirror(src.path(), dst.path(), true).unwrap();
+        // Same display labels and entry count, but not the same native name.
+        let other = std::ffi::OsString::from_vec(b"native-\xfe.txt".to_vec());
+        std::fs::rename(dst.path().join(&native), dst.path().join(other)).unwrap();
+        assert!(verify_path_mirror(src.path(), dst.path(), true)
+            .unwrap_err()
+            .contains("missing destination child"));
     }
 }

@@ -660,6 +660,7 @@ fn multipart_session_from_persisted(upload: &PersistedMultipartUpload) -> Multip
     MultipartUploadSession {
         upload_id: upload.upload_id.clone(),
         destination: ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: BackendId(upload.destination_backend.clone()),
                 stable_id: StableId(upload.upload_id.clone()),

@@ -20,6 +20,7 @@ use tokio::time::{sleep, Duration};
 
 fn make_ref(backend_id: &str, display_path: &str) -> ObjectRef {
     ObjectRef {
+        local_path_is_lossy: false,
         key: ObjectKey {
             backend_id: BackendId(backend_id.to_string()),
             stable_id: StableId(display_path.to_string()),

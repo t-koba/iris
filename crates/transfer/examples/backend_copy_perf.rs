@@ -346,6 +346,7 @@ fn object_ref(backend_id: &str, relative_path: &Path) -> Result<ObjectRef, Strin
         .ok_or_else(|| format!("path {} is not valid UTF-8", relative_path.display()))?
         .to_string();
     Ok(ObjectRef {
+        local_path_is_lossy: false,
         key: ObjectKey {
             backend_id: BackendId(backend_id.to_string()),
             stable_id: StableId(display_path.clone()),

@@ -19,6 +19,7 @@ const SIMULATED_SCROLL_VELOCITY: f32 = 3_600.0;
 
 fn object_ref(display_path: &str) -> ObjectRef {
     ObjectRef {
+        local_path_is_lossy: false,
         key: ObjectKey {
             backend_id: BackendId("perf-local".to_string()),
             stable_id: StableId(display_path.to_string()),

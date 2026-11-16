@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS cached_objects (
@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS directory_snapshot_entries (
     is_symlink        INTEGER NOT NULL DEFAULT 0,
     symlink_target    TEXT,
     is_inaccessible   INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (backend_id, dir_stable_id, generation, display_path)
+    local_path_is_lossy INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (backend_id, dir_stable_id, generation, display_path, stable_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_directory_snapshot_entries_generation

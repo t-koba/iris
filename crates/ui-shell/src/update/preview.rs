@@ -220,6 +220,7 @@ async fn load_preview_data(
     mode: PreviewLoadMode,
     cached_thumbnail: Option<iced_image::Handle>,
 ) -> Option<PreviewData> {
+    object_ref.ensure_operable().ok()?;
     let path = object_ref.display_path.clone();
     let ext = PathBuf::from(&path)
         .extension()

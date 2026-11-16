@@ -155,6 +155,7 @@ impl LocalFsAdapter {
     }
 
     fn resolve(&self, object: &ObjectRef) -> Result<PathBuf, BackendError> {
+        object.ensure_operable()?;
         let relative = Path::new(&object.display_path);
         ensure_within(&self.root, relative).map_err(|e| BackendError::Internal(Box::new(e)))
     }
@@ -233,6 +234,7 @@ impl LocalFsAdapter {
             .to_string();
         let stable_id = get_stable_id(path)?;
         Ok(ObjectRef {
+            local_path_is_lossy: path.to_str().is_none(),
             key: ObjectKey {
                 backend_id: self.backend_id.clone(),
                 stable_id,
@@ -329,14 +331,17 @@ impl LocalFsAdapter {
             Err(_) => return None,
         };
 
+        let stable_id = StableId(iris_platform_integration::staging::encode_path(&path));
+
         let file_type = match entry.file_type().await {
             Ok(file_type) => file_type,
             Err(_) => {
                 return Some(ListedEntry::NameOnly(EntryNameOnly {
                     object_ref: ObjectRef {
+                        local_path_is_lossy: path.to_str().is_none(),
                         key: ObjectKey {
                             backend_id: self.backend_id.clone(),
-                            stable_id: StableId(display_path.clone()),
+                            stable_id,
                         },
                         parent_stable_id: Some(parent_stable_id.clone()),
                         display_path,
@@ -354,9 +359,10 @@ impl LocalFsAdapter {
 
         Some(ListedEntry::NameOnly(EntryNameOnly {
             object_ref: ObjectRef {
+                local_path_is_lossy: path.to_str().is_none(),
                 key: ObjectKey {
                     backend_id: self.backend_id.clone(),
-                    stable_id: StableId(display_path.clone()),
+                    stable_id,
                 },
                 parent_stable_id: Some(parent_stable_id.clone()),
                 display_path,
@@ -375,6 +381,7 @@ impl BackendAdapter for LocalFsAdapter {
         if !self.root.exists() {
             return Err(BackendError::NotFound {
                 object: ObjectRef {
+                    local_path_is_lossy: false,
                     key: ObjectKey {
                         backend_id: self.backend_id.clone(),
                         stable_id: StableId("root".to_string()),
@@ -1062,6 +1069,7 @@ fn install_with_conflict(
 fn conflict_for(display_path: &str) -> BackendError {
     BackendError::Conflict {
         object: ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: BackendId("local".to_string()),
                 stable_id: StableId("unknown".to_string()),
@@ -1123,6 +1131,7 @@ mod tests {
 
     fn root_ref(backend_id: &BackendId) -> ObjectRef {
         ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: backend_id.clone(),
                 stable_id: StableId("root".to_string()),
@@ -1137,6 +1146,186 @@ mod tests {
             display_path: name.into(),
             ..root_ref(backend_id)
         }
+    }
+
+    #[cfg(any(unix, windows))]
+    async fn native_name_fixture() -> (TempDir, LocalFsAdapter, ObjectRef, PathBuf, PathBuf) {
+        #[cfg(unix)]
+        let name = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(b"native-\xff.txt".to_vec())
+        };
+        #[cfg(windows)]
+        let name = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[
+                110, 97, 116, 105, 118, 101, 45, 0xd800, 46, 116, 120, 116,
+            ])
+        };
+        let root = TempDir::new().unwrap();
+        let native = root.path().join(name);
+        let alias = root.path().join("native-\u{fffd}.txt");
+        std::fs::write(&native, b"A").unwrap();
+        std::fs::write(&alias, b"replacement sibling B").unwrap();
+        let id = BackendId("native-names".into());
+        let adapter = LocalFsAdapter::new(root.path().into(), id.clone());
+        let entries = adapter
+            .list_names(&root_ref(&id), None)
+            .await
+            .unwrap()
+            .entries;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name().name, entries[1].name().name);
+        assert_ne!(
+            entries[0].name().object_ref.key,
+            entries[1].name().object_ref.key
+        );
+        let object = entries
+            .iter()
+            .find(|entry| entry.name().object_ref.local_path_is_lossy)
+            .unwrap()
+            .name()
+            .object_ref
+            .clone();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.name().object_ref.local_path_is_lossy)
+                .count(),
+            1
+        );
+        (root, adapter, object, native, alias)
+    }
+
+    #[cfg(any(unix, windows))]
+    fn assert_native_refusal<T>(result: Result<T, BackendError>) {
+        assert!(matches!(
+            result,
+            Err(BackendError::Unsupported {
+                operation: "local path cannot be represented losslessly as Unicode"
+            })
+        ));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn native_name_read_and_metadata_refuse_lossy_alias() {
+        let (_root, adapter, object, native, alias) = native_name_fixture().await;
+        assert_native_refusal(adapter.read(&object, None).await);
+        assert_native_refusal(adapter.stat(&object).await);
+        assert_eq!(std::fs::read(native).unwrap(), b"A");
+        assert_eq!(std::fs::read(alias).unwrap(), b"replacement sibling B");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn native_name_copy_refuses_lossy_alias() {
+        let (root, adapter, object, native, alias) = native_name_fixture().await;
+        let dst = file_ref(&object.key.backend_id, "copy.txt");
+        assert_native_refusal(
+            adapter
+                .copy(
+                    &object,
+                    &dst,
+                    CopyOptions {
+                        on_conflict: ConflictResolution::Fail,
+                    },
+                )
+                .await,
+        );
+        assert!(!root.path().join("copy.txt").exists());
+        assert_eq!(std::fs::read(native).unwrap(), b"A");
+        assert_eq!(std::fs::read(alias).unwrap(), b"replacement sibling B");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn native_name_rename_refuses_lossy_alias() {
+        let (root, adapter, object, native, alias) = native_name_fixture().await;
+        let dst = file_ref(&object.key.backend_id, "renamed.txt");
+        assert_native_refusal(
+            adapter
+                .move_object(
+                    &object,
+                    &dst,
+                    MoveOptions {
+                        on_conflict: ConflictResolution::Fail,
+                    },
+                )
+                .await,
+        );
+        assert!(!root.path().join("renamed.txt").exists());
+        assert_eq!(std::fs::read(native).unwrap(), b"A");
+        assert_eq!(std::fs::read(alias).unwrap(), b"replacement sibling B");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn native_name_delete_refuses_lossy_alias() {
+        let (_root, adapter, object, native, alias) = native_name_fixture().await;
+        assert_native_refusal(adapter.delete(&object, DeleteMode::Permanent).await);
+        assert_eq!(std::fs::read(native).unwrap(), b"A");
+        assert_eq!(std::fs::read(alias).unwrap(), b"replacement sibling B");
+    }
+
+    #[tokio::test]
+    async fn unicode_name_operations_round_trip() {
+        let root = TempDir::new().unwrap();
+        let id = BackendId("unicode".into());
+        let adapter = LocalFsAdapter::new(root.path().into(), id.clone());
+        std::fs::write(root.path().join("日本語.txt"), b"unicode content").unwrap();
+        let entries = adapter
+            .list_names(&root_ref(&id), None)
+            .await
+            .unwrap()
+            .entries;
+        let source = &entries[0].name().object_ref;
+        assert!(!source.local_path_is_lossy);
+        assert_eq!(entries[0].name().name, "日本語.txt");
+        let mut read = adapter.read(source, None).await.unwrap();
+        let mut content = Vec::new();
+        read.stream.read_to_end(&mut content).await.unwrap();
+        assert_eq!(content, b"unicode content");
+        assert_eq!(
+            adapter.stat(source).await.unwrap().size,
+            Some(content.len() as u64)
+        );
+        let dst = file_ref(&id, "複製.txt");
+        adapter
+            .copy(
+                source,
+                &dst,
+                CopyOptions {
+                    on_conflict: ConflictResolution::Fail,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("複製.txt")).unwrap(),
+            content
+        );
+        let renamed = file_ref(&id, "改名.txt");
+        adapter
+            .move_object(
+                source,
+                &renamed,
+                MoveOptions {
+                    on_conflict: ConflictResolution::Fail,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!root.path().join("日本語.txt").exists());
+        assert_eq!(
+            std::fs::read(root.path().join("改名.txt")).unwrap(),
+            content
+        );
+        adapter
+            .delete(&renamed, DeleteMode::Permanent)
+            .await
+            .unwrap();
+        assert!(!root.path().join("改名.txt").exists());
     }
 
     #[tokio::test]
@@ -1940,6 +2129,7 @@ mod tests {
         let adapter = LocalFsAdapter::new(temp_dir.path().to_path_buf(), backend_id.clone());
         for name in ["dir-link", "dangling"] {
             let object = ObjectRef {
+                local_path_is_lossy: false,
                 key: ObjectKey {
                     backend_id: backend_id.clone(),
                     stable_id: StableId(name.to_string()),

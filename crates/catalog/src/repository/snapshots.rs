@@ -114,9 +114,9 @@ impl CatalogRepository {
                 "INSERT OR REPLACE INTO directory_snapshot_entries (
                     backend_id, dir_stable_id, generation, stable_id, display_path, name,
                     is_dir, metadata_level, size, mtime_secs, mtime_nanos, ctime_secs,
-                    ctime_nanos, is_symlink, symlink_target, is_inaccessible
+                    ctime_nanos, is_symlink, symlink_target, is_inaccessible, local_path_is_lossy
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17
                  )",
             )?;
             for entry in entries {
@@ -139,6 +139,7 @@ impl CatalogRepository {
                     entry.is_symlink as i32,
                     entry.symlink_target,
                     entry.is_inaccessible as i32,
+                    entry.local_path_is_lossy as i32,
                 ])?;
             }
         }
@@ -208,7 +209,7 @@ impl CatalogRepository {
         let mut statement = self.conn.prepare(
             "SELECT stable_id, display_path, name, is_dir, metadata_level, size,
                     mtime_secs, mtime_nanos, ctime_secs, ctime_nanos, is_symlink,
-                    symlink_target, is_inaccessible
+                    symlink_target, is_inaccessible, local_path_is_lossy
              FROM directory_snapshot_entries
              WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3
              ORDER BY rowid",
@@ -219,6 +220,7 @@ impl CatalogRepository {
                 let size: Option<i64> = row.get(5)?;
                 let metadata_level: i32 = row.get(4)?;
                 Ok(CachedDirectoryEntry {
+                    local_path_is_lossy: row.get::<_, i32>(13)? != 0,
                     stable_id: row.get(0)?,
                     display_path: row.get(1)?,
                     name: row.get(2)?,

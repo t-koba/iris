@@ -298,6 +298,7 @@ fn redo_transfer_items(op: &UndoableOp) -> Vec<PendingFileItem> {
 
 fn pending_object_ref(path: &Path) -> ObjectRef {
     ObjectRef {
+        local_path_is_lossy: path.to_str().is_none(),
         key: iris_core_domain::types::object::ObjectKey {
             backend_id: app_runtime().backend_id_for_path(path),
             stable_id: iris_core_domain::types::object::StableId(format!(

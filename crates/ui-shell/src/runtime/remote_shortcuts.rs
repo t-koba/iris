@@ -315,6 +315,7 @@ mod tests {
 
     fn object_ref(display_path: &Path) -> ObjectRef {
         ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: BackendId("local".into()),
                 stable_id: StableId(display_path.to_string_lossy().to_string()),

@@ -214,6 +214,7 @@ impl S3Adapter {
     fn conflict_error(&self, key: String) -> BackendError {
         BackendError::Conflict {
             object: ObjectRef {
+                local_path_is_lossy: false,
                 key: ObjectKey {
                     backend_id: self.backend_id.clone(),
                     stable_id: StableId("unknown".to_string()),
@@ -333,6 +334,7 @@ impl BackendAdapter for S3Adapter {
                 entries.push(ListedEntry::WithMeta(EntryWithMeta {
                     name: EntryNameOnly {
                         object_ref: ObjectRef {
+                            local_path_is_lossy: false,
                             key: ObjectKey {
                                 backend_id: self.backend_id.clone(),
                                 stable_id: StableId(p.to_string()),
@@ -367,6 +369,7 @@ impl BackendAdapter for S3Adapter {
                 entries.push(ListedEntry::WithMeta(EntryWithMeta {
                     name: EntryNameOnly {
                         object_ref: ObjectRef {
+                            local_path_is_lossy: false,
                             key: ObjectKey {
                                 backend_id: self.backend_id.clone(),
                                 stable_id: StableId(key.to_string()),
@@ -546,6 +549,7 @@ impl BackendAdapter for S3Adapter {
 
         Ok(MultipartUploadSession {
             destination: ObjectRef {
+                local_path_is_lossy: false,
                 key: ObjectKey {
                     backend_id: self.backend_id.clone(),
                     stable_id: StableId(upload_id.clone()),
@@ -727,6 +731,7 @@ impl BackendAdapter for S3Adapter {
         let display_path = self.display_path_from_key(&dir_key)?;
 
         Ok(ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: self.backend_id.clone(),
                 stable_id: StableId(dir_key),

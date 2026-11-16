@@ -259,6 +259,7 @@ pub fn cr3_with_jpeg(jpeg: &[u8], compact: bool) -> Vec<u8> {
 pub fn object(path: &str) -> iris_core_domain::types::object::ObjectRef {
     use iris_core_domain::types::object::{BackendId, ObjectKey, ObjectRef, StableId};
     ObjectRef {
+        local_path_is_lossy: false,
         key: ObjectKey {
             backend_id: BackendId("mock".to_string()),
             stable_id: StableId(path.to_string()),

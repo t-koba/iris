@@ -326,6 +326,7 @@ mod tests {
 
     fn object_ref() -> ObjectRef {
         ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: BackendId("test".to_string()),
                 stable_id: StableId("object".to_string()),

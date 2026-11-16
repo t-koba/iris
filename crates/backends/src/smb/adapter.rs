@@ -414,6 +414,7 @@ impl SmbAdapter {
         let display_path = child_display_path(&dir.display_path, &entry.file_name);
         ListedEntry::NameOnly(EntryNameOnly {
             object_ref: ObjectRef {
+                local_path_is_lossy: false,
                 key: ObjectKey {
                     backend_id: self.backend_id.clone(),
                     stable_id: StableId(display_path.clone()),
@@ -589,6 +590,7 @@ impl SmbAdapter {
 
     fn object_ref_for_display_path(&self, display_path: &str) -> ObjectRef {
         ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: self.backend_id.clone(),
                 stable_id: StableId(display_path.to_string()),
@@ -1118,6 +1120,7 @@ impl BackendAdapter for SmbAdapter {
         let result = close_directory_after_create(&native.actor, directory).await;
         self.finish_mutation(&native, result).await?;
         Ok(ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: self.backend_id.clone(),
                 stable_id: StableId(display_path.clone()),
@@ -1411,6 +1414,7 @@ mod tests {
 
     fn object_ref(backend_id: &BackendId, display_path: &str) -> ObjectRef {
         ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: backend_id.clone(),
                 stable_id: StableId(display_path.to_string()),

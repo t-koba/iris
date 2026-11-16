@@ -57,6 +57,7 @@ impl MemoryBackend {
 
     fn object_ref(&self, path: &str) -> ObjectRef {
         ObjectRef {
+            local_path_is_lossy: false,
             key: ObjectKey {
                 backend_id: self.backend_id.clone(),
                 stable_id: StableId(path.to_string()),
