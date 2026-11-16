@@ -510,6 +510,31 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
                         self.assertIn("        env:\n", step)
                         self.assertIn("          " + setting, step)
 
+    def test_verified_prefix_is_outside_cargo_cache(self):
+        for script, root in (("build-linux-ffmpeg.sh", "$root"),
+                             ("package-linux-appdir.sh", "$repo_root")):
+            with self.subTest(script=script):
+                contents = (ROOT / "scripts" / script).read_text()
+                self.assertIn("${IRIS_FFMPEG_PREFIX:-" + root + "/build/linux-ffmpeg}", contents)
+                self.assertNotIn("target/linux-ffmpeg", contents)
+        for workflow in ("linux-ffmpeg-validation.yml", "release.yml"):
+            with self.subTest(workflow=workflow):
+                contents = (ROOT / ".github/workflows" / workflow).read_text()
+                paths = {"FFMPEG_DIR": "", "PKG_CONFIG_LIBDIR": "/lib/pkgconfig",
+                         "PKG_CONFIG_PATH": "/lib/pkgconfig"}
+                if workflow == "linux-ffmpeg-validation.yml":
+                    paths["IRIS_FFMPEG_PREFIX"] = ""
+                for variable, suffix in paths.items():
+                    self.assertIn(variable + ": ${{ github.workspace }}/build/linux-ffmpeg" + suffix,
+                                  contents)
+                self.assertNotIn("target/linux-ffmpeg", contents)
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        release = (ROOT / ".github/workflows/release.yml").read_text()
+        release_linux = release.split("  package-linux:", 1)[1].split("  package-windows:", 1)[0]
+        for workflow in (ci, release_linux):
+            self.assertIn("uses: Swatinem/rust-cache@v2", workflow)
+        self.assertIn("/build/", (ROOT / ".gitignore").read_text().splitlines())
+
     def test_build_staging_and_workflow_contract(self):
         workflow = (ROOT / ".github/workflows/linux-ffmpeg-validation.yml").read_text()
         # This reusable workflow has one call trigger and one bounded JSON upload.

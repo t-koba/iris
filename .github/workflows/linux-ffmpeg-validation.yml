@@ -16,10 +16,10 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/linux-runtime-validation
       CARGO_PROFILE_RELEASE_OPT_LEVEL: z
-      IRIS_FFMPEG_PREFIX: ${{ github.workspace }}/target/linux-ffmpeg
-      FFMPEG_DIR: ${{ github.workspace }}/target/linux-ffmpeg
-      PKG_CONFIG_LIBDIR: ${{ github.workspace }}/target/linux-ffmpeg/lib/pkgconfig
-      PKG_CONFIG_PATH: ${{ github.workspace }}/target/linux-ffmpeg/lib/pkgconfig
+      IRIS_FFMPEG_PREFIX: ${{ github.workspace }}/build/linux-ffmpeg
+      FFMPEG_DIR: ${{ github.workspace }}/build/linux-ffmpeg
+      PKG_CONFIG_LIBDIR: ${{ github.workspace }}/build/linux-ffmpeg/lib/pkgconfig
+      PKG_CONFIG_PATH: ${{ github.workspace }}/build/linux-ffmpeg/lib/pkgconfig
       IRIS_BUILD_VARIANT: product
       IRIS_VERIFY_PDFIUM_PROVENANCE: "0"
       IRIS_MAX_LINUX_RELEASE_BYTES: "35651584"

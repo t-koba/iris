@@ -40,8 +40,12 @@ archive, enter `ffmpeg-8.1.3`, and run `./configure --prefix=/absolute/prefix
 `policy.configure_flags` array. Run `make -j2 && make install`. Set each real
 shared library's RUNPATH with `patchelf --set-rpath '$ORIGIN' path/to/library`.
 The Iris source tree automates digest/signature verification and these steps
-with `scripts/build-linux-ffmpeg.sh`; `IRIS_FFMPEG_PREFIX` chooses an absolute
-prefix and `IRIS_FFMPEG_JOBS` chooses parallelism (default 2). Each pinned-source
+with `scripts/build-linux-ffmpeg.sh`. The build and Linux packager default to
+`build/linux-ffmpeg` under the repository root; `IRIS_FFMPEG_PREFIX` overrides it
+with an absolute prefix. This keeps the verified runtime outside Cargo's cached
+`target/` directory: `Swatinem/rust-cache@v2` can restore an incomplete native
+prefix without its required manifest, which validation correctly rejects.
+`IRIS_FFMPEG_JOBS` chooses parallelism (default 2). Each pinned-source
 transfer has a per-request maximum duration (`IRIS_FFMPEG_FETCH_SECONDS`, default
 300 seconds) and retries (`IRIS_FFMPEG_FETCH_RETRIES`, default 1; set to 0 to
 disable), with a delay controlled by `IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS`

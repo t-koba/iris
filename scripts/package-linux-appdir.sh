@@ -14,7 +14,7 @@ cd "$repo_root"
 build_args=(cargo build --locked --offline --release -p iris-ui-shell --bin "$binary_name")
 case "$build_variant" in
     product)
-        export IRIS_FFMPEG_PREFIX="${IRIS_FFMPEG_PREFIX:-$repo_root/target/linux-ffmpeg}"
+        export IRIS_FFMPEG_PREFIX="${IRIS_FFMPEG_PREFIX:-$repo_root/build/linux-ffmpeg}"
         "$script_dir/build-linux-ffmpeg.sh"
         # Only the verified local FFmpeg pkg-config set may satisfy libav imports.
         export PKG_CONFIG_LIBDIR="$IRIS_FFMPEG_PREFIX/lib/pkgconfig"

@@ -2,7 +2,7 @@
 # Build only the pinned, signature-verified upstream shared runtime. No publishing.
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-prefix=${IRIS_FFMPEG_PREFIX:-$root/target/linux-ffmpeg}
+prefix=${IRIS_FFMPEG_PREFIX:-$root/build/linux-ffmpeg}
 [[ $prefix = /* ]] || { echo 'IRIS_FFMPEG_PREFIX must be absolute' >&2; exit 1; }
 # A completed prefix is immutable and revalidated before reuse. Failed builds
 # leave no cache; the unique scratch tree is owned and removed by this invocation.
