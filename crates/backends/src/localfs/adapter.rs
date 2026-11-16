@@ -600,18 +600,13 @@ impl BackendAdapter for LocalFsAdapter {
                 }
                 PersistentRangeFile::Staged(stage)
             }
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound && file_identity.is_some() =>
-            {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(file_identity) = file_identity else {
+                    return Err(BackendError::Internal(Box::new(error)));
+                };
                 PersistentRangeFile::Installed(
-                    InstalledStage::reopen(
-                        &dir,
-                        binding,
-                        final_size,
-                        &dst_path,
-                        file_identity.unwrap(),
-                    )
-                    .map_err(|e| BackendError::Internal(Box::new(e)))?,
+                    InstalledStage::reopen(&dir, binding, final_size, &dst_path, file_identity)
+                        .map_err(|e| BackendError::Internal(Box::new(e)))?,
                 )
             }
             Err(error) => return Err(BackendError::Internal(Box::new(error))),
