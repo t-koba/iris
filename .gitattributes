@@ -1,1 +1,4 @@
 /crates/ui-shell/tests/snapshots/*.json text eol=lf
+
+# Retain the upstream C headers byte-for-byte, including their existing whitespace.
+vendor/jpegxr/** -whitespace
