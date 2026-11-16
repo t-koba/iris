@@ -47,6 +47,8 @@ impl MemoryBudget {
         let bytes = bytes.max(1);
         loop {
             let notified = self.available.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if bytes > self.cap_bytes() {
                 return None;
             }
@@ -105,12 +107,14 @@ impl Drop for MemoryBudgetPermit {
         self.budget
             .allocated
             .fetch_sub(self.bytes, Ordering::Relaxed);
-        self.budget.available.notify_one();
+        self.budget.available.notify_waiters();
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[tokio::test]
@@ -146,6 +150,43 @@ mod tests {
         let second = budget.try_acquire(64 * 1024).expect("released capacity");
         assert_eq!(budget.allocated_bytes(), 64 * 1024);
         drop(second);
+    }
+
+    #[tokio::test]
+    async fn release_wakes_smaller_waiter_while_oversized_waiter_stays_blocked() {
+        let budget = Arc::new(MemoryBudget::new(100));
+        let headroom = budget.acquire(60).await.expect("headroom permit");
+        let releasable = budget.acquire(30).await.expect("releasable permit");
+
+        let oversized = tokio::spawn({
+            let budget = Arc::clone(&budget);
+            async move { budget.acquire(50).await }
+        });
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let small = tokio::spawn({
+            let budget = Arc::clone(&budget);
+            async move { budget.acquire(20).await }
+        });
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        drop(releasable);
+        let small_permit = tokio::time::timeout(Duration::from_millis(300), small)
+            .await
+            .expect("small waiter wakes after release")
+            .expect("small waiter joins")
+            .expect("small permit");
+        assert_eq!(budget.allocated_bytes(), 80);
+        assert!(!oversized.is_finished());
+
+        drop(small_permit);
+        drop(headroom);
+        let oversized_permit = tokio::time::timeout(Duration::from_millis(300), oversized)
+            .await
+            .expect("oversized waiter wakes after headroom is released")
+            .expect("oversized waiter joins")
+            .expect("oversized permit");
+        drop(oversized_permit);
+        assert_eq!(budget.allocated_bytes(), 0);
     }
 
     #[tokio::test]
