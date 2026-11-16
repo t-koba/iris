@@ -1,5 +1,6 @@
 use crate::s3::capabilities::s3_capabilities;
 use async_trait::async_trait;
+use aws_sdk_s3::types::EncodingType;
 use aws_sdk_s3::Client as S3Client;
 
 mod client_builder;
@@ -22,6 +23,7 @@ use iris_core_domain::types::progress::ByteRange;
 use iris_core_domain::types::read_handle::ReadHandle;
 use iris_core_domain::types::session::BackendSession;
 use multipart::{MULTIPART_CHUNK_BYTES, SINGLE_PART_UPLOAD_MAX_BYTES};
+use std::borrow::Cow;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -94,6 +96,32 @@ impl S3Adapter {
         } else {
             Ok(stripped.to_string())
         }
+    }
+
+    // ListObjectsV2 URL encoding is not form encoding: '+' stays literal.
+    // Decode only when the response opts in, and never decode a result twice.
+    fn list_key<'a>(&self, key: &'a str, url_encoded: bool) -> Result<Cow<'a, str>, BackendError> {
+        if !url_encoded || !key.contains('%') {
+            return Ok(Cow::Borrowed(key));
+        }
+        let invalid = || self.network_error("list_objects_v2", "invalid URL-encoded key or prefix");
+        let mut decoded = Vec::with_capacity(key.len());
+        let mut bytes = key.bytes();
+        while let Some(byte) = bytes.next() {
+            decoded.push(if byte == b'%' {
+                let high = bytes.next().and_then(|b| (b as char).to_digit(16));
+                let low = bytes.next().and_then(|b| (b as char).to_digit(16));
+                match (high, low) {
+                    (Some(high), Some(low)) => (high * 16 + low) as u8,
+                    _ => return Err(invalid()),
+                }
+            } else {
+                byte
+            });
+        }
+        String::from_utf8(decoded)
+            .map(Cow::Owned)
+            .map_err(|_| invalid())
     }
 
     fn next_ticket(&self, kind: OperationKind) -> OperationTicket {
@@ -277,6 +305,7 @@ impl BackendAdapter for S3Adapter {
             .bucket(&self.config.bucket)
             .prefix(&prefix)
             .delimiter("/")
+            .encoding_type(EncodingType::Url)
             .max_keys(LIST_OBJECTS_PAGE_SIZE);
 
         if let Some(c) = cursor {
@@ -290,10 +319,13 @@ impl BackendAdapter for S3Adapter {
             })
         })?;
 
+        let url_encoded = response.encoding_type() == Some(&EncodingType::Url);
         let mut entries = Vec::new();
 
         for cp in response.common_prefixes() {
             if let Some(p) = cp.prefix() {
+                let decoded = self.list_key(p, url_encoded)?;
+                let p = decoded.as_ref();
                 let name = p
                     .trim_end_matches('/')
                     .rsplit('/')
@@ -326,6 +358,8 @@ impl BackendAdapter for S3Adapter {
 
         for obj in response.contents() {
             if let Some(key) = obj.key() {
+                let decoded = self.list_key(key, url_encoded)?;
+                let key = decoded.as_ref();
                 // Skip the prefix itself.
                 if key == prefix {
                     continue;

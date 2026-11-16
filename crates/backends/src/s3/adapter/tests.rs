@@ -64,11 +64,8 @@ fn body_signature(body: &[u8]) -> (usize, u64) {
     (body.len(), hash.finish())
 }
 
-fn response(status: u16, body: &'static str) -> Result<HttpResponse, ConnectorError> {
-    Ok(HttpResponse::new(
-        status.try_into().unwrap(),
-        SdkBody::from(body),
-    ))
+fn response(status: u16, body: impl Into<SdkBody>) -> Result<HttpResponse, ConnectorError> {
+    Ok(HttpResponse::new(status.try_into().unwrap(), body.into()))
 }
 
 fn adapter(responses: Vec<Result<HttpResponse, ConnectorError>>) -> (S3Adapter, MockHttp) {
@@ -973,5 +970,122 @@ async fn rename_final_writes_have_a_retry_budget() {
             );
         }
         assert!(http.responses.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn listing_decodes_url_keys_and_prefixes_once_and_preserves_pagination_tokens() {
+    let xml = r#"<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+      <EncodingType>url</EncodingType><IsTruncated>true</IsTruncated>
+      <NextContinuationToken>opaque%2F+%not-hex/é</NextContinuationToken>
+      <Contents><Key>root%20%2B%C3%A9%2F</Key></Contents>
+      <Contents><Key>root%20%2B%C3%A9%2Fcontrol%01.txt</Key></Contents>
+      <Contents><Key>root%20%2B%C3%A9%2Fliteral%252F%25+%20雪%C3%A9.txt</Key></Contents>
+      <CommonPrefixes><Prefix>root%20%2B%C3%A9%2Fteam%252F+%20%E9%9B%AA%2f</Prefix></CommonPrefixes>
+    </ListBucketResult>"#;
+    let (adapter, http) = adapter_with_prefix(
+        vec![response(200, xml), response(200, "<ListBucketResult/>")],
+        Some("root +é"),
+    );
+    let page = adapter.list_names(&object(""), None).await.unwrap();
+    // The encoded root marker is skipped only after decoding.
+    assert_eq!(page.entries.len(), 3);
+    let mut actual = Vec::new();
+    for entry in page.entries {
+        let ListedEntry::WithMeta(entry) = entry else {
+            panic!("S3 list entries include metadata");
+        };
+        let path = &entry.name.object_ref.display_path;
+        assert_eq!(
+            entry.name.object_ref.key.stable_id.0,
+            format!("root +é/{path}")
+        );
+        actual.push((entry.name.name, path.clone(), entry.name.is_dir));
+    }
+    assert_eq!(
+        actual,
+        vec![
+            ("team%2F+ 雪".into(), "team%2F+ 雪/".into(), true),
+            ("control\x01.txt".into(), "control\x01.txt".into(), false),
+            (
+                "literal%2F%+ 雪é.txt".into(),
+                "literal%2F%+ 雪é.txt".into(),
+                false
+            ),
+        ]
+    );
+    assert_eq!(page.next_cursor.as_ref().unwrap().0, "opaque%2F+%not-hex/é");
+    adapter
+        .list_names(&object(""), page.next_cursor)
+        .await
+        .unwrap();
+    let requests = http.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    // The mock client and adapter both have a custom endpoint configured.
+    for (method, uri) in requests.iter() {
+        assert_eq!(method, "GET");
+        assert!(uri.starts_with("https://s3.test/archive/?"), "{uri}");
+        assert!(uri.contains("encoding-type=url"), "{uri}");
+        assert!(uri.contains("prefix=root%20%2B%C3%A9%2F"), "{uri}");
+    }
+    assert!(requests[1]
+        .1
+        .contains("continuation-token=opaque%252F%2B%25not-hex%2F%C3%A9"));
+}
+
+#[tokio::test]
+async fn listing_leaves_unmarked_and_unknown_encoding_responses_raw() {
+    for marker in ["", "<EncodingType>other</EncodingType>"] {
+        let xml = format!(
+            r#"<ListBucketResult>
+          {marker}<Contents><Key>foo/raw%2F%FF%+雪.txt</Key></Contents>
+          <CommonPrefixes><Prefix>foo/team%2F%+雪/</Prefix></CommonPrefixes>
+        </ListBucketResult>"#
+        );
+        let (adapter, _) = adapter_with_prefix(vec![response(200, xml)], Some("foo"));
+        let page = adapter.list_names(&object(""), None).await.unwrap();
+        let actual: Vec<_> = page
+            .entries
+            .iter()
+            .map(|entry| {
+                let ListedEntry::WithMeta(entry) = entry else {
+                    panic!("S3 list entries include metadata");
+                };
+                (
+                    entry.name.name.as_str(),
+                    entry.name.object_ref.display_path.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                ("team%2F%+雪", "team%2F%+雪/"),
+                ("raw%2F%FF%+雪.txt", "raw%2F%FF%+雪.txt"),
+            ]
+        );
+    }
+}
+
+#[tokio::test]
+async fn listing_rejects_malformed_url_keys_and_prefixes() {
+    for invalid in ["%", "%0", "%GG", "%0G", "%G0", "%FF", "%C3%28", "%E9%9B"] {
+        for element in [
+            format!("<Contents><Key>foo/{invalid}</Key></Contents>"),
+            format!("<CommonPrefixes><Prefix>foo/{invalid}/</Prefix></CommonPrefixes>"),
+        ] {
+            let xml = format!(
+                "<ListBucketResult><EncodingType>url</EncodingType>\
+                <Contents><Key>foo/valid.txt</Key></Contents>{element}</ListBucketResult>"
+            );
+            let (adapter, _) = adapter_with_prefix(vec![response(200, xml)], Some("foo"));
+            assert!(
+                matches!(
+                    adapter.list_names(&object(""), None).await,
+                    Err(BackendError::Network(_))
+                ),
+                "accepted invalid URL encoding: {invalid}"
+            );
+        }
     }
 }
