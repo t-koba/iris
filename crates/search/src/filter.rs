@@ -358,7 +358,6 @@ mod tests {
     fn filter_segment(segment: &Segment, model: FilterModel) -> Vec<FilterHit<'_>> {
         let batch = segment.records().len().max(1);
         crate::stream::filter_segment_incremental(segment, model, batch, || false)
-            .into_iter()
             .flat_map(|event| match event {
                 crate::stream::FilterEvent::Hits(hits) => hits,
                 _ => Vec::new(),
