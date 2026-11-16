@@ -282,6 +282,10 @@ jobs:
         if: always() && matrix.os == 'ubuntu-latest' && env.IRIS_PERF_SAMBA_IMAGE != ''
         run: docker image rm "$IRIS_PERF_SAMBA_IMAGE"
 
+      - name: Fuzz target routing regression
+        if: matrix.os == 'ubuntu-latest'
+        run: bash ./scripts/test-fuzz-target.sh
+
       - name: Install fuzz toolchain
         if: matrix.os == 'ubuntu-latest'
         uses: dtolnay/rust-toolchain@master
@@ -296,6 +300,11 @@ jobs:
 
       - name: Fuzz smoke
         if: matrix.os == 'ubuntu-latest'
+        env:
+          # The cargo-fuzz binary installed on Linux may be musl-linked; its
+          # inferred target is incompatible with ASan. Build for the runner's
+          # GNU target so the nightly sanitizer runtime can link.
+          IRIS_FUZZ_TARGET: x86_64-unknown-linux-gnu
         run: FUZZ_RUNS=1000 bash ./scripts/fuzz-all.sh
 
       - name: Default-feature preview corpus correctness and bounded latency smoke

@@ -36,6 +36,15 @@ input_timeout="${FUZZ_INPUT_TIMEOUT:-}"
 max_len="${FUZZ_MAX_LEN:-}"
 build_only="${FUZZ_BUILD_ONLY:-}"
 fuzz_toolchain="${FUZZ_TOOLCHAIN:-nightly-2026-07-11}"
+fuzz_target="${IRIS_FUZZ_TARGET:-}"
+target_args=()
+if [[ -n "$fuzz_target" ]]; then
+  if [[ ! "$fuzz_target" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]]; then
+    echo "IRIS_FUZZ_TARGET must be a valid Rust target triple" >&2
+    exit 2
+  fi
+  target_args=(--target "$fuzz_target")
+fi
 
 run_args=()
 label="build"
@@ -59,10 +68,10 @@ echo "==> ${crate_dir}: ${target} (${label})"
 (
   cd "$crate_dir"
   if [[ -n "$build_only" ]]; then
-    cargo "+$fuzz_toolchain" fuzz build "$target"
+    cargo "+$fuzz_toolchain" fuzz build "${target_args[@]}" "$target"
   elif [[ -n "$outer_timeout" ]] && command -v timeout >/dev/null 2>&1; then
-    timeout -k 10 "$outer_timeout" cargo "+$fuzz_toolchain" fuzz run "$target" -- "${run_args[@]}"
+    timeout -k 10 "$outer_timeout" cargo "+$fuzz_toolchain" fuzz run "${target_args[@]}" "$target" -- "${run_args[@]}"
   else
-    cargo "+$fuzz_toolchain" fuzz run "$target" -- "${run_args[@]}"
+    cargo "+$fuzz_toolchain" fuzz run "${target_args[@]}" "$target" -- "${run_args[@]}"
   fi
 )
