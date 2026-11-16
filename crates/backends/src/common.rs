@@ -616,6 +616,29 @@ mod tests {
                 Path::new("missing")
             );
             std::fs::remove_file(&dst).expect("remove link");
+
+            // A live symlink destination is also an occupied name. The primitive must
+            // refuse it without touching either the link or its existing target.
+            let live_target = temp.path().join("live-target");
+            std::fs::write(&live_target, b"target").expect("live target");
+            std::os::unix::fs::symlink(&live_target, &dst).expect("live symlink");
+            assert_eq!(
+                rename_no_replace(&src, &dst)
+                    .expect_err("live symlink occupied")
+                    .kind(),
+                std::io::ErrorKind::AlreadyExists
+            );
+            assert_eq!(
+                std::fs::read_link(&dst).expect("live link intact"),
+                live_target
+            );
+            assert_eq!(
+                std::fs::read(&live_target).expect("live target intact"),
+                b"target"
+            );
+            assert_eq!(std::fs::read(&src).expect("source intact"), b"source");
+            std::fs::remove_file(&dst).expect("remove live link");
+            std::fs::remove_file(&live_target).expect("remove live target");
         }
         rename_no_replace(&src, &dst).expect("absent destination");
         assert!(!src.exists());
