@@ -148,6 +148,6 @@ iris-transfer = { path = "crates/transfer" }
 # rejected by future Rust versions. Keep the upstream API/ABI and use an
 # inhabited opaque FFI marker until metal-rs migrates away from rust-block.
 block = { path = "vendor/block" }
-# Temporary jpegxr 0.3.1 vendor copy: bindgen 0.69 makes decoder structs opaque
-# with newer libclang on Ubuntu; use the workspace's bindgen 0.73 until upstream updates.
+# Temporary jpegxr 0.3.1 vendor copy: update bindgen for newer libclang and
+# release the C decoder when initialization fails (the fuzz-discovered leak).
 jpegxr = { path = "vendor/jpegxr" }

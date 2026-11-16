@@ -6,13 +6,15 @@ Source: the crates.io `jpegxr` 0.3.1 package from
 archive SHA-256 `20a0328c45484d19035d80b72eaadaefa374ff3f4b07737b6ad426587c890fbf`.
 License: BSD-3-Clause; see `license.md` and the notices in the C sources.
 
-This temporary Cargo patch changes only the build dependency from bindgen 0.69
+This temporary Cargo patch changes the build dependency from bindgen 0.69
 to 0.73.2 with the same runtime-only features used by Iris's FFmpeg bindings.
 This avoids enabling the unused prettyplease formatter (its syn version can
 differ from bindgen's). Older bindgen can generate an opaque
 `tagPKImageDecode` with newer libclang on Ubuntu, hiding the decoder's function
-pointers. The Rust API, build script and C codec sources are unchanged.
-Remove the patch when an upstream release includes the bindgen fix.
+pointers. The Rust wrapper also guards the C decoder during construction so
+failed creation or initialization releases any allocated handle, with an
+in-memory invalid-input regression. The Rust API, build script and C codec
+sources are unchanged. Remove the patch when upstream includes both fixes.
 
 The registry cache markers, duplicate manifest/license metadata, JS/Wasm tooling
 and binary documentation are omitted. The 8.7 MiB upstream screenshot is replaced

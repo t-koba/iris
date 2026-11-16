@@ -700,6 +700,20 @@ impl Rect {
     }
 }
 
+// Own any decoder allocated during construction, including on C-call errors.
+// This guard must be dropped before the InputStream used by Initialize.
+struct ImageDecodeGuard(*mut PKImageDecode);
+
+impl Drop for ImageDecodeGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                (*self.0).Release.unwrap()(&mut self.0);
+            }
+        }
+    }
+}
+
 ///
 /// High-level JPEG XR image decoder struct.
 /// Requires a seekable data source, such as a File.
@@ -721,12 +735,12 @@ impl<R> ImageDecode<R> where R: Read + Seek {
         unsafe {
             let mut stream = InputStream::new(reader);
 
-            let mut codec: *mut PKImageDecode = std::ptr::null_mut();
-            call(PKImageDecode_Create_WMP(&mut codec as *mut *mut PKImageDecode))?;
-            call((*codec).Initialize.unwrap()(codec, stream.raw.as_mut()))?;
+            let mut codec = ImageDecodeGuard(std::ptr::null_mut());
+            call(PKImageDecode_Create_WMP(&mut codec.0))?;
+            call((*codec.0).Initialize.unwrap()(codec.0, stream.raw.as_mut()))?;
 
             Ok(Self {
-                raw: codec,
+                raw: std::mem::replace(&mut codec.0, std::ptr::null_mut()),
                 stream: Some(stream)
             })
         }
@@ -822,6 +836,17 @@ mod tests {
     use crate::ColorFormat;
     use crate::BitDepthBits;
     use crate::PhotometricInterpretation;
+
+    #[test]
+    fn invalid_input_fails_initialization() {
+        // Initialize rejects this synthetic invalid input after the C decoder has
+        // been created; the guard must release it before the stream is dropped.
+        let input = std::io::Cursor::new([0u8; 2]);
+        assert!(matches!(
+            ImageDecode::with_reader(input),
+            Err(crate::JXRError::UnsupportedFormat)
+        ));
+    }
 
     #[test]
     fn it_works() {
