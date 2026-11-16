@@ -84,9 +84,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo test -p iris-remote-transport sftp::tests --locked
 
-      - name: JPEG XR decoder ownership regression
+      - name: JPEG XR signature and decoder regressions
         if: matrix.os == 'ubuntu-latest'
-        run: cargo test -p jpegxr --locked invalid_input_releases_the_decoder_it_allocated
+        run: |
+          cargo test -p iris-thumb-preview --lib modern_image::tests::detects_all_container_signatures --locked
+          cargo test -p jpegxr --locked
 
       - name: Library panic-path policy
         run: cargo clippy --workspace --lib --no-deps --locked -- -D warnings -D clippy::unwrap_used

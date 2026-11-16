@@ -1808,7 +1808,7 @@ ERR ReadContainer(
     //================================
     // Header
     Call(pWS->Read(pWS, szSig, sizeof(szSig))); offPos += 2;
-    FailIf(szSig != strstr(szSig, "II"), WMP_errUnsupportedFormat);
+    FailIf(szSig[0] != 'I' || szSig[1] != 'I', WMP_errUnsupportedFormat);
 
     Call(GetUShort(pWS, offPos, &uWmpID)); offPos += 2;
     FailIf(WMP_valWMPhotoID != (0x00FF & uWmpID), WMP_errUnsupportedFormat);

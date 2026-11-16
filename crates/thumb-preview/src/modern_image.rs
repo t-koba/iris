@@ -56,8 +56,10 @@ fn detect(data: &[u8]) -> Option<ModernFormat> {
     {
         return Some(ModernFormat::JpegXl);
     }
-    // JPEG XR uses a TIFF-like header in either byte order.
-    if data.starts_with(&[b'I', b'I', 0xbc, 0x01]) || data.starts_with(&[b'M', b'M', 0x01, 0xbc]) {
+    // JPEG XR uses a little-endian TIFF-like header. The bundled decoder only
+    // accepts `II`; a big-endian `MM` signature is not a supported JPEG XR file
+    // and must not be handed to the native decoder.
+    if data.starts_with(&[b'I', b'I', 0xbc, 0x01]) {
         return Some(ModernFormat::JpegXr);
     }
     if is_heic_container(data) {
@@ -352,6 +354,9 @@ mod tests {
             detect(&[b'I', b'I', 0xbc, 0x01]),
             Some(ModernFormat::JpegXr)
         );
+        // Big-endian JXR signature is unsupported; routing it to the native
+        // decoder caused an ASan stack-buffer-overflow in image_sniff.
+        assert_eq!(detect(&[b'M', b'M', 0x01, 0xbc]), None);
 
         let mut heic = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec();
         heic.resize(32, 0);
