@@ -6,6 +6,7 @@ fn make_segment(count: usize) -> Segment {
     Segment::new(
         (0..count)
             .map(|index| SegmentRecord {
+                native_locator: None,
                 local_path_is_lossy: false,
                 path: format!("/photos/2024/{index:06}.jpg"),
                 name: format!("{index:06}.jpg"),

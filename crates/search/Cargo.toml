@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 iris-core-domain = { workspace = true }
+iris-platform-integration = { workspace = true }
 chrono = { workspace = true }
 unicode-normalization = { workspace = true }
 

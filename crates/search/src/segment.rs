@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"IRISIDX1";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const HEADER_BYTES: usize = 48;
 const RECORD_BYTES: usize = 96;
 const FLAG_HAS_CONTENT_SIGNATURE: u32 = 1 << 0;
@@ -52,6 +52,8 @@ impl IndexedKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SegmentRecord {
+    /// Lossless native path encoding for identity, not permission to access a lossy path.
+    pub native_locator: Option<String>,
     pub path: String,
     /// The display path cannot be used to address the original native path.
     pub local_path_is_lossy: bool,
@@ -146,6 +148,7 @@ impl Segment {
             let name_ref = strings.intern(&record.name)?;
             let camera_ref = strings.intern_optional(record.camera.as_deref())?;
             let lens_ref = strings.intern_optional(record.lens.as_deref())?;
+            let native_locator_ref = strings.intern_optional(record.native_locator.as_deref())?;
             let signature_ref = if let Some(signature) = &record.content_signature {
                 let offset = signatures.len();
                 signatures.extend_from_slice(signature.as_bytes());
@@ -171,6 +174,7 @@ impl Segment {
                     gps_lat_bits: record.gps_lat.unwrap_or(f32::NAN).to_bits(),
                     gps_lon_bits: record.gps_lon.unwrap_or(f32::NAN).to_bits(),
                     signature_ref,
+                    native_locator_ref,
                 },
             );
         }
@@ -239,6 +243,9 @@ impl Segment {
                 Some(BloomSignature::from_bytes(bytes))
             };
             records.push(SegmentRecord {
+                native_locator: strings
+                    .get_optional(encoded.native_locator_ref)?
+                    .map(ToString::to_string),
                 local_path_is_lossy: encoded.flags & FLAG_LOCAL_PATH_LOSSY != 0,
                 path: strings.get(encoded.path_ref)?.to_string(),
                 name: strings.get(encoded.name_ref)?.to_string(),
@@ -314,6 +321,7 @@ struct EncodedRecord {
     gps_lat_bits: u32,
     gps_lon_bits: u32,
     signature_ref: u32,
+    native_locator_ref: u32,
 }
 
 #[derive(Default)]
@@ -445,6 +453,7 @@ fn encode_record(dst: &mut Vec<u8>, record: EncodedRecord) {
     put_u32(bytes, 60, record.gps_lat_bits);
     put_u32(bytes, 64, record.gps_lon_bits);
     put_u32(bytes, 68, record.signature_ref);
+    put_u32(bytes, 72, record.native_locator_ref);
 }
 
 fn decode_record(bytes: &[u8]) -> Result<EncodedRecord, SegmentError> {
@@ -475,6 +484,7 @@ fn decode_record(bytes: &[u8]) -> Result<EncodedRecord, SegmentError> {
         gps_lat_bits,
         gps_lon_bits,
         signature_ref,
+        native_locator_ref: get_u32(bytes, 72)?,
     })
 }
 
@@ -573,6 +583,7 @@ mod tests {
 
     fn sample_record(index: usize) -> SegmentRecord {
         SegmentRecord {
+            native_locator: None,
             local_path_is_lossy: false,
             path: format!("/photos/2024/file-{index}.jpg"),
             name: format!("file-{index}.jpg"),
@@ -663,6 +674,21 @@ mod tests {
     }
 
     #[test]
+    fn read_cache_discards_v2_segment_without_native_locator() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.idx");
+        let mut bytes = Segment::new(vec![sample_record(1)]).to_bytes().unwrap();
+        bytes[8..12].copy_from_slice(&2_u32.to_le_bytes());
+        // Version 2 left this slot zeroed rather than using the None sentinel.
+        bytes[HEADER_BYTES + 72..HEADER_BYTES + 76].fill(0);
+        fs::write(&path, bytes).unwrap();
+
+        assert_eq!(Segment::read(&path), Err(SegmentError::UnsupportedVersion));
+        assert_eq!(Segment::read_cache(&path).unwrap(), None);
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn read_cache_discards_corrupt_segment() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("photos.idx");
@@ -683,6 +709,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(index, name)| SegmentRecord {
+                    native_locator: None,
                     local_path_is_lossy: false,
                     path: format!("/root/{name}-{index}.txt"),
                     name: format!("{name}-{index}.txt"),

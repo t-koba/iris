@@ -305,6 +305,7 @@ pub(crate) fn recursive_filter_task(request: RecursiveFilterRequest) -> Task<Mes
                                         hit.record.path.clone(),
                                         annotation,
                                         hit.record.local_path_is_lossy,
+                                        hit.record.native_locator.clone(),
                                     )
                                 })
                                 .collect::<Vec<_>>();
@@ -483,10 +484,10 @@ fn apply_media_metadata_to_record(record: &mut SegmentRecord, media: &MediaMetad
 }
 
 async fn list_entries_for_paths_with_annotations(
-    items: Vec<(String, Option<String>, bool)>,
+    items: Vec<(String, Option<String>, bool, Option<String>)>,
 ) -> Vec<ListEntry> {
     let mut entries = Vec::with_capacity(items.len());
-    for (path, annotation, local_path_is_lossy) in items {
+    for (path, annotation, local_path_is_lossy, native_locator) in items {
         if local_path_is_lossy {
             // Only parse display text; never resolve or read this path. Keep its
             // identity separate from a real Unicode sibling with the same label.
@@ -500,7 +501,9 @@ async fn list_entries_for_paths_with_annotations(
                     backend_id: app_runtime().backend_id_for_path(display_path),
                     stable_id: StableId(format!(
                         "lossy:{}",
-                        iris_platform_integration::staging::encode_path(display_path)
+                        native_locator.unwrap_or_else(|| {
+                            iris_platform_integration::staging::encode_path(display_path)
+                        })
                     )),
                 },
                 parent_stable_id: None,
@@ -1158,6 +1161,7 @@ mod tests {
     #[test]
     fn media_metadata_updates_segment_record_filter_fields() {
         let mut record = SegmentRecord {
+            native_locator: None,
             local_path_is_lossy: false,
             path: "/tmp/photo.jpg".to_string(),
             name: "photo.jpg".to_string(),
@@ -1223,6 +1227,54 @@ mod tests {
                 dir.display()
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recursive_lossy_hits_with_colliding_display_paths_have_distinct_stable_ids() {
+        use iris_platform_integration::staging::encode_path;
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join(OsString::from_vec(b"a\xff.txt".to_vec()));
+        let second = dir.path().join(OsString::from_vec(b"a\xfe.txt".to_vec()));
+        let display_path = first.to_string_lossy().into_owned();
+        assert_eq!(display_path, second.to_string_lossy());
+        let locators = [encode_path(&first), encode_path(&second)];
+        let entries = list_entries_for_paths_with_annotations(
+            locators
+                .iter()
+                .map(|locator| (display_path.clone(), None, true, Some(locator.clone())))
+                .collect(),
+        )
+        .await;
+
+        assert_eq!(entries.len(), 2);
+        assert_ne!(
+            entries[0].object_ref.key.stable_id,
+            entries[1].object_ref.key.stable_id
+        );
+        for (entry, locator) in entries.iter().zip(&locators) {
+            assert_eq!(
+                entry.object_ref.key.stable_id,
+                StableId(format!("lossy:{locator}"))
+            );
+            assert_eq!(entry.object_ref.display_path, display_path);
+            assert!(entry.object_ref.local_path_is_lossy);
+            assert!(entry.is_inaccessible);
+            assert!(entry.object_ref.ensure_operable().is_err());
+            assert_eq!(entry.size, None);
+            assert_eq!(entry.mtime, None);
+        }
+        let fallback =
+            list_entries_for_paths_with_annotations(vec![(display_path.clone(), None, true, None)])
+                .await;
+        assert_eq!(
+            fallback[0].object_ref.key.stable_id,
+            StableId(format!("lossy:{}", encode_path(Path::new(&display_path))))
+        );
+        assert!(fallback[0].is_inaccessible);
     }
 
     #[cfg(unix)]
@@ -1303,6 +1355,7 @@ mod tests {
                     record.path.clone(),
                     Some("display annotation".into()),
                     record.local_path_is_lossy,
+                    record.native_locator.clone(),
                 )
             })
             .collect();
@@ -1340,6 +1393,12 @@ mod tests {
             lossy.object_ref.display_path.clone(),
             None,
             true,
+            records
+                .iter()
+                .find(|record| record.local_path_is_lossy)
+                .unwrap()
+                .native_locator
+                .clone(),
         )])
         .await;
         assert_eq!(repeated[0].object_ref.key, lossy.object_ref.key);
@@ -1397,6 +1456,7 @@ mod tests {
         let path = temp.path().join("doc.pdf");
         std::fs::write(&path, b"<< >>\nstream\n(invoice total)\nendstream").unwrap();
         let mut cached = SegmentRecord {
+            native_locator: None,
             local_path_is_lossy: false,
             path: temp.path().join("doc.pdf").to_string_lossy().to_string(),
             name: "doc.pdf".to_string(),

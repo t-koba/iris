@@ -115,6 +115,10 @@ fn record_from_metadata(path: &Path, metadata: &fs::Metadata) -> SegmentRecord {
         .unwrap_or_else(|| path_string.clone());
     let kind = IndexedKind::for_path(path, metadata.is_dir());
     SegmentRecord {
+        native_locator: path
+            .to_str()
+            .is_none()
+            .then(|| iris_platform_integration::staging::encode_path(path)),
         local_path_is_lossy: path.to_str().is_none(),
         path: path_string,
         name,
@@ -151,6 +155,116 @@ fn is_hidden(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_local_distinguishes_colliding_lossy_native_locators() {
+        use crate::reconcile::{reconcile_segment, ReconcileStats};
+        use crate::segment::Segment;
+        use iris_platform_integration::staging::encode_path;
+        use std::collections::HashSet;
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join(OsString::from_vec(b"a\xff.txt".to_vec()));
+        let second = dir.path().join(OsString::from_vec(b"a\xfe.txt".to_vec()));
+        let unicode = dir.path().join("a\u{FFFD}.txt");
+        for path in [&first, &second, &unicode] {
+            fs::write(path, b"same size and timestamp-independent identity").unwrap();
+        }
+        let records = walk_local(dir.path(), &WalkOptions::default(), || false)
+            .unwrap()
+            .records;
+        assert_eq!(records.len(), 3);
+        assert!(records
+            .iter()
+            .all(|record| record.path == unicode.to_str().unwrap()));
+        let lossy = records
+            .iter()
+            .filter(|record| record.local_path_is_lossy)
+            .collect::<Vec<_>>();
+        assert_eq!(lossy.len(), 2);
+        assert_ne!(lossy[0].native_locator, lossy[1].native_locator);
+        let expected = HashSet::from([Some(encode_path(&first)), Some(encode_path(&second))]);
+        assert_eq!(
+            lossy
+                .iter()
+                .map(|record| record.native_locator.clone())
+                .collect::<HashSet<_>>(),
+            expected
+        );
+        assert!(lossy
+            .iter()
+            .all(|record| !record.native_locator.as_ref().unwrap().contains('\0')));
+        assert!(records
+            .iter()
+            .find(|record| !record.local_path_is_lossy)
+            .unwrap()
+            .native_locator
+            .is_none());
+        let keys = records
+            .iter()
+            .map(|record| {
+                (
+                    record.path.clone(),
+                    record.local_path_is_lossy,
+                    record.native_locator.clone(),
+                )
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(keys.len(), 3);
+
+        let inserted = reconcile_segment(&Segment::default(), records.clone());
+        assert_eq!(
+            inserted.stats,
+            ReconcileStats {
+                inserted: 3,
+                ..ReconcileStats::default()
+            }
+        );
+        assert_eq!(inserted.segment.records().len(), 3);
+        let cache_dir = tempfile::tempdir().unwrap();
+        let cache = cache_dir.path().join("colliding.idx");
+        fs::write(&cache, inserted.segment.to_bytes().unwrap()).unwrap();
+        let restored = Segment::read(&cache).unwrap();
+        assert_eq!(restored, inserted.segment);
+
+        // A fresh rescan must preserve both locators, not reuse one colliding record twice.
+        let fresh = reconcile_segment(&restored, records);
+        assert_eq!(
+            fresh.stats,
+            ReconcileStats {
+                unchanged: 3,
+                ..ReconcileStats::default()
+            }
+        );
+        assert_eq!(fresh.segment, restored);
+        fs::remove_file(&first).unwrap();
+        let remaining = walk_local(dir.path(), &WalkOptions::default(), || false)
+            .unwrap()
+            .records;
+        let removed = reconcile_segment(&restored, remaining);
+        assert_eq!(
+            removed.stats,
+            ReconcileStats {
+                removed: 1,
+                unchanged: 2,
+                ..ReconcileStats::default()
+            }
+        );
+        assert_eq!(removed.segment.records().len(), 2);
+        assert!(removed
+            .segment
+            .records()
+            .iter()
+            .any(|record| record.native_locator == Some(encode_path(&second))));
+        assert!(removed
+            .segment
+            .records()
+            .iter()
+            .all(|record| record.native_locator != Some(encode_path(&first))));
+    }
 
     #[cfg(unix)]
     #[test]

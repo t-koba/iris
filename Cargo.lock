@@ -3486,6 +3486,7 @@ dependencies = [
  "chrono",
  "criterion",
  "iris-core-domain",
+ "iris-platform-integration",
  "proptest",
  "tempfile",
  "unicode-normalization",
