@@ -7,11 +7,46 @@ use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
-const WRITE_BATCH_WINDOW: Duration = Duration::from_millis(16);
 const WRITE_CHANNEL_CAPACITY: usize = 1024;
+
+/// Bounds collection of each writer batch, measured from its first command.
+///
+/// The default is a 16 ms window and at most 1024 commands. Store constructors
+/// reject zero windows, zero command limits, and windows that overflow `Instant`.
+#[derive(Clone, Copy, Debug)]
+pub struct WriterBatchPolicy {
+    /// Maximum collection time from receipt of the first command.
+    pub window: Duration,
+    /// Maximum commands per batch, including barriers and the first command.
+    pub max_commands: usize,
+}
+
+impl Default for WriterBatchPolicy {
+    fn default() -> Self {
+        Self {
+            window: Duration::from_millis(16),
+            max_commands: 1024,
+        }
+    }
+}
+
+impl WriterBatchPolicy {
+    fn validate(self) -> Result<(), JobStoreError> {
+        if self.window.is_zero()
+            || self.max_commands == 0
+            || Instant::now().checked_add(self.window).is_none()
+        {
+            return Err(JobStoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "writer batch policy requires a nonzero, representable window and command limit",
+            )));
+        }
+        Ok(())
+    }
+}
 
 enum WriteCommand {
     SaveJob {
@@ -77,13 +112,28 @@ pub struct JobStore {
 
 impl JobStore {
     pub fn open(db_path: &Path) -> Result<Self, JobStoreError> {
+        Self::open_with_policy(db_path, WriterBatchPolicy::default())
+    }
+
+    /// Open a store with bounded writer batches. Invalid policies return an
+    /// `InvalidInput` I/O error before opening the database.
+    pub fn open_with_policy(
+        db_path: &Path,
+        policy: WriterBatchPolicy,
+    ) -> Result<Self, JobStoreError> {
+        policy.validate()?;
         Ok(Self {
             reader_db_path: db_path.to_path_buf(),
-            writer: JobStoreWriterTask::open(db_path)?,
+            writer: JobStoreWriterTask::open(db_path, policy)?,
         })
     }
 
     pub fn open_in_memory() -> Result<Self, JobStoreError> {
+        Self::open_in_memory_with_policy(WriterBatchPolicy::default())
+    }
+
+    /// Like `open_in_memory`, with the policy validation of `open_with_policy`.
+    pub fn open_in_memory_with_policy(policy: WriterBatchPolicy) -> Result<Self, JobStoreError> {
         let unique = std::env::temp_dir().join(format!(
             "iris-jobstore-{}.sqlite3",
             SystemTime::now()
@@ -91,10 +141,7 @@ impl JobStore {
                 .unwrap_or_default()
                 .as_nanos()
         ));
-        Ok(Self {
-            reader_db_path: unique.clone(),
-            writer: JobStoreWriterTask::open(&unique)?,
-        })
+        Self::open_with_policy(&unique, policy)
     }
 
     pub fn save_job(&self, job: &PersistedJob) -> Result<(), JobStoreError> {
@@ -266,15 +313,18 @@ struct JobStoreWriterTask {
 }
 
 impl JobStoreWriterTask {
-    fn open(db_path: &Path) -> Result<Self, JobStoreError> {
-        Self::spawn(JobStoreRepository::open(db_path)?)
+    fn open(db_path: &Path, policy: WriterBatchPolicy) -> Result<Self, JobStoreError> {
+        Self::spawn(JobStoreRepository::open(db_path)?, policy)
     }
 
-    fn spawn(repository: JobStoreRepository) -> Result<Self, JobStoreError> {
+    fn spawn(
+        repository: JobStoreRepository,
+        policy: WriterBatchPolicy,
+    ) -> Result<Self, JobStoreError> {
         let (tx, rx) = mpsc::sync_channel(WRITE_CHANNEL_CAPACITY);
         let join_handle = thread::Builder::new()
             .name("iris-jobstore-writer".to_string())
-            .spawn(move || writer_loop(repository, rx))
+            .spawn(move || writer_loop(repository, rx, policy))
             .map_err(JobStoreError::Io)?;
         Ok(Self {
             tx,
@@ -382,22 +432,43 @@ impl Drop for JobStoreWriterTask {
     }
 }
 
-#[tracing::instrument(skip(repository, rx))]
-fn writer_loop(repository: JobStoreRepository, rx: Receiver<WriteCommand>) {
-    while let Ok(first_command) = rx.recv() {
-        let mut batch = vec![first_command];
-        let mut shutdown_requested = false;
-
-        loop {
-            match rx.recv_timeout(WRITE_BATCH_WINDOW) {
-                Ok(WriteCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
-                    shutdown_requested = true;
-                    break;
-                }
-                Ok(command) => batch.push(command),
-                Err(RecvTimeoutError::Timeout) => break,
-            }
+// The first command counts toward the limit, including when it is Shutdown.
+fn collect_batch(
+    first_command: WriteCommand,
+    rx: &Receiver<WriteCommand>,
+    policy: WriterBatchPolicy,
+) -> (Vec<WriteCommand>, bool) {
+    let deadline = Instant::now() + policy.window;
+    let mut shutdown_requested = matches!(first_command, WriteCommand::Shutdown);
+    let mut batch = vec![first_command];
+    while !shutdown_requested && batch.len() < policy.max_commands {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
         }
+        match rx.recv_timeout(remaining) {
+            Ok(command) => {
+                shutdown_requested = matches!(command, WriteCommand::Shutdown);
+                batch.push(command);
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                shutdown_requested = true;
+                break;
+            }
+            Err(RecvTimeoutError::Timeout) => break,
+        }
+    }
+    (batch, shutdown_requested)
+}
+
+#[tracing::instrument(skip(repository, rx))]
+fn writer_loop(
+    repository: JobStoreRepository,
+    rx: Receiver<WriteCommand>,
+    policy: WriterBatchPolicy,
+) {
+    while let Ok(first_command) = rx.recv() {
+        let (batch, shutdown_requested) = collect_batch(first_command, &rx, policy);
 
         let mut latest_task_progress = std::collections::HashMap::<TaskId, usize>::new();
         let mut latest_job_state = std::collections::HashMap::<JobId, usize>::new();
@@ -578,6 +649,128 @@ mod tests {
                 error_message: None,
             }],
         }
+    }
+
+    fn progress(bytes_completed: u64) -> WriteCommand {
+        WriteCommand::UpdateTaskProgress {
+            task_id: TaskId(7),
+            bytes_completed,
+        }
+    }
+
+    #[test]
+    fn invalid_batch_policies_are_rejected() {
+        for policy in [
+            WriterBatchPolicy {
+                window: Duration::ZERO,
+                ..WriterBatchPolicy::default()
+            },
+            WriterBatchPolicy {
+                max_commands: 0,
+                ..WriterBatchPolicy::default()
+            },
+            WriterBatchPolicy {
+                window: Duration::MAX,
+                ..WriterBatchPolicy::default()
+            },
+        ] {
+            assert!(matches!(
+                JobStore::open_in_memory_with_policy(policy),
+                Err(JobStoreError::Io(error))
+                    if error.kind() == std::io::ErrorKind::InvalidInput
+            ));
+        }
+    }
+
+    #[test]
+    fn batch_collection_caps_continuously_available_commands() {
+        let (tx, rx) = mpsc::sync_channel(16);
+        for value in 0..16 {
+            tx.send(progress(value)).unwrap();
+        }
+        let policy = WriterBatchPolicy {
+            window: Duration::from_millis(10),
+            max_commands: 4,
+        };
+        let (batch, shutdown) = collect_batch(rx.recv().unwrap(), &rx, policy);
+        assert!(!shutdown);
+        assert!(!batch.is_empty());
+        assert!(batch.len() <= policy.max_commands);
+        let remaining = rx.try_iter().count();
+        assert_eq!(batch.len() + remaining, 16);
+        assert!(remaining >= 12);
+    }
+
+    #[test]
+    fn batch_collection_stops_at_shutdown_or_disconnect() {
+        let policy = WriterBatchPolicy {
+            window: Duration::from_secs(5),
+            ..WriterBatchPolicy::default()
+        };
+        for shutdown_first in [false, true] {
+            let (tx, rx) = mpsc::sync_channel(3);
+            if !shutdown_first {
+                tx.send(progress(1)).unwrap();
+            }
+            tx.send(WriteCommand::Shutdown).unwrap();
+            tx.send(progress(2)).unwrap();
+            let (batch, shutdown) = collect_batch(rx.recv().unwrap(), &rx, policy);
+            assert!(shutdown);
+            assert_eq!(batch.len(), if shutdown_first { 1 } else { 2 });
+            assert!(matches!(batch.last(), Some(WriteCommand::Shutdown)));
+            assert_eq!(rx.try_iter().count(), 1);
+        }
+
+        let (tx, rx) = mpsc::sync_channel(2);
+        tx.send(progress(1)).unwrap();
+        tx.send(progress(2)).unwrap();
+        drop(tx);
+        let (batch, shutdown) = collect_batch(rx.recv().unwrap(), &rx, policy);
+        assert!(shutdown);
+        assert_eq!(batch.len(), 2);
+    }
+
+    #[test]
+    fn flush_is_acknowledged_before_sustained_producer_finishes() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = JobStore::open_with_policy(
+            &directory.path().join("jobs.sqlite3"),
+            WriterBatchPolicy {
+                window: Duration::from_millis(25),
+                // At one update per ms this cannot trigger within the ack bound:
+                // the elapsed-time bound, not the size bound, must flush the batch.
+                max_commands: 1024,
+            },
+        )
+        .unwrap();
+        store.save_job(&sample_job()).unwrap();
+        let tx = store.writer.tx.clone();
+        let (ack_tx, ack_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let producer = thread::spawn(move || {
+            let start = Instant::now();
+            tx.send(progress(1)).unwrap();
+            tx.send(WriteCommand::Flush { ack: ack_tx }).unwrap();
+            let mut value = 1;
+            while start.elapsed() < Duration::from_millis(1500) {
+                value += 1;
+                tx.send(progress(value)).unwrap();
+                thread::sleep(Duration::from_millis(1));
+            }
+            done_tx.send(()).unwrap();
+            value
+        });
+
+        let ack = ack_rx.recv_timeout(Duration::from_millis(500));
+        let still_sending = matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+        // Join even on failure so no producer outlives the test or its database.
+        let final_progress = producer.join().unwrap();
+        ack.expect("flush ack within 500 ms of a 1500 ms producer run")
+            .expect("successful flush");
+        assert!(still_sending, "flush must not wait for producer idle");
+        store.flush().unwrap();
+        let loaded = store.load_job(&JobId(1)).unwrap().unwrap();
+        assert_eq!(loaded.tasks[0].bytes_completed, final_progress);
     }
 
     #[test]
