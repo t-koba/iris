@@ -1,4 +1,21 @@
 use super::*;
+use std::future::Future;
+
+async fn commit_validated_pcloud_token<V, FutV, S>(
+    candidate: &TokenSet,
+    backend_id: &str,
+    account_id: &str,
+    validate: V,
+    save_token: S,
+) -> Result<(), String>
+where
+    V: FnOnce(&TokenSet) -> FutV,
+    FutV: Future<Output = Result<(), String>>,
+    S: FnOnce(&str, &str, &TokenSet) -> Result<(), String>,
+{
+    validate(candidate).await?;
+    save_token(backend_id, account_id, candidate)
+}
 
 impl AppRuntime {
     pub(super) fn initialize() -> Arc<Self> {
@@ -257,9 +274,31 @@ impl AppRuntime {
         let token = TokenSet {
             access_token: token_response.access_token.clone(),
         };
-        CredentialManager::new()
-            .save_token(&backend_id.0, &token_response.account_id, &token)
-            .map_err(|error| error.to_string())?;
+        commit_validated_pcloud_token(
+            &token,
+            &backend_id.0,
+            &token_response.account_id,
+            |candidate| {
+                let adapter = PCloudAdapter::new_with_base_and_transfer_idle_timeout(
+                    candidate.access_token.clone(),
+                    backend_id.clone(),
+                    api_base.clone(),
+                    StdDuration::from_secs(DEFAULT_PCLOUD_TRANSFER_IDLE_TIMEOUT_SECS),
+                )
+                .map_err(str::to_owned);
+                async move {
+                    let adapter = adapter?;
+                    adapter.connect().await.map_err(|error| error.to_string())?;
+                    Ok(())
+                }
+            },
+            |backend_id, account_id, candidate| {
+                CredentialManager::new()
+                    .save_token(backend_id, account_id, candidate)
+                    .map_err(|error| error.to_string())
+            },
+        )
+        .await?;
 
         let config = CloudAccountConfig::PCloud {
             backend_id: backend_id.0,
@@ -268,7 +307,7 @@ impl AppRuntime {
             api_base,
             transfer_idle_timeout_secs: DEFAULT_PCLOUD_TRANSFER_IDLE_TIMEOUT_SECS,
         };
-        let location = self.register_cloud_account(config.clone(), true).await?;
+        let location = self.register_cloud_account(config.clone(), false).await?;
         self.save_or_replace_cloud_account(config)?;
         Ok(location)
     }
@@ -540,5 +579,105 @@ impl AppRuntime {
                 (backend_id.0.clone(), relative_path.to_string()),
                 stable_id.clone(),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{commit_validated_pcloud_token, TokenSet};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    struct CredentialStore {
+        tokens: HashMap<(String, String), TokenSet>,
+        saves: usize,
+    }
+
+    impl CredentialStore {
+        fn with_old_token() -> Self {
+            Self {
+                tokens: HashMap::from([(
+                    ("pcloud:1".to_string(), "1".to_string()),
+                    TokenSet {
+                        access_token: "OLD".to_string(),
+                    },
+                )]),
+                saves: 0,
+            }
+        }
+
+        fn save(
+            &mut self,
+            backend_id: &str,
+            account_id: &str,
+            candidate: &TokenSet,
+        ) -> Result<(), String> {
+            self.saves += 1;
+            self.tokens.insert(
+                (backend_id.to_string(), account_id.to_string()),
+                candidate.clone(),
+            );
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_pcloud_validation_preserves_saved_token() {
+        let store = Mutex::new(CredentialStore::with_old_token());
+        let candidate = TokenSet {
+            access_token: "NEW".to_string(),
+        };
+        let result = commit_validated_pcloud_token(
+            &candidate,
+            "pcloud:1",
+            "1",
+            |_| async { Err("injected connection failure".to_string()) },
+            |backend_id, account_id, candidate| {
+                store
+                    .lock()
+                    .unwrap()
+                    .save(backend_id, account_id, candidate)
+            },
+        )
+        .await;
+
+        assert_eq!(result, Err("injected connection failure".to_string()));
+        let store = store.lock().unwrap();
+        assert_eq!(store.saves, 0);
+        assert_eq!(store.tokens.len(), 1);
+        assert_eq!(
+            store.tokens[&("pcloud:1".to_string(), "1".to_string())].access_token,
+            "OLD"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_pcloud_validation_replaces_saved_token() {
+        let store = Mutex::new(CredentialStore::with_old_token());
+        let candidate = TokenSet {
+            access_token: "NEW".to_string(),
+        };
+        let result = commit_validated_pcloud_token(
+            &candidate,
+            "pcloud:1",
+            "1",
+            |_| async { Ok(()) },
+            |backend_id, account_id, candidate| {
+                store
+                    .lock()
+                    .unwrap()
+                    .save(backend_id, account_id, candidate)
+            },
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+        let store = store.lock().unwrap();
+        assert_eq!(store.saves, 1);
+        assert_eq!(store.tokens.len(), 1);
+        assert_eq!(
+            store.tokens[&("pcloud:1".to_string(), "1".to_string())].access_token,
+            "NEW"
+        );
     }
 }

@@ -84,6 +84,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo test -p iris-remote-transport sftp::tests --locked
 
+      - name: pCloud credential ordering regressions
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p iris-ui-shell --lib runtime::backend_lifecycle::tests --locked
+
       - name: JPEG XR signature and decoder regressions
         if: matrix.os == 'ubuntu-latest'
         run: |
