@@ -128,7 +128,7 @@ jobs:
       - name: Product default release build (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         env:
-          CARGO_PROFILE_RELEASE_OPT_LEVEL: s
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: z
         run: cargo build --release -p iris-ui-shell --locked
 
       - name: Product default release build (macOS)

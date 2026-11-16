@@ -21,7 +21,7 @@ case "$build_variant" in
         export PKG_CONFIG_PATH="$PKG_CONFIG_LIBDIR"
         export FFMPEG_DIR="$IRIS_FFMPEG_PREFIX"
         # Match the Linux CI profile used to satisfy the release binary size budget.
-        export CARGO_PROFILE_RELEASE_OPT_LEVEL=s
+        export CARGO_PROFILE_RELEASE_OPT_LEVEL=z
         # Debian packaging requires dpkg-dev (dpkg-shlibdeps) and binutils.
         for tool in dpkg dpkg-deb dpkg-shlibdeps; do
             command -v "$tool" >/dev/null

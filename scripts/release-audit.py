@@ -765,7 +765,7 @@ def main():
             audit.file(path)
     if args.platform == "linux":
         app = directory / "Iris.AppDir"
-        audit.add("build", variant="product", features="Cargo defaults", opt_level="s")
+        audit.add("build", variant="product", features="Cargo defaults", opt_level="z")
         docs = app / "usr/share/doc/iris/pdfium"
         audit.add("provenance-check", subject="PDFium",
                   **audit.pdfium_attestation(docs, app / "usr/lib/iris/libpdfium.so"))
