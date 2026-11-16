@@ -22,6 +22,44 @@ struct TransferDirectoryRequest<'a> {
     resolution: ConflictResolution,
 }
 
+/// Resolve aliases without requiring the destination to exist. Only append normal missing
+/// components; dangling links, inaccessible ancestors and ambiguous `..` paths fail closed.
+async fn canonicalize_destination(path: &Path) -> Result<PathBuf, String> {
+    let mut ancestor = path.to_path_buf();
+    let mut missing = Vec::new();
+    loop {
+        match tokio::fs::canonicalize(&ancestor).await {
+            Ok(mut resolved) => {
+                for component in missing.into_iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound
+                    || !tokio::fs::symlink_metadata(&ancestor)
+                        .await
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                {
+                    return Err(format!("Cannot verify directory transfer safety: {error}"));
+                }
+                let Some(std::path::Component::Normal(name)) = ancestor.components().next_back()
+                else {
+                    return Err(format!(
+                        "Cannot verify directory transfer safety: {}",
+                        path.display()
+                    ));
+                };
+                missing.push(name.to_os_string());
+                ancestor.pop();
+                if ancestor.as_os_str().is_empty() {
+                    ancestor.push(".");
+                }
+            }
+        }
+    }
+}
+
 enum SymlinkTransfer {
     /// Not a local symlink, or the destination cannot hold one: copy what it points to.
     NotHandled,
@@ -32,6 +70,76 @@ enum SymlinkTransfer {
 }
 
 impl AppRuntime {
+    /// Preflight real directories before starting a transfer (including external batch tools).
+    /// Symlinks are copied as links; any fallback that traverses their target is checked below.
+    pub(super) async fn ensure_safe_transfer_destination(
+        &self,
+        source: &ObjectRef,
+        destination: &Path,
+    ) -> Result<(), String> {
+        let is_directory = if !self.is_virtual_display_path(&source.display_path) {
+            tokio::fs::symlink_metadata(&source.display_path)
+                .await
+                .map_err(|error| error.to_string())?
+                .is_dir()
+        } else {
+            self.is_directory_object(source).await?
+        };
+        if is_directory {
+            self.ensure_directory_destination_outside_source(source, destination)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn ensure_directory_destination_outside_source(
+        &self,
+        source: &ObjectRef,
+        destination: &Path,
+    ) -> Result<(), String> {
+        let src_path = Path::new(&source.display_path);
+        let contained = if !self.is_virtual_display_path(&source.display_path)
+            && !self.is_virtual_display_path(destination.to_string_lossy().as_ref())
+        {
+            let canonical_source = tokio::fs::canonicalize(src_path)
+                .await
+                .map_err(|error| format!("Cannot verify directory transfer safety: {error}"))?;
+            let canonical_destination = canonicalize_destination(destination).await?;
+            // Check the entry's parent as well: an existing symlink must not hide that the
+            // entry to be replaced lives inside the source, even if its target is elsewhere.
+            let parent_is_contained = if matches!(
+                destination.components().next_back(),
+                Some(std::path::Component::Normal(_))
+            ) {
+                let parent = destination
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."));
+                canonicalize_destination(parent)
+                    .await?
+                    .starts_with(&canonical_source)
+            } else {
+                false
+            };
+            canonical_destination.starts_with(&canonical_source) || parent_is_contained
+        } else {
+            let destination_backend = self.backend_id_for_path(destination);
+            let same_backend = source.key.backend_id == destination_backend
+                || self.backend_id_for_path(src_path) == destination_backend;
+            same_backend
+                && (destination.starts_with(src_path)
+                    || destination
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir)))
+        };
+        if contained {
+            return Err(
+                "Cannot copy or move a directory into itself or one of its descendants".into(),
+            );
+        }
+        Ok(())
+    }
+
     /// Copies keep symlinks as symlinks where the destination can hold them, as `cp -a` and
     /// Finder do. Following them would duplicate the target, and a link to an ancestor (Wine's
     /// `dosdevices/z: -> /`) would copy the whole disk. Renames are left to the move path, which
@@ -100,6 +208,8 @@ impl AppRuntime {
         resolution: ConflictResolution,
         base_bytes_completed: u64,
     ) -> Result<TransferItemOutcome, String> {
+        self.ensure_safe_transfer_destination(&item.source, Path::new(&item.destination_path))
+            .await?;
         let task_id = persisted_task_id(&job_id, task_index);
         // One control per job, shared by all of its files in flight, so Pause and Cancel reach
         // every one of them (and files started while paused wait).
@@ -290,6 +400,8 @@ impl AppRuntime {
                 is_move,
                 resolution,
             } = request;
+            self.ensure_directory_destination_outside_source(source, destination)
+                .await?;
             wait_if_paused_or_canceled(control).await?;
             let src_path = Path::new(&source.display_path);
             let src_resolved = self.resolve_backend(src_path);
@@ -740,7 +852,7 @@ async fn remove_symlink(path: &Path) -> std::io::Result<()> {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -755,6 +867,142 @@ mod tests {
         }
     }
 
+    async fn assert_rejected_without_writes(source: &Path, destination: &Path) {
+        // Neither conflict resolution nor moving may bypass the containment invariant.
+        for is_move in [false, true] {
+            for resolution in [
+                ConflictResolution::Overwrite,
+                ConflictResolution::Rename,
+                ConflictResolution::Skip,
+            ] {
+                let error = Arc::clone(app_runtime())
+                    .apply_pending_item(
+                        JobId(9_000_002),
+                        0,
+                        PendingFileItem {
+                            source: local_ref(source),
+                            destination_path: destination.to_string_lossy().into_owned(),
+                        },
+                        is_move,
+                        resolution,
+                        0,
+                    )
+                    .await
+                    .expect_err("recursive directory transfer must be rejected");
+                assert!(
+                    error.contains("into itself or one of its descendants"),
+                    "{error}"
+                );
+                assert_eq!(std::fs::read_dir(source).unwrap().count(), 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn directory_paste_into_itself_is_rejected_without_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        assert_rejected_without_writes(&source, &source).await;
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn directory_paste_into_descendant_is_rejected_without_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        // Multiple absent components exercise nearest-existing-ancestor resolution.
+        assert_rejected_without_writes(&source, &source.join("missing/copy")).await;
+        assert!(!source.join("missing").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn directory_paste_via_symlink_alias_is_rejected_without_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&source).unwrap();
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+        assert_rejected_without_writes(&source, &alias).await;
+        assert_rejected_without_writes(&source, &alias.join("missing/copy")).await;
+        assert!(!source.join("missing").exists());
+    }
+
+    #[tokio::test]
+    async fn directory_copy_to_sibling_succeeds() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        // A string prefix is not necessarily a path-component prefix.
+        let destination = temp.path().join("source-copy");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("file.txt"), b"content").unwrap();
+        Arc::clone(app_runtime())
+            .apply_pending_item(
+                JobId(9_000_003),
+                0,
+                PendingFileItem {
+                    source: local_ref(&source),
+                    destination_path: destination.to_string_lossy().into_owned(),
+                },
+                false,
+                ConflictResolution::Fail,
+                0,
+            )
+            .await
+            .expect("sibling copy succeeds");
+        assert_eq!(
+            std::fs::read(destination.join("file.txt")).unwrap(),
+            b"content"
+        );
+        assert!(source.join("file.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn batch_preflight_rejects_recursive_copy_before_any_destination_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let sibling = temp.path().join("sibling");
+        std::fs::create_dir(&source).unwrap();
+        let items = [sibling.clone(), source.join("copy")].map(|destination| PendingFileItem {
+            source: local_ref(&source),
+            destination_path: destination.to_string_lossy().into_owned(),
+        });
+        let error = app_runtime()
+            .try_rsync_batch(&items, false, &ConflictResolution::Overwrite)
+            .await
+            .unwrap_err();
+        assert!(error.contains("into itself or one of its descendants"));
+        assert!(!sibling.exists());
+        assert_eq!(std::fs::read_dir(&source).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn remote_directory_destination_uses_backend_and_path_components() {
+        let runtime = app_runtime();
+        // Use the runtime's virtual root spelling instead of requiring a live remote adapter.
+        let root = virtual_root_path(&BackendId("s3:test".into()));
+        let mut source = local_ref(&root.join("folder"));
+        source.key.backend_id = BackendId("s3:test".into());
+        for destination in [root.join("folder"), root.join("folder/child")] {
+            assert!(runtime
+                .ensure_directory_destination_outside_source(&source, &destination)
+                .await
+                .is_err());
+        }
+        for destination in [
+            root.join("folder-copy"),
+            virtual_root_path(&BackendId("s3:other".into())).join("folder/child"),
+        ] {
+            runtime
+                .ensure_directory_destination_outside_source(&source, &destination)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn copying_a_folder_keeps_symlinks_and_does_not_follow_a_link_to_an_ancestor() {
         let source_root = tempfile::tempdir().expect("source tempdir");
@@ -801,6 +1049,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn recreating_a_symlink_replaces_a_file_but_never_a_directory() {
         let temp = tempfile::tempdir().expect("tempdir");

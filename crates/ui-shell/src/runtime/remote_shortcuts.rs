@@ -27,6 +27,12 @@ impl AppRuntime {
             return Ok(None);
         }
 
+        // Validate the entire batch before any external tool can mutate a destination.
+        for item in items {
+            self.ensure_safe_transfer_destination(&item.source, Path::new(&item.destination_path))
+                .await?;
+        }
+
         for item in items {
             if self.is_virtual_display_path(&item.source.display_path)
                 || self.is_virtual_display_path(&item.destination_path)
