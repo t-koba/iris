@@ -395,33 +395,7 @@ impl BackendAdapter for PCloudAdapter {
         let (_, file_id) = Self::parse_id(object)?;
         let download_url = self.api().await?.get_file_link(file_id).await?;
 
-        let client = self.api().await?.http_client();
-        let mut request = client.get(&download_url);
-
-        if let Some(ref r) = range {
-            let range_str = match r.length {
-                Some(len) => format!("bytes={}-{}", r.offset, r.offset + len - 1),
-                None => format!("bytes={}-", r.offset),
-            };
-            request = request.header("Range", range_str);
-        }
-
-        let response = request
-            .send()
-            .await
-            .map_err(|e| BackendError::Internal(Box::new(e)))?;
-
-        let content_length = response.content_length();
-        let stream = response.bytes_stream();
-
-        use tokio_util::io::StreamReader;
-        let reader = StreamReader::new(stream.map(|result| result.map_err(std::io::Error::other)));
-
-        Ok(ReadHandle {
-            stream: Box::pin(reader),
-            content_length,
-            content_range: range,
-        })
+        download_read(self.api().await?.http_client(), &download_url, range).await
     }
 
     async fn write_object(
@@ -598,6 +572,142 @@ impl BackendAdapter for PCloudAdapter {
     }
 }
 
+/// Validate the download envelope before exposing any body bytes. Download URLs may
+/// be signed, so neither protocol errors nor transport errors may retain the URL.
+async fn download_read(
+    client: reqwest::Client,
+    url: &str,
+    range: Option<ByteRange>,
+) -> Result<ReadHandle, BackendError> {
+    let mut request = client.get(url);
+    let requested_end = match range.as_ref() {
+        Some(ByteRange {
+            offset,
+            length: Some(length),
+        }) => Some(
+            length
+                .checked_sub(1)
+                .and_then(|length| offset.checked_add(length))
+                .ok_or_else(|| download_error("invalid requested byte range"))?,
+        ),
+        _ => None,
+    };
+    if let Some(range) = &range {
+        let end = requested_end.map(|end| end.to_string()).unwrap_or_default();
+        request = request.header(
+            reqwest::header::RANGE,
+            format!("bytes={}-{end}", range.offset),
+        );
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|error| BackendError::Internal(Box::new(error.without_url())))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(BackendError::Internal(Box::new(io::Error::other(format!(
+            "pCloud download failed with HTTP status {}",
+            status.as_u16()
+        )))));
+    }
+
+    let content_range = if let Some(range) = range {
+        if status != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(download_error("range download requires HTTP status 206"));
+        }
+        let mut headers = response
+            .headers()
+            .get_all(reqwest::header::CONTENT_RANGE)
+            .iter();
+        let parsed = headers
+            .next()
+            .and_then(|header| header.to_str().ok())
+            .and_then(parse_content_range)
+            .filter(|_| headers.next().is_none())
+            .ok_or_else(|| download_error("invalid or missing Content-Range"))?;
+        let (start, end, total) = parsed;
+        // Open-ended requests must reach a known EOF; an unknown total cannot
+        // establish that the response fulfilled the request.
+        let expected_end = requested_end.or_else(|| total.and_then(|total| total.checked_sub(1)));
+        if start != range.offset || Some(end) != expected_end {
+            return Err(download_error(
+                "Content-Range does not match requested range",
+            ));
+        }
+        let span = end - start + 1; // Checked by parse_content_range.
+        if let Some(length) = response.headers().get(reqwest::header::CONTENT_LENGTH) {
+            let length = length.to_str().ok().and_then(parse_decimal);
+            if length != Some(span) {
+                return Err(download_error(
+                    "Content-Length does not match Content-Range",
+                ));
+            }
+        }
+        Some(ByteRange {
+            offset: start,
+            length: Some(span),
+        })
+    } else {
+        if status != reqwest::StatusCode::OK {
+            return Err(download_error("full download requires HTTP status 200"));
+        }
+        if response
+            .headers()
+            .contains_key(reqwest::header::CONTENT_RANGE)
+        {
+            return Err(download_error(
+                "unexpected partial response for full download",
+            ));
+        }
+        None
+    };
+
+    let content_length = content_range
+        .as_ref()
+        .and_then(|range| range.length)
+        .or_else(|| response.content_length());
+    let stream = response
+        .bytes_stream()
+        .map(|result| result.map_err(|error| io::Error::other(error.without_url())));
+    Ok(ReadHandle {
+        stream: Box::pin(tokio_util::io::StreamReader::new(stream)),
+        content_length,
+        content_range,
+    })
+}
+
+fn download_error(message: &'static str) -> BackendError {
+    BackendError::Internal(Box::new(io::Error::new(
+        io::ErrorKind::InvalidData,
+        message,
+    )))
+}
+
+fn parse_decimal(value: &str) -> Option<u64> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok()
+}
+
+/// Single byte range only; multipart and unsatisfied ranges are not downloads.
+fn parse_content_range(value: &str) -> Option<(u64, u64, Option<u64>)> {
+    let (range, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let (start, end) = (parse_decimal(start)?, parse_decimal(end)?);
+    let total = if total == "*" {
+        None
+    } else {
+        Some(parse_decimal(total)?)
+    };
+    end.checked_sub(start)?.checked_add(1)?;
+    if total.is_some_and(|total| end >= total) {
+        return None;
+    }
+    Some((start, end, total))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,3 +814,7 @@ mod tests {
 #[cfg(test)]
 #[path = "overwrite_tests.rs"]
 mod overwrite_tests;
+
+#[cfg(test)]
+#[path = "read_tests.rs"]
+mod read_tests;
