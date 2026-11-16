@@ -38,6 +38,7 @@ flate2 = { workspace = true }
 pdfium-render = { workspace = true, optional = true }
 
 [dev-dependencies]
+jpegxr = { workspace = true, features = ["decoder-accounting"] }
 iris-thumb-preview = { path = ".", features = ["test-fixtures"] }
 criterion = { workspace = true }
 image = { workspace = true, features = ["avif"] }

@@ -700,24 +700,25 @@ impl Rect {
     }
 }
 
-// Test-only accounting for the decoder-ownership regression. These observe the
+// Decoder-ownership accounting, compiled for unit tests and exposed to
+// workspace regressions via the decoder-accounting feature. These observe the
 // actual C allocation and Release calls, independent of any Rust guard, so
 // removing error-path ownership cannot silently rebalance the counters.
-#[cfg(test)]
+#[cfg(any(test, feature = "decoder-accounting"))]
 thread_local! {
     static DECODERS_CREATED: std::cell::Cell<u64> = std::cell::Cell::new(0);
     static DECODERS_RELEASED: std::cell::Cell<u64> = std::cell::Cell::new(0);
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "decoder-accounting"))]
 fn note_decoder_created() {
     DECODERS_CREATED.with(|count| count.set(count.get() + 1));
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "decoder-accounting"))]
 fn note_decoder_released() {
     DECODERS_RELEASED.with(|count| count.set(count.get() + 1));
 }
-#[cfg(test)]
-fn decoder_counts() -> (u64, u64) {
+#[cfg(any(test, feature = "decoder-accounting"))]
+pub fn decoder_counts() -> (u64, u64) {
     (
         DECODERS_CREATED.with(|count| count.get()),
         DECODERS_RELEASED.with(|count| count.get()),
@@ -734,7 +735,7 @@ impl Drop for ImageDecodeGuard {
             unsafe {
                 (*self.0).Release.unwrap()(&mut self.0);
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "decoder-accounting"))]
             note_decoder_released();
         }
     }
@@ -763,7 +764,7 @@ impl<R> ImageDecode<R> where R: Read + Seek {
 
             let mut codec = ImageDecodeGuard(std::ptr::null_mut());
             call(PKImageDecode_Create_WMP(&mut codec.0))?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "decoder-accounting"))]
             note_decoder_created();
             call((*codec.0).Initialize.unwrap()(codec.0, stream.raw.as_mut()))?;
 
@@ -852,7 +853,7 @@ impl<R> Drop for ImageDecode<R> where R: Read + Seek {
             // Release the C structure.
             (*self.raw).Release.unwrap()(&mut self.raw);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "decoder-accounting"))]
         note_decoder_released();
     }
 }

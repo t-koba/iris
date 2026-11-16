@@ -376,6 +376,26 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_xr_decoder_releases_after_failed_initialization() {
+        // Workspace-crate guard for the vendored decoder-ownership fix. The
+        // counters observe C allocation and Release calls, so reverting the
+        // error-path ownership cannot silently pass this test.
+        let (created_before, released_before) = jpegxr::decoder_counts();
+        let result = jpegxr::ImageDecode::with_reader(std::io::Cursor::new([0u8; 2]));
+        assert!(matches!(result, Err(jpegxr::JXRError::UnsupportedFormat)));
+        let (created_after, released_after) = jpegxr::decoder_counts();
+        assert!(
+            created_after > created_before,
+            "invalid input did not allocate a C decoder"
+        );
+        assert_eq!(
+            created_after - created_before,
+            released_after - released_before,
+            "decoder allocated during failed initialization was not released"
+        );
+    }
+
+    #[test]
     fn unpremultiplies_jpeg_xr_alpha() {
         let mut pixels = [64, 32, 16, 128, 20, 30, 40, 255];
         unpremultiply_rgba(&mut pixels);

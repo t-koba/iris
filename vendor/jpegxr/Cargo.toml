@@ -15,6 +15,9 @@ categories = ["multimedia::images"]
 license = "BSD-3-Clause"
 repository = "https://github.com/brion/jpegxr.git"
 
+[features]
+decoder-accounting = []
+
 [dependencies.thiserror]
 version = "1.0.57"
 
