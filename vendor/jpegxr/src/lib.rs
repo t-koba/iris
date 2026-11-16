@@ -700,6 +700,30 @@ impl Rect {
     }
 }
 
+// Test-only accounting for the decoder-ownership regression. These observe the
+// actual C allocation and Release calls, independent of any Rust guard, so
+// removing error-path ownership cannot silently rebalance the counters.
+#[cfg(test)]
+thread_local! {
+    static DECODERS_CREATED: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    static DECODERS_RELEASED: std::cell::Cell<u64> = std::cell::Cell::new(0);
+}
+#[cfg(test)]
+fn note_decoder_created() {
+    DECODERS_CREATED.with(|count| count.set(count.get() + 1));
+}
+#[cfg(test)]
+fn note_decoder_released() {
+    DECODERS_RELEASED.with(|count| count.set(count.get() + 1));
+}
+#[cfg(test)]
+fn decoder_counts() -> (u64, u64) {
+    (
+        DECODERS_CREATED.with(|count| count.get()),
+        DECODERS_RELEASED.with(|count| count.get()),
+    )
+}
+
 // Own any decoder allocated during construction, including on C-call errors.
 // This guard must be dropped before the InputStream used by Initialize.
 struct ImageDecodeGuard(*mut PKImageDecode);
@@ -710,6 +734,8 @@ impl Drop for ImageDecodeGuard {
             unsafe {
                 (*self.0).Release.unwrap()(&mut self.0);
             }
+            #[cfg(test)]
+            note_decoder_released();
         }
     }
 }
@@ -737,6 +763,8 @@ impl<R> ImageDecode<R> where R: Read + Seek {
 
             let mut codec = ImageDecodeGuard(std::ptr::null_mut());
             call(PKImageDecode_Create_WMP(&mut codec.0))?;
+            #[cfg(test)]
+            note_decoder_created();
             call((*codec.0).Initialize.unwrap()(codec.0, stream.raw.as_mut()))?;
 
             Ok(Self {
@@ -824,6 +852,8 @@ impl<R> Drop for ImageDecode<R> where R: Read + Seek {
             // Release the C structure.
             (*self.raw).Release.unwrap()(&mut self.raw);
         }
+        #[cfg(test)]
+        note_decoder_released();
     }
 }
 
@@ -846,6 +876,29 @@ mod tests {
             ImageDecode::with_reader(input),
             Err(crate::JXRError::UnsupportedFormat)
         ));
+    }
+
+    #[test]
+    fn invalid_input_releases_the_decoder_it_allocated() {
+        // This fails if error-path ownership is reverted: Initialize rejects the
+        // input after the C decoder is allocated, and that allocation must be
+        // released. The counts observe the C calls, not the Rust guard.
+        let (created_before, released_before) = super::decoder_counts();
+        let result = ImageDecode::with_reader(std::io::Cursor::new([0u8; 2]));
+        assert!(matches!(
+            result,
+            Err(crate::JXRError::UnsupportedFormat)
+        ));
+        let (created_after, released_after) = super::decoder_counts();
+        assert!(
+            created_after > created_before,
+            "test input did not allocate a C decoder"
+        );
+        assert_eq!(
+            (created_after - created_before) - (released_after - released_before),
+            0,
+            "decoder allocated during failed initialization was not released"
+        );
     }
 
     #[test]
