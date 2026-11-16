@@ -1,10 +1,13 @@
-use crate::pcloud::api_client::{PCloudApiClient, PCloudMetadata};
+use crate::pcloud::api_client::{
+    validate_transfer_idle_timeout, PCloudApiClient, PCloudMetadata,
+    DEFAULT_PCLOUD_TRANSFER_IDLE_TIMEOUT_SECS,
+};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use iris_auth::credential_manager::CredentialManager;
 use iris_core_domain::backend_adapter::BackendAdapter;
 use iris_core_domain::types::capability::CapabilitySet;
-use iris_core_domain::types::error::BackendError;
+use iris_core_domain::types::error::{BackendError, NetworkErrorDetail};
 use iris_core_domain::types::list::{
     EntryNameOnly, EntryWithMeta, ListCursor, ListPage, ListedEntry,
 };
@@ -22,6 +25,7 @@ use std::io;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::io::AsyncRead;
 use tokio::sync::OnceCell;
 
@@ -36,6 +40,7 @@ pub struct PCloudAdapter {
 struct PCloudStoredCredentials {
     account_id: String,
     api_base: String,
+    transfer_idle_timeout: Duration,
 }
 
 impl PCloudAdapter {
@@ -53,8 +58,26 @@ impl PCloudAdapter {
         backend_id: BackendId,
         api_base: String,
     ) -> Result<Self, &'static str> {
+        Self::new_with_base_and_transfer_idle_timeout(
+            access_token,
+            backend_id,
+            api_base,
+            Duration::from_secs(DEFAULT_PCLOUD_TRANSFER_IDLE_TIMEOUT_SECS),
+        )
+    }
+
+    pub fn new_with_base_and_transfer_idle_timeout(
+        access_token: String,
+        backend_id: BackendId,
+        api_base: String,
+        transfer_idle_timeout: Duration,
+    ) -> Result<Self, &'static str> {
         Ok(Self {
-            api: OnceCell::from(PCloudApiClient::with_base_url(access_token, api_base)?),
+            api: OnceCell::from(PCloudApiClient::with_base_url_and_transfer_idle_timeout(
+                access_token,
+                api_base,
+                transfer_idle_timeout,
+            )?),
             backend_id,
             ticket_counter: AtomicU64::new(1),
             stored_credentials: None,
@@ -76,6 +99,21 @@ impl PCloudAdapter {
         account_id: String,
         api_base: String,
     ) -> Result<Self, &'static str> {
+        Self::new_with_stored_credentials_and_transfer_idle_timeout(
+            backend_id,
+            account_id,
+            api_base,
+            Duration::from_secs(DEFAULT_PCLOUD_TRANSFER_IDLE_TIMEOUT_SECS),
+        )
+    }
+
+    pub fn new_with_stored_credentials_and_transfer_idle_timeout(
+        backend_id: BackendId,
+        account_id: String,
+        api_base: String,
+        transfer_idle_timeout: Duration,
+    ) -> Result<Self, &'static str> {
+        validate_transfer_idle_timeout(transfer_idle_timeout)?;
         let api_base = PCloudApiClient::canonical_api_base(&api_base)?.to_string();
         Ok(Self {
             api: OnceCell::new(),
@@ -84,6 +122,7 @@ impl PCloudAdapter {
             stored_credentials: Some(PCloudStoredCredentials {
                 account_id,
                 api_base,
+                transfer_idle_timeout,
             }),
         })
     }
@@ -109,8 +148,12 @@ impl PCloudAdapter {
                         is_token_expired: false,
                     })
                 })?;
-                PCloudApiClient::with_base_url(token.access_token, credentials.api_base.clone())
-                    .map_err(|message| BackendError::Internal(Box::new(io::Error::other(message))))
+                PCloudApiClient::with_base_url_and_transfer_idle_timeout(
+                    token.access_token,
+                    credentials.api_base.clone(),
+                    credentials.transfer_idle_timeout,
+                )
+                .map_err(|message| BackendError::Internal(Box::new(io::Error::other(message))))
             })
             .await
     }
@@ -395,7 +438,12 @@ impl BackendAdapter for PCloudAdapter {
         let (_, file_id) = Self::parse_id(object)?;
         let download_url = self.api().await?.get_file_link(file_id).await?;
 
-        download_read(self.api().await?.http_client(), &download_url, range).await
+        download_read(
+            self.api().await?.transfer_http_client(),
+            &download_url,
+            range,
+        )
+        .await
     }
 
     async fn write_object(
@@ -600,10 +648,18 @@ async fn download_read(
         );
     }
 
-    let response = request
-        .send()
-        .await
-        .map_err(|error| BackendError::Internal(Box::new(error.without_url())))?;
+    let response = request.send().await.map_err(|error| {
+        let is_timeout = error.is_timeout();
+        let error = error.without_url();
+        if is_timeout {
+            BackendError::Network(NetworkErrorDetail {
+                message: format!("pCloud download request failed: {error}"),
+                is_timeout: true,
+            })
+        } else {
+            BackendError::Internal(Box::new(error))
+        }
+    })?;
     let status = response.status();
     if !status.is_success() {
         return Err(BackendError::Internal(Box::new(io::Error::other(format!(
@@ -675,7 +731,14 @@ async fn download_read(
         |(mut stream, remaining)| async move {
             match stream.next().await {
                 Some(result) => {
-                    let chunk = result.map_err(|error| io::Error::other(error.without_url()))?;
+                    let chunk = result.map_err(|error| {
+                        let kind = if error.is_timeout() {
+                            io::ErrorKind::TimedOut
+                        } else {
+                            io::ErrorKind::Other
+                        };
+                        io::Error::new(kind, error.without_url())
+                    })?;
                     let remaining = remaining
                         .map(|remaining| {
                             remaining.checked_sub(chunk.len() as u64).ok_or_else(|| {
@@ -738,6 +801,15 @@ fn parse_content_range(value: &str) -> Option<(u64, u64, Option<u64>)> {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::{sleep, timeout, Duration};
+
+    async fn read_request_headers(stream: &mut tokio::net::TcpStream) {
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            headers.push(stream.read_u8().await.expect("read HTTP request"));
+            assert!(headers.len() <= 8192, "bounded HTTP request headers");
+        }
+    }
 
     #[test]
     fn stored_credential_adapter_does_not_read_credentials_during_construction() {
@@ -749,6 +821,19 @@ mod tests {
         .expect("approved origin");
 
         assert!(adapter.api.get().is_none());
+    }
+
+    #[test]
+    fn stored_credential_adapter_rejects_invalid_transfer_idle_timeouts() {
+        assert!(
+            PCloudAdapter::new_with_stored_credentials_and_transfer_idle_timeout(
+                BackendId("pcloud:test".into()),
+                "account".into(),
+                "https://api.pcloud.com".into(),
+                Duration::ZERO,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -766,6 +851,99 @@ mod tests {
             error,
             "pCloud API base must be the HTTPS US or Europe API origin"
         );
+    }
+
+    #[tokio::test]
+    async fn progressing_download_can_outlive_the_api_request_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock pCloud server");
+        let address = listener.local_addr().expect("mock server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept download");
+            read_request_headers(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("write response headers");
+            for chunk in [b"ab".as_slice(), b"cd", b"ef"] {
+                sleep(Duration::from_millis(45)).await;
+                stream.write_all(chunk).await.expect("write response chunk");
+            }
+        });
+        let client = PCloudApiClient::with_test_base_url_and_timeouts(
+            "synthetic-token".into(),
+            format!("http://{address}"),
+            Duration::from_millis(100),
+            Duration::from_millis(250),
+        )
+        .transfer_http_client();
+
+        let started = tokio::time::Instant::now();
+        let mut handle = download_read(client, &format!("http://{address}/download"), None)
+            .await
+            .expect("download stream");
+        let mut bytes = Vec::new();
+        timeout(
+            Duration::from_secs(2),
+            handle.stream.read_to_end(&mut bytes),
+        )
+        .await
+        .expect("bounded download")
+        .expect("read complete download");
+        assert!(started.elapsed() > Duration::from_millis(100));
+        assert_eq!(bytes, b"abcdef");
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    async fn stalled_download_expires_at_the_transfer_idle_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock pCloud server");
+        let address = listener.local_addr().expect("mock server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept stalled download");
+            read_request_headers(&mut stream).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nx")
+                .await
+                .expect("write partial response");
+            let mut byte = [0; 1];
+            assert_eq!(
+                stream
+                    .read(&mut byte)
+                    .await
+                    .expect("observe client cancellation"),
+                0,
+                "dropping the stalled response stream closes its HTTP connection"
+            );
+        });
+        let client = PCloudApiClient::with_test_base_url_and_timeouts(
+            "synthetic-token".into(),
+            format!("http://{address}"),
+            Duration::from_millis(50),
+            Duration::from_millis(60),
+        )
+        .transfer_http_client();
+        let mut handle = download_read(client, &format!("http://{address}/stalled"), None)
+            .await
+            .expect("download stream");
+        let mut bytes = Vec::new();
+        let error = timeout(
+            Duration::from_secs(1),
+            handle.stream.read_to_end(&mut bytes),
+        )
+        .await
+        .expect("bounded stalled download")
+        .expect_err("stalled body must time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(bytes, b"x");
+        drop(handle);
+        timeout(Duration::from_secs(1), server)
+            .await
+            .expect("server observes response cancellation")
+            .expect("mock server task");
     }
 
     #[tokio::test]

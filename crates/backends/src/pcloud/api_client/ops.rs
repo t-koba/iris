@@ -1,10 +1,14 @@
 use super::{PCloudApiClient, PCloudMetadata, PCloudResponse};
+use futures_util::StreamExt;
 use iris_core_domain::types::error::{BackendError, NetworkErrorDetail};
 use reqwest::{multipart, RequestBuilder};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use std::io::Cursor;
 use std::pin::Pin;
+use std::time::Duration;
 use tokio::io::AsyncRead;
+use tokio::sync::watch;
 use tokio_util::io::ReaderStream;
 
 impl PCloudApiClient {
@@ -160,9 +164,13 @@ impl PCloudApiClient {
         file_name: &str,
         data: Vec<u8>,
     ) -> Result<PCloudMetadata, BackendError> {
-        self.upload(
+        let content_length =
+            u64::try_from(data.len()).map_err(|error| BackendError::Internal(Box::new(error)))?;
+        self.upload_stream_to_folder(
             folder_id,
-            multipart::Part::bytes(data).file_name(file_name.to_string()),
+            file_name,
+            Box::pin(Cursor::new(data)),
+            Some(content_length),
         )
         .await
     }
@@ -174,42 +182,62 @@ impl PCloudApiClient {
         reader: Pin<Box<dyn AsyncRead + Send>>,
         content_length: Option<u64>,
     ) -> Result<PCloudMetadata, BackendError> {
-        let body = reqwest::Body::wrap_stream(ReaderStream::new(reader));
+        let (progress_tx, progress_rx) = watch::channel(tokio::time::Instant::now());
+        let progress = ReaderStream::new(reader).inspect(move |result| {
+            if let Ok(bytes) = result {
+                if !bytes.is_empty() {
+                    progress_tx.send_replace(tokio::time::Instant::now());
+                }
+            }
+        });
+        let body = reqwest::Body::wrap_stream(progress);
         let part = match content_length {
             Some(length) => multipart::Part::stream_with_length(body, length),
             None => multipart::Part::stream(body),
         };
-        self.upload(folder_id, part.file_name(file_name.to_string()))
-            .await
+        self.upload(
+            folder_id,
+            part.file_name(file_name.to_string()),
+            progress_rx,
+        )
+        .await
     }
 
     async fn upload(
         &self,
         folder_id: u64,
         part: multipart::Part,
+        progress: watch::Receiver<tokio::time::Instant>,
     ) -> Result<PCloudMetadata, BackendError> {
         // uploadfile overwrites an existing file, retaining its old contents as a
         // revision. nopartial prevents incomplete uploads from replacing that file.
-        let response = self
-            .http
-            .post(format!("{}/uploadfile", self.api_base))
-            .query(&[
-                ("access_token", self.access_token.clone()),
-                ("folderid", folder_id.to_string()),
-                ("nopartial", "1".to_string()),
-            ])
-            .multipart(multipart::Form::new().part("file", part))
-            .send()
-            .await
-            .map_err(|e| network_error("uploadfile", e))?;
-        let body = parse_response::<serde_json::Value>("uploadfile", response).await?;
-        extract_uploaded_metadata(&body.unwrap_or_default())
+        let upload = async {
+            let response = self
+                .transfer_http
+                .post(format!("{}/uploadfile", self.api_base))
+                .query(&[
+                    ("access_token", self.access_token.clone()),
+                    ("folderid", folder_id.to_string()),
+                    ("nopartial", "1".to_string()),
+                ])
+                .multipart(multipart::Form::new().part("file", part))
+                .send()
+                .await
+                .map_err(|e| network_error("uploadfile", e))?;
+            let body = parse_response::<serde_json::Value>("uploadfile", response).await?;
+            extract_uploaded_metadata(&body.unwrap_or_default())
+        };
+        tokio::select! {
+            result = upload => result,
+            () = wait_for_upload_progress(progress, self.transfer_idle_timeout) => Err(upload_stalled_error()),
+        }
     }
 
     fn request(&self, method: &str) -> RequestBuilder {
         self.http
             .get(format!("{}/{method}", self.api_base))
             .query(&[("access_token", self.access_token.as_str())])
+            .timeout(self.api_timeout)
     }
 
     /// Calls `method` and returns the body of a successful response.
@@ -249,6 +277,36 @@ async fn parse_response<T: DeserializeOwned>(
         .map_err(|e| internal_reqwest_error(method, e))?;
     PCloudApiClient::ensure_success(method, &body)?;
     Ok(body.data)
+}
+
+async fn wait_for_upload_progress(
+    mut progress: watch::Receiver<tokio::time::Instant>,
+    idle_timeout: Duration,
+) {
+    let mut last_progress = *progress.borrow_and_update();
+    loop {
+        let elapsed = tokio::time::Instant::now().saturating_duration_since(last_progress);
+        let remaining = idle_timeout.saturating_sub(elapsed);
+        if remaining.is_zero() {
+            return;
+        }
+        match tokio::time::timeout(remaining, progress.changed()).await {
+            Ok(Ok(())) => last_progress = *progress.borrow_and_update(),
+            Ok(Err(_)) => {
+                // The body has ended; keep the response wait bounded by the same idle policy.
+                tokio::time::sleep(remaining).await;
+                return;
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+fn upload_stalled_error() -> BackendError {
+    BackendError::Network(NetworkErrorDetail {
+        message: "pCloud uploadfile stalled without transfer progress".to_owned(),
+        is_timeout: true,
+    })
 }
 
 fn network_error(method: &str, error: reqwest::Error) -> BackendError {
@@ -346,6 +404,32 @@ mod tests {
         );
     }
 
+    async fn read_content_length(stream: &mut tokio::net::TcpStream) -> usize {
+        let mut content_length = None;
+        loop {
+            let mut line = Vec::new();
+            loop {
+                let byte = stream.read_u8().await.expect("read HTTP headers");
+                line.push(byte);
+                assert!(line.len() <= 8192, "bounded HTTP header line");
+                if line.ends_with(b"\r\n") {
+                    break;
+                }
+            }
+            if line == b"\r\n" {
+                break;
+            }
+            if let Ok(line) = std::str::from_utf8(&line) {
+                if let Some((name, value)) = line.trim_end().split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        content_length = value.trim().parse::<usize>().ok();
+                    }
+                }
+            }
+        }
+        content_length.expect("known multipart content length")
+    }
+
     async fn response_server(
         body: Vec<u8>,
         content_length: usize,
@@ -380,14 +464,12 @@ mod tests {
             read_request_line(&mut stream).await;
             sleep(Duration::from_millis(250)).await;
         });
-        let api = PCloudApiClient {
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_millis(50))
-                .build()
-                .expect("build timed client"),
-            access_token: TOKEN.to_owned(),
-            api_base: format!("http://{address}"),
-        };
+        let api = PCloudApiClient::with_test_base_url_and_timeouts(
+            TOKEN.to_owned(),
+            format!("http://{address}"),
+            Duration::from_millis(50),
+            Duration::from_millis(100),
+        );
 
         let error = api
             .list_folder(0)
@@ -400,6 +482,199 @@ mod tests {
             BackendError::Network(detail) if detail.is_timeout
         ));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn api_request_deadline_covers_a_slow_response_body() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock pCloud server");
+        let address = listener.local_addr().expect("mock server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept API request");
+            read_request_line(&mut stream).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 128\r\nConnection: close\r\n\r\n{",
+                )
+                .await
+                .expect("write partial API response");
+            sleep(Duration::from_millis(250)).await;
+        });
+        let api = PCloudApiClient::with_test_base_url_and_timeouts(
+            TOKEN.to_owned(),
+            format!("http://{address}"),
+            Duration::from_millis(50),
+            Duration::from_millis(200),
+        );
+        let result = tokio::time::timeout(Duration::from_millis(150), api.list_folder(0)).await;
+        let error = result
+            .expect("API request deadline applies while reading the response body")
+            .expect_err("incomplete API response should fail");
+        assert_token_redacted(&error);
+        assert!(error.to_string().contains("listfolder response failed"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn progressing_stream_upload_can_outlive_the_api_request_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock pCloud server");
+        let address = listener.local_addr().expect("mock server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept upload");
+            read_request_line(&mut stream).await;
+            let content_length = read_content_length(&mut stream).await;
+            let mut body = vec![0; content_length];
+            stream
+                .read_exact(&mut body)
+                .await
+                .expect("read multipart upload");
+            let metadata = serde_json::json!({
+                "result": 0,
+                "metadata": {"name": "slow.bin", "fileid": 7, "isfolder": false, "size": 12}
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                metadata.len(), metadata
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write upload response");
+        });
+        let api = PCloudApiClient::with_test_base_url_and_timeouts(
+            TOKEN.to_owned(),
+            format!("http://{address}"),
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+        );
+        let (mut source, reader) = tokio::io::duplex(64);
+        let producer = tokio::spawn(async move {
+            for chunk in [b"abc".as_slice(), b"def", b"ghi", b"jkl"] {
+                sleep(Duration::from_millis(40)).await;
+                source.write_all(chunk).await.expect("write upload source");
+            }
+        });
+
+        let started = tokio::time::Instant::now();
+        let metadata = tokio::time::timeout(
+            Duration::from_secs(2),
+            api.upload_stream_to_folder(1, "slow.bin", Box::pin(reader), Some(12)),
+        )
+        .await
+        .expect("bounded progressing upload")
+        .expect("upload beyond API request deadline");
+        assert!(started.elapsed() > Duration::from_millis(100));
+        assert_eq!(metadata.name, "slow.bin");
+        producer.await.expect("upload producer");
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    async fn stalled_upload_body_write_expires_when_progress_stops() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock pCloud server");
+        let address = listener.local_addr().expect("mock server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept stalled body");
+            read_request_line(&mut stream).await;
+            let content_length = read_content_length(&mut stream).await;
+            assert!(content_length > 1_000_000_000);
+            // Do not consume the upload body until the client-side progress guard cancels it.
+            sleep(Duration::from_millis(400)).await;
+            let mut buffer = [0; 16 * 1024];
+            loop {
+                if stream
+                    .read(&mut buffer)
+                    .await
+                    .expect("drain canceled request")
+                    == 0
+                {
+                    break;
+                }
+            }
+        });
+        let api = PCloudApiClient::with_test_base_url_and_timeouts(
+            TOKEN.to_owned(),
+            format!("http://{address}"),
+            Duration::from_millis(50),
+            Duration::from_millis(80),
+        );
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            api.upload_stream_to_folder(
+                1,
+                "large.bin",
+                Box::pin(tokio::io::repeat(0_u8)),
+                Some(1_000_000_000),
+            ),
+        )
+        .await
+        .expect("bounded stalled upload");
+        let error = result.expect_err("body write should stop after idle timeout");
+        assert!(matches!(
+            &error,
+            BackendError::Network(detail) if detail.is_timeout
+        ));
+        assert_token_redacted(&error);
+        drop(api);
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server observes canceled body request")
+            .expect("mock server task");
+    }
+
+    #[tokio::test]
+    async fn stalled_upload_remains_cancellable_after_the_api_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock pCloud server");
+        let address = listener.local_addr().expect("mock server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept stalled upload");
+            read_request_line(&mut stream).await;
+            let content_length = read_content_length(&mut stream).await;
+            let mut body = vec![0; content_length];
+            stream
+                .read_exact(&mut body)
+                .await
+                .expect("read stalled upload body");
+            let mut byte = [0; 1];
+            assert_eq!(
+                stream
+                    .read(&mut byte)
+                    .await
+                    .expect("observe client cancellation"),
+                0,
+                "canceling the request closes its HTTP connection"
+            );
+        });
+        let api = PCloudApiClient::with_test_base_url_and_timeouts(
+            TOKEN.to_owned(),
+            format!("http://{address}"),
+            Duration::from_millis(50),
+            Duration::from_secs(1),
+        );
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_millis(150),
+            api.upload_file_to_folder(1, "stalled.bin", b"small body".to_vec()),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "external cancellation, not API timeout, ends upload"
+        );
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        drop(api);
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("server observes request cancellation")
+            .expect("mock server task");
     }
 
     #[tokio::test]

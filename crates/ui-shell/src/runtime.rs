@@ -22,7 +22,9 @@ use iris_auth::token::TokenSet;
 use iris_backends::localfs::adapter::LocalFsAdapter;
 use iris_backends::localfs::stable_id::get_stable_id as get_local_stable_id;
 use iris_backends::pcloud::adapter::PCloudAdapter;
-use iris_backends::pcloud::api_client::PCloudApiClient;
+use iris_backends::pcloud::api_client::{
+    PCloudApiClient, DEFAULT_PCLOUD_TRANSFER_IDLE_TIMEOUT_SECS,
+};
 use iris_backends::registry::BackendRegistry;
 use iris_backends::s3::adapter::{
     S3Adapter, S3Config, S3_CUSTOM_ENDPOINT_CONDITIONAL_WRITES_UNCONFIRMED,
@@ -157,7 +159,13 @@ enum CloudAccountConfig {
         display_name: String,
         account_id: String,
         api_base: String,
+        #[serde(default = "default_pcloud_transfer_idle_timeout_secs")]
+        transfer_idle_timeout_secs: u64,
     },
+}
+
+fn default_pcloud_transfer_idle_timeout_secs() -> u64 {
+    DEFAULT_PCLOUD_TRANSFER_IDLE_TIMEOUT_SECS
 }
 
 #[derive(Clone, Debug)]
@@ -590,7 +598,42 @@ fn is_cloud_backend_id(backend_id: &BackendId) -> bool {
 
 #[cfg(test)]
 mod cloud_config_tests {
-    use super::CloudAccountConfig;
+    use super::{CloudAccountConfig, DEFAULT_PCLOUD_TRANSFER_IDLE_TIMEOUT_SECS};
+
+    #[test]
+    fn pcloud_idle_timeout_has_a_safe_legacy_default_and_round_trips() {
+        let mut saved = serde_json::json!({
+            "provider": "p_cloud", "backend_id": "pcloud:test", "display_name": "Test",
+            "account_id": "account", "api_base": "https://api.pcloud.com"
+        });
+        let config: CloudAccountConfig = serde_json::from_value(saved.clone()).unwrap();
+        assert!(matches!(
+            config,
+            CloudAccountConfig::PCloud {
+                transfer_idle_timeout_secs: DEFAULT_PCLOUD_TRANSFER_IDLE_TIMEOUT_SECS,
+                ..
+            }
+        ));
+
+        saved["transfer_idle_timeout_secs"] = 7.into();
+        let config: CloudAccountConfig = serde_json::from_value(saved.clone()).unwrap();
+        assert!(matches!(
+            config,
+            CloudAccountConfig::PCloud {
+                transfer_idle_timeout_secs: 7,
+                ..
+            }
+        ));
+        let round_trip: CloudAccountConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert!(matches!(
+            round_trip,
+            CloudAccountConfig::PCloud {
+                transfer_idle_timeout_secs: 7,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn s3_confirmation_defaults_closed_and_round_trips() {

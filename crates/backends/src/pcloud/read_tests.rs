@@ -44,7 +44,7 @@ async fn download(
         // None closes before sending headers, exercising .send() failure.
     });
     let client = PCloudApiClient::with_test_base_url("token".into(), format!("http://{address}"))
-        .http_client();
+        .transfer_http_client();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         download_read(
@@ -225,7 +225,7 @@ async fn invalid_requested_ranges_fail_without_sending() {
         },
     ] {
         let client = PCloudApiClient::with_test_base_url("token".into(), "http://127.0.0.1".into())
-            .http_client();
+            .transfer_http_client();
         let result = download_read(client, "not a URL", Some(range)).await;
         match result {
             Err(error) => assert!(error.to_string().contains("invalid requested byte range")),

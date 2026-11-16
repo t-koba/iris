@@ -266,6 +266,7 @@ impl AppRuntime {
             display_name,
             account_id: token_response.account_id,
             api_base,
+            transfer_idle_timeout_secs: DEFAULT_PCLOUD_TRANSFER_IDLE_TIMEOUT_SECS,
         };
         let location = self.register_cloud_account(config.clone(), true).await?;
         self.save_or_replace_cloud_account(config)?;
@@ -421,26 +422,30 @@ impl AppRuntime {
                 display_name,
                 account_id,
                 api_base,
+                transfer_idle_timeout_secs,
             } => {
+                let transfer_idle_timeout = StdDuration::from_secs(transfer_idle_timeout_secs);
                 let backend_id = BackendId(backend_id);
                 let adapter = if verify_connection {
                     let token = CredentialManager::new()
                         .load_token(&backend_id.0, &account_id)
                         .map_err(|error| error.to_string())?;
                     Arc::new(
-                        PCloudAdapter::new_with_base(
+                        PCloudAdapter::new_with_base_and_transfer_idle_timeout(
                             token.access_token,
                             backend_id.clone(),
                             api_base,
+                            transfer_idle_timeout,
                         )
                         .map_err(str::to_owned)?,
                     )
                 } else {
                     Arc::new(
-                        PCloudAdapter::new_with_stored_credentials(
+                        PCloudAdapter::new_with_stored_credentials_and_transfer_idle_timeout(
                             backend_id.clone(),
                             account_id,
                             api_base,
+                            transfer_idle_timeout,
                         )
                         .map_err(str::to_owned)?,
                     )
