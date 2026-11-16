@@ -82,7 +82,7 @@ jobs:
 
       - name: macOS no-replace occupancy regressions
         if: matrix.os == 'macos-latest'
-        run: cargo test -p iris-backends --lib common::tests:: --locked
+        run: "cargo test -p iris-backends --lib common::tests:: --locked"
 
       - name: SFTP staged mode regressions
         if: matrix.os == 'ubuntu-latest'
