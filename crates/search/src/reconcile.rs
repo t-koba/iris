@@ -22,15 +22,16 @@ pub fn reconcile_segment(
     let existing_by_path = existing
         .records()
         .iter()
-        .map(|record| (record.path.as_str(), record))
+        .map(|record| ((record.path.clone(), record.local_path_is_lossy), record))
         .collect::<HashMap<_, _>>();
     let mut seen = HashSet::new();
     let mut records = Vec::new();
     let mut stats = ReconcileStats::default();
 
     for record in scanned {
-        seen.insert(record.path.clone());
-        match existing_by_path.get(record.path.as_str()) {
+        let key = (record.path.clone(), record.local_path_is_lossy);
+        seen.insert(key.clone());
+        match existing_by_path.get(&key) {
             Some(previous) if record_is_fresh(previous, &record) => {
                 records.push((*previous).clone());
                 stats.unchanged += 1;
@@ -49,7 +50,7 @@ pub fn reconcile_segment(
     stats.removed = existing
         .records()
         .iter()
-        .filter(|record| !seen.contains(&record.path))
+        .filter(|record| !seen.contains(&(record.path.clone(), record.local_path_is_lossy)))
         .count();
     records.sort_by(|a, b| a.path.cmp(&b.path));
 
@@ -72,6 +73,7 @@ mod tests {
 
     fn record(path: &str, size: u64, mtime_secs: i64) -> SegmentRecord {
         SegmentRecord {
+            local_path_is_lossy: false,
             path: path.to_string(),
             name: path.rsplit('/').next().unwrap_or(path).to_string(),
             size,

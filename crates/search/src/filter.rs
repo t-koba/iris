@@ -369,6 +369,7 @@ mod tests {
 
     fn record(path: &str) -> SegmentRecord {
         SegmentRecord {
+            local_path_is_lossy: false,
             path: path.to_string(),
             name: path.rsplit('/').next().unwrap_or(path).to_string(),
             size: 100,

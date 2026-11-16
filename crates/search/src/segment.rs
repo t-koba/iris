@@ -5,11 +5,12 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"IRISIDX1";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER_BYTES: usize = 48;
 const RECORD_BYTES: usize = 96;
 const FLAG_HAS_CONTENT_SIGNATURE: u32 = 1 << 0;
 const FLAG_HAS_GPS: u32 = 1 << 1;
+const FLAG_LOCAL_PATH_LOSSY: u32 = 1 << 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
@@ -52,6 +53,8 @@ impl IndexedKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SegmentRecord {
     pub path: String,
+    /// The display path cannot be used to address the original native path.
+    pub local_path_is_lossy: bool,
     pub name: String,
     pub size: u64,
     pub mtime_secs: i64,
@@ -236,6 +239,7 @@ impl Segment {
                 Some(BloomSignature::from_bytes(bytes))
             };
             records.push(SegmentRecord {
+                local_path_is_lossy: encoded.flags & FLAG_LOCAL_PATH_LOSSY != 0,
                 path: strings.get(encoded.path_ref)?.to_string(),
                 name: strings.get(encoded.name_ref)?.to_string(),
                 size: encoded.size,
@@ -384,6 +388,9 @@ impl<'a> StringTable<'a> {
 
 fn record_flags(record: &SegmentRecord) -> u32 {
     let mut flags = 0;
+    if record.local_path_is_lossy {
+        flags |= FLAG_LOCAL_PATH_LOSSY;
+    }
     if record.content_signature.is_some() {
         flags |= FLAG_HAS_CONTENT_SIGNATURE;
     }
@@ -566,6 +573,7 @@ mod tests {
 
     fn sample_record(index: usize) -> SegmentRecord {
         SegmentRecord {
+            local_path_is_lossy: false,
             path: format!("/photos/2024/file-{index}.jpg"),
             name: format!("file-{index}.jpg"),
             size: 1024 + index as u64,
@@ -642,6 +650,19 @@ mod tests {
     }
 
     #[test]
+    fn read_cache_discards_v1_segment_without_lossy_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("old.idx");
+        let mut bytes = Segment::new(vec![sample_record(1)]).to_bytes().unwrap();
+        bytes[8..12].copy_from_slice(&1_u32.to_le_bytes());
+        fs::write(&path, bytes).unwrap();
+
+        assert_eq!(Segment::read(&path), Err(SegmentError::UnsupportedVersion));
+        assert_eq!(Segment::read_cache(&path).unwrap(), None);
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn read_cache_discards_corrupt_segment() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("photos.idx");
@@ -662,6 +683,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(index, name)| SegmentRecord {
+                    local_path_is_lossy: false,
                     path: format!("/root/{name}-{index}.txt"),
                     name: format!("{name}-{index}.txt"),
                     size: index as u64,

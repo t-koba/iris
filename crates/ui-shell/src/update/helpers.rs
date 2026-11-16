@@ -301,7 +301,11 @@ pub(crate) fn recursive_filter_task(request: RecursiveFilterRequest) -> Task<Mes
                                         pdf_limits,
                                         &pdf_scan_labels,
                                     );
-                                    (hit.record.path.clone(), annotation)
+                                    (
+                                        hit.record.path.clone(),
+                                        annotation,
+                                        hit.record.local_path_is_lossy,
+                                    )
                                 })
                                 .collect::<Vec<_>>();
                             if cancellation_token.is_cancelled() {
@@ -398,6 +402,9 @@ async fn enrich_recursive_records_if_needed(
         if cancellation_token.is_cancelled() {
             return;
         }
+        if record.local_path_is_lossy {
+            continue;
+        }
         if record.kind != IndexedKind::Image {
             if record.kind == IndexedKind::Pdf && needs_pdf_content {
                 // Cached signatures may predate these budgets/settings. Even an
@@ -476,10 +483,37 @@ fn apply_media_metadata_to_record(record: &mut SegmentRecord, media: &MediaMetad
 }
 
 async fn list_entries_for_paths_with_annotations(
-    items: Vec<(String, Option<String>)>,
+    items: Vec<(String, Option<String>, bool)>,
 ) -> Vec<ListEntry> {
     let mut entries = Vec::with_capacity(items.len());
-    for (path, annotation) in items {
+    for (path, annotation, local_path_is_lossy) in items {
+        if local_path_is_lossy {
+            // Only parse display text; never resolve or read this path. Keep its
+            // identity separate from a real Unicode sibling with the same label.
+            let display_path = Path::new(&path);
+            let name = display_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone());
+            let object_ref = ObjectRef {
+                key: ObjectKey {
+                    backend_id: app_runtime().backend_id_for_path(display_path),
+                    stable_id: StableId(format!(
+                        "lossy:{}",
+                        iris_platform_integration::staging::encode_path(display_path)
+                    )),
+                },
+                parent_stable_id: None,
+                display_path: path,
+                local_path_is_lossy: true,
+            };
+            entries.push(ListEntry {
+                is_inaccessible: true,
+                annotation,
+                ..ListEntry::new(object_ref, name, false)
+            });
+            continue;
+        }
         let full_path = PathBuf::from(&path);
         let name = full_path
             .file_name()
@@ -527,7 +561,7 @@ fn recursive_content_annotation(
     limits: PdfTextLimits,
     labels: &PdfScanLabels,
 ) -> Option<String> {
-    if !content_candidate || record.kind != IndexedKind::Pdf {
+    if record.local_path_is_lossy || !content_candidate || record.kind != IndexedKind::Pdf {
         return None;
     }
     pdf_content_snippet(Path::new(&record.path), query, limits, labels)
@@ -1124,6 +1158,7 @@ mod tests {
     #[test]
     fn media_metadata_updates_segment_record_filter_fields() {
         let mut record = SegmentRecord {
+            local_path_is_lossy: false,
             path: "/tmp/photo.jpg".to_string(),
             name: "photo.jpg".to_string(),
             size: 10,
@@ -1190,6 +1225,171 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recursive_pdf_lossy_paths_never_read_unicode_siblings() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path()
+                .join(OsString::from_vec(b"native-\xff.pdf".to_vec())),
+            b"<< >>\nstream\n(native secret)\nendstream",
+        )
+        .unwrap();
+        for name in ["native-\u{FFFD}.pdf", "\u{65e5}\u{672c}\u{8a9e}.pdf"] {
+            std::fs::write(
+                temp.path().join(name),
+                b"<< >>\nstream\n(sibling invoice)\nendstream",
+            )
+            .unwrap();
+        }
+        let mut records = walk_local(temp.path(), &WalkOptions::default(), || false)
+            .unwrap()
+            .records;
+        assert_eq!(records.len(), 3);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.local_path_is_lossy)
+                .count(),
+            1
+        );
+        let model = FilterModel {
+            content: true,
+            text: "invoice".into(),
+            ..FilterModel::default()
+        };
+        let limits = crate::config::PdfTextSearchSettings::default().limits();
+        enrich_recursive_records_if_needed(
+            &mut records,
+            &model,
+            &CancellationToken::new(),
+            false,
+            limits,
+        )
+        .await;
+        let labels = PdfScanLabels {
+            incomplete: "incomplete".into(),
+            unknown: "unknown".into(),
+        };
+        for record in &records {
+            let annotation =
+                recursive_content_annotation(true, record, &model.text, limits, &labels);
+            if record.local_path_is_lossy {
+                assert!(
+                    record.content_signature.is_none(),
+                    "lossy path read the Unicode sibling's PDF signature"
+                );
+                assert_eq!(
+                    annotation, None,
+                    "lossy path read the Unicode sibling's annotation"
+                );
+            } else {
+                assert!(record
+                    .content_signature
+                    .as_ref()
+                    .unwrap()
+                    .might_contain_query("invoice"));
+                assert!(annotation.unwrap().contains("invoice"));
+            }
+        }
+
+        let items = records
+            .iter()
+            .map(|record| {
+                (
+                    record.path.clone(),
+                    Some("display annotation".into()),
+                    record.local_path_is_lossy,
+                )
+            })
+            .collect();
+        let entries = list_entries_for_paths_with_annotations(items).await;
+        assert_eq!(entries.len(), 3);
+        let lossy = entries
+            .iter()
+            .find(|entry| entry.object_ref.local_path_is_lossy)
+            .unwrap();
+        assert!(lossy.is_inaccessible);
+        assert!(!lossy.is_dir);
+        assert_eq!(lossy.size, None);
+        assert_eq!(lossy.mtime, None);
+        assert!(lossy.object_ref.ensure_operable().is_err());
+        assert_eq!(lossy.annotation.as_deref(), Some("display annotation"));
+        let sibling = entries
+            .iter()
+            .find(|entry| {
+                !entry.object_ref.local_path_is_lossy
+                    && entry.object_ref.display_path == lossy.object_ref.display_path
+            })
+            .unwrap();
+        assert!(!sibling.is_inaccessible);
+        assert!(sibling.size.unwrap() > 0);
+        assert!(sibling.object_ref.ensure_operable().is_ok());
+        assert_eq!(
+            lossy.object_ref.key.backend_id,
+            sibling.object_ref.key.backend_id
+        );
+        assert_ne!(
+            lossy.object_ref.key.stable_id,
+            sibling.object_ref.key.stable_id
+        );
+        let repeated = list_entries_for_paths_with_annotations(vec![(
+            lossy.object_ref.display_path.clone(),
+            None,
+            true,
+        )])
+        .await;
+        assert_eq!(repeated[0].object_ref.key, lossy.object_ref.key);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recursive_image_lossy_paths_never_read_unicode_siblings() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path()
+                .join(OsString::from_vec(b"native-\xff.png".to_vec())),
+            b"not an image",
+        )
+        .unwrap();
+        image::RgbImage::new(7, 11)
+            .save(temp.path().join("native-\u{FFFD}.png"))
+            .unwrap();
+        let mut records = walk_local(temp.path(), &WalkOptions::default(), || false)
+            .unwrap()
+            .records;
+        assert_eq!(records.len(), 2);
+        let model = FilterModel {
+            gps: GpsFilter::Absent,
+            ..FilterModel::default()
+        };
+        enrich_recursive_records_if_needed(
+            &mut records,
+            &model,
+            &CancellationToken::new(),
+            false,
+            crate::config::PdfTextSearchSettings::default().limits(),
+        )
+        .await;
+        let lossy = records
+            .iter()
+            .find(|record| record.local_path_is_lossy)
+            .unwrap();
+        let unicode = records
+            .iter()
+            .find(|record| !record.local_path_is_lossy)
+            .unwrap();
+        assert_eq!(lossy.path, unicode.path);
+        assert_eq!((lossy.width, lossy.height), (None, None));
+        assert_eq!((unicode.width, unicode.height), (Some(7), Some(11)));
+    }
+
     #[tokio::test]
     async fn pdf_content_rescan_replaces_cached_signature_and_keeps_partial_candidates() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1197,6 +1397,7 @@ mod tests {
         let path = temp.path().join("doc.pdf");
         std::fs::write(&path, b"<< >>\nstream\n(invoice total)\nendstream").unwrap();
         let mut cached = SegmentRecord {
+            local_path_is_lossy: false,
             path: temp.path().join("doc.pdf").to_string_lossy().to_string(),
             name: "doc.pdf".to_string(),
             size: 42,

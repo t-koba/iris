@@ -115,6 +115,7 @@ fn record_from_metadata(path: &Path, metadata: &fs::Metadata) -> SegmentRecord {
         .unwrap_or_else(|| path_string.clone());
     let kind = IndexedKind::for_path(path, metadata.is_dir());
     SegmentRecord {
+        local_path_is_lossy: path.to_str().is_none(),
         path: path_string,
         name,
         size: if metadata.is_file() {
@@ -150,6 +151,92 @@ fn is_hidden(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_local_preserves_lossy_marker_through_cache_and_reconcile() {
+        use crate::reconcile::{reconcile_segment, ReconcileStats};
+        use crate::segment::Segment;
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path()
+                .join(OsString::from_vec(b"native-\xff.txt".to_vec())),
+            b"A",
+        )
+        .unwrap();
+        fs::write(dir.path().join("native-\u{FFFD}.txt"), b"B").unwrap();
+        fs::write(dir.path().join("日本語.txt"), b"Unicode").unwrap();
+        let records = walk_local(dir.path(), &WalkOptions::default(), || false)
+            .unwrap()
+            .records;
+        assert_eq!(records.len(), 3);
+        let colliding = records
+            .iter()
+            .filter(|record| record.name == "native-\u{FFFD}.txt")
+            .collect::<Vec<_>>();
+        assert_eq!(colliding.len(), 2);
+        assert_eq!(colliding[0].path, colliding[1].path);
+        assert_ne!(
+            colliding[0].local_path_is_lossy,
+            colliding[1].local_path_is_lossy
+        );
+        assert!(
+            !records
+                .iter()
+                .find(|record| record.name == "日本語.txt")
+                .unwrap()
+                .local_path_is_lossy
+        );
+
+        let segment = Segment::new(records.clone());
+        let cache_path = dir.path().join("root.idx");
+        fs::write(&cache_path, segment.to_bytes().unwrap()).unwrap();
+        let restored = Segment::read(&cache_path).unwrap();
+        assert_eq!(restored, segment);
+        let reconciled = reconcile_segment(&restored, records.clone());
+        assert_eq!(reconciled.segment, segment);
+        assert_eq!(
+            reconciled.stats,
+            ReconcileStats {
+                unchanged: 3,
+                ..ReconcileStats::default()
+            }
+        );
+
+        // Both directions must count deletion even though the display path remains.
+        for removed_lossy in [false, true] {
+            let remaining = records
+                .iter()
+                .filter(|record| {
+                    record.name == "日本語.txt" || record.local_path_is_lossy != removed_lossy
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let result = reconcile_segment(&restored, remaining.clone());
+            assert_eq!(
+                result.stats,
+                ReconcileStats {
+                    unchanged: 2,
+                    removed: 1,
+                    ..ReconcileStats::default()
+                }
+            );
+            assert_eq!(result.segment.records(), remaining);
+            let reinserted = reconcile_segment(&result.segment, records.clone());
+            assert_eq!(reinserted.segment, segment);
+            assert_eq!(
+                reinserted.stats,
+                ReconcileStats {
+                    unchanged: 2,
+                    inserted: 1,
+                    ..ReconcileStats::default()
+                }
+            );
+        }
+    }
 
     #[test]
     fn walk_local_classifies_and_sorts_recursive_records() {
