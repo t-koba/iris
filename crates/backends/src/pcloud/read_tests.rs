@@ -90,6 +90,9 @@ async fn rejects_invalid_download_envelopes_without_returning_a_stream() {
         ("reversed range", range(Some(12)), 206, "Content-Length: 12\r\nContent-Range: bytes 15-4/20\r\n"),
         ("invalid total", range(Some(12)), 206, "Content-Length: 12\r\nContent-Range: bytes 4-15/15\r\n"),
         ("wrong end", range(Some(12)), 206, "Content-Length: 12\r\nContent-Range: bytes 4-14/20\r\n"),
+        ("short range with unknown total", range(Some(13)), 206, "Content-Length: 12\r\nContent-Range: bytes 4-15/*\r\n"),
+        ("end exceeds request at EOF", range(Some(11)), 206, "Content-Length: 12\r\nContent-Range: bytes 4-15/16\r\n"),
+        ("unsatisfiable start", range(Some(12)), 206, "Content-Length: 4\r\nContent-Range: bytes 0-3/4\r\n"),
         ("length mismatch", range(Some(12)), 206, "Content-Length: 11\r\nContent-Range: bytes 4-15/20\r\n"),
         ("open range truncated", range(None), 206, "Content-Length: 12\r\nContent-Range: bytes 4-15/20\r\n"),
         ("open range unknown EOF", range(None), 206, "Content-Length: 12\r\nContent-Range: bytes 4-15/*\r\n"),
@@ -124,6 +127,18 @@ async fn valid_full_bounded_and_open_downloads_preserve_bytes_and_observed_range
             Some(12),
         ),
         (
+            range(Some(20)),
+            206,
+            "Content-Length: 12\r\nContent-Range: bytes 4-15/16\r\n",
+            Some(12),
+        ),
+        (
+            range(Some(20)),
+            206,
+            "Content-Range: bytes 4-15/16\r\n",
+            Some(12),
+        ),
+        (
             range(None),
             206,
             "Content-Length: 12\r\nContent-Range: bytes 4-15/16\r\n",
@@ -152,6 +167,27 @@ async fn valid_full_bounded_and_open_downloads_preserve_bytes_and_observed_range
         let mut bytes = Vec::new();
         handle.stream.read_to_end(&mut bytes).await.unwrap();
         assert_eq!(bytes, BODY.as_bytes());
+    }
+}
+
+#[tokio::test]
+async fn ranged_downloads_reject_short_and_overlong_close_delimited_bodies() {
+    for range in [range(Some(12)), range(None)] {
+        for body in ["short", "private-body-extra"] {
+            let mut handle = download(
+                range.clone(),
+                Some(response(206, "Content-Range: bytes 4-15/16\r\n", body)),
+            )
+            .await
+            .unwrap();
+            let error = handle
+                .stream
+                .read_to_end(&mut Vec::new())
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert_safe(&BackendError::Internal(Box::new(error)));
+        }
     }
 }
 

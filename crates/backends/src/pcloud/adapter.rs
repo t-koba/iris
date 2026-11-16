@@ -629,7 +629,12 @@ async fn download_read(
         let (start, end, total) = parsed;
         // Open-ended requests must reach a known EOF; an unknown total cannot
         // establish that the response fulfilled the request.
-        let expected_end = requested_end.or_else(|| total.and_then(|total| total.checked_sub(1)));
+        // A bounded request may extend past EOF, but may not stop short of
+        // its requested end unless the known total establishes that EOF.
+        let eof = total.and_then(|total| total.checked_sub(1));
+        let expected_end = requested_end
+            .map(|end| eof.map_or(end, |eof| end.min(eof)))
+            .or(eof);
         if start != range.offset || Some(end) != expected_end {
             return Err(download_error(
                 "Content-Range does not match requested range",
@@ -663,15 +668,36 @@ async fn download_read(
         None
     };
 
-    let content_length = content_range
-        .as_ref()
-        .and_then(|range| range.length)
-        .or_else(|| response.content_length());
-    let stream = response
-        .bytes_stream()
-        .map(|result| result.map_err(|error| io::Error::other(error.without_url())));
+    let remaining = content_range.as_ref().and_then(|range| range.length);
+    let content_length = remaining.or_else(|| response.content_length());
+    let stream = futures_util::stream::try_unfold(
+        (Box::pin(response.bytes_stream()), remaining),
+        |(mut stream, remaining)| async move {
+            match stream.next().await {
+                Some(result) => {
+                    let chunk = result.map_err(|error| io::Error::other(error.without_url()))?;
+                    let remaining = remaining
+                        .map(|remaining| {
+                            remaining.checked_sub(chunk.len() as u64).ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "response body exceeds Content-Range",
+                                )
+                            })
+                        })
+                        .transpose()?;
+                    Ok(Some((chunk, (stream, remaining))))
+                }
+                None if remaining.is_some_and(|remaining| remaining != 0) => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "response body is shorter than Content-Range",
+                )),
+                None => Ok(None),
+            }
+        },
+    );
     Ok(ReadHandle {
-        stream: Box::pin(tokio_util::io::StreamReader::new(stream)),
+        stream: Box::pin(tokio_util::io::StreamReader::new(Box::pin(stream))),
         content_length,
         content_range,
     })
