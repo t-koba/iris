@@ -519,7 +519,6 @@ version = "0.3.1"
 dependencies = [
  "bindgen",
  "cc",
- "libc",
  "thiserror 1.0.69",
 ]
 
