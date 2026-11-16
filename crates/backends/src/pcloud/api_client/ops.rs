@@ -183,10 +183,11 @@ impl PCloudApiClient {
         content_length: Option<u64>,
     ) -> Result<PCloudMetadata, BackendError> {
         let (progress_tx, progress_rx) = watch::channel(tokio::time::Instant::now());
+        let body_progress = progress_tx.clone();
         let progress = ReaderStream::new(reader).inspect(move |result| {
             if let Ok(bytes) = result {
                 if !bytes.is_empty() {
-                    progress_tx.send_replace(tokio::time::Instant::now());
+                    body_progress.send_replace(tokio::time::Instant::now());
                 }
             }
         });
@@ -198,6 +199,7 @@ impl PCloudApiClient {
         self.upload(
             folder_id,
             part.file_name(file_name.to_string()),
+            progress_tx,
             progress_rx,
         )
         .await
@@ -207,6 +209,7 @@ impl PCloudApiClient {
         &self,
         folder_id: u64,
         part: multipart::Part,
+        progress_tx: watch::Sender<tokio::time::Instant>,
         progress: watch::Receiver<tokio::time::Instant>,
     ) -> Result<PCloudMetadata, BackendError> {
         // uploadfile overwrites an existing file, retaining its old contents as a
@@ -224,7 +227,11 @@ impl PCloudApiClient {
                 .send()
                 .await
                 .map_err(|e| network_error("uploadfile", e))?;
-            let body = parse_response::<serde_json::Value>("uploadfile", response).await?;
+            // Keep the sender alive after request EOF: response bytes are transfer
+            // progress too, even when the entire request body was buffered.
+            let body =
+                parse_response::<serde_json::Value>("uploadfile", response, Some(&progress_tx))
+                    .await?;
             extract_uploaded_metadata(&body.unwrap_or_default())
         };
         tokio::select! {
@@ -252,7 +259,7 @@ impl PCloudApiClient {
             .send()
             .await
             .map_err(|e| network_error(method, e))?;
-        parse_response(method, response).await
+        parse_response(method, response, None).await
     }
 
     async fn call_metadata(
@@ -269,12 +276,28 @@ impl PCloudApiClient {
 
 async fn parse_response<T: DeserializeOwned>(
     method: &str,
-    response: reqwest::Response,
+    mut response: reqwest::Response,
+    progress: Option<&watch::Sender<tokio::time::Instant>>,
 ) -> Result<Option<T>, BackendError> {
-    let body: PCloudResponse<T> = response
-        .json()
-        .await
-        .map_err(|e| internal_reqwest_error(method, e))?;
+    let body: PCloudResponse<T> = if let Some(progress) = progress {
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| internal_reqwest_error(method, e))?
+        {
+            if !chunk.is_empty() {
+                progress.send_replace(tokio::time::Instant::now());
+                bytes.extend_from_slice(&chunk);
+            }
+        }
+        serde_json::from_slice(&bytes).map_err(|e| internal_response_error(method, e))?
+    } else {
+        response
+            .json()
+            .await
+            .map_err(|e| internal_reqwest_error(method, e))?
+    };
     PCloudApiClient::ensure_success(method, &body)?;
     Ok(body.data)
 }
@@ -319,25 +342,32 @@ fn network_error(method: &str, error: reqwest::Error) -> BackendError {
 }
 
 fn internal_reqwest_error(method: &str, error: reqwest::Error) -> BackendError {
+    internal_response_error(method, error.without_url())
+}
+
+fn internal_response_error(
+    method: &str,
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> BackendError {
     BackendError::Internal(Box::new(PCloudResponseError {
         method: method.to_owned(),
-        source: error.without_url(),
+        source: error,
     }))
 }
 
 #[derive(Debug)]
-struct PCloudResponseError {
+struct PCloudResponseError<E> {
     method: String,
-    source: reqwest::Error,
+    source: E,
 }
 
-impl std::fmt::Display for PCloudResponseError {
+impl<E: std::fmt::Display> std::fmt::Display for PCloudResponseError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "pCloud {} response failed: {}", self.method, self.source)
     }
 }
 
-impl std::error::Error for PCloudResponseError {
+impl<E: std::error::Error + 'static> std::error::Error for PCloudResponseError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.source)
     }
@@ -571,6 +601,129 @@ mod tests {
         assert_eq!(metadata.name, "slow.bin");
         producer.await.expect("upload producer");
         server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
+    async fn buffered_upload_response_progress_resets_idle_watchdog_after_request_eof() {
+        let idle_timeout = Duration::from_millis(200);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock pCloud server");
+        let address = listener.local_addr().expect("mock server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept buffered upload");
+            stream
+                .set_nodelay(true)
+                .expect("disable response coalescing");
+            read_request_line(&mut stream).await;
+            let content_length = read_content_length(&mut stream).await;
+            let mut body = vec![0; content_length];
+            stream
+                .read_exact(&mut body)
+                .await
+                .expect("consume complete multipart request before responding");
+            let response = serde_json::json!({
+                "result": 0,
+                "metadata": {"name": "buffered.bin", "fileid": 7, "isfolder": false, "size": 10}
+            })
+            .to_string();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response.len()
+            );
+            stream
+                .write_all(headers.as_bytes())
+                .await
+                .expect("write upload response headers");
+            // Each gap is well below the idle budget, but the whole response
+            // lasts several budgets. All progress is after request EOF.
+            for chunk in response.as_bytes().chunks(10) {
+                sleep(Duration::from_millis(50)).await;
+                stream.write_all(chunk).await.expect("write response chunk");
+            }
+        });
+        let api = PCloudApiClient::with_test_base_url_and_timeouts(
+            TOKEN.to_owned(),
+            format!("http://{address}"),
+            Duration::from_millis(50),
+            idle_timeout,
+        );
+        let started = tokio::time::Instant::now();
+        let metadata = tokio::time::timeout(
+            Duration::from_secs(2),
+            api.upload_file_to_folder(1, "buffered.bin", b"small body".to_vec()),
+        )
+        .await
+        .expect("bounded progressing response")
+        .expect("response progress keeps buffered upload alive");
+        assert!(started.elapsed() > idle_timeout);
+        assert_eq!(metadata.name, "buffered.bin");
+        assert_eq!(metadata.file_id, Some(7));
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("bounded mock response server")
+            .expect("mock server task");
+    }
+
+    #[tokio::test]
+    async fn stalled_upload_response_expires_after_request_eof() {
+        let idle_timeout = Duration::from_millis(200);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock pCloud server");
+        let address = listener.local_addr().expect("mock server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept buffered upload");
+            read_request_line(&mut stream).await;
+            let content_length = read_content_length(&mut stream).await;
+            let mut body = vec![0; content_length];
+            stream
+                .read_exact(&mut body)
+                .await
+                .expect("consume complete multipart request before responding");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 128\r\nConnection: close\r\n\r\n{",
+                )
+                .await
+                .expect("write partial upload response");
+            assert_eq!(
+                stream
+                    .read_u8()
+                    .await
+                    .expect_err("client closes idle response")
+                    .kind(),
+                std::io::ErrorKind::UnexpectedEof
+            );
+        });
+        let mut api = PCloudApiClient::with_test_base_url_and_timeouts(
+            TOKEN.to_owned(),
+            format!("http://{address}"),
+            Duration::from_millis(50),
+            idle_timeout,
+        );
+        // Isolate the upload watchdog from reqwest's separate read timeout.
+        api.transfer_http = super::super::build_http_client(None);
+        let started = tokio::time::Instant::now();
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            api.upload_file_to_folder(1, "stalled.bin", b"small body".to_vec()),
+        )
+        .await
+        .expect("idle budget bounds response wait")
+        .expect_err("incomplete response must not wait indefinitely after request EOF");
+        assert!(started.elapsed() >= idle_timeout);
+        assert!(matches!(
+            &error,
+            BackendError::Network(detail) if detail.is_timeout
+                && detail.message.contains("stalled without transfer progress")
+        ));
+        assert_token_redacted(&error);
+        drop(api);
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("server observes idle response cancellation")
+            .expect("mock server task");
     }
 
     #[tokio::test]
