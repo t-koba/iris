@@ -9,6 +9,9 @@ cargo-fuzz = true
 
 [workspace]
 
+[patch.crates-io]
+jpegxr = { path = "../../../vendor/jpegxr" }
+
 [dependencies]
 tokio-util = "0.7"
 libfuzzer-sys = "0.4"

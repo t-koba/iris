@@ -9,6 +9,9 @@ cargo-fuzz = true
 
 [workspace]
 
+[patch.crates-io]
+jpegxr = { path = "../../../vendor/jpegxr" }
+
 [dependencies]
 iris-ui-shell = { path = "..", default-features = false, features = ["minimal"] }
 libfuzzer-sys = "0.4"
