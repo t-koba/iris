@@ -553,6 +553,51 @@ const PREFIX_LIST_RESPONSE: &str = r#"<ListBucketResult xmlns="http://s3.amazona
 </ListBucketResult>"#;
 
 #[tokio::test]
+async fn listing_identity_uses_exact_keys_not_shared_or_changed_etags() {
+    let responses = ["shared-etag", "changed-etag"].map(|etag| {
+        response(
+            200,
+            format!(
+                r#"<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                  <Contents><Key>foo/first.txt</Key><ETag>&quot;{etag}&quot;</ETag></Contents>
+                  <Contents><Key>foo/second.txt</Key><ETag>&quot;{etag}&quot;</ETag></Contents>
+                </ListBucketResult>"#
+            ),
+        )
+    });
+    let (adapter, http) = adapter_with_prefix(responses.into(), Some("foo"));
+    let mut listings = Vec::new();
+    for _ in 0..2 {
+        let page = adapter.list_names(&object(""), None).await.unwrap();
+        assert_eq!(page.entries.len(), 2);
+        let mut by_identity = std::collections::HashMap::new();
+        for entry in page.entries {
+            let ListedEntry::WithMeta(entry) = entry else {
+                panic!("S3 list entries include metadata");
+            };
+            let object_ref = entry.name.object_ref;
+            assert_eq!(
+                object_ref.key.stable_id.0,
+                format!("foo/{}", object_ref.display_path)
+            );
+            assert!(by_identity
+                .insert(object_ref.key, object_ref.display_path)
+                .is_none());
+        }
+        assert_eq!(by_identity.len(), 2);
+        for path in ["first.txt", "second.txt"] {
+            assert_eq!(
+                by_identity.get(&object(&format!("foo/{path}")).key),
+                Some(&path.to_string())
+            );
+        }
+        listings.push(by_identity);
+    }
+    assert_eq!(listings[0], listings[1]);
+    assert!(http.responses.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn configured_prefix_is_a_slash_delimited_root_for_listing_and_keys() {
     for configured_prefix in ["foo", "foo/"] {
         let (adapter, http) = adapter_with_prefix(

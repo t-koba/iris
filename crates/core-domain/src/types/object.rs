@@ -11,8 +11,10 @@ impl fmt::Display for BackendId {
     }
 }
 
-/// Immutable object id from the backend (inode, S3 ETag, cloud file id, ...).
-/// Expected to survive rename / move.
+/// Object identity within a connection: a backend file id (inode, cloud file id, ...)
+/// that survives rename / move where available. Backends without a stable file id,
+/// such as S3, use the exact object key, so renaming changes identity.
+/// An ETag is version metadata, not identity.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StableId(pub String);
 

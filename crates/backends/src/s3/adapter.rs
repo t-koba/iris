@@ -368,19 +368,12 @@ impl BackendAdapter for S3Adapter {
                 let name = key.rsplit('/').next().unwrap_or(key).to_string();
                 let display_path = self.display_path_from_key(key)?;
 
-                let etag = obj.e_tag().unwrap_or("").to_string();
-                let stable_id = if etag.is_empty() {
-                    StableId(key.to_string())
-                } else {
-                    StableId(etag.clone())
-                };
-
                 entries.push(ListedEntry::WithMeta(EntryWithMeta {
                     name: EntryNameOnly {
                         object_ref: ObjectRef {
                             key: ObjectKey {
                                 backend_id: self.backend_id.clone(),
-                                stable_id,
+                                stable_id: StableId(key.to_string()),
                             },
                             parent_stable_id: Some(dir.key.stable_id.clone()),
                             display_path,
