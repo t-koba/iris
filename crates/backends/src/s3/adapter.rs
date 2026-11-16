@@ -29,6 +29,8 @@ use tokio::io::AsyncRead;
 use tokio::sync::OnceCell;
 
 const LIST_OBJECTS_PAGE_SIZE: i32 = 1_000;
+// Application retries, in addition to the SDK transport retry policy.
+const CONDITIONAL_WRITE_RETRIES: usize = 3;
 
 pub const S3_CUSTOM_ENDPOINT_CONDITIONAL_WRITES_UNCONFIRMED: &str =
     "s3_custom_endpoint_conditional_writes_unconfirmed";
@@ -145,17 +147,35 @@ impl S3Adapter {
         requested_key: String,
         on_conflict: &ConflictResolution,
     ) -> Result<String, BackendError> {
+        self.resolve_write_key_excluding(requested_key, on_conflict, None)
+            .await
+    }
+
+    // A 412 establishes that this key was occupied, even if a subsequent HEAD
+    // would race with a delete. Rename must advance rather than reuse that key.
+    async fn resolve_write_key_excluding(
+        &self,
+        requested_key: String,
+        on_conflict: &ConflictResolution,
+        occupied: Option<&str>,
+    ) -> Result<String, BackendError> {
         self.require_conditional_writes(on_conflict)?;
         match on_conflict {
             // Overwrite does not depend on an existence check.
             ConflictResolution::Overwrite => Ok(requested_key),
-            _ if !self.object_exists(&requested_key).await? => Ok(requested_key),
+            _ if occupied != Some(requested_key.as_str())
+                && !self.object_exists(&requested_key).await? =>
+            {
+                Ok(requested_key)
+            }
             ConflictResolution::Rename => {
                 let (base, ext) = split_key_extension(&requested_key);
                 let mut counter = 1u32;
                 loop {
                     let candidate = format!("{} ({}){}", base, counter, ext);
-                    if !self.object_exists(&candidate).await? {
+                    if occupied != Some(candidate.as_str())
+                        && !self.object_exists(&candidate).await?
+                    {
                         return Ok(candidate);
                     }
                     counter += 1;
@@ -188,8 +208,16 @@ impl S3Adapter {
         status: Option<u16>,
         error: impl std::fmt::Display,
     ) -> BackendError {
-        if was_conditional && matches!(status, Some(409 | 412)) {
+        if was_conditional && status == Some(412) {
             self.conflict_error(key.to_string())
+        } else if was_conditional && status == Some(409) {
+            let guidance = match operation {
+                "complete_multipart_upload" =>
+                    "a new multipart upload and re-upload of all parts is required; completion cannot be retried in place",
+                "copy" => "CopyObject 409 was not automatically retried",
+                _ => "conditional retry budget exhausted",
+            };
+            self.network_error(operation, format!("HTTP 409: {guidance}: {error}"))
         } else {
             self.network_error(operation, error)
         }
@@ -432,22 +460,15 @@ impl BackendAdapter for S3Adapter {
         on_conflict: ConflictResolution,
     ) -> Result<OperationTicket, BackendError> {
         let requested_key = self.object_key(dst);
-        let final_key = self.resolve_write_key(requested_key, &on_conflict).await?;
+        let final_key = self
+            .resolve_write_key(requested_key.clone(), &on_conflict)
+            .await?;
         if data.len() <= SINGLE_PART_UPLOAD_MAX_BYTES {
-            self.put_object_bytes(&final_key, data, &on_conflict)
+            self.put_object_bytes(&requested_key, &final_key, data, &on_conflict)
                 .await?;
         } else {
-            let mut chunks = Vec::new();
-            for chunk in data.chunks(MULTIPART_CHUNK_BYTES) {
-                chunks.push(chunk.to_vec());
-            }
-            self.upload_multipart_chunks(
-                &final_key,
-                chunks,
-                Box::pin(tokio::io::empty()),
-                &on_conflict,
-            )
-            .await?;
+            self.upload_buffered_multipart(&requested_key, final_key, data, &on_conflict)
+                .await?;
         }
 
         Ok(self.next_ticket(OperationKind::Copy))
@@ -461,9 +482,17 @@ impl BackendAdapter for S3Adapter {
         on_conflict: ConflictResolution,
     ) -> Result<OperationTicket, BackendError> {
         let requested_key = self.object_key(dst);
-        let final_key = self.resolve_write_key(requested_key, &on_conflict).await?;
-        self.upload_from_reader(&final_key, reader, content_length, &on_conflict)
+        let final_key = self
+            .resolve_write_key(requested_key.clone(), &on_conflict)
             .await?;
+        self.upload_from_reader(
+            &requested_key,
+            &final_key,
+            reader,
+            content_length,
+            &on_conflict,
+        )
+        .await?;
         Ok(self.next_ticket(OperationKind::Copy))
     }
 
@@ -692,36 +721,45 @@ impl BackendAdapter for S3Adapter {
     ) -> Result<OperationTicket, BackendError> {
         let src_key = self.object_key(src);
         let requested_dst_key = self.object_key(dst);
-        let dst_key = self
-            .resolve_write_key(requested_dst_key, &options.on_conflict)
+        let mut dst_key = self
+            .resolve_write_key(requested_dst_key.clone(), &options.on_conflict)
             .await?;
-
         let copy_source = format!("{}/{}", self.config.bucket, src_key);
-
-        self.client()
-            .await?
-            .copy_object()
-            .bucket(&self.config.bucket)
-            .copy_source(&copy_source)
-            .key(&dst_key)
-            .set_if_none_match(
-                (!matches!(options.on_conflict, ConflictResolution::Overwrite)).then(|| "*".into()),
-            )
-            .send()
-            .await
-            .map_err(|error| {
-                self.write_error(
-                    "copy",
-                    &dst_key,
-                    !matches!(options.on_conflict, ConflictResolution::Overwrite),
-                    error
-                        .raw_response()
-                        .map(|response| response.status().as_u16()),
-                    error,
-                )
-            })?;
-
-        Ok(self.next_ticket(OperationKind::Copy))
+        let conditional = !matches!(options.on_conflict, ConflictResolution::Overwrite);
+        for retry in 0..=CONDITIONAL_WRITE_RETRIES {
+            let error = match self
+                .client()
+                .await?
+                .copy_object()
+                .bucket(&self.config.bucket)
+                .copy_source(&copy_source)
+                .key(&dst_key)
+                .set_if_none_match(conditional.then(|| "*".into()))
+                .send()
+                .await
+            {
+                Ok(_) => return Ok(self.next_ticket(OperationKind::Copy)),
+                Err(error) => error,
+            };
+            let status = error
+                .raw_response()
+                .map(|response| response.status().as_u16());
+            if status == Some(412)
+                && matches!(options.on_conflict, ConflictResolution::Rename)
+                && retry < CONDITIONAL_WRITE_RETRIES
+            {
+                dst_key = self
+                    .resolve_write_key_excluding(
+                        requested_dst_key.clone(),
+                        &options.on_conflict,
+                        Some(&dst_key),
+                    )
+                    .await?;
+            } else {
+                return Err(self.write_error("copy", &dst_key, conditional, status, error));
+            }
+        }
+        unreachable!("bounded copy loop always returns")
     }
 
     async fn move_object(

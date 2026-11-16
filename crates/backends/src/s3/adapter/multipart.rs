@@ -1,4 +1,4 @@
-use super::S3Adapter;
+use super::{S3Adapter, CONDITIONAL_WRITE_RETRIES};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::Future;
 use iris_core_domain::types::error::BackendError;
@@ -18,37 +18,70 @@ type MultipartUploadFuture<'a> = Pin<
     >,
 >;
 
+// Only a completion response carries a retryable status. Part/start/reader
+// failures must never be mistaken for permission to replay a whole upload.
+struct MultipartFailure {
+    status: Option<u16>,
+    error: BackendError,
+}
+
+impl From<BackendError> for MultipartFailure {
+    fn from(error: BackendError) -> Self {
+        Self {
+            status: None,
+            error,
+        }
+    }
+}
+
 impl S3Adapter {
     pub(super) async fn put_object_bytes(
         &self,
+        requested_key: &str,
         key: &str,
         data: Vec<u8>,
         on_conflict: &ConflictResolution,
     ) -> Result<(), BackendError> {
         self.require_conditional_writes(on_conflict)?;
-        self.client()
-            .await?
-            .put_object()
-            .bucket(&self.config.bucket)
-            .key(key)
-            .set_if_none_match(
-                (!matches!(on_conflict, ConflictResolution::Overwrite)).then(|| "*".into()),
-            )
-            .body(aws_sdk_s3::primitives::ByteStream::from(data))
-            .send()
-            .await
-            .map_err(|error| {
-                self.write_error(
-                    "put",
-                    key,
-                    !matches!(on_conflict, ConflictResolution::Overwrite),
-                    error
-                        .raw_response()
-                        .map(|response| response.status().as_u16()),
-                    error,
-                )
-            })?;
-        Ok(())
+        let conditional = !matches!(on_conflict, ConflictResolution::Overwrite);
+        // ByteStream clones share these buffered bytes; no stream is re-read.
+        let body = bytes::Bytes::from(data);
+        let mut key = key.to_string();
+        for retry in 0..=CONDITIONAL_WRITE_RETRIES {
+            let error = match self
+                .client()
+                .await?
+                .put_object()
+                .bucket(&self.config.bucket)
+                .key(&key)
+                .set_if_none_match(conditional.then(|| "*".into()))
+                .body(aws_sdk_s3::primitives::ByteStream::from(body.clone()))
+                .send()
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(error) => error,
+            };
+            let status = error
+                .raw_response()
+                .map(|response| response.status().as_u16());
+            if conditional
+                && retry < CONDITIONAL_WRITE_RETRIES
+                && (status == Some(409)
+                    || (status == Some(412) && matches!(on_conflict, ConflictResolution::Rename)))
+            {
+                key = self
+                    .resolve_write_key_excluding(
+                        requested_key.to_string(),
+                        on_conflict,
+                        (status == Some(412)).then_some(key.as_str()),
+                    )
+                    .await?;
+            } else {
+                return Err(self.write_error("put", &key, conditional, status, error));
+            }
+        }
+        unreachable!("bounded put loop always returns")
     }
 
     pub(super) async fn upload_part(
@@ -97,6 +130,18 @@ impl S3Adapter {
         parts: Vec<aws_sdk_s3::types::CompletedPart>,
         on_conflict: &ConflictResolution,
     ) -> Result<(), BackendError> {
+        self.complete_multipart_upload_attempt(key, upload_id, parts, on_conflict)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    async fn complete_multipart_upload_attempt(
+        &self,
+        key: &str,
+        upload_id: &str,
+        parts: Vec<aws_sdk_s3::types::CompletedPart>,
+        on_conflict: &ConflictResolution,
+    ) -> Result<(), MultipartFailure> {
         self.require_conditional_writes(on_conflict)?;
         self.client()
             .await?
@@ -115,15 +160,19 @@ impl S3Adapter {
             .send()
             .await
             .map_err(|error| {
-                self.write_error(
-                    "complete_multipart_upload",
-                    key,
-                    !matches!(on_conflict, ConflictResolution::Overwrite),
-                    error
-                        .raw_response()
-                        .map(|response| response.status().as_u16()),
-                    error,
-                )
+                let status = error
+                    .raw_response()
+                    .map(|response| response.status().as_u16());
+                MultipartFailure {
+                    status,
+                    error: self.write_error(
+                        "complete_multipart_upload",
+                        key,
+                        !matches!(on_conflict, ConflictResolution::Overwrite),
+                        status,
+                        error,
+                    ),
+                }
             })?;
         Ok(())
     }
@@ -147,10 +196,22 @@ impl S3Adapter {
     pub(super) async fn upload_multipart_chunks(
         &self,
         key: &str,
+        chunks: Vec<Vec<u8>>,
+        reader: Pin<Box<dyn AsyncRead + Send>>,
+        on_conflict: &ConflictResolution,
+    ) -> Result<(), BackendError> {
+        self.upload_multipart_attempt(key, chunks, reader, on_conflict)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    async fn upload_multipart_attempt(
+        &self,
+        key: &str,
         mut chunks: Vec<Vec<u8>>,
         mut reader: Pin<Box<dyn AsyncRead + Send>>,
         on_conflict: &ConflictResolution,
-    ) -> Result<(), BackendError> {
+    ) -> Result<(), MultipartFailure> {
         self.require_conditional_writes(on_conflict)?;
         let upload_id = self.start_multipart_upload(key).await?;
 
@@ -184,7 +245,7 @@ impl S3Adapter {
             }
 
             parts.sort_by_key(|(part_number, _)| *part_number);
-            self.complete_multipart_upload_by_key(
+            self.complete_multipart_upload_attempt(
                 key,
                 &upload_id,
                 parts.into_iter().map(|(_, part)| part).collect(),
@@ -200,8 +261,50 @@ impl S3Adapter {
         result
     }
 
+    // Only the Vec-backed entry point may restart a multipart upload. Streamed
+    // writes and session completion cannot reconstruct already-consumed parts.
+    pub(super) async fn upload_buffered_multipart(
+        &self,
+        requested_key: &str,
+        mut key: String,
+        data: Vec<u8>,
+        on_conflict: &ConflictResolution,
+    ) -> Result<(), BackendError> {
+        for retry in 0..=CONDITIONAL_WRITE_RETRIES {
+            let chunks = data
+                .chunks(MULTIPART_CHUNK_BYTES)
+                .map(<[u8]>::to_vec)
+                .collect();
+            let failure = match self
+                .upload_multipart_attempt(&key, chunks, Box::pin(tokio::io::empty()), on_conflict)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(failure) => failure,
+            };
+            if !matches!(on_conflict, ConflictResolution::Overwrite)
+                && retry < CONDITIONAL_WRITE_RETRIES
+                && (failure.status == Some(409)
+                    || (failure.status == Some(412)
+                        && matches!(on_conflict, ConflictResolution::Rename)))
+            {
+                key = self
+                    .resolve_write_key_excluding(
+                        requested_key.to_string(),
+                        on_conflict,
+                        (failure.status == Some(412)).then_some(key.as_str()),
+                    )
+                    .await?;
+            } else {
+                return Err(failure.error);
+            }
+        }
+        unreachable!("bounded multipart loop always returns")
+    }
+
     pub(super) async fn upload_from_reader(
         &self,
+        requested_key: &str,
         key: &str,
         mut reader: Pin<Box<dyn AsyncRead + Send>>,
         content_length: Option<u64>,
@@ -209,18 +312,24 @@ impl S3Adapter {
     ) -> Result<(), BackendError> {
         if content_length.is_some_and(|len| len <= SINGLE_PART_UPLOAD_MAX_BYTES as u64) {
             let small = read_chunk(&mut reader, SINGLE_PART_UPLOAD_MAX_BYTES).await?;
-            return self.put_object_bytes(key, small, on_conflict).await;
+            return self
+                .put_object_bytes(requested_key, key, small, on_conflict)
+                .await;
         }
 
         let first_chunk = read_chunk(&mut reader, MULTIPART_CHUNK_BYTES).await?;
         if first_chunk.is_empty() {
-            return self.put_object_bytes(key, Vec::new(), on_conflict).await;
+            return self
+                .put_object_bytes(requested_key, key, Vec::new(), on_conflict)
+                .await;
         }
 
         if content_length.is_none() && first_chunk.len() < SINGLE_PART_UPLOAD_MAX_BYTES {
             let second_chunk = read_chunk(&mut reader, MULTIPART_CHUNK_BYTES).await?;
             if second_chunk.is_empty() {
-                return self.put_object_bytes(key, first_chunk, on_conflict).await;
+                return self
+                    .put_object_bytes(requested_key, key, first_chunk, on_conflict)
+                    .await;
             }
             return self
                 .upload_multipart_chunks(key, vec![first_chunk, second_chunk], reader, on_conflict)

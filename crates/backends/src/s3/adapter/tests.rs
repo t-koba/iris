@@ -8,6 +8,7 @@ use aws_smithy_runtime_api::client::http::{
 use aws_smithy_runtime_api::client::result::ConnectorError;
 use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
 use std::collections::VecDeque;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Mutex;
 
 #[derive(Clone, Debug)]
@@ -15,6 +16,7 @@ struct MockHttp {
     responses: Arc<Mutex<VecDeque<Result<HttpResponse, ConnectorError>>>>,
     requests: Arc<Mutex<Vec<(String, String)>>>,
     conditions: Arc<Mutex<Vec<Option<String>>>>,
+    bodies: Arc<Mutex<Vec<(usize, u64)>>>,
 }
 
 impl HttpClient for MockHttp {
@@ -37,14 +39,29 @@ impl HttpConnector for MockHttp {
             .lock()
             .unwrap()
             .push((request.method().to_string(), request.uri().to_string()));
-        HttpConnectorFuture::ready(
-            self.responses
-                .lock()
+        let response = self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected S3 request (possibly a write after a failed HEAD)");
+        let bodies = self.bodies.clone();
+        HttpConnectorFuture::new(async move {
+            let body = aws_sdk_s3::primitives::ByteStream::new(request.into_body())
+                .collect()
+                .await
                 .unwrap()
-                .pop_front()
-                .expect("unexpected S3 request (possibly a write after a failed HEAD)"),
-        )
+                .into_bytes();
+            bodies.lock().unwrap().push(body_signature(&body));
+            response
+        })
     }
+}
+
+fn body_signature(body: &[u8]) -> (usize, u64) {
+    let mut hash = DefaultHasher::new();
+    body.hash(&mut hash);
+    (body.len(), hash.finish())
 }
 
 fn response(status: u16, body: &'static str) -> Result<HttpResponse, ConnectorError> {
@@ -66,6 +83,7 @@ fn adapter_with_prefix(
         responses: Arc::new(Mutex::new(responses.into())),
         requests: Default::default(),
         conditions: Default::default(),
+        bodies: Default::default(),
     };
     let config = aws_sdk_s3::Config::builder()
         .behavior_version(BehaviorVersion::latest())
@@ -247,8 +265,8 @@ async fn existing_objects_keep_conflict_and_rename_behavior() {
         let requests = http.requests.lock().unwrap();
         assert_eq!(requests.len(), 4);
         assert!(requests[..3].iter().all(|(method, _)| method == "HEAD"));
-        assert!(requests[1].1.ends_with("/file%20%281%29.txt"));
-        assert!(requests[2].1.ends_with("/file%20%282%29.txt"));
+        assert!(requests[1].1.contains("/file%20%281%29.txt"));
+        assert!(requests[2].1.contains("/file%20%282%29.txt"));
         assert!(requests[3].1.contains("/file%20%282%29.txt"));
         assert!(http.responses.lock().unwrap().is_empty());
     }
@@ -272,8 +290,8 @@ async fn overwrite_does_not_depend_on_head() {
     }
 }
 
-// Simulate a creator winning after HEAD: final conditional writes must reject
-// the race, never fall back to an unconditional write (including Rename).
+// Non-retryable outcomes must never fall back to an unconditional write.
+// Retryable cases and their budgets are covered separately below.
 #[tokio::test]
 async fn final_writes_are_conditional_except_overwrite() {
     for default_aws in [false, true] {
@@ -281,6 +299,14 @@ async fn final_writes_are_conditional_except_overwrite() {
             for write in WRITES {
                 for status in [200, 409, 412, 501] {
                     let overwrite = matches!(policy, ConflictResolution::Overwrite);
+                    if !overwrite
+                        && ((status == 409 && matches!(write, Write::Bytes | Write::Reader))
+                            || (status == 412
+                                && matches!(policy, ConflictResolution::Rename)
+                                && !matches!(write, Write::Multipart)))
+                    {
+                        continue;
+                    }
                     let mut responses = Vec::new();
                     if !overwrite {
                         responses.push(response(404, ""));
@@ -319,7 +345,7 @@ async fn final_writes_are_conditional_except_overwrite() {
                     };
                     match (status, overwrite) {
                         (200, _) => result.unwrap(),
-                        (409 | 412, false) => assert!(
+                        (412, false) => assert!(
                             matches!(&result, Err(BackendError::Conflict { object }) if object.display_path == "file.txt"),
                             "{policy:?} {write:?} {status}: {result:?}"
                         ),
@@ -351,8 +377,8 @@ async fn final_writes_are_conditional_except_overwrite() {
 
 #[tokio::test]
 async fn streamed_multipart_keeps_policy_and_aborts_after_conflict() {
-    for policy in [ConflictResolution::Fail, ConflictResolution::Overwrite] {
-        for status in [200, 412] {
+    for policy in POLICIES.into_iter().chain([ConflictResolution::Overwrite]) {
+        for status in [200, 409, 412] {
             let mut responses = vec![
                 Write::Multipart.success(),
                 response(200, ""), // UploadPart
@@ -365,7 +391,7 @@ async fn streamed_multipart_keeps_policy_and_aborts_after_conflict() {
                     },
                 ),
             ];
-            if status == 412 {
+            if status != 200 {
                 responses.push(response(204, "")); // AbortMultipartUpload
             }
             let (adapter, http) = adapter(responses);
@@ -383,7 +409,11 @@ async fn streamed_multipart_keeps_policy_and_aborts_after_conflict() {
                     matches!(&result, Err(BackendError::Conflict { .. })),
                     "{policy:?} {status}: {result:?}"
                 );
-            } else if status == 412 {
+            } else if status != 200 {
+                if status == 409 && !overwrite {
+                    assert!(matches!(&result, Err(BackendError::Network(detail))
+                        if detail.message.contains("new multipart upload") && detail.message.contains("409")));
+                }
                 assert!(
                     matches!(&result, Err(BackendError::Network(_))),
                     "{policy:?} {status}: {result:?}"
@@ -400,7 +430,10 @@ async fn streamed_multipart_keeps_policy_and_aborts_after_conflict() {
                     Some("*")
                 }
             );
-            assert_eq!(conditions.len(), if status == 412 { 4 } else { 3 });
+            assert_eq!(conditions.len(), if status != 200 { 4 } else { 3 });
+            if status != 200 {
+                assert_eq!(http.requests.lock().unwrap()[3].0, "DELETE");
+            }
             assert!(http.responses.lock().unwrap().is_empty());
         }
     }
@@ -601,5 +634,344 @@ async fn unprefixed_listing_and_keys_remain_unprefixed() {
             ListedEntry::WithMeta(entry) if entry.name.object_ref.display_path == "file.txt"
         ));
         assert!(!http.requests.lock().unwrap()[0].1.contains("prefix=foo"));
+    }
+}
+
+#[tokio::test]
+async fn buffered_put_retries_409_and_rename_412_with_same_body() {
+    for status in [409, 412] {
+        for source in 0..3 {
+            // Vec, known-length reader, unknown-length small reader
+            for policy in POLICIES {
+                if status == 412 && !matches!(policy, ConflictResolution::Rename) {
+                    continue; // Fail/Skip's definite conflict is covered by the status matrix.
+                }
+                let (s3, http) = adapter(vec![
+                    response(404, ""),
+                    response(
+                        status,
+                        "<Error><Code>ConditionalRequestConflict</Code></Error>",
+                    ),
+                    response(404, ""), // Re-resolve original (409) or next suffix (412).
+                    response(200, ""),
+                ]);
+                let data = b"replay these bytes".to_vec();
+                if source == 0 {
+                    s3.write_object(&object("file.txt"), data.clone(), policy.clone())
+                        .await
+                        .unwrap();
+                } else {
+                    s3.write_from_reader(
+                        &object("file.txt"),
+                        Box::pin(std::io::Cursor::new(data.clone())),
+                        (source == 1).then_some(data.len() as u64),
+                        policy.clone(),
+                    )
+                    .await
+                    .unwrap();
+                }
+                let requests = http.requests.lock().unwrap();
+                assert_eq!(requests.len(), 4);
+                assert_eq!(requests[2].0, "HEAD");
+                assert!(requests[3].1.contains(if status == 412 {
+                    "/file%20%281%29.txt"
+                } else {
+                    "/file.txt"
+                }));
+                assert_eq!(
+                    *http.conditions.lock().unwrap(),
+                    [None, Some("*".into()), None, Some("*".into())]
+                );
+                let bodies = http.bodies.lock().unwrap();
+                assert_eq!(bodies[1], body_signature(&data));
+                assert_eq!(bodies[3], bodies[1]);
+                assert!(http.responses.lock().unwrap().is_empty());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn put_409_reresolves_under_the_same_policy_and_has_a_retry_budget() {
+    for policy in POLICIES {
+        let mut responses = vec![response(404, ""), response(409, ""), response(200, "")];
+        let rename = matches!(policy, ConflictResolution::Rename);
+        if rename {
+            responses.extend([response(404, ""), response(200, "")]);
+        }
+        let (s3, http) = adapter(responses);
+        let result = Write::Bytes.run(&s3, policy).await;
+        if rename {
+            result.unwrap();
+            assert!(http
+                .requests
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .1
+                .contains("/file%20%281%29.txt"));
+        } else {
+            assert!(matches!(result, Err(BackendError::Conflict { .. })));
+            assert_eq!(http.requests.lock().unwrap().len(), 3);
+        }
+        assert!(http.responses.lock().unwrap().is_empty());
+    }
+    for write in [Write::Bytes, Write::Reader] {
+        let mut responses = Vec::new();
+        for _ in 0..=CONDITIONAL_WRITE_RETRIES {
+            responses.extend([response(404, ""), response(409, "")]);
+        }
+        let (s3, http) = adapter(responses);
+        assert!(matches!(write.run(&s3, ConflictResolution::Fail).await,
+            Err(BackendError::Network(detail)) if detail.message.contains("retry budget exhausted")));
+        assert_eq!(
+            http.requests.lock().unwrap().len(),
+            2 * (CONDITIONAL_WRITE_RETRIES + 1)
+        );
+        assert!(http.responses.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn copy_rename_retries_412_but_never_409() {
+    // Start at an already suffixed destination. Always resolve against the
+    // original name, not "file (1) (1).txt", and exclude the known occupied key.
+    let (s3, http) = adapter(vec![
+        response(200, ""),
+        response(404, ""),
+        response(412, ""),
+        response(200, ""),
+        response(404, ""),
+        Write::Copy.success(),
+    ]);
+    Write::Copy
+        .run(&s3, ConflictResolution::Rename)
+        .await
+        .unwrap();
+    {
+        let requests = http.requests.lock().unwrap();
+        assert!(requests[2].1.contains("/file%20%281%29.txt"));
+        assert!(requests[5].1.contains("/file%20%282%29.txt"));
+        assert_eq!(
+            *http.conditions.lock().unwrap(),
+            [None, None, Some("*".into()), None, None, Some("*".into())]
+        );
+        assert!(http.responses.lock().unwrap().is_empty());
+    }
+    for policy in POLICIES {
+        let (s3, http) = adapter(vec![response(404, ""), response(409, "")]);
+        assert!(
+            matches!(Write::Copy.run(&s3, policy).await, Err(BackendError::Network(detail))
+            if detail.message.contains("CopyObject") && detail.message.contains("409"))
+        );
+        assert_eq!(http.requests.lock().unwrap().len(), 2);
+        assert_eq!(http.conditions.lock().unwrap()[1].as_deref(), Some("*"));
+    }
+}
+
+fn start_upload(id: u8) -> Result<HttpResponse, ConnectorError> {
+    response(
+        200,
+        if id == 1 {
+            "<InitiateMultipartUploadResult><UploadId>first</UploadId></InitiateMultipartUploadResult>"
+        } else {
+            "<InitiateMultipartUploadResult><UploadId>second</UploadId></InitiateMultipartUploadResult>"
+        },
+    )
+}
+
+fn completed_upload() -> Result<HttpResponse, ConnectorError> {
+    response(
+        200,
+        "<CompleteMultipartUploadResult><ETag>test</ETag></CompleteMultipartUploadResult>",
+    )
+}
+
+#[tokio::test]
+async fn buffered_multipart_restarts_all_parts_on_409_or_rename_412() {
+    // Two distinct parts prove the complete source, not just its last chunk,
+    // is replayed into a fresh upload id.
+    let mut data = vec![b'a'; MULTIPART_CHUNK_BYTES];
+    data.extend_from_slice(b"last part");
+    for status in [409, 412] {
+        let (s3, http) = adapter(vec![
+            response(404, ""),
+            start_upload(1),
+            response(200, ""),
+            response(200, ""),
+            response(status, ""),
+            response(204, ""), // Abort failed upload.
+            response(404, ""),
+            start_upload(2),
+            response(200, ""),
+            response(200, ""),
+            completed_upload(),
+        ]);
+        s3.write_object(
+            &object("file.txt"),
+            data.clone(),
+            ConflictResolution::Rename,
+        )
+        .await
+        .unwrap();
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 11);
+        assert_eq!(requests[5].0, "DELETE");
+        assert!(requests[5].1.contains("uploadId=first"));
+        for index in [2, 3, 4] {
+            assert!(requests[index].1.contains("uploadId=first"));
+        }
+        for index in [8, 9, 10] {
+            assert!(requests[index].1.contains("uploadId=second"));
+        }
+        assert!(requests[7].1.contains(if status == 412 {
+            "/file%20%281%29.txt?"
+        } else {
+            "/file.txt?"
+        }));
+        let conditions = http.conditions.lock().unwrap();
+        for (index, condition) in conditions.iter().enumerate() {
+            assert_eq!(
+                condition.as_deref(),
+                if [4, 10].contains(&index) {
+                    Some("*")
+                } else {
+                    None
+                }
+            );
+        }
+        let bodies = http.bodies.lock().unwrap();
+        assert_eq!(bodies[2], body_signature(&data[..MULTIPART_CHUNK_BYTES]));
+        assert_eq!(bodies[3], body_signature(&data[MULTIPART_CHUNK_BYTES..]));
+        assert_eq!(bodies[8], bodies[2]);
+        assert_eq!(bodies[9], bodies[3]);
+        assert!(http.responses.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn buffered_multipart_respects_conflict_policy_overwrite_and_retry_budget() {
+    // Exercise the multipart policy matrix with a tiny part. The public Vec
+    // entry point and its size threshold are exercised by the two-part test.
+    let data = vec![1; 3];
+    for policy in POLICIES.into_iter().chain([ConflictResolution::Overwrite]) {
+        for status in [200, 409, 412] {
+            let overwrite = matches!(policy, ConflictResolution::Overwrite);
+            let mut responses = Vec::new();
+            let retryable = !overwrite
+                && (status == 409
+                    || (status == 412 && matches!(policy, ConflictResolution::Rename)));
+            let attempts = if retryable {
+                CONDITIONAL_WRITE_RETRIES + 1
+            } else {
+                1
+            };
+            for _ in 0..attempts {
+                if !overwrite {
+                    responses.push(response(404, ""));
+                }
+                responses.extend([
+                    start_upload(1),
+                    response(200, ""),
+                    if status == 200 {
+                        completed_upload()
+                    } else {
+                        response(status, "")
+                    },
+                ]);
+                if status != 200 {
+                    responses.push(response(204, ""));
+                }
+            }
+            let (mut s3, http) = adapter(responses);
+            if overwrite {
+                s3.config.custom_endpoint_conditional_writes_confirmed = false;
+            }
+            let key = s3
+                .resolve_write_key("file.txt".into(), &policy)
+                .await
+                .unwrap();
+            let result = s3
+                .upload_buffered_multipart("file.txt", key, data.clone(), &policy)
+                .await;
+            match (status, overwrite) {
+                (200, _) => {
+                    result.unwrap();
+                }
+                (412, false) => assert!(matches!(result, Err(BackendError::Conflict { .. }))),
+                _ => assert!(matches!(result, Err(BackendError::Network(_)))),
+            }
+            let requests = http.requests.lock().unwrap();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|(_, uri)| uri.contains("uploads"))
+                    .count(),
+                attempts
+            );
+            for ((method, uri), condition) in
+                requests.iter().zip(http.conditions.lock().unwrap().iter())
+            {
+                assert_eq!(
+                    condition.as_deref(),
+                    if !overwrite && method == "POST" && uri.contains("uploadId=") {
+                        Some("*")
+                    } else {
+                        None
+                    }
+                );
+            }
+            assert!(http.responses.lock().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn streamed_multipart_409_aborts_without_replaying_consumed_reader() {
+    let data = vec![7; SINGLE_PART_UPLOAD_MAX_BYTES + 1];
+    for content_length in [None, Some(data.len() as u64)] {
+        let (s3, http) = adapter(vec![
+            response(404, ""),
+            start_upload(1),
+            response(200, ""),
+            response(409, ""),
+            response(204, ""),
+        ]);
+        assert!(
+            matches!(s3.write_from_reader(&object("file.txt"), Box::pin(std::io::Cursor::new(data.clone())), content_length, ConflictResolution::Rename).await,
+            Err(BackendError::Network(detail)) if detail.message.contains("new multipart upload") && detail.message.contains("409"))
+        );
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[4].0, "DELETE");
+        assert_eq!(http.conditions.lock().unwrap()[3].as_deref(), Some("*"));
+        assert_eq!(http.bodies.lock().unwrap()[2], body_signature(&data));
+        assert!(http.responses.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn rename_final_writes_have_a_retry_budget() {
+    for write in [Write::Bytes, Write::Reader, Write::Copy] {
+        let mut responses = Vec::new();
+        for _ in 0..=CONDITIONAL_WRITE_RETRIES {
+            responses.extend([response(404, ""), response(412, "")]);
+        }
+        let (s3, http) = adapter(responses);
+        assert!(matches!(
+            write.run(&s3, ConflictResolution::Rename).await,
+            Err(BackendError::Conflict { .. })
+        ));
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2 * (CONDITIONAL_WRITE_RETRIES + 1));
+        let conditions = http.conditions.lock().unwrap();
+        for (index, condition) in conditions.iter().enumerate() {
+            assert_eq!(
+                condition.as_deref(),
+                if index % 2 == 1 { Some("*") } else { None }
+            );
+        }
+        assert!(http.responses.lock().unwrap().is_empty());
     }
 }
