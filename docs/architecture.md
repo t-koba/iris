@@ -163,9 +163,11 @@ mismatched bindings and live owners fail closed. Creation durably records immuta
 intent before data and its file identity, so interrupted creation is recoverable.
 Parallel source range reads and per-range retries remain active for missing ranges.
 Before installation, the journal must contain the exact complete range set for the
-session, with completed checksums; it is validated and committed in one SQLite
-transaction with `synchronous=FULL`. Ordinary job writes retain `NORMAL`, and a
-failed durability barrier prevents installation.
+session, with completed checksums. The store validates it, then advances a per-session
+barrier generation in a SQLite transaction with `synchronous=FULL`; this actual row
+change forces a WAL commit that syncs earlier checksum writes made under `NORMAL`.
+Ordinary job writes retain `NORMAL`, and a failed durability barrier prevents
+installation.
 
 Cancellation of the transfer control or a dropped transfer future retains the
 session for restart; outstanding filesystem work retains its lock until finished.

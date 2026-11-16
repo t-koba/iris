@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS persisted_range_sessions (
     staging_path TEXT NOT NULL,
     total_len INTEGER NOT NULL,
     file_identity TEXT,
+    checksum_barrier_generation INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (job_id, entry_index),
     FOREIGN KEY (job_id) REFERENCES persisted_jobs (id) ON DELETE CASCADE
 );
@@ -98,6 +99,18 @@ pub fn open(path: Option<&Path>, mmap_bytes: u64) -> rusqlite::Result<Connection
     )?;
     if !has_file_identity {
         conn.execute_batch("ALTER TABLE persisted_range_sessions ADD COLUMN file_identity TEXT;")?;
+    }
+    let has_checksum_barrier_generation: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('persisted_range_sessions')
+         WHERE name = 'checksum_barrier_generation')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_checksum_barrier_generation {
+        conn.execute_batch(
+            "ALTER TABLE persisted_range_sessions
+             ADD COLUMN checksum_barrier_generation INTEGER NOT NULL DEFAULT 0;",
+        )?;
     }
     Ok(conn)
 }

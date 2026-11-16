@@ -447,8 +447,9 @@ impl JobStoreRepository {
         Ok(())
     }
 
-    /// Rewrites and commits every completed checksum for an exact staging session
+    /// Validates every completed checksum and advances a durable session marker
     /// in one FULL-synchronous transaction before the stage may be installed.
+    /// The marker write forces a WAL commit that synchronizes prior NORMAL writes.
     pub fn persist_range_chunk_checksums(
         &self,
         session: &PersistedRangeSession,
@@ -539,11 +540,29 @@ impl JobStoreRepository {
                 {
                     return Err(invalid());
                 }
-                tx.execute(
-                    "UPDATE persisted_task_chunks SET checksum = ?1
-                     WHERE job_id = ?2 AND entry_index = ?3 AND offset = ?4",
-                    rusqlite::params![checksum, job_id, entry_index, *offset as i64],
-                )?;
+            }
+            let marked = tx.execute(
+                "UPDATE persisted_range_sessions
+                 SET checksum_barrier_generation = checksum_barrier_generation + 1
+                 WHERE job_id = ?1 AND entry_index = ?2 AND session_id = ?3
+                   AND binding = ?4 AND staging_path = ?5 AND total_len = ?6
+                   AND file_identity IS ?7
+                   AND typeof(checksum_barrier_generation) = 'integer'
+                   AND checksum_barrier_generation >= 0
+                   AND checksum_barrier_generation < ?8",
+                rusqlite::params![
+                    job_id,
+                    entry_index,
+                    session.session_id,
+                    session.binding,
+                    session.staging_path,
+                    session.total_len as i64,
+                    session.file_identity,
+                    i64::MAX
+                ],
+            )?;
+            if marked != 1 {
+                return Err(invalid());
             }
             tx.commit()?;
             Ok(())
@@ -939,10 +958,13 @@ mod tests {
             file_identity: None,
         };
         repo.save_range_session(&session).unwrap();
-        // A v1 store predating the additive proof field must retain its jobs
-        // and journal, but cannot prove installation until normal stage validation.
+        // A v1 store predating the additive proof fields retains its jobs and
+        // journal; normal stage validation still gates installation.
         repo.conn
-            .execute_batch("ALTER TABLE persisted_range_sessions DROP COLUMN file_identity;")
+            .execute_batch(
+                "ALTER TABLE persisted_range_sessions DROP COLUMN checksum_barrier_generation;
+                 ALTER TABLE persisted_range_sessions DROP COLUMN file_identity;",
+            )
             .unwrap();
         drop(repo);
         let repo = JobStoreRepository::open(&db).unwrap();
@@ -950,6 +972,16 @@ mod tests {
             repo.load_range_session(&job.id, 0).unwrap(),
             Some(session.clone())
         );
+        let generation: i64 = repo
+            .conn
+            .query_row(
+                "SELECT checksum_barrier_generation FROM persisted_range_sessions
+                 WHERE job_id = ?1 AND entry_index = ?2",
+                rusqlite::params![job.id.0 as i64, session.entry_index as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(generation, 0);
         assert_eq!(
             repo.load_job(&job.id).unwrap().unwrap().tasks.len(),
             job.tasks.len()
@@ -1095,6 +1127,18 @@ mod tests {
 
         repo.persist_range_chunk_checksums(&session, &ranges)
             .unwrap();
+        repo.persist_range_chunk_checksums(&session, &ranges)
+            .unwrap();
+        let generation: i64 = repo
+            .conn
+            .query_row(
+                "SELECT checksum_barrier_generation FROM persisted_range_sessions
+                 WHERE job_id = ?1 AND entry_index = ?2",
+                rusqlite::params![job.id.0 as i64, session.entry_index as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(generation, 2);
         assert_eq!(
             repo.conn
                 .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
@@ -1104,6 +1148,16 @@ mod tests {
         drop(repo);
 
         let reopened = JobStoreRepository::open(&db).unwrap();
+        let generation: i64 = reopened
+            .conn
+            .query_row(
+                "SELECT checksum_barrier_generation FROM persisted_range_sessions
+                 WHERE job_id = ?1 AND entry_index = ?2",
+                rusqlite::params![job.id.0 as i64, session.entry_index as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(generation, 2);
         let chunks = reopened.load_chunk_states(&job.id).unwrap();
         let expected_checksum = "a".repeat(64);
         assert_eq!(chunks.len(), ranges.len());
@@ -1194,9 +1248,9 @@ mod tests {
         repo.upsert_chunk_state(&second).unwrap();
         repo.conn
             .execute_batch(
-                "CREATE TRIGGER fail_range_checksum_update
-                 BEFORE UPDATE OF checksum ON persisted_task_chunks
-                 BEGIN SELECT RAISE(ABORT, 'injected checksum write failure'); END;",
+                "CREATE TRIGGER fail_range_checksum_barrier
+                 BEFORE UPDATE OF checksum_barrier_generation ON persisted_range_sessions
+                 BEGIN SELECT RAISE(ABORT, 'injected checksum barrier failure'); END;",
             )
             .unwrap();
         assert!(repo
@@ -1209,7 +1263,7 @@ mod tests {
             1
         );
         repo.conn
-            .execute_batch("DROP TRIGGER fail_range_checksum_update;")
+            .execute_batch("DROP TRIGGER fail_range_checksum_barrier;")
             .unwrap();
         repo.persist_range_chunk_checksums(&session, &ranges)
             .unwrap();
