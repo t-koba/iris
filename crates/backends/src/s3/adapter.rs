@@ -91,11 +91,7 @@ impl S3Adapter {
                 ),
             )))
         })?;
-        if prefix.is_empty() {
-            Ok(stripped.trim_start_matches('/').to_string())
-        } else {
-            Ok(stripped.to_string())
-        }
+        Ok(stripped.to_string())
     }
 
     // ListObjectsV2 URL encoding is not form encoding: '+' stays literal.

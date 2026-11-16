@@ -630,6 +630,11 @@ async fn configured_prefix_is_a_slash_delimited_root_for_listing_and_keys() {
             adapter.display_path_from_key("foo/team/file.txt").unwrap(),
             "team/file.txt"
         );
+        assert_eq!(
+            adapter.display_path_from_key("foo//photos/").unwrap(),
+            "/photos/"
+        );
+        assert_eq!(adapter.object_key(&object("/photos/")), "foo//photos/");
     }
 }
 
@@ -676,6 +681,53 @@ async fn unprefixed_listing_and_keys_remain_unprefixed() {
             ListedEntry::WithMeta(entry) if entry.name.object_ref.display_path == "file.txt"
         ));
         assert!(!http.requests.lock().unwrap()[0].1.contains("prefix=foo"));
+    }
+}
+
+#[tokio::test]
+async fn unprefixed_common_prefixes_preserve_leading_slashes_when_opened() {
+    for prefix in [None, Some("")] {
+        for (encoded, key) in [
+            ("%2F", "/"),
+            ("%2Fphotos%2F", "/photos/"),
+            ("%2F%2Fphotos%2F", "//photos/"),
+            ("photos%2F", "photos/"),
+            ("%2F%252Fphotos%2F", "/%2Fphotos/"),
+        ] {
+            let body = format!(
+                r#"<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                  <EncodingType>url</EncodingType><IsTruncated>false</IsTruncated>
+                  <CommonPrefixes><Prefix>{encoded}</Prefix></CommonPrefixes>
+                </ListBucketResult>"#
+            );
+            let (adapter, http) = adapter_with_prefix(
+                vec![response(200, body), response(200, "<ListBucketResult/>")],
+                prefix,
+            );
+            assert_eq!(adapter.display_path_from_key(key).unwrap(), key);
+            let page = adapter.list_names(&object(""), None).await.unwrap();
+            assert_eq!(page.entries.len(), 1);
+            let ListedEntry::WithMeta(entry) = &page.entries[0] else {
+                panic!("S3 list entries include metadata");
+            };
+            let directory = &entry.name.object_ref;
+            assert_eq!(directory.display_path, key);
+            assert_eq!(adapter.object_key(directory), key);
+
+            adapter.list_names(directory, None).await.unwrap();
+            let requests = http.requests.lock().unwrap();
+            let uri = &requests[1].1;
+            let expected_prefix = format!("prefix={encoded}");
+            assert!(
+                uri.split_once('?')
+                    .unwrap()
+                    .1
+                    .split('&')
+                    .any(|parameter| parameter == expected_prefix),
+                "{uri}"
+            );
+            assert!(http.responses.lock().unwrap().is_empty());
+        }
     }
 }
 
