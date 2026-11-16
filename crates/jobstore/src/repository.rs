@@ -447,6 +447,113 @@ impl JobStoreRepository {
         Ok(())
     }
 
+    /// Rewrites and commits every completed checksum for an exact staging session
+    /// in one FULL-synchronous transaction before the stage may be installed.
+    pub fn persist_range_chunk_checksums(
+        &self,
+        session: &PersistedRangeSession,
+        ranges: &[(u64, u64)],
+    ) -> Result<(), JobStoreError> {
+        use rusqlite::OptionalExtension;
+
+        let invalid = || {
+            JobStoreError::Io(std::io::Error::other(
+                "range checksum journal does not match installation plan",
+            ))
+        };
+        let job_id = i64::try_from(session.job_id.0).map_err(|_| invalid())?;
+        let entry_index = i64::try_from(session.entry_index).map_err(|_| invalid())?;
+        if ranges.is_empty() || i64::try_from(session.total_len).is_err() {
+            return Err(invalid());
+        }
+        let mut next_offset = 0u64;
+        for (offset, len) in ranges {
+            if *offset != next_offset
+                || *len == 0
+                || i64::try_from(*offset).is_err()
+                || i64::try_from(*len).is_err()
+            {
+                return Err(invalid());
+            }
+            next_offset = offset.checked_add(*len).ok_or_else(invalid)?;
+        }
+        if next_offset != session.total_len {
+            return Err(invalid());
+        }
+
+        let stage_etag = format!("stage:{}", session.session_id);
+        let synchronous: i64 = self
+            .conn
+            .pragma_query_value(None, "synchronous", |row| row.get(0))?;
+        self.conn.pragma_update(None, "synchronous", "FULL")?;
+        let result = (|| {
+            let tx = rusqlite::Transaction::new_unchecked(
+                &self.conn,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            if self
+                .load_range_session(&session.job_id, session.entry_index)?
+                .as_ref()
+                != Some(session)
+            {
+                return Err(JobStoreError::Io(std::io::Error::other(
+                    "range session changed before checksum durability barrier",
+                )));
+            }
+            let row_count: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM persisted_task_chunks
+                 WHERE job_id = ?1 AND entry_index = ?2 AND etag = ?3",
+                rusqlite::params![job_id, entry_index, stage_etag],
+                |row| row.get(0),
+            )?;
+            if usize::try_from(row_count).ok() != Some(ranges.len()) {
+                return Err(invalid());
+            }
+
+            for (offset, len) in ranges {
+                let row = tx
+                    .query_row(
+                        "SELECT chunk_len, state, etag, checksum
+                         FROM persisted_task_chunks
+                         WHERE job_id = ?1 AND entry_index = ?2 AND offset = ?3",
+                        rusqlite::params![job_id, entry_index, *offset as i64],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                                row.get::<_, Option<String>>(3)?,
+                            ))
+                        },
+                    )
+                    .optional()?
+                    .ok_or_else(invalid)?;
+                let (stored_len, state, etag, checksum) = row;
+                let valid_checksum = checksum.as_deref().is_some_and(|value| {
+                    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                });
+                if stored_len != *len as i64
+                    || state != "Completed"
+                    || etag.as_deref() != Some(stage_etag.as_str())
+                    || !valid_checksum
+                {
+                    return Err(invalid());
+                }
+                tx.execute(
+                    "UPDATE persisted_task_chunks SET checksum = ?1
+                     WHERE job_id = ?2 AND entry_index = ?3 AND offset = ?4",
+                    rusqlite::params![checksum, job_id, entry_index, *offset as i64],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        self.conn
+            .pragma_update(None, "synchronous", synchronous)
+            .map_err(JobStoreError::from)?;
+        result
+    }
+
     pub fn load_range_session(
         &self,
         job_id: &JobId,
@@ -943,6 +1050,169 @@ mod tests {
         let loaded = repo.load_job(&JobId(1)).unwrap().unwrap();
         assert_eq!(loaded.tasks[1].state, TaskState::Failed);
         assert_eq!(loaded.tasks[1].error_message.as_deref(), Some("disk full"));
+    }
+
+    #[test]
+    fn range_checksum_barrier_commits_exact_session_with_full_sync() {
+        use iris_platform_integration::staging::encode_path;
+
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("jobs.sqlite3");
+        let stage_path = root.path().join("stage");
+        let repo = JobStoreRepository::open(&db).unwrap();
+        let job = make_test_job();
+        repo.save_job(&job).unwrap();
+        let session = PersistedRangeSession {
+            job_id: job.id.clone(),
+            entry_index: 0,
+            session_id: "durable-session".into(),
+            binding: "source-and-destination-binding".into(),
+            staging_path: encode_path(&stage_path),
+            total_len: 8,
+            file_identity: None,
+        };
+        repo.save_range_session(&session).unwrap();
+        let ranges = [(0, 4), (4, 4)];
+        let etag = format!("stage:{}", session.session_id);
+        for (offset, len) in ranges {
+            repo.upsert_chunk_state(&PersistedChunkStateRow {
+                job_id: job.id.clone(),
+                entry_index: session.entry_index,
+                offset,
+                len,
+                state: PersistedChunkState::Completed,
+                etag: Some(etag.clone()),
+                checksum: Some("a".repeat(64)),
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            repo.conn
+                .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+
+        repo.persist_range_chunk_checksums(&session, &ranges)
+            .unwrap();
+        assert_eq!(
+            repo.conn
+                .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        drop(repo);
+
+        let reopened = JobStoreRepository::open(&db).unwrap();
+        let chunks = reopened.load_chunk_states(&job.id).unwrap();
+        let expected_checksum = "a".repeat(64);
+        assert_eq!(chunks.len(), ranges.len());
+        assert!(chunks.iter().all(|chunk| {
+            chunk.state == PersistedChunkState::Completed
+                && chunk.etag.as_deref() == Some(etag.as_str())
+                && chunk.checksum.as_deref() == Some(expected_checksum.as_str())
+        }));
+    }
+
+    #[test]
+    fn range_checksum_barrier_rejects_incomplete_rows_and_propagates_write_errors() {
+        use iris_platform_integration::staging::encode_path;
+
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("jobs.sqlite3");
+        let stage_path = root.path().join("stage");
+        let repo = JobStoreRepository::open(&db).unwrap();
+        let job = make_test_job();
+        repo.save_job(&job).unwrap();
+        let session = PersistedRangeSession {
+            job_id: job.id.clone(),
+            entry_index: 0,
+            session_id: "barrier-session".into(),
+            binding: "source-and-destination-binding".into(),
+            staging_path: encode_path(&stage_path),
+            total_len: 8,
+            file_identity: None,
+        };
+        repo.save_range_session(&session).unwrap();
+        let ranges = [(0, 4), (4, 4)];
+        let etag = format!("stage:{}", session.session_id);
+        let mut second = PersistedChunkStateRow {
+            job_id: job.id.clone(),
+            entry_index: session.entry_index,
+            offset: 4,
+            len: 4,
+            state: PersistedChunkState::Pending,
+            etag: Some(etag.clone()),
+            checksum: None,
+        };
+        repo.upsert_chunk_state(&PersistedChunkStateRow {
+            job_id: job.id.clone(),
+            entry_index: session.entry_index,
+            offset: 0,
+            len: 4,
+            state: PersistedChunkState::Completed,
+            etag: Some(etag.clone()),
+            checksum: Some("b".repeat(64)),
+        })
+        .unwrap();
+        repo.upsert_chunk_state(&second).unwrap();
+        assert!(repo
+            .persist_range_chunk_checksums(&session, &ranges)
+            .is_err());
+        repo.conn
+            .execute(
+                "DELETE FROM persisted_task_chunks WHERE job_id = ?1 AND entry_index = ?2 AND offset = 4",
+                rusqlite::params![job.id.0 as i64, session.entry_index as i64],
+            )
+            .unwrap();
+        assert!(repo
+            .persist_range_chunk_checksums(&session, &ranges)
+            .is_err());
+        repo.upsert_chunk_state(&second).unwrap();
+        assert!(repo
+            .persist_range_chunk_checksums(&session, &[(0, 3), (4, 5)])
+            .is_err());
+        let mut stale_session = session.clone();
+        stale_session.binding.push('x');
+        assert!(repo
+            .persist_range_chunk_checksums(&stale_session, &ranges)
+            .is_err());
+        assert_eq!(
+            repo.conn
+                .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+
+        second.state = PersistedChunkState::Completed;
+        second.checksum = Some("bad".into());
+        repo.upsert_chunk_state(&second).unwrap();
+        assert!(repo
+            .persist_range_chunk_checksums(&session, &ranges)
+            .is_err());
+        second.checksum = Some("c".repeat(64));
+        repo.upsert_chunk_state(&second).unwrap();
+        repo.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_range_checksum_update
+                 BEFORE UPDATE OF checksum ON persisted_task_chunks
+                 BEGIN SELECT RAISE(ABORT, 'injected checksum write failure'); END;",
+            )
+            .unwrap();
+        assert!(repo
+            .persist_range_chunk_checksums(&session, &ranges)
+            .is_err());
+        assert_eq!(
+            repo.conn
+                .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        repo.conn
+            .execute_batch("DROP TRIGGER fail_range_checksum_update;")
+            .unwrap();
+        repo.persist_range_chunk_checksums(&session, &ranges)
+            .unwrap();
     }
 
     #[test]

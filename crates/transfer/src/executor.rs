@@ -1949,6 +1949,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            let mut expected_ranges = Vec::new();
             for offset in (0..total_len).step_by(crate::chunked::CHUNKED_RANGE_CHUNK_BYTES as usize)
             {
                 let len = (total_len - offset).min(crate::chunked::CHUNKED_RANGE_CHUNK_BYTES);
@@ -1974,9 +1975,12 @@ mod tests {
                         checksum: Some(crate::chunked::range_checksum(&bytes)),
                     })
                     .unwrap();
+                expected_ranges.push((offset, len));
             }
             drop(stage);
-            store.flush().unwrap();
+            store
+                .persist_range_chunk_checksums(&session, &expected_ranges)
+                .unwrap();
             let final_path = root.path().join("final");
             assert!(!final_path.exists());
             std::fs::rename(stage_path.join("data"), &final_path).unwrap();

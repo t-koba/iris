@@ -44,6 +44,11 @@ enum WriteCommand {
         identity: String,
         ack: mpsc::Sender<Result<(), JobStoreError>>,
     },
+    PersistRangeChunkChecksums {
+        session: PersistedRangeSession,
+        ranges: Vec<(u64, u64)>,
+        ack: mpsc::Sender<Result<(), JobStoreError>>,
+    },
     RemoveRangeSession {
         job_id: JobId,
         entry_index: u64,
@@ -168,6 +173,21 @@ impl JobStore {
             .send_with_ack(|ack| WriteCommand::BindRangeFileIdentity {
                 session: session.clone(),
                 identity: identity.into(),
+                ack,
+            })
+    }
+
+    /// Commit the complete checksum set for this staging session with FULL
+    /// synchronous durability before its data is installed at the final path.
+    pub fn persist_range_chunk_checksums(
+        &self,
+        session: &PersistedRangeSession,
+        ranges: &[(u64, u64)],
+    ) -> Result<(), JobStoreError> {
+        self.writer
+            .send_with_ack(|ack| WriteCommand::PersistRangeChunkChecksums {
+                session: session.clone(),
+                ranges: ranges.to_vec(),
                 ack,
             })
     }
@@ -457,6 +477,14 @@ fn apply_command(
         } => send_repository_result(
             ack,
             repository.bind_range_file_identity(&session, &identity),
+        ),
+        WriteCommand::PersistRangeChunkChecksums {
+            session,
+            ranges,
+            ack,
+        } => send_repository_result(
+            ack,
+            repository.persist_range_chunk_checksums(&session, &ranges),
         ),
         WriteCommand::RemoveRangeSession {
             job_id,

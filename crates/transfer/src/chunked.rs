@@ -968,6 +968,7 @@ pub(crate) async fn copy_chunked_with_range_writes(
         false,
     ));
     let recorder_ref = &recorder;
+    let persisted_session_for_completion = persisted_session.clone();
     let result = async move {
         let recorder = recorder_ref;
         let mut next_to_schedule = 0usize;
@@ -1038,13 +1039,13 @@ pub(crate) async fn copy_chunked_with_range_writes(
             }
         }
 
-        if let Some(recorder) = &recorder {
-            recorder
-                .job_store
-                .flush()
-                .map_err(jobstore_error_to_backend_error)?;
-        }
         if completed_bytes != total_len {
+            if let Some(recorder) = recorder.as_ref() {
+                recorder
+                    .job_store
+                    .flush()
+                    .map_err(jobstore_error_to_backend_error)?;
+            }
             return Err(BackendError::Internal(Box::new(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 format!(
@@ -1054,6 +1055,27 @@ pub(crate) async fn copy_chunked_with_range_writes(
         }
 
         wait_for_resume_or_cancel(pause_rx, cancel_token).await?;
+        let expected_ranges = plan
+            .ranges
+            .iter()
+            .map(|range| (range.offset, range.length.unwrap_or(0)))
+            .collect::<Vec<_>>();
+        match (recorder.as_ref(), persisted_session_for_completion.as_ref()) {
+            (Some(recorder), Some(session)) => recorder
+                .job_store
+                .persist_range_chunk_checksums(session, &expected_ranges)
+                .map_err(jobstore_error_to_backend_error)?,
+            (Some(recorder), None) => recorder
+                .job_store
+                .flush()
+                .map_err(jobstore_error_to_backend_error)?,
+            (None, None) => {}
+            (None, Some(_)) => {
+                return Err(BackendError::Internal(Box::new(std::io::Error::other(
+                    "range session has no checksum recorder",
+                ))));
+            }
+        }
         staging.complete().await
     }
     .await;
