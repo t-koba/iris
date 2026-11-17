@@ -902,7 +902,7 @@ pub(crate) async fn copy_chunked_with_range_writes(
                 .filter(|row| row.entry_index == recorder.entry_index)
                 .map(|row| (row.offset, row))
                 .collect();
-            let mut invalid_stage = false;
+            let mut invalid_ranges = Vec::new();
             for (index, range) in plan.ranges.iter().enumerate() {
                 if let Some(row) = rows.get(&range.offset).filter(|row| {
                     row.len == range.length.unwrap_or(0)
@@ -918,8 +918,9 @@ pub(crate) async fn copy_chunked_with_range_writes(
                             })?;
                         let bytes = staging.read_range(range.clone()).await?;
                         if range_checksum(&bytes) != *checksum {
-                            invalid_stage = true;
-                            break;
+                            recorder.record(range, PersistedChunkState::Pending, None)?;
+                            invalid_ranges.push(index);
+                            continue;
                         }
                         resumed[index] = true;
                         continue;
@@ -927,23 +928,23 @@ pub(crate) async fn copy_chunked_with_range_writes(
                 }
                 recorder.record(range, PersistedChunkState::Pending, None)?;
             }
-            if staging.is_installed() && (invalid_stage || resumed.iter().any(|done| !done)) {
+            if staging.is_installed()
+                && (!invalid_ranges.is_empty() || resumed.iter().any(|done| !done))
+            {
                 return Err(BackendError::Internal(Box::new(std::io::Error::other(
                     "installed range session requires every completed chunk checksum",
                 ))));
             }
-            if invalid_stage {
+            if !invalid_ranges.is_empty() {
                 drop(staging);
-                recorder
-                    .job_store
-                    .discard_range_session(&session)
-                    .map_err(jobstore_error_to_backend_error)?;
                 if retried_stage {
                     return Err(BackendError::Internal(Box::new(std::io::Error::other(
                         "owned staging range checksum mismatch",
                     ))));
                 }
-                resumed.fill(false);
+                for index in invalid_ranges {
+                    resumed[index] = false;
+                }
                 retried_stage = true;
                 continue;
             }

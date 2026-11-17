@@ -1011,6 +1011,7 @@ mod tests {
         deleted: Arc<Mutex<Vec<String>>>,
         read_ranges: Arc<Mutex<Vec<Option<ByteRange>>>>,
         on_second_range: Option<Box<dyn Fn() -> Result<(), BackendError> + Send + Sync>>,
+        on_third_range: Option<Box<dyn Fn() -> Result<(), BackendError> + Send + Sync>>,
         stream_writes: Arc<Mutex<u32>>,
         range_writes: Arc<AtomicU32>,
         read_failures_remaining: Arc<AtomicU32>,
@@ -1039,6 +1040,7 @@ mod tests {
                 deleted: Arc::new(Mutex::new(Vec::new())),
                 read_ranges: Arc::new(Mutex::new(Vec::new())),
                 on_second_range: None,
+                on_third_range: None,
                 stream_writes: Arc::new(Mutex::new(0)),
                 range_writes: Arc::new(AtomicU32::new(0)),
                 read_failures_remaining: Arc::new(AtomicU32::new(0)),
@@ -1236,6 +1238,14 @@ mod tests {
                 .is_some_and(|range| range.offset == crate::chunked::CHUNKED_RANGE_CHUNK_BYTES)
             {
                 if let Some(hook) = &self.on_second_range {
+                    hook()?;
+                }
+            }
+            if range
+                .as_ref()
+                .is_some_and(|range| range.offset == crate::chunked::CHUNKED_RANGE_CHUNK_BYTES * 2)
+            {
+                if let Some(hook) = &self.on_third_range {
                     hook()?;
                 }
             }
@@ -2344,6 +2354,7 @@ mod tests {
             "stale row",
             "stale length",
             "corrupt range",
+            "corrupt earlier with later intact",
             "source mismatch",
             "destination mismatch",
             "stage replaced",
@@ -2400,11 +2411,19 @@ mod tests {
                 LocalFsAdapter::new(destination_root.clone(), BackendId("destination".into()));
             let dst = make_ref("destination", "final");
             let control = TransferControl::new();
-            let cancel = control.cancel_token();
-            source.on_second_range = Some(Box::new(move || {
-                cancel.cancel();
-                Ok(())
-            }));
+            let cancel_second = control.cancel_token();
+            let cancel_third = control.cancel_token();
+            if scenario == "corrupt earlier with later intact" {
+                source.on_third_range = Some(Box::new(move || {
+                    cancel_third.cancel();
+                    Ok(())
+                }));
+            } else {
+                source.on_second_range = Some(Box::new(move || {
+                    cancel_second.cancel();
+                    Ok(())
+                }));
+            }
             let (tx, _rx) = watch::channel(ProgressInfo::single_file(0, Some(total_len), false));
             assert!(owned_range_attempt(
                 &source,
@@ -2420,7 +2439,11 @@ mod tests {
             store.flush().unwrap();
             assert_eq!(
                 tx.borrow().bytes_completed,
-                crate::chunked::CHUNKED_RANGE_CHUNK_BYTES,
+                if scenario == "corrupt earlier with later intact" {
+                    crate::chunked::CHUNKED_RANGE_CHUNK_BYTES * 2
+                } else {
+                    crate::chunked::CHUNKED_RANGE_CHUNK_BYTES
+                },
                 "{scenario}"
             );
             assert!(!destination_root.join("final").exists());
@@ -2432,11 +2455,16 @@ mod tests {
                 rows.iter()
                     .filter(|row| row.state == PersistedChunkState::Completed)
                     .count(),
-                1
+                if scenario == "corrupt earlier with later intact" {
+                    2
+                } else {
+                    1
+                }
             );
             drop(store);
             let store = Arc::new(JobStore::open(&db).unwrap());
             source.on_second_range = None;
+            source.on_third_range = None;
             source.read_ranges.lock().unwrap().clear();
             let mut version = Some("v1");
             let mut retry_dst = dst.clone();
@@ -2454,7 +2482,7 @@ mod tests {
                     store.upsert_chunk_state(&row).unwrap();
                     store.flush().unwrap();
                 }
-                "corrupt range" => {
+                "corrupt range" | "corrupt earlier with later intact" => {
                     use std::io::Write;
                     let mut data = std::fs::OpenOptions::new()
                         .write(true)
@@ -2567,14 +2595,28 @@ mod tests {
             )
             .await;
             match scenario {
-                "resume" | "stale row" | "stale length" | "missing stage" | "missing data"
-                | "short data" | "partial intent" | "partial identity" | "empty stage"
-                | "corrupt range" | "no identity" | "lossless path" | "source mismatch" => {
+                "resume"
+                | "stale row"
+                | "stale length"
+                | "missing stage"
+                | "missing data"
+                | "short data"
+                | "partial intent"
+                | "partial identity"
+                | "empty stage"
+                | "corrupt range"
+                | "corrupt earlier with later intact"
+                | "no identity"
+                | "lossless path"
+                | "source mismatch" => {
                     result.unwrap();
                     let reads = source.read_ranges();
                     assert_eq!(
                         reads.len(),
-                        if matches!(scenario, "resume" | "lossless path") {
+                        if matches!(
+                            scenario,
+                            "resume" | "lossless path" | "corrupt earlier with later intact"
+                        ) {
                             2
                         } else {
                             3
@@ -2590,6 +2632,15 @@ mod tests {
                             .as_slice(),
                         changed_payload.as_deref().unwrap_or(&payload)
                     );
+                    if scenario == "corrupt earlier with later intact" {
+                        assert_eq!(
+                            reads
+                                .iter()
+                                .filter_map(|range| range.as_ref().map(|range| range.offset))
+                                .collect::<Vec<_>>(),
+                            vec![0, crate::chunked::CHUNKED_RANGE_CHUNK_BYTES * 2]
+                        );
+                    }
                     if scenario == "source mismatch" {
                         assert_eq!(
                             reads
