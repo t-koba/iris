@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Deterministic Darwin contracts; Linux mocks are not native runtime evidence."""
 import importlib.util
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 from pathlib import Path
 import tempfile
+import socket
+import threading
 import sys
 sys.dont_write_bytecode = True
 import unittest
@@ -24,11 +27,13 @@ class CandidateContracts(unittest.TestCase):
             m.download_pinned('https://example.invalid/pinned.tar.xz', Path('/tmp/pinned.tar.xz'))
         args = run.call_args.args
         self.assertIn('--remove-on-error', args)
-        self.assertIn('--retry-all-errors', args)
-        self.assertEqual(args[args.index('--retry') + 1], '1')
-        self.assertEqual(args[args.index('--retry-delay') + 1], '3')
+        self.assertNotIn('--retry-all-errors', args)
+        self.assertEqual(args[args.index('--proto') + 1], '=https')
+        self.assertEqual(args[args.index('--proto-redir') + 1], '=https')
+        self.assertIn('--tlsv1.2', args)
         self.assertIn('https://example.invalid/pinned.tar.xz', args)
-        self.assertEqual(run.call_args.kwargs['seconds'], m.setting('IRIS_FFMPEG_FETCH_SECONDS', 300))
+        self.assertGreater(run.call_args.kwargs['seconds'], 0)
+        self.assertLessEqual(run.call_args.kwargs['seconds'], m.setting('IRIS_FFMPEG_FETCH_SECONDS', 300))
         with patch.dict(m.os.environ, {'IRIS_FFMPEG_FETCH_RETRIES': '0'}), patch.object(m, 'run') as run:
             m.download_pinned('https://example.invalid/pinned.tar.xz', Path('/tmp/pinned.tar.xz'))
         self.assertNotIn('--retry', run.call_args.args)
@@ -37,6 +42,110 @@ class CandidateContracts(unittest.TestCase):
                             ('IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS', '-1')):
             with patch.dict(m.os.environ, {name: value}), self.assertRaises(ValueError):
                 m.download_pinned('https://example.invalid/pinned.tar.xz', Path('/tmp/pinned.tar.xz'))
+
+    def test_pinned_download_retry_behavior(self):
+        # Real curl, local synthetic bytes only. The runner substitutes HTTP
+        # solely for this loopback test; production keeps HTTPS-only options.
+        payload = b'synthetic pinned archive'
+        for responses in ((403,), (404,), (418,), (429,), (501,), (503, 200),
+                          ('disconnect', 200), ('partial', 200),
+                          ('partial', 'partial')):
+            with self.subTest(responses=responses), tempfile.TemporaryDirectory() as tmp:
+                requests = []
+
+                class Handler(BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        response = responses[min(len(requests), len(responses) - 1)]
+                        requests.append(self.path)
+                        if response == 'disconnect':
+                            self.connection.shutdown(socket.SHUT_RDWR)
+                            self.connection.close()
+                            return
+                        partial = response == 'partial'
+                        self.send_response(200 if partial else response)
+                        self.send_header('Content-Length', str(len(payload) + (10 if partial else 0)))
+                        self.end_headers()
+                        self.wfile.write(payload)
+
+                    def log_message(self, *args):
+                        pass
+
+                with HTTPServer(('127.0.0.1', 0), Handler) as server:
+                    thread = threading.Thread(target=server.serve_forever,
+                                              kwargs={'poll_interval': 0.01}, daemon=True)
+                    thread.start()
+                    real_run = m.run
+
+                    def loopback_run(*args, **kwargs):
+                        args = list(args)
+                        self.assertEqual(args[args.index('--proto') + 1], '=https')
+                        self.assertEqual(args[args.index('--proto-redir') + 1], '=https')
+                        args[args.index('--proto') + 1] = '=http'
+                        args[args.index('--proto-redir') + 1] = '=http'
+                        args[args.index('https://example.invalid/pinned')] = (
+                            f'http://127.0.0.1:{server.server_port}/pinned')
+                        return real_run(*args, '--noproxy', '*', **kwargs)
+
+                    output = Path(tmp) / 'archive'
+                    try:
+                        with patch.dict(m.os.environ, {
+                            'IRIS_FFMPEG_FETCH_RETRIES': '1',
+                            'IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS': '3',
+                            'IRIS_FFMPEG_FETCH_SECONDS': '5',
+                        }), patch.object(m, 'run', side_effect=loopback_run), \
+                                patch.object(m, 'time', wraps=m.time) as clock:
+                            sleep = clock.sleep
+                            sleep.return_value = None
+                            if responses[-1] == 200:
+                                m.download_pinned('https://example.invalid/pinned', output)
+                                self.assertEqual(output.read_bytes(), payload)
+                            else:
+                                with self.assertRaises(m.CommandFailure):
+                                    m.download_pinned('https://example.invalid/pinned', output)
+                                self.assertFalse(output.exists())
+                            self.assertEqual(len(requests), len(responses))
+                            if len(responses) == 2:
+                                sleep.assert_called_once_with(3)
+                            else:
+                                sleep.assert_not_called()
+                    finally:
+                        server.shutdown()
+                        thread.join(timeout=2)
+                        self.assertFalse(thread.is_alive())
+
+    def test_pinned_download_deadline_and_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / 'partial'
+            output.write_bytes(b'incomplete')
+            failure = m.CommandFailure('curl', 56, 'connection reset')
+            with patch.dict(m.os.environ, {
+                'IRIS_FFMPEG_FETCH_RETRIES': '1',
+                'IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS': '3',
+                'IRIS_FFMPEG_FETCH_SECONDS': '5',
+            }), patch.object(m, 'run', side_effect=failure) as run, \
+                    patch.object(m.time, 'monotonic', side_effect=[0, 0, 4, 5]), \
+                    patch.object(m.time, 'sleep') as sleep:
+                with self.assertRaisesRegex(ValueError, 'exceeded fetch deadline'):
+                    m.download_pinned('https://example.invalid/pinned', output)
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(run.call_args.kwargs['seconds'], 5)
+                sleep.assert_called_once_with(1)
+                self.assertFalse(output.exists())
+
+    def test_pinned_download_non_retryable_failures_and_disabled_retries(self):
+        for retries, error in ((0, m.CommandFailure('curl', 56, 'reset')),
+                               (1, m.CommandFailure('curl', 60, 'untrusted certificate')),
+                               (1, m.CommandFailure('curl', 23, 'write error')),
+                               (1, InterruptedError('cancelled'))):
+            with self.subTest(retries=retries, error=str(error)), tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp) / 'partial'
+                output.write_bytes(b'incomplete')
+                with patch.dict(m.os.environ, {'IRIS_FFMPEG_FETCH_RETRIES': str(retries)}), \
+                        patch.object(m, 'run', side_effect=error) as run:
+                    with self.assertRaises(type(error)):
+                        m.download_pinned('https://example.invalid/pinned', output)
+                    self.assertEqual(run.call_count, 1)
+                    self.assertFalse(output.exists())
 
     def test_command_cancellation_is_not_an_optional_comparison_failure(self):
         for error in (InterruptedError('TERM'), KeyboardInterrupt(), m.subprocess.TimeoutExpired('synthetic', 1)):

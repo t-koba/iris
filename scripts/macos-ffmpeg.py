@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,13 +53,34 @@ def download_pinned(url, output):
     require(retries >= 0, 'IRIS_FFMPEG_FETCH_RETRIES must be non-negative')
     require(delay >= 0, 'IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS must be non-negative')
     args = ['curl', '--fail', '--location', '--silent', '--show-error', '--proto', '=https',
-            '--proto-redir', '=https', '--tlsv1.2', '--remove-on-error']
-    if retries:
-        # The default curl retry set misses resets during TLS/response transfer.
-        # Retries remain bounded by the configured count, and downloaded bytes
-        # must still pass the pinned digest/signature checks below.
-        args += ['--retry-all-errors', '--retry', str(retries), '--retry-delay', str(delay)]
-    run(*args, url, '-o', output, seconds=setting('IRIS_FFMPEG_FETCH_SECONDS', 300))
+            '--proto-redir', '=https', '--tlsv1.2', '--remove-on-error',
+            '--write-out', '\n%{http_code}']
+    deadline = time.monotonic() + setting('IRIS_FFMPEG_FETCH_SECONDS', 300)
+    try:
+        for attempt in range(retries + 1):
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, 'curl exceeded fetch deadline')
+            try:
+                run(*args, url, '-o', output, seconds=remaining)
+                return
+            except CommandFailure as error:
+                # curl exit codes for DNS/connect, partial transfer, timeout,
+                # TLS handshake, empty response, send/receive and HTTP/2 stream
+                # failures. Certificate verification errors are not retryable.
+                transient = error.returncode in (5, 6, 7, 18, 28, 35, 52, 55, 56, 92)
+                if error.returncode == 22:
+                    # Only retry transient server errors, never a 4xx refusal.
+                    transient = error.output.splitlines()[-1:] in (
+                        ['500'], ['502'], ['503'], ['504'])
+                if not transient or attempt == retries:
+                    raise
+                # Match curl's default backoff when retry-delay is zero.
+                pause = delay or min(2 ** min(attempt, 10), 600)
+                time.sleep(min(pause, max(0, deadline - time.monotonic())))
+    except BaseException:
+        # Also clean partial bytes when the overall deadline kills curl.
+        output.unlink(missing_ok=True)
+        raise
 
 
 def clean(text):
@@ -69,6 +91,13 @@ def clean(text):
 
 
 REDACTIONS = {str(ROOT): '<source>', str(Path.home()): '<home>'}
+
+
+class CommandFailure(ValueError):
+    def __init__(self, command, returncode, output):
+        super().__init__(f"{Path(command).name} failed: {clean(output)}")
+        self.returncode = returncode
+        self.output = output
 
 
 def run(*args, cwd=None, env=None, seconds=None):
@@ -87,7 +116,8 @@ def run(*args, cwd=None, env=None, seconds=None):
         limit = setting('IRIS_FFMPEG_COMMAND_BYTES', 32768)
         log.seek(max(0, size - limit))
         text = log.read(limit).decode('utf-8', 'replace')
-    require(code == 0, f"{Path(args[0]).name} failed: {clean(text)}")
+    if code != 0:
+        raise CommandFailure(args[0], code, text)
     # Long successful build logs are discarded. Inspection commands fail on truncation.
     if seconds is None:
         require(size <= limit, f"{Path(args[0]).name} output exceeds command budget")
