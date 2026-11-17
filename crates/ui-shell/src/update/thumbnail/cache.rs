@@ -304,6 +304,10 @@ mod tests {
 
     fn key(path: &str, size: u64) -> ThumbnailCacheKey {
         ThumbnailCacheKey {
+            object_key: ObjectKey {
+                backend_id: BackendId("local".into()),
+                stable_id: StableId(path.to_string()),
+            },
             path: path.to_string(),
             size: Some(size),
             mtime: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(size)),

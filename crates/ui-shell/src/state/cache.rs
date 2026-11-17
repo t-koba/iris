@@ -66,6 +66,8 @@ impl EntryCacheStamp {
 
 #[derive(Clone, Debug)]
 pub struct ThumbnailCacheKey {
+    /// Backend and object identity keep canonically equivalent remote paths apart.
+    pub object_key: ObjectKey,
     pub path: String,
     pub size: Option<u64>,
     pub mtime: Option<SystemTime>,
@@ -73,7 +75,8 @@ pub struct ThumbnailCacheKey {
 
 impl PartialEq for ThumbnailCacheKey {
     fn eq(&self, other: &Self) -> bool {
-        self.size == other.size
+        self.object_key == other.object_key
+            && self.size == other.size
             && self.mtime == other.mtime
             && equality_key(&self.path) == equality_key(&other.path)
     }
@@ -83,13 +86,20 @@ impl Eq for ThumbnailCacheKey {}
 
 impl Hash for ThumbnailCacheKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        (equality_key(&self.path), self.size, self.mtime).hash(state);
+        (
+            &self.object_key,
+            equality_key(&self.path),
+            self.size,
+            self.mtime,
+        )
+            .hash(state);
     }
 }
 
 impl ThumbnailCacheKey {
     pub fn from_entry(entry: &ListEntry) -> Self {
         Self {
+            object_key: entry.object_ref.key.clone(),
             path: entry.object_ref.display_path.clone(),
             size: entry.size,
             mtime: entry.mtime,
@@ -298,7 +308,12 @@ mod tests {
 
     #[test]
     fn thumbnail_keys_use_path_identity_but_preserve_display_spelling() {
+        let object_key = ObjectKey {
+            backend_id: iris_core_domain::types::object::BackendId("local".into()),
+            stable_id: iris_core_domain::types::object::StableId("inode-1".into()),
+        };
         let nfc = ThumbnailCacheKey {
+            object_key: object_key.clone(),
             path: "Café.jpg".into(),
             size: Some(10),
             mtime: Some(SystemTime::UNIX_EPOCH),
@@ -315,6 +330,18 @@ mod tests {
         assert_eq!(cache.get(&nfd), Some(&2));
         assert_eq!(nfc.path(), "Café.jpg");
         assert_eq!(nfd.path(), "Cafe\u{301}.jpg");
+        // A cloud/remote object with a canonically equivalent display path is a
+        // different object; it must never reuse the APFS-normalized entry.
+        assert_ne!(
+            nfd,
+            ThumbnailCacheKey {
+                object_key: ObjectKey {
+                    backend_id: object_key.backend_id.clone(),
+                    stable_id: iris_core_domain::types::object::StableId("inode-2".into()),
+                },
+                ..nfd.clone()
+            }
+        );
         assert_ne!(
             nfd,
             ThumbnailCacheKey {
