@@ -1,4 +1,5 @@
 use crate::segment::{Segment, SegmentRecord};
+use iris_core_domain::path_identity::equality_key;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -25,7 +26,7 @@ pub fn reconcile_segment(
         .map(|record| {
             (
                 (
-                    record.path.clone(),
+                    equality_key(&record.path),
                     record.local_path_is_lossy,
                     record.native_locator.clone(),
                 ),
@@ -39,7 +40,7 @@ pub fn reconcile_segment(
 
     for record in scanned {
         let key = (
-            record.path.clone(),
+            equality_key(&record.path),
             record.local_path_is_lossy,
             record.native_locator.clone(),
         );
@@ -65,7 +66,7 @@ pub fn reconcile_segment(
         .iter()
         .filter(|record| {
             !seen.contains(&(
-                record.path.clone(),
+                equality_key(&record.path),
                 record.local_path_is_lossy,
                 record.native_locator.clone(),
             ))
@@ -108,6 +109,34 @@ mod tests {
             gps_lat: None,
             gps_lon: None,
             content_signature: None,
+        }
+    }
+
+    #[test]
+    fn reconcile_path_identity_preserves_original_records_and_platform_policy() {
+        let original = record("/root/Café.jpg", 10, 100);
+        let existing = Segment::new(vec![original.clone()]);
+        let scanned = record("/root/Cafe\u{301}.jpg", 10, 100);
+        let result = reconcile_segment(&existing, [scanned.clone()]);
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                result.stats,
+                ReconcileStats {
+                    unchanged: 1,
+                    ..Default::default()
+                }
+            );
+            assert_eq!(result.segment.records(), &[original]);
+        } else {
+            assert_eq!(
+                result.stats,
+                ReconcileStats {
+                    inserted: 1,
+                    removed: 1,
+                    ..Default::default()
+                }
+            );
+            assert_eq!(result.segment.records(), &[scanned]);
         }
     }
 

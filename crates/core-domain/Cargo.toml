@@ -11,4 +11,5 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
-rusqlite = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true, features = ["collation"] }
+unicode-normalization = { workspace = true }

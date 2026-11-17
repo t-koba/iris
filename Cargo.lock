@@ -3422,6 +3422,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.21",
  "tokio",
+ "unicode-normalization",
 ]
 
 [[package]]

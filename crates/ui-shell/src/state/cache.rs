@@ -1,10 +1,12 @@
 use iced::widget::image as iced_image;
 use iris_core_domain::memory_budget::MemoryBudgetPermit;
+use iris_core_domain::path_identity::equality_key;
 use iris_core_domain::types::list::ListEntry;
 use iris_core_domain::types::metadata::MediaMetadata;
 use iris_core_domain::types::object::ObjectKey;
 use iris_thumb_preview::scheduler::RequestPriority;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::time::SystemTime;
 
 pub const DEFAULT_THUMBNAIL_CACHE_LIMIT_BYTES: usize = 48 * 1024 * 1024;
@@ -62,11 +64,27 @@ impl EntryCacheStamp {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug)]
 pub struct ThumbnailCacheKey {
     pub path: String,
     pub size: Option<u64>,
     pub mtime: Option<SystemTime>,
+}
+
+impl PartialEq for ThumbnailCacheKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.size == other.size
+            && self.mtime == other.mtime
+            && equality_key(&self.path) == equality_key(&other.path)
+    }
+}
+
+impl Eq for ThumbnailCacheKey {}
+
+impl Hash for ThumbnailCacheKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (equality_key(&self.path), self.size, self.mtime).hash(state);
+    }
 }
 
 impl ThumbnailCacheKey {
@@ -277,6 +295,41 @@ impl StorageUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thumbnail_keys_use_path_identity_but_preserve_display_spelling() {
+        let nfc = ThumbnailCacheKey {
+            path: "Café.jpg".into(),
+            size: Some(10),
+            mtime: Some(SystemTime::UNIX_EPOCH),
+        };
+        let nfd = ThumbnailCacheKey {
+            path: "Cafe\u{301}.jpg".into(),
+            ..nfc.clone()
+        };
+        assert_eq!(nfc == nfd, cfg!(target_os = "macos"));
+        let mut cache = HashMap::new();
+        cache.insert(nfc.clone(), 1);
+        cache.insert(nfd.clone(), 2);
+        assert_eq!(cache.len(), if cfg!(target_os = "macos") { 1 } else { 2 });
+        assert_eq!(cache.get(&nfd), Some(&2));
+        assert_eq!(nfc.path(), "Café.jpg");
+        assert_eq!(nfd.path(), "Cafe\u{301}.jpg");
+        assert_ne!(
+            nfd,
+            ThumbnailCacheKey {
+                size: Some(11),
+                ..nfd.clone()
+            }
+        );
+        assert_ne!(
+            nfd,
+            ThumbnailCacheKey {
+                mtime: None,
+                ..nfd.clone()
+            }
+        );
+    }
 
     #[test]
     fn total_memory_budget_input_enforces_supported_range() {

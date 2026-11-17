@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS cached_objects (
@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS directory_snapshot_entries (
     dir_stable_id    TEXT NOT NULL,
     generation       INTEGER NOT NULL,
     stable_id         TEXT NOT NULL,
-    display_path      TEXT NOT NULL,
+    display_path      TEXT NOT NULL COLLATE IRIS_PATH_IDENTITY,
     name              TEXT NOT NULL,
     is_dir            INTEGER NOT NULL,
     metadata_level    INTEGER NOT NULL,
@@ -188,6 +188,36 @@ fn reclaim_retired(owned: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn insert_spellings(conn: &Connection) -> Vec<String> {
+        for path in ["Café.jpg", "Cafe\u{301}.jpg"] {
+            conn.execute(
+                "INSERT OR REPLACE INTO directory_snapshot_entries
+                 (backend_id, dir_stable_id, generation, stable_id, display_path, name,
+                  is_dir, metadata_level)
+                 VALUES ('local', 'dir', 1, 'file', ?1, ?1, 0, 0)",
+                [path],
+            )
+            .unwrap();
+        }
+        conn.prepare("SELECT display_path FROM directory_snapshot_entries ORDER BY display_path")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn snapshot_path_collation_uses_platform_policy() {
+        let conn = open(None, 0).unwrap();
+        let paths = insert_spellings(&conn);
+        if cfg!(target_os = "macos") {
+            assert_eq!(paths, ["Cafe\u{301}.jpg"]);
+        } else {
+            assert_eq!(paths, ["Cafe\u{301}.jpg", "Café.jpg"]);
+        }
+    }
 
     fn old_catalog(db: &Path, paths: &[&Path]) {
         let conn = Connection::open(db).unwrap();

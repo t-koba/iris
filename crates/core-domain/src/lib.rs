@@ -3,6 +3,7 @@ pub mod event;
 pub mod media;
 pub mod memory_budget;
 pub mod observability;
+pub mod path_identity;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 pub mod types;

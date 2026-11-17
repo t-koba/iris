@@ -31,6 +31,10 @@ pub fn open(
             conn
         }
     };
+    conn.create_collation(
+        crate::path_identity::PATH_IDENTITY_COLLATION,
+        crate::path_identity::compare,
+    )?;
     conn.execute_batch("PRAGMA temp_store=MEMORY;")?;
     conn.busy_timeout(Duration::from_secs(5))?;
 
