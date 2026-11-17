@@ -112,6 +112,7 @@ impl CatalogRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
     use tempfile::tempdir;
 
     #[test]
@@ -450,6 +451,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn concurrent_generations_from_separate_connections_are_distinct() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("catalog.sqlite3");
+        for _ in 0..20 {
+            let barrier = Arc::new(Barrier::new(2));
+            let mut first = CatalogRepository::open(&db_path).unwrap();
+            let mut second = CatalogRepository::open(&db_path).unwrap();
+
+            let first_barrier = Arc::clone(&barrier);
+            let first_thread = std::thread::spawn(move || {
+                first_barrier.wait();
+                first.begin_snapshot_generation("local", "root-id")
+            });
+            let second_barrier = Arc::clone(&barrier);
+            let second_thread = std::thread::spawn(move || {
+                second_barrier.wait();
+                second.begin_snapshot_generation("local", "root-id")
+            });
+
+            let first_generation = first_thread.join().unwrap().unwrap();
+            let second_generation = second_thread.join().unwrap().unwrap();
+            assert_ne!(first_generation, second_generation);
+        }
     }
 
     #[test]
