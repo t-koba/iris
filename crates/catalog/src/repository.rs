@@ -10,6 +10,9 @@ mod objects;
 mod snapshots;
 mod thumbnails;
 
+/// Sentinel stable id used to reserve a snapshot generation while a listing is in progress.
+pub(crate) const SNAPSHOT_RESERVATION_STABLE_ID: &str = "__iris_snapshot_reservation__";
+
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
     #[error("database error: {0}")]
@@ -380,6 +383,63 @@ mod tests {
                 .unwrap()
                 .unwrap(),
             vec![entry("committed")]
+        );
+        let rows: i64 = repo
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM directory_snapshot_entries",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn concurrent_generations_are_reserved_and_abandoned_independently() {
+        let mut repo = CatalogRepository::open_in_memory().unwrap();
+        let entry = |name: &str| CachedDirectoryEntry {
+            local_path_is_lossy: false,
+            stable_id: format!("{name}-id"),
+            display_path: format!("/root/{name}"),
+            name: name.to_string(),
+            is_dir: false,
+            metadata_level: MetadataLevel::L1,
+            size: Some(1),
+            mtime: None,
+            ctime: None,
+            is_symlink: false,
+            symlink_target: None,
+            is_inaccessible: false,
+        };
+
+        let first = repo.begin_snapshot_generation("local", "root-id").unwrap();
+        let second = repo.begin_snapshot_generation("local", "root-id").unwrap();
+        assert_ne!(first, second);
+        repo.append_snapshot_entries(
+            "local",
+            "root-id",
+            first,
+            std::slice::from_ref(&entry("first")),
+        )
+        .unwrap();
+        repo.append_snapshot_entries(
+            "local",
+            "root-id",
+            second,
+            std::slice::from_ref(&entry("second")),
+        )
+        .unwrap();
+
+        repo.abandon_snapshot_generation("local", "root-id", first)
+            .unwrap();
+        repo.complete_snapshot_generation("local", "root-id", second)
+            .unwrap();
+        assert_eq!(
+            repo.get_snapshot_entries("local", "root-id")
+                .unwrap()
+                .unwrap(),
+            vec![entry("second")]
         );
         let rows: i64 = repo
             .conn

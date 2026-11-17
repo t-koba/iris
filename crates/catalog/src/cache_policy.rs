@@ -1,3 +1,4 @@
+use crate::repository::SNAPSHOT_RESERVATION_STABLE_ID;
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -138,28 +139,63 @@ impl CachePolicy {
         cutoff_secs: i64,
     ) -> Result<u64, rusqlite::Error> {
         let mut statement = conn.prepare(
-            "SELECT backend_id, dir_stable_id FROM directory_snapshots
+            "SELECT backend_id, dir_stable_id, generation FROM directory_snapshots
              WHERE snapshot_at_secs < ?1",
         )?;
-        let keys = statement
+        let expired = statement
             .query_map([cutoff_secs], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
-        for (backend_id, dir_stable_id) in &keys {
+        for (backend_id, dir_stable_id, generation) in &expired {
+            // Only the expired committed generation belongs to this snapshot. Other
+            // generations may be staged by a listing that is still in progress.
             conn.execute(
                 "DELETE FROM directory_snapshot_entries
-                 WHERE backend_id = ?1 AND dir_stable_id = ?2",
-                rusqlite::params![backend_id, dir_stable_id],
+                 WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3",
+                rusqlite::params![backend_id, dir_stable_id, generation],
             )?;
             conn.execute(
                 "DELETE FROM directory_snapshots
-                 WHERE backend_id = ?1 AND dir_stable_id = ?2",
-                rusqlite::params![backend_id, dir_stable_id],
+                 WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3
+                   AND snapshot_at_secs < ?4",
+                rusqlite::params![backend_id, dir_stable_id, generation, cutoff_secs],
             )?;
         }
-        Ok(keys.len() as u64)
+
+        // A writer that exited without running its Drop hook leaves a reserved
+        // generation behind; reclaim it with the same configured lifetime.
+        let mut statement = conn.prepare(
+            "SELECT DISTINCT backend_id, dir_stable_id, generation
+             FROM directory_snapshot_entries
+             WHERE stable_id = ?1 AND mtime_secs < ?2",
+        )?;
+        let abandoned = statement
+            .query_map(
+                rusqlite::params![SNAPSHOT_RESERVATION_STABLE_ID, cutoff_secs],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        for (backend_id, dir_stable_id, generation) in &abandoned {
+            conn.execute(
+                "DELETE FROM directory_snapshot_entries
+                 WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3",
+                rusqlite::params![backend_id, dir_stable_id, generation],
+            )?;
+        }
+        Ok((expired.len() + abandoned.len()) as u64)
     }
 
     pub fn run_eviction(&self, conn: &Connection) -> Result<u64, rusqlite::Error> {
@@ -221,7 +257,9 @@ mod tests {
                 (backend_id, dir_stable_id, generation, stable_id, display_path, name,
                  is_dir, metadata_level)
              VALUES ('local', 'stale', 1, 'old', '/stale', 'stale', 0, 0),
-                    ('local', 'fresh', 1, 'new', '/fresh', 'fresh', 0, 0);",
+                    ('local', 'fresh', 1, 'new', '/fresh', 'fresh', 0, 0),
+                    ('local', 'stale', 2, '__iris_snapshot_reservation__', '', '', 0, 0),
+                    ('local', 'stale', 2, 'in-progress', '/stale/in-progress', 'in-progress', 0, 0);",
         )
         .expect("insert snapshots");
 
@@ -242,7 +280,16 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("count entries");
-        assert_eq!((snapshots, entries), (1, 1));
+        assert_eq!((snapshots, entries), (1, 3));
+        let in_progress: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM directory_snapshot_entries
+                 WHERE dir_stable_id = 'stale' AND generation = 2",
+                [],
+                |row| row.get(0),
+            )
+            .expect("in-progress generation survives eviction");
+        assert_eq!(in_progress, 2);
         let fresh: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM directory_snapshots WHERE dir_stable_id = 'fresh'",

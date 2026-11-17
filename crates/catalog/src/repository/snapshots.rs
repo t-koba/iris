@@ -70,32 +70,72 @@ impl CatalogRepository {
         }
     }
 
+    /// Reserve a generation by writing a sentinel row. The sentinel makes concurrent
+    /// writers choose distinct generations and lets cleanup distinguish live in-progress
+    /// work from abandoned rows.
     pub fn begin_snapshot_generation(
         &mut self,
         backend_id: &str,
         dir_stable_id: &str,
     ) -> Result<u64, CatalogError> {
-        let transaction = self.conn.transaction()?;
-        let current: i64 = transaction.query_row(
-            "SELECT COALESCE(MAX(generation), 0) FROM (
-                SELECT generation FROM directory_snapshots WHERE backend_id = ?1 AND dir_stable_id = ?2
-                UNION ALL
-                SELECT generation FROM directory_snapshot_entries WHERE backend_id = ?1 AND dir_stable_id = ?2
-            )",
-            rusqlite::params![backend_id, dir_stable_id],
-            |row| row.get(0),
-        )?;
-        let generation = current.saturating_add(1);
-        transaction.execute(
-            "DELETE FROM directory_snapshot_entries
-             WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation != COALESCE(
-                 (SELECT generation FROM directory_snapshots WHERE backend_id = ?1 AND dir_stable_id = ?2),
-                 -1
-             )",
-            rusqlite::params![backend_id, dir_stable_id],
-        )?;
-        transaction.commit()?;
-        Ok(generation as u64)
+        for _ in 0..8 {
+            let transaction = self.conn.transaction()?;
+            let current: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(generation), 0) FROM (
+                    SELECT generation FROM directory_snapshots WHERE backend_id = ?1 AND dir_stable_id = ?2
+                    UNION ALL
+                    SELECT generation FROM directory_snapshot_entries WHERE backend_id = ?1 AND dir_stable_id = ?2
+                )",
+                rusqlite::params![backend_id, dir_stable_id],
+                |row| row.get(0),
+            )?;
+            let generation = current.saturating_add(1);
+            // Keep the committed generation and every generation that is currently reserved.
+            transaction.execute(
+                "DELETE FROM directory_snapshot_entries
+                 WHERE backend_id = ?1 AND dir_stable_id = ?2
+                   AND generation != COALESCE(
+                       (SELECT generation FROM directory_snapshots WHERE backend_id = ?1 AND dir_stable_id = ?2),
+                       -1
+                   )
+                   AND generation NOT IN (
+                       SELECT generation FROM directory_snapshot_entries
+                       WHERE backend_id = ?1 AND dir_stable_id = ?2 AND stable_id = ?3
+                   )",
+                rusqlite::params![backend_id, dir_stable_id, SNAPSHOT_RESERVATION_STABLE_ID],
+            )?;
+            let reserved = transaction.execute(
+                "INSERT INTO directory_snapshot_entries (
+                    backend_id, dir_stable_id, generation, stable_id, display_path, name,
+                    is_dir, metadata_level, size, mtime_secs, mtime_nanos, ctime_secs,
+                    ctime_nanos, is_symlink, symlink_target, is_inaccessible, local_path_is_lossy
+                 ) VALUES (?1, ?2, ?3, ?4, '', '', 0, 0, NULL, ?5, NULL, NULL, NULL, 0, NULL, 0, 0)",
+                rusqlite::params![
+                    backend_id,
+                    dir_stable_id,
+                    generation,
+                    SNAPSHOT_RESERVATION_STABLE_ID,
+                    system_time_to_secs(SystemTime::now()),
+                ],
+            );
+            match reserved {
+                Ok(_) => {
+                    transaction.commit()?;
+                    return Ok(generation as u64);
+                }
+                // Another writer reserved this generation first; recompute and retry.
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                    if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    continue
+                }
+                Err(error) => return Err(CatalogError::Database(error)),
+            }
+        }
+        Err(CatalogError::Database(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("could not reserve a directory snapshot generation".to_string()),
+        )))
     }
 
     /// Reclaim entries written by a generation whose owner exited before completion.
@@ -170,10 +210,27 @@ impl CatalogRepository {
         generation: u64,
     ) -> Result<DirectorySnapshot, CatalogError> {
         let transaction = self.conn.transaction()?;
+        transaction.execute(
+            "DELETE FROM directory_snapshot_entries
+             WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3
+               AND stable_id = ?4",
+            rusqlite::params![
+                backend_id,
+                dir_stable_id,
+                generation as i64,
+                SNAPSHOT_RESERVATION_STABLE_ID,
+            ],
+        )?;
         let item_count: i64 = transaction.query_row(
             "SELECT COUNT(*) FROM directory_snapshot_entries
-             WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3",
-            rusqlite::params![backend_id, dir_stable_id, generation as i64],
+             WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3
+               AND stable_id != ?4",
+            rusqlite::params![
+                backend_id,
+                dir_stable_id,
+                generation as i64,
+                SNAPSHOT_RESERVATION_STABLE_ID,
+            ],
             |row| row.get(0),
         )?;
         let snapshot = DirectorySnapshot {
@@ -204,8 +261,17 @@ impl CatalogRepository {
         )?;
         transaction.execute(
             "DELETE FROM directory_snapshot_entries
-             WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation != ?3",
-            rusqlite::params![backend_id, dir_stable_id, generation as i64],
+             WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation != ?3
+               AND generation NOT IN (
+                   SELECT generation FROM directory_snapshot_entries
+                   WHERE backend_id = ?1 AND dir_stable_id = ?2 AND stable_id = ?4
+               )",
+            rusqlite::params![
+                backend_id,
+                dir_stable_id,
+                generation as i64,
+                SNAPSHOT_RESERVATION_STABLE_ID,
+            ],
         )?;
         transaction.commit()?;
         Ok(snapshot)
