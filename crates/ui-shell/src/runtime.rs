@@ -221,7 +221,7 @@ pub struct AppRuntime {
     registered_backends: Mutex<Vec<RegisteredBackend>>,
     job_store: Arc<JobStore>,
     job_manager: Arc<JobManager>,
-    active_transfers: Mutex<HashMap<u64, TransferControl>>,
+    active_transfers: Mutex<HashMap<u64, Arc<TransferControl>>>,
     active_transfer_progress: Mutex<HashMap<u64, ActiveJobProgress>>,
     catalog: Arc<Mutex<CatalogRepository>>,
     catalog_cache_dir: PathBuf,

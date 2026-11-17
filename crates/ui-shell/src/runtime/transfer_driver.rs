@@ -1,5 +1,41 @@
 use super::*;
 
+/// Keeps a job's control reachable by Cancel for the entire admission and transfer.
+/// The last item releases the registration, including on preflight failure or task abort.
+struct TransferAdmission<'a> {
+    runtime: &'a AppRuntime,
+    job_id: u64,
+    control: Option<Arc<TransferControl>>,
+}
+
+impl TransferAdmission<'_> {
+    fn control(&self) -> &TransferControl {
+        self.control.as_deref().expect("admission owns a control")
+    }
+}
+
+impl Drop for TransferAdmission<'_> {
+    fn drop(&mut self) {
+        let mut active = self
+            .runtime
+            .active_transfers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let control = self.control.take().expect("admission owns a control");
+        // Two references means only the map and this item remain; clones use this lock.
+        // An explicit resume may have replaced a canceled lifecycle; an old item must
+        // not remove the new control.
+        if active.get(&self.job_id).is_some_and(|registered| {
+            Arc::ptr_eq(registered, &control) && Arc::strong_count(registered) == 2
+        }) {
+            active.remove(&self.job_id);
+        }
+        // Release our reference before unlocking, so concurrent rejections cannot both
+        // leave the registration thinking another item still owns it.
+        drop(control);
+    }
+}
+
 struct TransferExecutionContext<'a> {
     job_id: &'a JobId,
     task_index: usize,
@@ -210,6 +246,36 @@ impl AppRuntime {
         Ok(SymlinkTransfer::NotHandled)
     }
 
+    fn admit_transfer(&self, job_id: &JobId) -> Result<TransferAdmission<'_>, String> {
+        let mut active = self
+            .active_transfers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // Cancel publishes the authoritative state under this same lock, including when
+        // the first item has not registered yet. No canceled job can fabricate a control.
+        let state = self.job_manager.get_state(job_id);
+        if state == Some(JobState::Canceled) {
+            return Err("transfer canceled".into());
+        }
+        let control = active
+            .entry(job_id.0)
+            .or_insert_with(|| {
+                let control = Arc::new(TransferControl::new());
+                // Registrations live only while items are in flight; preserve Pause between
+                // items as well as across concurrent admissions.
+                if state == Some(JobState::Paused) {
+                    control.pause();
+                }
+                control
+            })
+            .clone();
+        Ok(TransferAdmission {
+            runtime: self,
+            job_id: job_id.0,
+            control: Some(control),
+        })
+    }
+
     pub async fn apply_pending_item(
         self: Arc<Self>,
         job_id: JobId,
@@ -219,18 +285,26 @@ impl AppRuntime {
         resolution: ConflictResolution,
         base_bytes_completed: u64,
     ) -> Result<TransferItemOutcome, String> {
-        self.ensure_safe_transfer_destination(&item.source, Path::new(&item.destination_path))
-            .await?;
+        #[cfg(test)]
+        tests::pause_admission(&job_id, tests::AdmissionStage::BeforeRegistration).await;
+
+        let admission = self.admit_transfer(&job_id)?;
+        let control = admission.control();
+        #[cfg(test)]
+        tests::pause_admission(&job_id, tests::AdmissionStage::Preflight).await;
+
+        let preflight = self
+            .ensure_safe_transfer_destination(&item.source, Path::new(&item.destination_path))
+            .await;
+        // Cancellation wins even if preflight also failed. Never look up (or recreate) a
+        // control after the await: Cancel may have removed it, but this item still owns it.
+        if control.cancel_token().is_cancelled()
+            || self.job_manager.get_state(&job_id) == Some(JobState::Canceled)
+        {
+            return Err("transfer canceled".into());
+        }
+        preflight?;
         let task_id = persisted_task_id(&job_id, task_index);
-        // One control per job, shared by all of its files in flight, so Pause and Cancel reach
-        // every one of them (and files started while paused wait).
-        let control = self
-            .active_transfers
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .entry(job_id.0)
-            .or_default()
-            .clone();
 
         let (progress_tx, mut progress_rx) =
             watch::channel(ProgressInfo::single_file(0, None, false));
@@ -263,7 +337,7 @@ impl AppRuntime {
             task_index,
             record_chunk_state: true,
             progress_tx: &progress_tx,
-            control: &control,
+            control,
         };
         let transfer_result = self
             .transfer_path(
@@ -297,11 +371,6 @@ impl AppRuntime {
             Ok(outcome) => {
                 self.update_task_state(&job_id, task_index, TaskState::Completed, None);
                 Ok(outcome)
-            }
-            Err(error) if error == "transfer canceled" => {
-                self.update_task_state(&job_id, task_index, TaskState::Failed, Some(&error));
-                self.persist_job_state(&job_id, JobState::Canceled);
-                Err(error)
             }
             Err(error) => {
                 self.update_task_state(&job_id, task_index, TaskState::Failed, Some(&error));
@@ -343,8 +412,7 @@ impl AppRuntime {
                 )
                 .await?;
 
-                self.persist_job_state(job_id, JobState::Running);
-                self.job_manager.update_state(job_id, JobState::Running);
+                self.set_transfer_job_state(job_id, control, JobState::Running)?;
                 self.update_task_state(job_id, task_index, TaskState::Running, None);
             }
 
@@ -786,9 +854,7 @@ impl AppRuntime {
             .any(|backend_type| !self.job_manager.can_start_job(backend_type))
         {
             wait_if_paused_or_canceled(control).await?;
-            self.job_manager
-                .update_state(job_id, JobState::WaitingRemote);
-            self.persist_job_state(job_id, JobState::WaitingRemote);
+            self.set_transfer_job_state(job_id, control, JobState::WaitingRemote)?;
             sleep(Duration::from_millis(50)).await;
         }
 
@@ -950,6 +1016,205 @@ async fn remove_symlink(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum AdmissionStage {
+        BeforeRegistration,
+        Preflight,
+    }
+
+    struct AdmissionHook {
+        stage: AdmissionStage,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    static ADMISSION_HOOKS: OnceLock<Mutex<HashMap<u64, Arc<AdmissionHook>>>> = OnceLock::new();
+
+    pub(super) async fn pause_admission(job_id: &JobId, stage: AdmissionStage) {
+        let hook = {
+            let mut hooks = ADMISSION_HOOKS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap();
+            if hooks.get(&job_id.0).is_some_and(|hook| hook.stage == stage) {
+                hooks.remove(&job_id.0)
+            } else {
+                None
+            }
+        };
+        if let Some(hook) = hook {
+            hook.entered.notify_one();
+            hook.release.notified().await;
+        }
+    }
+
+    fn has_active_transfer(job_id: &JobId) -> bool {
+        app_runtime()
+            .active_transfers
+            .lock()
+            .unwrap()
+            .contains_key(&job_id.0)
+    }
+
+    async fn assert_canceled_admission(stage: AdmissionStage, first_job_id: u64) {
+        let runtime = app_runtime();
+        for is_move in [false, true] {
+            for existing_destination in [false, true] {
+                let job_id =
+                    JobId(first_job_id + u64::from(is_move) * 2 + u64::from(existing_destination));
+                runtime
+                    .job_manager
+                    .track_job(job_id.clone(), JobState::Running, 1, None, vec![]);
+                let temp = tempfile::tempdir().unwrap();
+                let source = temp.path().join("source");
+                let destination = temp.path().join("destination");
+                std::fs::write(&source, b"source content").unwrap();
+                if existing_destination {
+                    std::fs::write(&destination, b"destination unchanged").unwrap();
+                }
+                // The later-item case already has an admitted item sharing the control.
+                let admitted = (stage == AdmissionStage::Preflight)
+                    .then(|| runtime.admit_transfer(&job_id).unwrap());
+                let hook = Arc::new(AdmissionHook {
+                    stage,
+                    entered: tokio::sync::Notify::new(),
+                    release: tokio::sync::Notify::new(),
+                });
+                ADMISSION_HOOKS
+                    .get_or_init(Default::default)
+                    .lock()
+                    .unwrap()
+                    .insert(job_id.0, Arc::clone(&hook));
+                let pending = tokio::spawn(Arc::clone(runtime).apply_pending_item(
+                    job_id.clone(),
+                    0,
+                    PendingFileItem {
+                        source: local_ref(&source),
+                        destination_path: destination.to_str().unwrap().to_owned(),
+                    },
+                    is_move,
+                    ConflictResolution::Overwrite,
+                    0,
+                ));
+                tokio::time::timeout(StdDuration::from_secs(10), hook.entered.notified())
+                    .await
+                    .unwrap();
+                assert_eq!(has_active_transfer(&job_id), admitted.is_some());
+                runtime.cancel_job(&job_id);
+                if let Some(admitted) = &admitted {
+                    assert!(admitted.control().cancel_token().is_cancelled());
+                }
+                hook.release.notify_one();
+                let error = tokio::time::timeout(StdDuration::from_secs(10), pending)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .expect_err("canceled admission must not transfer");
+                assert_eq!(error, "transfer canceled");
+                assert_eq!(
+                    runtime.job_manager.get_state(&job_id),
+                    Some(JobState::Canceled)
+                );
+                assert!(!has_active_transfer(&job_id));
+                assert_eq!(
+                    runtime.admit_transfer(&job_id).err().unwrap(),
+                    "transfer canceled"
+                );
+                // An absent destination stays absent, and an overwrite target stays byte-exact:
+                // neither a destination write nor a move's source deletion occurred.
+                assert_eq!(std::fs::read(&source).unwrap(), b"source content");
+                if existing_destination {
+                    assert_eq!(
+                        std::fs::read(&destination).unwrap(),
+                        b"destination unchanged"
+                    );
+                } else {
+                    assert!(!destination.exists());
+                }
+                assert_eq!(
+                    std::fs::read_dir(temp.path()).unwrap().count(),
+                    1 + usize::from(existing_destination)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_before_first_transfer_registration_prevents_writes_and_source_deletion() {
+        // Exercise the old preflight window where no control existed yet. Real preflight
+        // now follows registration, so the hook holds admission immediately before it.
+        assert_canceled_admission(AdmissionStage::BeforeRegistration, 9_100_000).await;
+    }
+
+    #[tokio::test]
+    async fn cancel_during_transfer_preflight_prevents_control_resurrection_and_writes() {
+        assert_canceled_admission(AdmissionStage::Preflight, 9_100_010).await;
+    }
+
+    #[tokio::test]
+    async fn transfer_admission_scopes_controls_and_preserves_pause_and_fresh_resume() {
+        let runtime = app_runtime();
+        let job_id = JobId(9_100_020);
+        runtime
+            .job_manager
+            .track_job(job_id.clone(), JobState::Running, 1, None, vec![]);
+        let first = runtime.admit_transfer(&job_id).unwrap();
+        runtime.pause_job(&job_id);
+        assert!(*first.control().pause_receiver().borrow());
+        drop(first);
+        assert!(!has_active_transfer(&job_id));
+        let paused = runtime.admit_transfer(&job_id).unwrap();
+        assert!(*paused.control().pause_receiver().borrow());
+        let concurrent = runtime.admit_transfer(&job_id).unwrap();
+        drop(paused);
+        assert!(has_active_transfer(&job_id));
+        runtime.resume_job(&job_id);
+        assert!(!*concurrent.control().pause_receiver().borrow());
+        runtime.cancel_job(&job_id);
+        assert!(concurrent.control().cancel_token().is_cancelled());
+        runtime.pause_job(&job_id);
+        runtime.fail_job(&job_id);
+        runtime.complete_job(&job_id);
+        assert_eq!(
+            runtime.job_manager.get_state(&job_id),
+            Some(JobState::Canceled)
+        );
+        for state in [JobState::Running, JobState::WaitingRemote] {
+            assert_eq!(
+                runtime
+                    .set_transfer_job_state(&job_id, concurrent.control(), state)
+                    .unwrap_err(),
+                "transfer canceled"
+            );
+        }
+        runtime.resume_job(&job_id);
+        let fresh = runtime.admit_transfer(&job_id).unwrap();
+        assert!(!fresh.control().cancel_token().is_cancelled());
+        assert!(concurrent.control().cancel_token().is_cancelled());
+        drop(concurrent);
+        assert!(has_active_transfer(&job_id));
+        drop(fresh);
+        assert!(!has_active_transfer(&job_id));
+
+        let temp = tempfile::tempdir().unwrap();
+        let error = Arc::clone(runtime)
+            .apply_pending_item(
+                job_id.clone(),
+                0,
+                PendingFileItem {
+                    source: local_ref(temp.path()),
+                    destination_path: temp.path().join("child").to_str().unwrap().to_owned(),
+                },
+                true,
+                ConflictResolution::Overwrite,
+                0,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("into itself or one of its descendants"));
+        assert!(!has_active_transfer(&job_id));
+    }
 
     fn local_ref(path: &Path) -> ObjectRef {
         ObjectRef {

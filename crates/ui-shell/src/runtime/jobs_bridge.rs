@@ -135,14 +135,37 @@ impl AppRuntime {
         Ok(Some((items, current_index, is_move)))
     }
 
-    pub fn pause_job(&self, job_id: &JobId) {
-        if let Some(control) = self
+    /// Transfer callbacks cannot overwrite cancellation, even if they passed an earlier
+    /// token check. Only an explicit resume starts a fresh lifecycle after Cancel.
+    pub(super) fn set_transfer_job_state(
+        &self,
+        job_id: &JobId,
+        control: &TransferControl,
+        state: JobState,
+    ) -> Result<(), String> {
+        let _active = self
             .active_transfers
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(&job_id.0)
-            .cloned()
+            .unwrap_or_else(|error| error.into_inner());
+        if control.cancel_token().is_cancelled()
+            || self.job_manager.get_state(job_id) == Some(JobState::Canceled)
         {
+            return Err("transfer canceled".into());
+        }
+        self.persist_job_state(job_id, state.clone());
+        self.job_manager.update_state(job_id, state);
+        Ok(())
+    }
+
+    pub fn pause_job(&self, job_id: &JobId) {
+        let active = self
+            .active_transfers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.job_manager.get_state(job_id) == Some(JobState::Canceled) {
+            return;
+        }
+        if let Some(control) = active.get(&job_id.0) {
             control.pause();
         }
         self.persist_job_state(job_id, JobState::Paused);
@@ -150,13 +173,11 @@ impl AppRuntime {
     }
 
     pub fn resume_job(&self, job_id: &JobId) {
-        if let Some(control) = self
+        let active = self
             .active_transfers
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(&job_id.0)
-            .cloned()
-        {
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(control) = active.get(&job_id.0) {
             control.resume();
         }
         self.persist_job_state(job_id, JobState::Running);
@@ -164,30 +185,42 @@ impl AppRuntime {
     }
 
     pub fn cancel_job(&self, job_id: &JobId) {
-        if let Some(control) = self
+        let mut active = self
             .active_transfers
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(&job_id.0)
-        {
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(control) = active.remove(&job_id.0) {
             control.cancel();
         }
+        // Serialize the authoritative lifecycle signal with admission, not just control removal.
+        // In-flight items retain their canceled control; later admissions see Canceled.
+        self.job_manager.cancel_job(job_id);
         self.clear_active_job_progress(job_id);
         self.persist_job_state(job_id, JobState::Canceled);
-        self.job_manager.cancel_job(job_id);
     }
 
     pub fn complete_job(&self, job_id: &JobId) {
-        self.active_transfers
+        let mut active = self
+            .active_transfers
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(&job_id.0);
+            .unwrap_or_else(|error| error.into_inner());
+        if self.job_manager.get_state(job_id) == Some(JobState::Canceled) {
+            return;
+        }
+        active.remove(&job_id.0);
         self.clear_active_job_progress(job_id);
         self.persist_job_state(job_id, JobState::Completed);
         self.job_manager.update_state(job_id, JobState::Completed);
     }
 
     pub fn fail_job(&self, job_id: &JobId) {
+        let _active = self
+            .active_transfers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.job_manager.get_state(job_id) == Some(JobState::Canceled) {
+            return;
+        }
         self.clear_active_job_progress(job_id);
         self.persist_job_state(job_id, JobState::Failed);
         self.job_manager.update_state(job_id, JobState::Failed);
