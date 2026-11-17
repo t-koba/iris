@@ -17,6 +17,11 @@ import urllib.request
 from urllib.parse import urlsplit
 
 
+# Wikimedia's UA policy requires a public contact for automated clients.
+USER_AGENT = ('Iris-preview-corpus-smoke/1.0 (https://github.com/t-koba/iris) '
+              'Python-urllib/3')
+
+
 def validate_url(url, hosts):
     parts = urlsplit(url)
     if (parts.scheme != "https" or parts.hostname not in hosts
@@ -82,7 +87,7 @@ def fetch_entry(opener, entry, output, hosts, timeout, retries, retry_delay, max
     for attempt in range(retries + 1):
         partial = output / f".{entry['filename']}.{attempt}.part"
         request = urllib.request.Request(entry['url'], headers={
-            'User-Agent': 'Iris-preview-corpus-smoke/1.0', 'Accept-Encoding': 'identity'})
+            'User-Agent': USER_AGENT, 'Accept-Encoding': 'identity'})
         try:
             with opener.open(request, timeout=timeout) as response:
                 validate_url(response.geturl(), hosts)

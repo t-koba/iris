@@ -52,6 +52,14 @@ class FetchTests(unittest.TestCase):
         self.assertEqual((self.output / 'test.jpg').read_bytes(), self.body)
         self.assertEqual([p.name for p in self.output.iterdir()], ['test.jpg'])
 
+    def test_user_agent_has_public_contact(self):
+        opener = self.fetch(self.body)
+        request = opener.open.call_args.args[0]
+        user_agent = request.headers['User-agent']
+        self.assertTrue(user_agent.startswith('Iris-preview-corpus-smoke/1.0 ('))
+        self.assertIn('https://github.com/t-koba/iris', user_agent)
+        self.assertIn('Python-urllib/', user_agent)
+
     def test_transient_gateway_and_stream_errors_retry_without_partial_bytes(self):
         interrupted = Response(self.body)
         original_read = interrupted.read
