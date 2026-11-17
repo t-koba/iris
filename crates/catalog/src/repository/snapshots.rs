@@ -137,7 +137,14 @@ impl CatalogRepository {
                 }
             })();
             match reserved {
-                Ok(Some(generation)) => return Ok(generation),
+                Ok(Some(generation)) => {
+                    self.live_snapshot_generations.insert((
+                        backend_id.to_string(),
+                        dir_stable_id.to_string(),
+                        generation,
+                    ));
+                    return Ok(generation);
+                }
                 Ok(None) => continue,
                 Err(rusqlite::Error::SqliteFailure(error, _))
                     if error.code == rusqlite::ErrorCode::ConstraintViolation
@@ -163,6 +170,11 @@ impl CatalogRepository {
         dir_stable_id: &str,
         generation: u64,
     ) -> Result<(), CatalogError> {
+        self.live_snapshot_generations.remove(&(
+            backend_id.to_string(),
+            dir_stable_id.to_string(),
+            generation,
+        ));
         self.conn.execute(
             "DELETE FROM directory_snapshot_entries
              WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3",
@@ -178,10 +190,8 @@ impl CatalogRepository {
         generation: u64,
         entries: &[CachedDirectoryEntry],
     ) -> Result<(), CatalogError> {
-        if entries.is_empty() {
-            return Ok(());
-        }
         let transaction = self.conn.transaction()?;
+        require_snapshot_reservation(&transaction, backend_id, dir_stable_id, generation)?;
         {
             let mut statement = transaction.prepare(
                 "INSERT OR REPLACE INTO directory_snapshot_entries (
@@ -227,6 +237,7 @@ impl CatalogRepository {
         generation: u64,
     ) -> Result<DirectorySnapshot, CatalogError> {
         let transaction = self.conn.transaction()?;
+        require_snapshot_reservation(&transaction, backend_id, dir_stable_id, generation)?;
         transaction.execute(
             "DELETE FROM directory_snapshot_entries
              WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3
@@ -291,6 +302,11 @@ impl CatalogRepository {
             ],
         )?;
         transaction.commit()?;
+        self.live_snapshot_generations.remove(&(
+            backend_id.to_string(),
+            dir_stable_id.to_string(),
+            generation,
+        ));
         Ok(snapshot)
     }
 
@@ -343,4 +359,28 @@ impl CatalogRepository {
         }
         Ok(Some(entries))
     }
+}
+
+/// Check inside the write transaction so reclaimed staging data cannot be resurrected.
+fn require_snapshot_reservation(
+    transaction: &rusqlite::Transaction<'_>,
+    backend_id: &str,
+    dir_stable_id: &str,
+    generation: u64,
+) -> Result<(), CatalogError> {
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM directory_snapshot_entries
+         WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3 AND stable_id = ?4)",
+        rusqlite::params![
+            backend_id,
+            dir_stable_id,
+            generation as i64,
+            SNAPSHOT_RESERVATION_STABLE_ID,
+        ],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Err(CatalogError::SnapshotReservationMissing { generation });
+    }
+    Ok(())
 }

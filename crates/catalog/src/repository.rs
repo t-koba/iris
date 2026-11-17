@@ -2,6 +2,7 @@ use crate::schema;
 use iris_core_domain::types::metadata::MetadataLevel;
 use iris_core_domain::types::thumbnail::ImageFormat;
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -20,6 +21,9 @@ pub enum CatalogError {
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("directory snapshot generation {generation} has no staging reservation")]
+    SnapshotReservationMissing { generation: u64 },
 }
 
 #[derive(Clone, Debug)]
@@ -81,23 +85,28 @@ const CATALOG_MMAP_BYTES: u64 = 32 * 1024 * 1024;
 /// SQLite cache index for listings and thumbnails.
 pub struct CatalogRepository {
     conn: Connection,
+    // Owners serialize begin/append/complete/abandon and eviction through this repository.
+    live_snapshot_generations: HashSet<(String, String, u64)>,
 }
 
 impl CatalogRepository {
     pub fn open(db_path: &Path) -> Result<Self, CatalogError> {
         Ok(Self {
             conn: schema::open(Some(db_path), CATALOG_MMAP_BYTES)?,
+            live_snapshot_generations: HashSet::new(),
         })
     }
 
     pub fn open_in_memory() -> Result<Self, CatalogError> {
         Ok(Self {
             conn: schema::open(None, CATALOG_MMAP_BYTES)?,
+            live_snapshot_generations: HashSet::new(),
         })
     }
 
     pub fn evict(&self) -> Result<u64, CatalogError> {
-        Ok(crate::cache_policy::CachePolicy::default().run_eviction(&self.conn)?)
+        Ok(crate::cache_policy::CachePolicy::default()
+            .run_eviction(&self.conn, &self.live_snapshot_generations)?)
     }
 
     /// Recreates the database so browsing continues after cache corruption.
@@ -379,6 +388,7 @@ mod tests {
 
         repo.abandon_snapshot_generation("local", "root-id", abandoned)
             .unwrap();
+        assert!(repo.live_snapshot_generations.is_empty());
         assert_eq!(
             repo.get_snapshot_entries("local", "root-id")
                 .unwrap()
@@ -394,6 +404,117 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn snapshot_eviction_preserves_live_writers_and_invalidates_reclaimed_generations() {
+        for live in [false, true] {
+            let mut repo = CatalogRepository::open_in_memory().unwrap();
+            let entry = |name: &str| CachedDirectoryEntry {
+                local_path_is_lossy: false,
+                stable_id: name.to_string(),
+                display_path: format!("/root/{name}"),
+                name: name.to_string(),
+                is_dir: false,
+                metadata_level: MetadataLevel::L1,
+                size: None,
+                mtime: None,
+                ctime: None,
+                is_symlink: false,
+                symlink_target: None,
+                is_inaccessible: false,
+            };
+            let committed = repo.begin_snapshot_generation("local", "root-id").unwrap();
+            repo.append_snapshot_entries("local", "root-id", committed, &[entry("committed")])
+                .unwrap();
+            repo.complete_snapshot_generation("local", "root-id", committed)
+                .unwrap();
+            assert!(repo.live_snapshot_generations.is_empty());
+            // Keep the committed listing fresh and age only the reservation: no sleeps.
+            repo.conn
+                .execute(
+                    "UPDATE directory_snapshots SET snapshot_at_secs = 9999999999",
+                    [],
+                )
+                .unwrap();
+            let staged = repo.begin_snapshot_generation("local", "root-id").unwrap();
+            repo.append_snapshot_entries("local", "root-id", staged, &[entry("first-batch")])
+                .unwrap();
+            repo.conn
+                .execute(
+                    "UPDATE directory_snapshot_entries SET mtime_secs = 1 WHERE stable_id = ?1",
+                    [SNAPSHOT_RESERVATION_STABLE_ID],
+                )
+                .unwrap();
+            assert!(repo.live_snapshot_generations.contains(&(
+                "local".to_string(),
+                "root-id".to_string(),
+                staged,
+            )));
+            if !live {
+                // Simulate losing the owner across a crash/reopen, without its Drop hook.
+                repo.live_snapshot_generations.clear();
+            }
+            assert_eq!(repo.evict().unwrap(), u64::from(!live));
+            let staged_rows: i64 = repo
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM directory_snapshot_entries WHERE generation = ?1",
+                    [staged as i64],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(staged_rows, if live { 2 } else { 0 });
+            assert_eq!(
+                repo.get_snapshot_entries("local", "root-id")
+                    .unwrap()
+                    .unwrap(),
+                vec![entry("committed")],
+            );
+
+            let append =
+                repo.append_snapshot_entries("local", "root-id", staged, &[entry("second-batch")]);
+            let empty_append = repo.append_snapshot_entries("local", "root-id", staged, &[]);
+            let complete = repo.complete_snapshot_generation("local", "root-id", staged);
+            let (expected_generation, expected_entries) = if live {
+                append.unwrap();
+                empty_append.unwrap();
+                assert_eq!(complete.unwrap().item_count, 2);
+                assert!(repo.live_snapshot_generations.is_empty());
+                (staged, vec![entry("first-batch"), entry("second-batch")])
+            } else {
+                assert!(
+                    matches!(append, Err(CatalogError::SnapshotReservationMissing { generation }) if generation == staged)
+                );
+                assert!(
+                    matches!(empty_append, Err(CatalogError::SnapshotReservationMissing { generation }) if generation == staged)
+                );
+                assert!(
+                    matches!(complete, Err(CatalogError::SnapshotReservationMissing { generation }) if generation == staged)
+                );
+                (committed, vec![entry("committed")])
+            };
+            let snapshot = repo.get_snapshot("local", "root-id").unwrap().unwrap();
+            assert!(snapshot.is_complete);
+            assert_eq!(snapshot.generation, expected_generation);
+            assert_eq!(snapshot.item_count, expected_entries.len() as u64);
+            assert_eq!(
+                repo.get_snapshot_entries("local", "root-id")
+                    .unwrap()
+                    .unwrap(),
+                expected_entries
+            );
+            let (snapshots, entries): (i64, i64) = repo
+                .conn
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM directory_snapshots),
+                        (SELECT COUNT(*) FROM directory_snapshot_entries)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((snapshots, entries), (1, expected_entries.len() as i64));
+        }
     }
 
     #[test]
