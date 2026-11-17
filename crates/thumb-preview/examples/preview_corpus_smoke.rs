@@ -366,6 +366,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         "canon-eos-r.cr3",
         "bunny.mp4",
         "one-page.pdf",
+        "hevc.mp4",
     ];
     let pins = filenames
         .iter()
@@ -375,6 +376,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cr3_pin = &pins[2];
     let video_pin = &pins[3];
     let pdf_pin = &pins[4];
+    let hevc_pin = &pins[5];
     let jpeg = dir.join("landscape.jpg");
     let info = encoded::probe_encoded_image_path(&jpeg).ok_or("missing JPEG dimensions")?;
     assert_eq!((info.width, info.height), (4000, 3000));
@@ -420,6 +422,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert_eq!((video_thumb.width, video_thumb.height), (256, 144));
     assert_eq!(video_thumb.source, ThumbnailSource::PartialDecode);
 
+    let hevc = dir.join("hevc.mp4");
+    let start = Instant::now();
+    let hevc_thumb = check(
+        "H.265/HEVC MP4",
+        video::extract_video_thumbnail(&hevc, MAX_DIMENSION),
+        start,
+        true,
+    );
+    assert_eq!((hevc_thumb.width, hevc_thumb.height), (256, 144));
+    assert_eq!(hevc_thumb.source, ThumbnailSource::PartialDecode);
+
     let path = dir.join("one-page.pdf");
     assert_eq!(pdf::pdf_page_count(&path), Some(1));
     let start = Instant::now();
@@ -440,6 +453,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &cr3_thumb,
         &video_thumb,
         &pdf_thumb,
+        &hevc_thumb,
     ];
     let fixtures: Vec<_> = filenames
         .iter()
@@ -463,7 +477,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         serde_json::json!({
             "record": "iris.preview_correctness.v1", "passed": true,
             "fixtures": fixtures, "identity": identity,
-            "scope": "JPEG resize/passthrough, CR3 embedded preview, H.264 decode, PDF page count/render; decoded JPEG dimensions and nonuniform photo/RAW/PDF pixels checked; not sensor demosaic or UI parity",
+            "scope": "JPEG resize/passthrough, CR3 embedded preview, H.264 and H.265/HEVC decode, PDF page count/render; decoded JPEG dimensions and nonuniform photo/RAW/HEVC/PDF pixels checked; not sensor demosaic or UI parity",
         })
     );
     let jpeg_report = latency_report(
@@ -522,10 +536,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         config,
         || pdf::extract_pdf_thumbnail(&path, MAX_DIMENSION),
     )?;
+    let hevc_report = latency_report(
+        &MeasurementSpec {
+            operation: "video::extract_hevc_thumbnail",
+            filename: "hevc.mp4",
+            fixture_digest: &hevc_pin.0,
+            fixture_size: hevc_pin.1,
+            output: &hevc_thumb,
+            identity: &identity,
+            uses_ffmpeg: true,
+            expected_pixels: None,
+        },
+        config,
+        || video::extract_video_thumbnail(&hevc, MAX_DIMENSION),
+    )?;
     println!("PREVIEW_LATENCY {}", serde_json::to_string(&jpeg_report)?);
     println!("PREVIEW_LATENCY {}", serde_json::to_string(&cr3_report)?);
     println!("PREVIEW_LATENCY {}", serde_json::to_string(&video_report)?);
     println!("PREVIEW_LATENCY {}", serde_json::to_string(&pdf_report)?);
+    println!("PREVIEW_LATENCY {}", serde_json::to_string(&hevc_report)?);
     println!("Corpus correctness smoke passed; latency reports are bounded diagnostics, not parity evidence.");
     Ok(())
 }

@@ -1,6 +1,6 @@
 # Preview correctness corpus
 
-`fixtures.json` pins five externally hosted assets (33,605,141 bytes total),
+`fixtures.json` pins six externally hosted assets (38,554,056 bytes total),
 including source/license notes and exact HTTPS hosts/redirect destinations. The
 assets are never stored in the repository or uploaded as CI artifacts.
 
@@ -37,16 +37,16 @@ successful output.
 
 The smoke requires the product-default `video`, `pdf` and `raw-full` features. It
 checks a high-resolution JPEG resize, small JPEG passthrough, CR3 embedded preview,
-H.264 video decode, and one-page PDF render/page count. Outputs must be decodable,
-bounded JPEGs; photo, RAW and PDF outputs must contain nonuniform pixels. The
-pinned video's first frame is a valid black fade-in, so its check validates the
-decoder path and dimensions rather than rejecting that frame as blank. RAW sensor
-data is not demosaiced.
+H.264 and H.265/HEVC video decode, and one-page PDF render/page count. Outputs must
+be decodable, bounded JPEGs; photo, RAW, HEVC and PDF outputs must contain nonuniform
+pixels. The pinned H.264 video's first frame is a valid black fade-in, so its check
+validates the decoder path and dimensions rather than rejecting that frame as
+blank. RAW sensor data is not demosaiced.
 
-Before extraction, all five inputs are streamed through a fixed 64 KiB buffer and
+Before extraction, all six inputs are streamed through a fixed 64 KiB buffer and
 checked against their pinned sizes and hashes. The smoke emits one
-`PREVIEW_CORRECTNESS` and four `PREVIEW_LATENCY` JSON records. It measures JPEG,
-CR3, H.264 and PDF extraction, with configured warmups and sample counts plus
+`PREVIEW_CORRECTNESS` and five `PREVIEW_LATENCY` JSON records. It measures JPEG,
+CR3, H.264, HEVC and PDF extraction, with configured warmups and sample counts plus
 min/median/p90/median-absolute-deviation/max nanoseconds. Each record includes the
 fixture digest, source/run, Cargo.lock, compiler, target/features, runner and CPU
 identity. PDF timings explicitly identify CoreGraphics on macOS or dynamically
@@ -65,9 +65,9 @@ release readiness. Sequential samples may reflect cache/order effects.
 The report-only macOS runtime validation fetches the corpus once and runs the same
 smoke against separate Homebrew-baseline and pinned-candidate FFmpeg build targets.
 Its bounded JSON report retains correctness and timing records; paired median
-differences remain limited to JPEG, CR3 and video. PDF timing is not paired because
-its renderer is a macOS system framework, not FFmpeg. Corpus, app and runtime bytes
-are temporary; only bounded JSON reports are uploaded under the existing
+differences remain limited to JPEG, CR3 and both video codecs. PDF timing is not
+paired because its renderer is a macOS system framework, not FFmpeg. Corpus, app
+and runtime bytes are temporary; only bounded JSON reports are uploaded under the existing
 `IRIS_FFMPEG_MAX_REPORT_BYTES` cap (266,240 bytes by default).
 
 The report-only Linux FFmpeg validation runs the default-feature smoke from the

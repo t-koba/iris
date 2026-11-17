@@ -34,6 +34,13 @@
       "size": 29045112,
       "url": "https://github.com/tellodaniel/revelraw-sample-raw-files/releases/download/v1/Canon-EOS-R.CR3",
       "filename": "canon-eos-r.cr3"
+    },
+    {
+      "notes": "TrueFileSize H.265/HEVC sample, 1920x1080, 10 seconds, video/mp4 (ISO BMFF isom); CC0/public domain; source: https://cdn.truefilesize.com/mp4/sample-h265.mp4; source/license page: https://truefilesize.com/",
+      "sha256": "f110da4f156dde1c5fcf38895109568660b6464aa9c33d3c042d2470e2a9c364",
+      "size": 4948915,
+      "url": "https://cdn.truefilesize.com/mp4/sample-h265.mp4",
+      "filename": "hevc.mp4"
     }
   ],
   "allowed_hosts": [
@@ -41,6 +48,7 @@
     "upload.wikimedia.org",
     "raw.githubusercontent.com",
     "github.com",
-    "release-assets.githubusercontent.com"
+    "release-assets.githubusercontent.com",
+    "cdn.truefilesize.com"
   ]
 }

@@ -771,9 +771,9 @@ class PreviewComparison(unittest.TestCase):
             timing['timing'].update(median=200, p90=300, max=400)
         candidate = self.parsed()
         pairs = m.paired_preview(baseline, candidate)
-        self.assertEqual(len(pairs), 3)
+        self.assertEqual(len(pairs), 4)
         self.assertNotIn('pdf::extract_pdf_thumbnail', {p['operation'] for p in pairs})
-        self.assertEqual(sum(p['uses_ffmpeg'] for p in pairs), 1)
+        self.assertEqual(sum(p['uses_ffmpeg'] for p in pairs), 2)
         self.assertTrue(all(p['candidate_minus_baseline_ns'] == 198 for p in pairs))
         self.assertNotIn('discarded', json.dumps(baseline))
         self.assertNotIn('threshold', json.dumps(pairs))
@@ -785,7 +785,7 @@ class PreviewComparison(unittest.TestCase):
             self.identity['target_os'] = platform
             self.pdf['pdf_runtime'] = m.PDF_RUNTIMES[platform]
             parsed = m.parse_preview(self.text(), 'synthetic', target_os=platform)
-            self.assertEqual(len(parsed['timings']), 4)
+            self.assertEqual(len(parsed['timings']), 5)
             mutations = [
                 (self.pdf, 'pdf_runtime', m.PDF_RUNTIMES['linux' if platform == 'macos' else 'macos']),
                 (self.pdf, 'repeated_output_validation', 'dimensions only'),
@@ -819,7 +819,11 @@ class PreviewComparison(unittest.TestCase):
                 self.parsed()
 
     def test_parse_rejects_unpinned_or_invalid_measurements(self):
+        hevc = next(t for t in self.timings if t['operation'] == 'video::extract_hevc_thumbnail')
         mutations = [
+            (hevc, 'uses_ffmpeg', False),
+            (hevc['input'], 'filename', 'bunny.mp4'),
+            (hevc['input'], 'sha256', '0' * 64),
             (self.correct, 'passed', False),
             (self.correct['fixtures'][0], 'sha256', '0' * 64),
             (self.correct['fixtures'][0], 'size_bytes', 1),
@@ -1020,7 +1024,7 @@ class PreviewComparison(unittest.TestCase):
                     self.assertLessEqual(len(preview['failure'].encode()), 32768)
                 elif not failure:
                     self.assertEqual(preview['status'], 'passed')
-                    self.assertEqual(len(preview['paired_comparisons']), 3)
+                    self.assertEqual(len(preview['paired_comparisons']), 4)
                 if not failure:
                     self.assertEqual(report['smoke']['corpus_correctness'], unavailable != 'fetch')
                 self.assertEqual({p.relative_to(root).as_posix() for p in root.rglob('*') if p.is_file()},

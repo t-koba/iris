@@ -12,6 +12,7 @@ PREVIEW_OPERATIONS = {
     'image_generic::extract_image_thumbnail': ('landscape.jpg', False),
     'raw::extract_raw_thumbnail': ('canon-eos-r.cr3', False),
     'video::extract_video_thumbnail': ('bunny.mp4', True),
+    'video::extract_hevc_thumbnail': ('hevc.mp4', True),
     'pdf::extract_pdf_thumbnail': ('one-page.pdf', False),
 }
 PDF_RUNTIMES = {

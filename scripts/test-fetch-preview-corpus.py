@@ -270,7 +270,20 @@ class FetchTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         manifest = json.loads((root / 'tests/preview-corpus/fixtures.json').read_text())
         _, files = helper.validate_manifest(manifest, 40_000_000)
-        self.assertEqual(len(files), 5)
+        self.assertEqual(len(files), 6)
+
+    def test_real_manifest_hevc_contract(self):
+        root = Path(__file__).resolve().parents[1]
+        manifest = json.loads((root / 'tests/preview-corpus/fixtures.json').read_text())
+        self.assertIn('cdn.truefilesize.com', manifest['allowed_hosts'])
+        hevc, = [entry for entry in manifest['files'] if entry['filename'] == 'hevc.mp4']
+        self.assertEqual(hevc['url'], 'https://cdn.truefilesize.com/mp4/sample-h265.mp4')
+        self.assertEqual(hevc['size'], 4_948_915)
+        self.assertEqual(hevc['sha256'],
+                         'f110da4f156dde1c5fcf38895109568660b6464aa9c33d3c042d2470e2a9c364')
+        total = sum(entry['size'] for entry in manifest['files'])
+        self.assertEqual(total, 38_554_056)
+        self.assertLessEqual(total, 40_000_000)
 
 
 if __name__ == '__main__':
