@@ -262,3 +262,109 @@ fn generate_local_raw_thumbnail_does_not_modify_source_mtime() {
     assert_eq!(metadata.modified().ok(), Some(expected_mtime));
     let _ = std::fs::remove_file(path);
 }
+
+/// Supplies a partial download, then either fails or stalls until its future is dropped.
+struct PartialDownload {
+    prefix: std::io::Cursor<Vec<u8>>,
+    stalled: Option<Arc<tokio::sync::Notify>>,
+}
+
+impl AsyncRead for PartialDownload {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        if self.prefix.position() < self.prefix.get_ref().len() as u64 {
+            return std::pin::Pin::new(&mut self.prefix).poll_read(cx, buffer);
+        }
+        if let Some(stalled) = &self.stalled {
+            stalled.notify_one();
+            std::task::Poll::Pending
+        } else {
+            std::task::Poll::Ready(Err(io::Error::other("download interrupted")))
+        }
+    }
+}
+
+#[test]
+fn downloaded_temp_file_preserves_extension_and_default_directory() {
+    for (name, extension) in [
+        ("photo.JPEG", "JPEG"),
+        ("video.mp4", "mp4"),
+        ("no-ext", "bin"),
+    ] {
+        let file = temp_file_for_object(&object(name)).expect("create owned temp file");
+        assert_eq!(file.path().extension().unwrap(), extension);
+        assert_eq!(file.path().parent().unwrap(), std::env::temp_dir());
+    }
+}
+
+#[tokio::test]
+async fn partial_download_failure_removes_temp_file() {
+    let file = temp_file_for_object(&object("photo.jpg")).expect("create temp file");
+    let path = file.path().to_owned();
+    let reader = PartialDownload {
+        prefix: std::io::Cursor::new(vec![42; 64 * 1024]),
+        stalled: None,
+    };
+    let error = stream_to_temp_file(reader, file, &CancellationToken::new())
+        .await
+        .expect_err("partial read must fail");
+    assert!(error.to_string().contains("download interrupted"));
+    assert!(!path.exists(), "partial download leaked {path:?}");
+}
+
+#[tokio::test]
+async fn cancelled_or_dropped_download_removes_temp_file() {
+    for cancel in [true, false] {
+        let file = temp_file_for_object(&object("photo.jpg")).expect("create temp file");
+        let path = file.path().to_owned();
+        let stalled = Arc::new(tokio::sync::Notify::new());
+        let reader = PartialDownload {
+            prefix: std::io::Cursor::new(vec![42; 64 * 1024]),
+            stalled: Some(stalled.clone()),
+        };
+        let token = CancellationToken::new();
+        let mut download = Box::pin(stream_to_temp_file(reader, file, &token));
+        tokio::select! {
+            _ = stalled.notified() => {},
+            result = &mut download => panic!("download should stall: {result:?}"),
+        }
+        assert!(path.exists(), "file must exist during the partial download");
+        if cancel {
+            token.cancel();
+            let error = download.await.expect_err("download must be cancelled");
+            assert!(error.to_string().contains("thumbnail generation canceled"));
+        } else {
+            drop(download);
+        }
+        assert!(!path.exists(), "interrupted download leaked {path:?}");
+    }
+}
+
+#[tokio::test]
+async fn downloaded_temp_file_is_removed_after_decode_success_or_failure() {
+    let token = CancellationToken::new();
+    let hint = ThumbnailHint {
+        max_dimension: 32,
+        preferred_formats: vec![ImageFormat::Jpeg],
+    };
+    for valid in [true, false] {
+        let file = temp_file_for_object(&object("photo.jpg")).expect("create temp file");
+        let path = file.path().to_owned();
+        let data = if valid { jpeg(64, 48) } else { vec![0; 32] };
+        let file = stream_to_temp_file(std::io::Cursor::new(data), file, &token)
+            .await
+            .expect("download to temp file");
+        assert!(path.exists(), "file must exist until decoding finishes");
+        let result = generate_from_temp_file(file, &hint, Some("image/jpeg"), &token).await;
+        if valid {
+            let result = result.expect("decode downloaded JPEG");
+            assert_eq!((result.width, result.height), (32, 24));
+        } else {
+            assert!(result.is_err(), "invalid JPEG must fail to decode");
+        }
+        assert!(!path.exists(), "decoder leaked {path:?}");
+    }
+}

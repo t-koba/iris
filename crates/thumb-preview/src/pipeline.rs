@@ -12,7 +12,8 @@ use iris_core_domain::types::thumbnail::{
 };
 use std::io;
 use std::path::Path;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tempfile::NamedTempFile;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -423,59 +424,44 @@ async fn decode_in_memory(
     .map_err(|e| BackendError::Internal(Box::new(io::Error::other(e.to_string()))))?
 }
 
-fn temp_path_for_object(object: &ObjectRef) -> std::path::PathBuf {
+fn temp_file_for_object(object: &ObjectRef) -> Result<NamedTempFile, BackendError> {
     let extension = Path::new(&object.display_path)
         .extension()
         .and_then(|ext| ext.to_str())
         .filter(|ext| !ext.is_empty())
         .unwrap_or("bin");
-    let unique_id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "iris-thumb-{}-{}.{}",
-        std::process::id(),
-        unique_id,
-        extension
-    ))
+    tempfile::Builder::new()
+        .prefix("iris-thumb-")
+        .suffix(&format!(".{extension}"))
+        .tempfile()
+        .map_err(|error| BackendError::Internal(Box::new(error)))
 }
 
 async fn stream_to_temp_file(
-    backend: &dyn BackendAdapter,
-    object: &ObjectRef,
+    mut reader: impl AsyncRead + Unpin,
+    temp_file: NamedTempFile,
     cancel_token: &CancellationToken,
-) -> Result<std::path::PathBuf, BackendError> {
+) -> Result<NamedTempFile, BackendError> {
     ensure_not_cancelled(cancel_token)?;
-    let temp_path = temp_path_for_object(object);
-    let handle = backend.read(object, None).await?;
-    let mut reader = handle.stream;
-    let mut file = tokio::fs::File::create(&temp_path)
-        .await
-        .map_err(|e| BackendError::Internal(Box::new(e)))?;
+    // Keep the owner while the async writer uses a cloned handle. Every early return or
+    // dropped future then removes the file, including while an I/O operation is pending.
+    let mut file = tokio::fs::File::from_std(
+        temp_file
+            .as_file()
+            .try_clone()
+            .map_err(|error| BackendError::Internal(Box::new(error)))?,
+    );
 
-    let mut buffer = vec![0u8; 64 * 1024];
-    loop {
-        ensure_not_cancelled(cancel_token)?;
-        let bytes_read = reader
-            .read(&mut buffer)
-            .await
-            .map_err(|error| BackendError::Internal(Box::new(error)))?;
-        if bytes_read == 0 {
-            break;
-        }
-        if let Err(error) = file.write_all(&buffer[..bytes_read]).await {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(BackendError::Internal(Box::new(error)));
-        }
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => return Err(cancellation_error()),
+        result = async {
+            tokio::io::copy(&mut reader, &mut file).await?;
+            file.flush().await
+        } => result.map_err(|error| BackendError::Internal(Box::new(error)))?,
     }
 
-    if let Err(error) = file.flush().await {
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(BackendError::Internal(Box::new(error)));
-    }
-
-    Ok(temp_path)
+    Ok(temp_file)
 }
 
 async fn generate_from_downloaded_temp_path(
@@ -485,25 +471,35 @@ async fn generate_from_downloaded_temp_path(
     content_type: Option<&str>,
     cancel_token: &CancellationToken,
 ) -> Result<ThumbnailResult, BackendError> {
-    let temp_path = stream_to_temp_file(backend, object, cancel_token).await?;
-    let decode_path = temp_path.clone();
+    ensure_not_cancelled(cancel_token)?;
+    let handle = backend.read(object, None).await?;
+    let temp_file =
+        stream_to_temp_file(handle.stream, temp_file_for_object(object)?, cancel_token).await?;
+    generate_from_temp_file(temp_file, hint, content_type, cancel_token).await
+}
+
+async fn generate_from_temp_file(
+    temp_file: NamedTempFile,
+    hint: &ThumbnailHint,
+    content_type: Option<&str>,
+    cancel_token: &CancellationToken,
+) -> Result<ThumbnailResult, BackendError> {
     let hint = hint.clone();
     let content_type = content_type.map(str::to_owned);
     let cancel_token = cancel_token.clone();
 
-    let result = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
+        // The decoder owns the file, so cancelling its awaiter cannot remove the path
+        // while blocking work still needs it. Unwinding also drops this owner.
         ThumbnailPipeline::generate_from_path(
-            &decode_path,
+            temp_file.path(),
             &hint,
             content_type.as_deref(),
             &cancel_token,
         )
     })
     .await
-    .map_err(|error| BackendError::Internal(Box::new(io::Error::other(error.to_string()))))?;
-
-    let _ = tokio::fs::remove_file(&temp_path).await;
-    result
+    .map_err(|error| BackendError::Internal(Box::new(io::Error::other(error.to_string()))))?
 }
 
 fn local_thumbnail_result(
