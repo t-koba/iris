@@ -20,9 +20,9 @@ pub fn reconcile_segment(
     existing: &Segment,
     scanned: impl IntoIterator<Item = SegmentRecord>,
 ) -> ReconcileResult {
-    // Exact paths win so two genuinely distinct files that merely normalize
-    // alike both survive. Normalized identity is only a fallback for matching
-    // an original record when the same file is reported under a respelled path.
+    // Reserve exact-path matches across the whole scan before falling back to
+    // normalized identity. Otherwise a respelled record can consume the original
+    // record a later exact match needs on a normalization-sensitive volume.
     let mut existing_by_exact = HashMap::new();
     let mut existing_by_equality = HashMap::new();
     for (index, record) in existing.records().iter().enumerate() {
@@ -36,30 +36,46 @@ pub fn reconcile_segment(
             .push(index);
     }
 
+    let scanned: Vec<_> = scanned.into_iter().collect();
     let mut matched = HashSet::new();
-    let mut records = Vec::new();
-    let mut stats = ReconcileStats::default();
-
-    for record in scanned {
-        let exact = exact_identity(&record);
-        let normalized = normalized_identity(&record);
-        let previous_index = existing_by_exact
+    let mut resolved = vec![None; scanned.len()];
+    for (position, record) in scanned.iter().enumerate() {
+        let exact = exact_identity(record);
+        let index = existing_by_exact
             .get(&exact)
             .and_then(|indices| indices.iter().find(|index| !matched.contains(*index)))
-            .copied()
-            .or_else(|| {
-                existing_by_equality
-                    .get(&normalized)
-                    .and_then(|indices| indices.iter().find(|index| !matched.contains(*index)))
-                    .copied()
-            });
+            .copied();
+        if let Some(index) = index {
+            matched.insert(index);
+            resolved[position] = Some(reuse_record(&existing.records()[index], record));
+        }
+    }
 
-        match previous_index {
-            Some(index) => {
-                matched.insert(index);
-                let previous = &existing.records()[index];
-                if record_is_fresh(previous, &record) {
-                    records.push(previous.clone());
+    for (position, record) in scanned.iter().enumerate() {
+        if resolved[position].is_some() {
+            continue;
+        }
+        let normalized = normalized_identity(record);
+        let index = existing_by_equality
+            .get(&normalized)
+            .and_then(|indices| indices.iter().find(|index| !matched.contains(*index)))
+            .copied();
+        if let Some(index) = index {
+            matched.insert(index);
+            resolved[position] = Some(reuse_record(&existing.records()[index], record));
+        }
+    }
+
+    let mut stats = ReconcileStats {
+        removed: existing.records().len() - matched.len(),
+        ..Default::default()
+    };
+    let mut records = Vec::with_capacity(scanned.len());
+    for (position, record) in scanned.into_iter().enumerate() {
+        match resolved[position].take() {
+            Some((previous, fresh)) => {
+                if fresh {
+                    records.push(previous);
                     stats.unchanged += 1;
                 } else {
                     records.push(record);
@@ -72,14 +88,16 @@ pub fn reconcile_segment(
             }
         }
     }
-
-    stats.removed = existing.records().len() - matched.len();
     records.sort_by(|a, b| a.path.cmp(&b.path));
 
     ReconcileResult {
         segment: Segment::new(records),
         stats,
     }
+}
+
+fn reuse_record(previous: &SegmentRecord, scanned: &SegmentRecord) -> (SegmentRecord, bool) {
+    (previous.clone(), record_is_fresh(previous, scanned))
 }
 
 type RecordIdentity = (String, bool, Option<String>);
@@ -223,6 +241,26 @@ mod tests {
             ReconcileStats {
                 unchanged: 1,
                 removed: 1,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn reconcile_reserves_exact_matches_before_normalized_fallback() {
+        // Walker order is byte-sorted, so NFD precedes NFC on macOS.
+        let first = record("/root/Cafe\u{301}.jpg", 10, 100);
+        let second = record("/root/Café.jpg", 10, 100);
+        let existing = Segment::new(vec![second.clone()]);
+
+        let result = reconcile_segment(&existing, [first.clone(), second.clone()]);
+
+        assert_eq!(result.segment.records(), &[first, second]);
+        assert_eq!(
+            result.stats,
+            ReconcileStats {
+                inserted: 1,
+                unchanged: 1,
                 ..Default::default()
             }
         );
