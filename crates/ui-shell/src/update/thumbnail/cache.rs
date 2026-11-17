@@ -199,19 +199,32 @@ pub fn thumbnail_cache_key_is_current(state: &AppState, key: &ThumbnailCacheKey)
     })
 }
 
-fn stale_thumbnail_keys<'a, I>(state: &AppState, keys: I) -> Vec<ThumbnailCacheKey>
+fn current_thumbnail_keys(state: &AppState) -> std::collections::HashSet<ThumbnailCacheKey> {
+    state
+        .active_panes()
+        .into_iter()
+        .flat_map(|pane| pane.entries.iter())
+        .map(ThumbnailCacheKey::from_entry)
+        .collect()
+}
+
+fn stale_thumbnail_keys<'a, I>(
+    keys: I,
+    current: &std::collections::HashSet<ThumbnailCacheKey>,
+) -> Vec<ThumbnailCacheKey>
 where
     I: IntoIterator<Item = &'a ThumbnailCacheKey>,
 {
     keys.into_iter()
-        .filter(|key| !thumbnail_cache_key_is_current(state, key))
+        .filter(|key| !current.contains(*key))
         .cloned()
         .collect()
 }
 
 /// Prunes the cache to the entries shown in any pane.
 pub fn prune_thumbnail_cache(state: &mut AppState) {
-    let canceled = stale_thumbnail_keys(state, state.thumbnail_inflight.iter());
+    let current = current_thumbnail_keys(state);
+    let canceled = stale_thumbnail_keys(state.thumbnail_inflight.iter(), &current);
     if !canceled.is_empty() {
         app_runtime().cancel_thumbnails(canceled.iter().map(ThumbnailCacheKey::path));
         for key in &canceled {
@@ -222,32 +235,32 @@ pub fn prune_thumbnail_cache(state: &mut AppState) {
     }
 
     let stale_inflight_backends =
-        stale_thumbnail_keys(state, state.thumbnail_inflight_backends.keys())
+        stale_thumbnail_keys(state.thumbnail_inflight_backends.keys(), &current)
             .into_iter()
             .collect::<std::collections::HashSet<_>>();
     state
         .thumbnail_inflight_backends
         .retain(|key, _| !stale_inflight_backends.contains(key));
 
-    let stale_cache_keys = stale_thumbnail_keys(state, state.thumbnail_cache.keys());
+    let stale_cache_keys = stale_thumbnail_keys(state.thumbnail_cache.keys(), &current);
     for key in stale_cache_keys {
         remove_thumbnail_cache_entry(state, &key);
     }
-    let stale_canceled = stale_thumbnail_keys(state, state.thumbnail_canceled.iter())
+    let stale_canceled = stale_thumbnail_keys(state.thumbnail_canceled.iter(), &current)
         .into_iter()
         .collect::<std::collections::HashSet<_>>();
     state
         .thumbnail_canceled
         .retain(|key| !stale_canceled.contains(key));
 
-    let stale_unsupported = stale_thumbnail_keys(state, state.thumbnail_unsupported.iter())
+    let stale_unsupported = stale_thumbnail_keys(state.thumbnail_unsupported.iter(), &current)
         .into_iter()
         .collect::<std::collections::HashSet<_>>();
     state
         .thumbnail_unsupported
         .retain(|key| !stale_unsupported.contains(key));
 
-    let stale_queued = stale_thumbnail_keys(state, state.thumbnail_generation_queued.iter())
+    let stale_queued = stale_thumbnail_keys(state.thumbnail_generation_queued.iter(), &current)
         .into_iter()
         .collect::<std::collections::HashSet<_>>();
     for key in &stale_queued {
@@ -261,14 +274,14 @@ pub fn prune_thumbnail_cache(state: &mut AppState) {
         .retain(|key| !stale_queued.contains(key));
 
     let stale_generation_queue =
-        stale_thumbnail_keys(state, state.thumbnail_generation_queue.iter())
+        stale_thumbnail_keys(state.thumbnail_generation_queue.iter(), &current)
             .into_iter()
             .collect::<std::collections::HashSet<_>>();
     state
         .thumbnail_generation_queue
         .retain(|key| !stale_generation_queue.contains(key));
 
-    let stale_requests = stale_thumbnail_keys(state, state.thumbnail_generation_requests.keys())
+    let stale_requests = stale_thumbnail_keys(state.thumbnail_generation_requests.keys(), &current)
         .into_iter()
         .collect::<std::collections::HashSet<_>>();
     state
@@ -551,6 +564,12 @@ mod tests {
 
         assert!(thumbnail_cache_key_is_current(&state, &first_key));
         assert!(thumbnail_cache_key_is_current(&state, &second_key));
+
+        insert_thumbnail_cache(&mut state, first_key.clone(), thumbnail(1));
+        insert_thumbnail_cache(&mut state, second_key.clone(), thumbnail(1));
+        prune_thumbnail_cache(&mut state);
+        assert!(state.thumbnail_cache.contains_key(&first_key));
+        assert!(state.thumbnail_cache.contains_key(&second_key));
     }
 
     #[test]
