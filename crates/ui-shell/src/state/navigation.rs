@@ -603,11 +603,6 @@ impl PaneState {
             .and_then(|index| self.entries.get(entry_offset(index)))
     }
 
-    pub(crate) fn entry_by_object_key(&self, object_key: &ObjectKey) -> Option<&ListEntry> {
-        self.entry_index_by_object_key(object_key)
-            .and_then(|index| self.entries.get(entry_offset(index)))
-    }
-
     pub(crate) fn entry_index_by_object_key(&self, object_key: &ObjectKey) -> Option<EntryIndex> {
         if let Some(index) = self.entry_indices_by_object_key.get(object_key).copied() {
             if self

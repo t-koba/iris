@@ -189,9 +189,13 @@ pub fn touch_thumbnail_cache_entry(state: &mut AppState, key: &ThumbnailCacheKey
 }
 
 pub fn thumbnail_cache_key_is_current(state: &AppState, key: &ThumbnailCacheKey) -> bool {
+    // An object key is not necessarily unique: hard links share one object
+    // identity while appearing under different paths. Validate the exact full
+    // key against every entry for that object instead of a single indexed hit.
     state.active_panes().into_iter().any(|pane| {
-        pane.entry_by_object_key(&key.object_key)
-            .is_some_and(|entry| ThumbnailCacheKey::from_entry(entry) == *key)
+        pane.entries.iter().any(|entry| {
+            entry.object_ref.key == key.object_key && ThumbnailCacheKey::from_entry(entry) == *key
+        })
     })
 }
 
@@ -532,6 +536,21 @@ mod tests {
                 assert_eq!(state.thumbnail_cache_lru.pop_front(), Some(key));
             }
         }
+    }
+
+    #[test]
+    fn current_key_accepts_every_path_of_a_shared_object() {
+        let mut state = AppState::default();
+        let first = entry("/tmp/first.jpg", 5);
+        let mut second = entry("/tmp/second.jpg", 5);
+        second.object_ref.key = first.object_ref.key.clone();
+        let first_key = ThumbnailCacheKey::from_entry(&first);
+        let second_key = ThumbnailCacheKey::from_entry(&second);
+        assert_ne!(first_key, second_key);
+        state.pane_mut(0).replace_entries(vec![first, second]);
+
+        assert!(thumbnail_cache_key_is_current(&state, &first_key));
+        assert!(thumbnail_cache_key_is_current(&state, &second_key));
     }
 
     #[test]
