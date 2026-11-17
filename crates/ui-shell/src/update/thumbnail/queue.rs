@@ -9,6 +9,7 @@ use crate::state::QueuedThumbnailRequest;
 
 pub fn generate_thumbnails(state: &mut AppState) -> Task<Message> {
     let preview_blocked_backend = preview_throttled_thumbnail_backend(state);
+    let desired_keys = collect_desired_paths(state);
 
     let mut inflight_by_backend = std::collections::HashMap::<String, usize>::new();
     for key in &state.thumbnail_inflight {
@@ -75,10 +76,13 @@ pub fn generate_thumbnails(state: &mut AppState) -> Task<Message> {
             // Hard links share an object key but need one thumbnail per visible
             // path. The scheduler deduplicates by object key, so resolve every
             // visible entry for the dequeued object.
-            for entry in thumbnail_entries_for_object_key(state, &request.object_key) {
+            let mut remaining_aliases = None;
+            for entry in thumbnail_entries_for_object_key(state, &request.object_key, &desired_keys)
+            {
                 if tasks.len() >= available_slots
                     || already_inflight + started_for_backend >= max_for_backend
                 {
+                    remaining_aliases = Some(request.clone());
                     break;
                 }
 
@@ -121,6 +125,13 @@ pub fn generate_thumbnails(state: &mut AppState) -> Task<Message> {
                     },
                 ));
             }
+
+            if let Some(request) = remaining_aliases {
+                if let Some(scheduler) = state.thumbnail_schedulers.get_mut(&backend_type) {
+                    scheduler.enqueue(request);
+                }
+                break;
+            }
         }
     }
 
@@ -131,10 +142,20 @@ pub fn generate_thumbnails(state: &mut AppState) -> Task<Message> {
     }
 }
 
-fn thumbnail_entries_for_object_key(state: &AppState, object_key: &ObjectKey) -> Vec<ListEntry> {
+fn thumbnail_entries_for_object_key(
+    state: &AppState,
+    object_key: &ObjectKey,
+    desired_keys: &std::collections::HashSet<ThumbnailCacheKey>,
+) -> Vec<ListEntry> {
     (0..2)
         .flat_map(|pane_idx| state.pane(pane_idx).entries.iter())
-        .filter(|entry| !entry.is_dir && entry.object_ref.key == *object_key)
+        .filter(|entry| {
+            if entry.is_dir || entry.object_ref.key != *object_key {
+                return false;
+            }
+            let key = ThumbnailCacheKey::from_entry(entry);
+            desired_keys.contains(&key) && state.thumbnail_generation_queued.contains(&key)
+        })
         .cloned()
         .collect()
 }
@@ -392,5 +413,118 @@ mod tests {
         assert!(state.thumbnail_inflight.contains(&second_key));
         assert!(!state.thumbnail_generation_queued.contains(&first_key));
         assert!(!state.thumbnail_generation_queued.contains(&second_key));
+    }
+
+    #[test]
+    fn generate_thumbnails_skips_filtered_out_hard_links() {
+        let mut state = AppState::default();
+        state.window_height = 400.0;
+        let shown = image_entry("/tmp/shown-photo.jpg");
+        let mut hidden = image_entry("/tmp/hidden-photo.jpg");
+        hidden.object_ref.key = shown.object_ref.key.clone();
+        {
+            let pane = state.pane_mut(0);
+            pane.view_mode = ViewMode::Grid;
+            pane.entries = vec![hidden.clone(), shown.clone()];
+            pane.rebuild_visible_indices();
+            pane.set_filter_query("shown".to_string());
+        }
+
+        seed_thumbnail_generation_queue(&mut state);
+        let shown_key = ThumbnailCacheKey::from_entry(&shown);
+        let hidden_key = ThumbnailCacheKey::from_entry(&hidden);
+        assert!(state.thumbnail_generation_queued.contains(&shown_key));
+        assert!(!state.thumbnail_generation_queued.contains(&hidden_key));
+
+        let _tasks = generate_thumbnails(&mut state);
+
+        assert!(state.thumbnail_inflight.contains(&shown_key));
+        assert!(!state.thumbnail_inflight.contains(&hidden_key));
+    }
+
+    #[test]
+    fn generate_thumbnails_requeues_aliases_that_exceed_worker_slots() {
+        use iris_thumb_preview::scheduler::ThumbnailScheduler;
+
+        let mut state = AppState::default();
+        state.window_height = 400.0;
+        let first = image_entry("/tmp/first-photo.jpg");
+        let mut second = image_entry("/tmp/second-photo.jpg");
+        second.object_ref.key = first.object_ref.key.clone();
+        {
+            let pane = state.pane_mut(0);
+            pane.view_mode = ViewMode::Grid;
+            pane.entries = vec![first.clone(), second.clone()];
+            pane.rebuild_visible_indices();
+        }
+
+        seed_thumbnail_generation_queue(&mut state);
+        state.thumbnail_schedulers.clear();
+        state
+            .thumbnail_schedulers
+            .insert("local".to_string(), ThumbnailScheduler::new(1));
+        enqueue_thumbnail_request(&mut state, &first, RequestPriority::Visible);
+        enqueue_thumbnail_request(&mut state, &second, RequestPriority::Visible);
+        let first_key = ThumbnailCacheKey::from_entry(&first);
+        let second_key = ThumbnailCacheKey::from_entry(&second);
+
+        let _tasks = generate_thumbnails(&mut state);
+
+        assert_eq!(state.thumbnail_inflight.len(), 1);
+        assert!(
+            state.thumbnail_inflight.contains(&first_key)
+                || state.thumbnail_inflight.contains(&second_key)
+        );
+        assert_eq!(state.thumbnail_schedulers["local"].pending_count(), 1);
+        let remaining = state.thumbnail_generation_queued;
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining.contains(&first_key) || remaining.contains(&second_key));
+    }
+
+    #[test]
+    fn failed_thumbnail_does_not_retry_before_queued_alias() {
+        use crate::messages::Message;
+        use crate::update::update;
+        use iris_thumb_preview::scheduler::ThumbnailScheduler;
+
+        let mut state = AppState::default();
+        state.window_height = 400.0;
+        let first = image_entry("/tmp/first-photo.jpg");
+        let mut second = image_entry("/tmp/second-photo.jpg");
+        second.object_ref.key = first.object_ref.key.clone();
+        {
+            let pane = state.pane_mut(0);
+            pane.view_mode = ViewMode::Grid;
+            pane.entries = vec![first.clone(), second.clone()];
+            pane.rebuild_visible_indices();
+        }
+
+        seed_thumbnail_generation_queue(&mut state);
+        state.thumbnail_schedulers.clear();
+        state
+            .thumbnail_schedulers
+            .insert("local".to_string(), ThumbnailScheduler::new(1));
+        enqueue_thumbnail_request(&mut state, &first, RequestPriority::Visible);
+        enqueue_thumbnail_request(&mut state, &second, RequestPriority::Visible);
+
+        let _ = generate_thumbnails(&mut state);
+        let first_key = ThumbnailCacheKey::from_entry(&first);
+        let second_key = ThumbnailCacheKey::from_entry(&second);
+        let failed = if state.thumbnail_inflight.contains(&first_key) {
+            first_key.clone()
+        } else {
+            second_key.clone()
+        };
+        let other = if failed == first_key {
+            second_key.clone()
+        } else {
+            first_key.clone()
+        };
+        assert!(state.thumbnail_inflight.contains(&failed));
+
+        let _ = update(&mut state, Message::ThumbnailFailed(failed.clone()));
+
+        assert!(!state.thumbnail_inflight.contains(&failed));
+        assert!(state.thumbnail_inflight.contains(&other));
     }
 }

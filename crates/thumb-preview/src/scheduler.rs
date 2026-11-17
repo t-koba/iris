@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 const PRIORITY_QUEUE_CAPACITY: usize = 1_024;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ThumbnailRequest {
     pub object_key: ObjectKey,
     pub hint: ThumbnailHint,
