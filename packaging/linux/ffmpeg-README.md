@@ -78,8 +78,14 @@ also supports a compatible replacement through the dynamic loader's normal
 
 The upstream security page (https://ffmpeg.org/security.html) lists fixes for
 CVE-2026-8461 and CVE-2026-30999 in 8.1.2; this runtime selects 8.1.3 (libavcodec
-62.28.103). This is not a claim of a broader security review. Iris distributors
-must update the source/hash/signature pin and rebuild to ship FFmpeg fixes;
+62.28.103). CVE-2026-70629 (RSCC decoder) and CVE-2026-70631 (TIFF decoder) are
+uninitialized-heap-read disclosures affecting FFmpeg before 9.0; 8.1.3 is in range and
+TIFF decoding is enabled. Their documented impact needs a crafted file in a persistent,
+multi-user decoding service; for a single-user desktop preview flow this is a bounded
+residual risk, not an assumption that untrusted media is safe. This is not a claim of a
+broader security review.
+
+To ship FFmpeg fixes, distributors must update the source/hash/signature pin and rebuild;
 Ubuntu does not update these private bundled libraries. Debian's generated
 `Depends` declares the system dependency closure, including PDFium and Iris;
 unknown/missing package mappings block packaging. The AppDir uses that same
