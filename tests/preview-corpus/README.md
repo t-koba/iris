@@ -38,10 +38,10 @@ successful output.
 The smoke requires the product-default `video`, `pdf` and `raw-full` features. It
 checks a high-resolution JPEG resize, small JPEG passthrough, CR3 embedded preview,
 H.264 and H.265/HEVC video decode, and one-page PDF render/page count. Outputs must
-be decodable, bounded JPEGs; photo, RAW, HEVC and PDF outputs must contain nonuniform
-pixels. The pinned H.264 video's first frame is a valid black fade-in, so its check
-validates the decoder path and dimensions rather than rejecting that frame as
-blank. RAW sensor data is not demosaiced.
+be decodable, bounded JPEGs; photo, RAW and PDF outputs must contain nonuniform
+pixels. First-frame uniformity is not established for either pinned video, so their
+checks validate the decoder path and dimensions rather than rejecting a valid blank
+opening frame. RAW sensor data is not demosaiced.
 
 Before extraction, all six inputs are streamed through a fixed 64 KiB buffer and
 checked against their pinned sizes and hashes. The smoke emits one

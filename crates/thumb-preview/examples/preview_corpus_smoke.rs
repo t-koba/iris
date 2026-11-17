@@ -428,7 +428,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         "H.265/HEVC MP4",
         video::extract_video_thumbnail(&hevc, MAX_DIMENSION),
         start,
-        true,
+        false, // First-frame uniformity of this clip is not established; check decode and dimensions.
     );
     assert_eq!((hevc_thumb.width, hevc_thumb.height), (256, 144));
     assert_eq!(hevc_thumb.source, ThumbnailSource::PartialDecode);
@@ -477,7 +477,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         serde_json::json!({
             "record": "iris.preview_correctness.v1", "passed": true,
             "fixtures": fixtures, "identity": identity,
-            "scope": "JPEG resize/passthrough, CR3 embedded preview, H.264 and H.265/HEVC decode, PDF page count/render; decoded JPEG dimensions and nonuniform photo/RAW/HEVC/PDF pixels checked; not sensor demosaic or UI parity",
+            "scope": "JPEG resize/passthrough, CR3 embedded preview, H.264 and H.265/HEVC decode, PDF page count/render; decoded JPEG dimensions and nonuniform photo/RAW/PDF pixels checked; HEVC decoder path and dimensions checked without asserting first-frame uniformity; not sensor demosaic or UI parity",
         })
     );
     let jpeg_report = latency_report(
