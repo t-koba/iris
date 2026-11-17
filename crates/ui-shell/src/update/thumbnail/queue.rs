@@ -72,47 +72,55 @@ pub fn generate_thumbnails(state: &mut AppState) -> Task<Message> {
             else {
                 break;
             };
-            let Some(entry) = thumbnail_entry_for_object_key(state, &request.object_key) else {
-                continue;
-            };
-            let entry = entry.clone();
-
-            let key = ThumbnailCacheKey::from_entry(&entry);
-            state.thumbnail_generation_queued.remove(&key);
-            state.thumbnail_generation_requests.remove(&key);
-            state
-                .thumbnail_generation_queue
-                .retain(|queued| queued != &key);
-
-            if state.thumbnail_cache.contains_key(&key) || state.thumbnail_inflight.contains(&key) {
-                touch_thumbnail_cache_entry(state, &key);
-                continue;
-            }
-            if state.thumbnail_unsupported.contains(&key) {
-                continue;
-            }
-
-            state.thumbnail_canceled.remove(&key);
-            state.thumbnail_inflight.insert(key.clone());
-            state
-                .thumbnail_inflight_backends
-                .insert(key.clone(), backend_type.clone());
-            started_for_backend += 1;
-            tasks.push(Task::perform(
-                generate_one_thumbnail(entry.object_ref.clone(), request.content_type.clone()),
+            // Hard links share an object key but need one thumbnail per visible
+            // path. The scheduler deduplicates by object key, so resolve every
+            // visible entry for the dequeued object.
+            for entry in thumbnail_entries_for_object_key(state, &request.object_key) {
+                if tasks.len() >= available_slots
+                    || already_inflight + started_for_backend >= max_for_backend
                 {
-                    let key_for_msg = key.clone();
-                    move |result| match result {
-                        ThumbnailTaskOutcome::Ready(data) => {
-                            Message::ThumbnailReady(key_for_msg, data)
+                    break;
+                }
+
+                let key = ThumbnailCacheKey::from_entry(&entry);
+                state.thumbnail_generation_queued.remove(&key);
+                state.thumbnail_generation_requests.remove(&key);
+                state
+                    .thumbnail_generation_queue
+                    .retain(|queued| queued != &key);
+
+                if state.thumbnail_cache.contains_key(&key)
+                    || state.thumbnail_inflight.contains(&key)
+                {
+                    touch_thumbnail_cache_entry(state, &key);
+                    continue;
+                }
+                if state.thumbnail_unsupported.contains(&key) {
+                    continue;
+                }
+
+                state.thumbnail_canceled.remove(&key);
+                state.thumbnail_inflight.insert(key.clone());
+                state
+                    .thumbnail_inflight_backends
+                    .insert(key.clone(), backend_type.clone());
+                started_for_backend += 1;
+                tasks.push(Task::perform(
+                    generate_one_thumbnail(entry.object_ref.clone(), request.content_type.clone()),
+                    {
+                        let key_for_msg = key.clone();
+                        move |result| match result {
+                            ThumbnailTaskOutcome::Ready(data) => {
+                                Message::ThumbnailReady(key_for_msg, data)
+                            }
+                            ThumbnailTaskOutcome::Unsupported => {
+                                Message::ThumbnailUnsupported(key_for_msg)
+                            }
+                            ThumbnailTaskOutcome::Failed => Message::ThumbnailFailed(key_for_msg),
                         }
-                        ThumbnailTaskOutcome::Unsupported => {
-                            Message::ThumbnailUnsupported(key_for_msg)
-                        }
-                        ThumbnailTaskOutcome::Failed => Message::ThumbnailFailed(key_for_msg),
-                    }
-                },
-            ));
+                    },
+                ));
+            }
         }
     }
 
@@ -123,17 +131,12 @@ pub fn generate_thumbnails(state: &mut AppState) -> Task<Message> {
     }
 }
 
-fn thumbnail_entry_for_object_key<'a>(
-    state: &'a AppState,
-    object_key: &ObjectKey,
-) -> Option<&'a ListEntry> {
-    for pane_idx in 0..2 {
-        let pane = state.pane(pane_idx);
-        if let Some(index) = pane.entry_index_by_object_key(object_key) {
-            return pane.entry(index);
-        }
-    }
-    None
+fn thumbnail_entries_for_object_key(state: &AppState, object_key: &ObjectKey) -> Vec<ListEntry> {
+    (0..2)
+        .flat_map(|pane_idx| state.pane(pane_idx).entries.iter())
+        .filter(|entry| !entry.is_dir && entry.object_ref.key == *object_key)
+        .cloned()
+        .collect()
 }
 
 pub fn seed_thumbnail_generation_queue(state: &mut AppState) {
@@ -356,5 +359,38 @@ mod tests {
             scheduler.dequeue().map(|request| request.priority),
             Some(RequestPriority::Visible)
         );
+    }
+
+    #[test]
+    fn generate_thumbnails_creates_one_task_per_visible_hard_link() {
+        let mut state = AppState::default();
+        state.window_height = 400.0;
+        let first = image_entry("/tmp/first-photo.jpg");
+        let mut second = image_entry("/tmp/second-photo.jpg");
+        second.object_ref.key = first.object_ref.key.clone();
+        {
+            let pane = state.pane_mut(0);
+            pane.view_mode = ViewMode::Grid;
+            pane.entries = vec![first.clone(), second.clone()];
+            pane.rebuild_visible_indices();
+        }
+
+        seed_thumbnail_generation_queue(&mut state);
+        let first_key = ThumbnailCacheKey::from_entry(&first);
+        let second_key = ThumbnailCacheKey::from_entry(&second);
+        assert!(state.thumbnail_generation_queued.contains(&first_key));
+        assert!(state.thumbnail_generation_queued.contains(&second_key));
+        assert_eq!(
+            state.thumbnail_schedulers["local"].pending_count(),
+            1,
+            "the scheduler deduplicates by object key"
+        );
+
+        let _tasks = generate_thumbnails(&mut state);
+
+        assert!(state.thumbnail_inflight.contains(&first_key));
+        assert!(state.thumbnail_inflight.contains(&second_key));
+        assert!(!state.thumbnail_generation_queued.contains(&first_key));
+        assert!(!state.thumbnail_generation_queued.contains(&second_key));
     }
 }
