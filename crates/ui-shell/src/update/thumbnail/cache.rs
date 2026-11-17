@@ -469,4 +469,27 @@ mod tests {
         assert!(!state.thumbnail_generation_queued.contains(&stale_key));
         assert!(!state.thumbnail_generation_requests.contains_key(&stale_key));
     }
+
+    #[test]
+    fn invalidation_keeps_distinct_remote_objects_with_equivalent_paths() {
+        let mut state = AppState::default();
+        let first = entry("Café.jpg", 5);
+        let second = entry("Cafe\u{301}.jpg", 5);
+        let first_key = ThumbnailCacheKey::from_entry(&first);
+        let second_key = ThumbnailCacheKey::from_entry(&second);
+        assert_ne!(first_key, second_key);
+        insert_thumbnail_cache(&mut state, first_key.clone(), thumbnail(1));
+        insert_thumbnail_cache(&mut state, second_key.clone(), thumbnail(1));
+
+        let mut changed_second = second.clone();
+        changed_second.size = Some(6);
+        invalidate_changed_thumbnail_entries(
+            &mut state,
+            &[first.clone(), second.clone()],
+            &[first.clone(), changed_second],
+        );
+
+        assert!(state.thumbnail_cache.contains_key(&first_key));
+        assert!(!state.thumbnail_cache.contains_key(&second_key));
+    }
 }
