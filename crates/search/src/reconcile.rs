@@ -20,39 +20,51 @@ pub fn reconcile_segment(
     existing: &Segment,
     scanned: impl IntoIterator<Item = SegmentRecord>,
 ) -> ReconcileResult {
-    let existing_by_path = existing
-        .records()
-        .iter()
-        .map(|record| {
-            (
-                (
-                    equality_key(&record.path),
-                    record.local_path_is_lossy,
-                    record.native_locator.clone(),
-                ),
-                record,
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    let mut seen = HashSet::new();
+    // Exact paths win so two genuinely distinct files that merely normalize
+    // alike both survive. Normalized identity is only a fallback for matching
+    // an original record when the same file is reported under a respelled path.
+    let mut existing_by_exact = HashMap::new();
+    let mut existing_by_equality = HashMap::new();
+    for (index, record) in existing.records().iter().enumerate() {
+        existing_by_exact
+            .entry(exact_identity(record))
+            .or_insert_with(Vec::new)
+            .push(index);
+        existing_by_equality
+            .entry(normalized_identity(record))
+            .or_insert_with(Vec::new)
+            .push(index);
+    }
+
+    let mut matched = HashSet::new();
     let mut records = Vec::new();
     let mut stats = ReconcileStats::default();
 
     for record in scanned {
-        let key = (
-            equality_key(&record.path),
-            record.local_path_is_lossy,
-            record.native_locator.clone(),
-        );
-        seen.insert(key.clone());
-        match existing_by_path.get(&key) {
-            Some(previous) if record_is_fresh(previous, &record) => {
-                records.push((*previous).clone());
-                stats.unchanged += 1;
-            }
-            Some(_) => {
-                records.push(record);
-                stats.updated += 1;
+        let exact = exact_identity(&record);
+        let normalized = normalized_identity(&record);
+        let previous_index = existing_by_exact
+            .get(&exact)
+            .and_then(|indices| indices.iter().find(|index| !matched.contains(*index)))
+            .copied()
+            .or_else(|| {
+                existing_by_equality
+                    .get(&normalized)
+                    .and_then(|indices| indices.iter().find(|index| !matched.contains(*index)))
+                    .copied()
+            });
+
+        match previous_index {
+            Some(index) => {
+                matched.insert(index);
+                let previous = &existing.records()[index];
+                if record_is_fresh(previous, &record) {
+                    records.push(previous.clone());
+                    stats.unchanged += 1;
+                } else {
+                    records.push(record);
+                    stats.updated += 1;
+                }
             }
             None => {
                 records.push(record);
@@ -61,23 +73,31 @@ pub fn reconcile_segment(
         }
     }
 
-    stats.removed = existing
-        .records()
-        .iter()
-        .filter(|record| {
-            !seen.contains(&(
-                equality_key(&record.path),
-                record.local_path_is_lossy,
-                record.native_locator.clone(),
-            ))
-        })
-        .count();
+    stats.removed = existing.records().len() - matched.len();
     records.sort_by(|a, b| a.path.cmp(&b.path));
 
     ReconcileResult {
         segment: Segment::new(records),
         stats,
     }
+}
+
+type RecordIdentity = (String, bool, Option<String>);
+
+fn exact_identity(record: &SegmentRecord) -> RecordIdentity {
+    (
+        record.path.clone(),
+        record.local_path_is_lossy,
+        record.native_locator.clone(),
+    )
+}
+
+fn normalized_identity(record: &SegmentRecord) -> RecordIdentity {
+    (
+        equality_key(&record.path),
+        record.local_path_is_lossy,
+        record.native_locator.clone(),
+    )
 }
 
 fn record_is_fresh(previous: &SegmentRecord, scanned: &SegmentRecord) -> bool {
@@ -173,6 +193,38 @@ mod tests {
                 .map(|record| record.path.as_str())
                 .collect::<Vec<_>>(),
             vec!["/root/a.txt", "/root/b.txt", "/root/c.txt"]
+        );
+    }
+
+    #[test]
+    fn reconcile_preserves_distinct_records_with_equivalent_paths() {
+        // On a normalization-sensitive share mounted from macOS, both names
+        // can exist at once even though their equality keys are identical.
+        let first = record("/Volumes/share/Café.jpg", 10, 100);
+        let second = record("/Volumes/share/Cafe\u{301}.jpg", 10, 100);
+        let existing = Segment::new(vec![first.clone(), second.clone()]);
+
+        let result = reconcile_segment(&existing, [first.clone(), second.clone()]);
+        let mut expected = vec![first.clone(), second.clone()];
+        expected.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(result.segment.records(), expected.as_slice());
+        assert_eq!(
+            result.stats,
+            ReconcileStats {
+                unchanged: 2,
+                ..Default::default()
+            }
+        );
+
+        let deleted = reconcile_segment(&existing, [first.clone()]);
+        assert_eq!(deleted.segment.records(), &[first]);
+        assert_eq!(
+            deleted.stats,
+            ReconcileStats {
+                unchanged: 1,
+                removed: 1,
+                ..Default::default()
+            }
         );
     }
 }
