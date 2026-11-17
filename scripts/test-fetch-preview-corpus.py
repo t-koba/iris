@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import socket
 import tempfile
@@ -70,35 +71,74 @@ class FetchTests(unittest.TestCase):
         opener.open.side_effect = [
             urllib.error.HTTPError(self.manifest['files'][0]['url'], 504, 'gateway timeout', {}, io.BytesIO()),
             interrupted,
+            urllib.error.HTTPError(self.manifest['files'][0]['url'], 503, 'unavailable', {}, io.BytesIO()),
+            urllib.error.HTTPError(self.manifest['files'][0]['url'], 500, 'server error', {}, io.BytesIO()),
             Response(self.body),
         ]
         with patch.object(helper.time, 'sleep') as sleep:
             helper.fetch(self.manifest, self.output, len(self.body), 1, opener,
-                         retries=2, retry_delay=3)
-        self.assertEqual(opener.open.call_count, 3)
-        self.assertEqual(sleep.call_args_list, [unittest.mock.call(3), unittest.mock.call(3)])
+                         retries=4, retry_delay=3, max_retry_delay=10)
+        self.assertEqual(opener.open.call_count, 5)
+        self.assertEqual(sleep.call_args_list, [unittest.mock.call(n) for n in (3, 6, 10, 10)])
         self.assertEqual((self.output / 'test.jpg').read_bytes(), self.body)
         self.assertEqual([p.name for p in self.output.iterdir()], ['test.jpg'])
 
-    def test_permanent_http_error_and_integrity_mismatch_are_not_retried(self):
-        for error in (
-            urllib.error.HTTPError(self.manifest['files'][0]['url'], 404, 'not found', {}, io.BytesIO()),
-        ):
-            with self.subTest(code=error.code):
+    def test_retry_after_is_honoured_before_next_attempt_but_capped(self):
+        for index, (code, header, cap, expected) in enumerate((
+            (429, '7', 30, 7), (503, '7', 30, 7),
+            (429, '100', 5, 5), (503, '100', 5, 5),
+            (429, '9' * 400, 5, 5), (429, '7', 0, 0),
+            (429, 'bad', 30, 2), (503, '-7', 30, 2),
+            (429, 'Wed, 21 Oct 2015 07:28:00 GMT', 30, 2),
+            (500, '7', 30, 2),
+        )):
+            with self.subTest(code=code, header=header, cap=cap), patch.object(helper.time, 'sleep') as sleep:
+                error = urllib.error.HTTPError(self.manifest['files'][0]['url'], code,
+                                               'transient', {'Retry-After': header}, io.BytesIO())
+                output = Path(self.temp.name) / f'corpus-{index}'
+
+                def attempt(*args, **kwargs):
+                    if opener.open.call_count == 1:
+                        raise error
+                    if expected:
+                        sleep.assert_called_once_with(expected)
+                    else:
+                        sleep.assert_not_called()
+                    return Response(self.body)
+
                 opener = Mock()
-                opener.open.side_effect = error
-                with self.assertRaises(urllib.error.HTTPError):
-                    helper.fetch(self.manifest, self.output, len(self.body), 1, opener,
-                                 retries=2, retry_delay=0)
-                self.assertEqual(opener.open.call_count, 1)
-                self.assertFalse(self.output.exists())
+                opener.open.side_effect = attempt
+                helper.fetch(self.manifest, output, len(self.body), 1, opener,
+                             retries=1, retry_delay=2, max_retry_delay=cap)
+                self.assertEqual(opener.open.call_count, 2)
+                self.assertEqual((output / 'test.jpg').read_bytes(), self.body)
+                self.assertEqual([p.name for p in output.iterdir()], ['test.jpg'])
+
+    def test_retry_exhaustion_removes_output_without_final_sleep(self):
         opener = Mock()
-        opener.open.return_value = Response(b'corrupt body')
-        with self.assertRaises(ValueError):
+        opener.open.side_effect = urllib.error.URLError(TimeoutError('transient'))
+        with patch.object(helper.time, 'sleep') as sleep, self.assertRaises(urllib.error.URLError):
             helper.fetch(self.manifest, self.output, len(self.body), 1, opener,
-                         retries=2, retry_delay=0)
-        self.assertEqual(opener.open.call_count, 1)
+                         retries=3, retry_delay=2, max_retry_delay=4)
+        self.assertEqual(opener.open.call_count, 4)
+        self.assertEqual(sleep.call_args_list, [unittest.mock.call(n) for n in (2, 4, 4)])
         self.assertFalse(self.output.exists())
+
+    def test_permanent_http_error_and_integrity_mismatch_are_not_retried(self):
+        for result, exception in (
+            (urllib.error.HTTPError(self.manifest['files'][0]['url'], 404, 'not found',
+                                    {'Retry-After': '7'}, io.BytesIO()), urllib.error.HTTPError),
+            (Response(b'x' * len(self.body)), ValueError),
+        ):
+            with self.subTest(result=result), patch.object(helper.time, 'sleep') as sleep:
+                opener = Mock()
+                opener.open.side_effect = [result]
+                with self.assertRaises(exception):
+                    helper.fetch(self.manifest, self.output, len(self.body), 1, opener,
+                                 retries=4, retry_delay=2)
+                self.assertEqual(opener.open.call_count, 1)
+                sleep.assert_not_called()
+                self.assertFalse(self.output.exists())
 
     def test_temporary_dns_resolution_retries_but_permanent_dns_fails_fast(self):
         opener = Mock()
@@ -127,6 +167,46 @@ class FetchTests(unittest.TestCase):
                 helper.fetch(self.manifest, self.output, len(self.body), 1, Mock(),
                              retries=retries, retry_delay=delay)
             self.assertFalse(self.output.exists())
+
+    def test_invalid_max_retry_delay_fails_before_output_creation(self):
+        for cap in (-1, float('inf'), float('nan'), True, '30'):
+            with self.subTest(cap=cap), self.assertRaises(ValueError):
+                helper.fetch(self.manifest, self.output, len(self.body), 1, Mock(),
+                             max_retry_delay=cap)
+            self.assertFalse(self.output.exists())
+
+    def test_main_reads_max_retry_delay_from_environment(self):
+        manifest_path = Path(self.temp.name) / 'manifest.json'
+        manifest_path.write_text(json.dumps(self.manifest))
+        for index, cap in enumerate(('5', '0', '-1', 'inf', 'nan', 'bad')):
+            output = Path(self.temp.name) / f'corpus-{index}'
+            opener = Mock()
+            opener.open.side_effect = [
+                urllib.error.HTTPError(self.manifest['files'][0]['url'], 429, 'rate limited',
+                                       {'Retry-After': '100'}, io.BytesIO()),
+                Response(self.body),
+            ]
+            with self.subTest(cap=cap), patch.dict(os.environ, {
+                'IRIS_PREVIEW_CORPUS_MAX_BYTES': str(len(self.body)),
+                'IRIS_PREVIEW_CORPUS_RETRIES': '1',
+                'IRIS_PREVIEW_CORPUS_RETRY_DELAY_SECONDS': '2',
+                'IRIS_PREVIEW_CORPUS_MAX_RETRY_DELAY_SECONDS': cap,
+            }), patch.object(helper.sys, 'argv', [
+                'fetch-preview-corpus.py', '--manifest', str(manifest_path), '--output', str(output),
+            ]), patch.object(helper.urllib.request, 'build_opener', return_value=opener), \
+                    patch.object(helper.time, 'sleep') as sleep:
+                if cap in ('5', '0'):
+                    helper.main()
+                    if cap == '5':
+                        sleep.assert_called_once_with(5)
+                    else:
+                        sleep.assert_not_called()
+                    self.assertEqual((output / 'test.jpg').read_bytes(), self.body)
+                else:
+                    with self.assertRaises(ValueError):
+                        helper.main()
+                    opener.open.assert_not_called()
+                    self.assertFalse(output.exists())
 
     def test_corrupt_responses_remove_owned_output(self):
         for body, changes in [

@@ -76,7 +76,8 @@ def transient_fetch_error(error):
     return isinstance(reason, (TimeoutError, ConnectionError))
 
 
-def fetch_entry(opener, entry, output, hosts, timeout, retries, retry_delay):
+def fetch_entry(opener, entry, output, hosts, timeout, retries, retry_delay, max_retry_delay):
+    backoff = min(retry_delay, max_retry_delay)
     destination = output / entry['filename']
     for attempt in range(retries + 1):
         partial = output / f".{entry['filename']}.{attempt}.part"
@@ -114,23 +115,34 @@ def fetch_entry(opener, entry, output, hosts, timeout, retries, retry_delay):
             if not transient_fetch_error(error) or attempt == retries:
                 raise
             print(f"transient preview fixture fetch failure; retry {attempt + 1} of {retries}", file=sys.stderr)
-            if retry_delay:
-                time.sleep(retry_delay)
+            delay = backoff
+            if isinstance(error, urllib.error.HTTPError) and error.code in {429, 503}:
+                retry_after = (error.headers or {}).get('Retry-After', '').strip()
+                # Only numeric seconds, not HTTP dates; the operator's cap always wins.
+                if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", retry_after):
+                    delay = max(delay, float(retry_after))
+            delay = min(delay, max_retry_delay)
+            if delay:
+                time.sleep(delay)
+            backoff = min(backoff * 2, max_retry_delay)
 
 
-def fetch(manifest, output, budget, timeout, opener=None, retries=0, retry_delay=0):
+def fetch(manifest, output, budget, timeout, opener=None, retries=0, retry_delay=0,
+          max_retry_delay=30):
     hosts, files = validate_manifest(manifest, budget)
     if type(retries) is not int or retries < 0:
         raise ValueError("retries must be a non-negative integer")
-    if (not isinstance(retry_delay, (int, float)) or isinstance(retry_delay, bool)
-            or not math.isfinite(retry_delay) or retry_delay < 0):
-        raise ValueError("retry delay must be finite and non-negative")
+    for delay in (retry_delay, max_retry_delay):
+        if (not isinstance(delay, (int, float)) or isinstance(delay, bool)
+                or not math.isfinite(delay) or delay < 0):
+            raise ValueError("retry delays must be finite and non-negative")
     opener = opener or urllib.request.build_opener(SafeRedirects(hosts))
     # Refuse reuse, including symlinks: never truncate an existing caller file.
     output.mkdir(mode=0o700)
     try:
         for entry in files:
-            size = fetch_entry(opener, entry, output, hosts, timeout, retries, retry_delay)
+            size = fetch_entry(opener, entry, output, hosts, timeout, retries, retry_delay,
+                               max_retry_delay)
             print(f"verified {entry['filename']}: {size} bytes")
     except BaseException:
         shutil.rmtree(output)
@@ -147,10 +159,11 @@ def main():
     timeout = float(os.environ.get('IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS', '30'))
     retries = int(os.environ.get('IRIS_PREVIEW_CORPUS_RETRIES', '0'))
     retry_delay = float(os.environ.get('IRIS_PREVIEW_CORPUS_RETRY_DELAY_SECONDS', '2'))
+    max_retry_delay = float(os.environ.get('IRIS_PREVIEW_CORPUS_MAX_RETRY_DELAY_SECONDS', '30'))
     if not 0 < timeout < float('inf'):
         raise ValueError("timeout must be finite and positive")
     fetch(json.loads(args.manifest.read_text(encoding='utf-8')), args.output, budget, timeout,
-          retries=retries, retry_delay=retry_delay)
+          retries=retries, retry_delay=retry_delay, max_retry_delay=max_retry_delay)
 
 
 if __name__ == '__main__':

@@ -151,6 +151,14 @@ def matrix_runner_mutation_regression():
 
 
 checks = {
+    "Preview corpus CI retries and delay cap keep operator overrides": all(
+        f"IRIS_PREVIEW_CORPUS_RETRIES: ${{{{ vars.IRIS_PREVIEW_CORPUS_RETRIES || {retries} }}}}" in workflow
+        and f"IRIS_PREVIEW_CORPUS_MAX_RETRY_DELAY_SECONDS: ${{{{ vars.IRIS_PREVIEW_CORPUS_MAX_RETRY_DELAY_SECONDS || {cap} }}}}" in workflow
+        for workflow, retries, cap in (
+            (ci, "4", "30"), (linux, "4", "30"), (macos, "4", "30"),
+            (media_probe, "'4'", "'30'"),
+        )
+    ),
     "All release audit jobs inherit the operator-configured native component bound": (
         "\n  IRIS_RELEASE_AUDIT_MAX_NATIVE_COMPONENTS: "
         "${{ vars.IRIS_RELEASE_AUDIT_MAX_NATIVE_COMPONENTS || 4096 }}\n" in release
