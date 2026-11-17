@@ -2,14 +2,15 @@ use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
 use ring::digest::{digest, SHA256};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 const ENCRYPTED_MAGIC: &[u8; 8] = b"IRISCCH1";
 const DEFAULT_MAX_ENTRIES: usize = 512;
 const DEFAULT_MAX_BYTES: u64 = 256 * 1024 * 1024;
-static CACHE_INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(1);
+// Bound collision retries even when every candidate already exists.
+const DIRECTORY_CREATE_ATTEMPTS: usize = 16;
 static CACHE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug)]
@@ -29,6 +30,7 @@ struct CacheState {
 /// Not kept across restarts; data is always encrypted with a per-session key.
 pub struct SessionCache {
     base_dir: PathBuf,
+    owned: bool,
     state: Mutex<CacheState>,
     encryption_key: [u8; 32],
     max_entries: usize,
@@ -37,11 +39,25 @@ pub struct SessionCache {
 
 impl SessionCache {
     pub fn new() -> Result<Self, std::io::Error> {
-        let instance = CACHE_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let base_dir = std::env::temp_dir()
-            .join("iris-session-cache")
-            .join(format!("{}-{instance}", std::process::id()));
-        Self::with_base_dir(base_dir)
+        let base_dir = create_private_directory(&std::env::temp_dir(), || {
+            let mut random = [0u8; 16];
+            SystemRandom::new()
+                .fill(&mut random)
+                .map_err(|_| std::io::Error::other("failed to generate cache directory name"))?;
+            let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+            Ok(format!("iris-session-cache-{suffix}"))
+        })?;
+        match Self::with_base_dir(base_dir.clone()) {
+            Ok(mut cache) => {
+                cache.owned = true;
+                Ok(cache)
+            }
+            Err(error) => {
+                // Initialization failed; only our exclusively created, empty directory is ours.
+                let _ = std::fs::remove_dir(base_dir);
+                Err(error)
+            }
+        }
     }
 
     fn with_base_dir(base_dir: PathBuf) -> Result<Self, std::io::Error> {
@@ -60,6 +76,7 @@ impl SessionCache {
             .map_err(|_| std::io::Error::other("failed to generate session cache key"))?;
         Ok(Self {
             base_dir,
+            owned: false,
             state: Mutex::new(CacheState::default()),
             encryption_key,
             max_entries,
@@ -225,9 +242,40 @@ impl SessionCache {
 
 impl Drop for SessionCache {
     fn drop(&mut self) {
-        self.clear();
-        let _ = std::fs::remove_dir(&self.base_dir);
+        if self.owned {
+            let _ = std::fs::remove_dir_all(&self.base_dir);
+        } else {
+            self.clear();
+        }
     }
+}
+
+/// Exclusively create a candidate, never adopting or removing an existing path.
+fn create_private_directory(
+    parent: &Path,
+    mut next_name: impl FnMut() -> Result<String, std::io::Error>,
+) -> Result<PathBuf, std::io::Error> {
+    for _ in 0..DIRECTORY_CREATE_ATTEMPTS {
+        let candidate = parent.join(next_name()?);
+        // DirBuilder has create_dir's exclusive semantics, with private Unix permissions
+        // set at creation rather than through a racy chmod. Other platforms inherit ACLs.
+        #[cfg(unix)]
+        let result = {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().mode(0o700).create(&candidate)
+        };
+        #[cfg(not(unix))]
+        let result = std::fs::create_dir(&candidate);
+        match result {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "exhausted session cache directory creation attempts",
+    ))
 }
 
 fn touch_lru(state: &mut CacheState, key: &str) {
@@ -270,6 +318,92 @@ mod tests {
 
     fn cache_path(dir: &TempDir, key: &str) -> PathBuf {
         dir.path().join(format!("{}.cache", cache_key_digest(key)))
+    }
+
+    #[test]
+    fn new_caches_have_private_independent_directories() {
+        let first = SessionCache::new().unwrap();
+        let second = SessionCache::new().unwrap();
+        assert_ne!(first.base_dir, second.base_dir);
+        assert_eq!(
+            first.base_dir.parent(),
+            Some(std::env::temp_dir().as_path())
+        );
+        first.put("same-key", b"first").unwrap();
+        second.put("same-key", b"second").unwrap();
+        assert_eq!(first.read("same-key").unwrap(), b"first");
+        assert_eq!(second.read("same-key").unwrap(), b"second");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&first.base_dir)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+    }
+
+    #[test]
+    fn private_directory_skips_existing_candidates_without_changing_them() {
+        let dir = TempDir::new().unwrap();
+        let existing_file = dir.path().join("existing-file");
+        let existing_dir = dir.path().join("existing-directory");
+        std::fs::write(&existing_file, b"unrelated file").unwrap();
+        std::fs::create_dir(&existing_dir).unwrap();
+        std::fs::write(existing_dir.join("data"), b"unrelated directory").unwrap();
+        let mut names = ["existing-file", "existing-directory", "fresh"].into_iter();
+        let created =
+            create_private_directory(dir.path(), || Ok(names.next().unwrap().to_string())).unwrap();
+        assert_eq!(created, dir.path().join("fresh"));
+        assert!(created.is_dir());
+        assert_eq!(std::fs::read(existing_file).unwrap(), b"unrelated file");
+        assert_eq!(
+            std::fs::read(existing_dir.join("data")).unwrap(),
+            b"unrelated directory"
+        );
+    }
+
+    #[test]
+    fn private_directory_collision_retries_are_bounded() {
+        let dir = TempDir::new().unwrap();
+        let existing = dir.path().join("occupied");
+        std::fs::write(&existing, b"untouched").unwrap();
+        let mut attempts = 0;
+        let error = create_private_directory(dir.path(), || {
+            attempts += 1;
+            Ok("occupied".to_string())
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(attempts, DIRECTORY_CREATE_ATTEMPTS);
+        assert_eq!(std::fs::read(existing).unwrap(), b"untouched");
+    }
+
+    #[test]
+    fn dropping_owned_cache_removes_only_its_directory() {
+        let cache = SessionCache::new().unwrap();
+        let base_dir = cache.base_dir.clone();
+        let sibling = TempDir::new_in(base_dir.parent().unwrap()).unwrap();
+        let unrelated = sibling.path().join("unrelated");
+        std::fs::write(&unrelated, b"keep me").unwrap();
+        cache.put("key", b"cached").unwrap();
+        // Unindexed session files (such as interrupted writes) are cleaned up too.
+        std::fs::write(base_dir.join("unfinished.tmp"), b"temporary").unwrap();
+        drop(cache);
+        assert!(!base_dir.exists());
+        assert_eq!(std::fs::read(unrelated).unwrap(), b"keep me");
+    }
+
+    #[test]
+    fn dropping_cache_preserves_caller_owned_directory() {
+        let dir = TempDir::new().unwrap();
+        let cache = SessionCache::with_base_dir(dir.path().to_path_buf()).unwrap();
+        cache.put("key", b"cached").unwrap();
+        drop(cache);
+        // Even when the cache leaves the directory empty, it belongs to the caller.
+        assert!(dir.path().is_dir());
+        assert!(!cache_path(&dir, "key").exists());
     }
 
     #[test]
