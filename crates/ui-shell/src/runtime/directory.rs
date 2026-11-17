@@ -95,6 +95,8 @@ impl AppRuntime {
             backend_id: backend_id.clone(),
             dir_stable_id: dir_stable_id.clone(),
             generation,
+            catalog: Arc::clone(&self.catalog),
+            completed: false,
         })
     }
 
@@ -132,8 +134,9 @@ impl AppRuntime {
             .is_ok()
     }
 
-    pub(crate) fn complete_directory_snapshot(&self, write: DirectorySnapshotWrite) -> bool {
-        self.catalog
+    pub(crate) fn complete_directory_snapshot(&self, mut write: DirectorySnapshotWrite) -> bool {
+        let completed = self
+            .catalog
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .complete_snapshot_generation(
@@ -141,7 +144,9 @@ impl AppRuntime {
                 &write.dir_stable_id.0,
                 write.generation,
             )
-            .is_ok()
+            .is_ok();
+        write.completed = completed;
+        completed
     }
 
     pub fn backend_id_for_path(&self, path: &Path) -> BackendId {
@@ -1014,6 +1019,60 @@ mod tests {
             .expect("snapshot exists");
         assert_eq!(snapshot.item_count, 7);
         assert!(snapshot.is_complete);
+    }
+
+    #[test]
+    fn cancelled_snapshot_write_reclaims_its_staging_rows() {
+        let runtime = AppRuntime::initialize();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_string_lossy().to_string();
+        let backend_id = runtime.backend_id_for_path(temp.path());
+        let parent_stable_id = runtime.stable_id_for_path(temp.path());
+        let entry = iris_core_domain::types::list::ListEntry {
+            object_ref: ObjectRef {
+                local_path_is_lossy: false,
+                key: ObjectKey {
+                    backend_id: backend_id.clone(),
+                    stable_id: StableId("pending-id".to_string()),
+                },
+                parent_stable_id: Some(parent_stable_id.clone()),
+                display_path: temp
+                    .path()
+                    .join("pending.txt")
+                    .to_string_lossy()
+                    .to_string(),
+            },
+            sort_name_key: iris_core_domain::types::list::ListEntry::sort_name_key_for(
+                "pending.txt",
+            ),
+            sort_extension_key: iris_core_domain::types::list::ListEntry::sort_extension_key_for(
+                "pending.txt",
+            ),
+            name: "pending.txt".to_string(),
+            is_dir: false,
+            metadata_level: MetadataLevel::L1,
+            size: Some(1),
+            mtime: None,
+            ctime: None,
+            is_symlink: false,
+            symlink_target: None,
+            is_inaccessible: false,
+            annotation: None,
+        };
+        let write = runtime
+            .begin_directory_snapshot_for_path(&root)
+            .expect("snapshot generation");
+        let generation = write.generation;
+        assert!(runtime.append_directory_snapshot_entries(&write, &[entry]));
+        drop(write);
+
+        // Generation numbers come from both snapshots and entries. With no committed
+        // snapshot the counter restarts, so a leftover staging row would advance it.
+        let next = runtime
+            .begin_directory_snapshot_for_path(&root)
+            .expect("next snapshot generation");
+        assert_eq!(next.generation, generation);
+        drop(next);
     }
 
     #[test]

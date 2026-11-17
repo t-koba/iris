@@ -335,6 +335,64 @@ mod tests {
     }
 
     #[test]
+    fn abandoned_generation_is_reclaimed_without_losing_the_committed_listing() {
+        let mut repo = CatalogRepository::open_in_memory().unwrap();
+        let entry = |name: &str| CachedDirectoryEntry {
+            local_path_is_lossy: false,
+            stable_id: format!("{name}-id"),
+            display_path: format!("/root/{name}"),
+            name: name.to_string(),
+            is_dir: false,
+            metadata_level: MetadataLevel::L1,
+            size: Some(1),
+            mtime: None,
+            ctime: None,
+            is_symlink: false,
+            symlink_target: None,
+            is_inaccessible: false,
+        };
+
+        let committed = repo.begin_snapshot_generation("local", "root-id").unwrap();
+        repo.append_snapshot_entries(
+            "local",
+            "root-id",
+            committed,
+            std::slice::from_ref(&entry("committed")),
+        )
+        .unwrap();
+        repo.complete_snapshot_generation("local", "root-id", committed)
+            .unwrap();
+
+        let abandoned = repo.begin_snapshot_generation("local", "root-id").unwrap();
+        repo.append_snapshot_entries(
+            "local",
+            "root-id",
+            abandoned,
+            std::slice::from_ref(&entry("abandoned")),
+        )
+        .unwrap();
+        assert_eq!(abandoned, committed + 1);
+
+        repo.abandon_snapshot_generation("local", "root-id", abandoned)
+            .unwrap();
+        assert_eq!(
+            repo.get_snapshot_entries("local", "root-id")
+                .unwrap()
+                .unwrap(),
+            vec![entry("committed")]
+        );
+        let rows: i64 = repo
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM directory_snapshot_entries",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
     fn snapshot_keeps_distinct_paths_that_share_a_stable_id() {
         let mut repo = CatalogRepository::open_in_memory().unwrap();
         let entry = |name: &str| CachedDirectoryEntry {

@@ -89,11 +89,37 @@ pub struct TransferItemOutcome {
     pub bytes_completed: u64,
 }
 
-#[derive(Clone, Debug)]
+/// Owns an in-progress directory snapshot generation. Dropping it before completion
+/// reclaims its staging rows so a cancelled listing cannot leave permanent cache debris.
 pub struct DirectorySnapshotWrite {
     backend_id: BackendId,
     dir_stable_id: StableId,
     generation: u64,
+    catalog: Arc<Mutex<CatalogRepository>>,
+    completed: bool,
+}
+
+impl Drop for DirectorySnapshotWrite {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let mut catalog = self
+            .catalog
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Err(error) = catalog.abandon_snapshot_generation(
+            &self.backend_id.0,
+            &self.dir_stable_id.0,
+            self.generation,
+        ) {
+            tracing::warn!(
+                backend_id = self.backend_id.0,
+                dir_stable_id_hash = %iris_core_domain::observability::path_hash(&self.dir_stable_id.0),
+                "failed to abandon directory snapshot generation: {error}"
+            );
+        }
+    }
 }
 
 #[derive(Clone)]

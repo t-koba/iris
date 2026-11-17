@@ -113,11 +113,61 @@ impl CachePolicy {
         Ok(deleted)
     }
 
+    /// Expired committed listings and their entries are removed together in one savepoint,
+    /// without waiting for the same directory to be listed again.
+    pub fn evict_expired_snapshots(&self, conn: &Connection) -> Result<u64, rusqlite::Error> {
+        let cutoff_secs = now_secs() - self.ttl.as_secs() as i64;
+        conn.execute_batch("SAVEPOINT iris_snapshot_eviction")?;
+        match self.delete_expired_snapshots(conn, cutoff_secs) {
+            Ok(deleted) => {
+                conn.execute_batch("RELEASE iris_snapshot_eviction")?;
+                Ok(deleted)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch(
+                    "ROLLBACK TO iris_snapshot_eviction; RELEASE iris_snapshot_eviction",
+                );
+                Err(error)
+            }
+        }
+    }
+
+    fn delete_expired_snapshots(
+        &self,
+        conn: &Connection,
+        cutoff_secs: i64,
+    ) -> Result<u64, rusqlite::Error> {
+        let mut statement = conn.prepare(
+            "SELECT backend_id, dir_stable_id FROM directory_snapshots
+             WHERE snapshot_at_secs < ?1",
+        )?;
+        let keys = statement
+            .query_map([cutoff_secs], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        for (backend_id, dir_stable_id) in &keys {
+            conn.execute(
+                "DELETE FROM directory_snapshot_entries
+                 WHERE backend_id = ?1 AND dir_stable_id = ?2",
+                rusqlite::params![backend_id, dir_stable_id],
+            )?;
+            conn.execute(
+                "DELETE FROM directory_snapshots
+                 WHERE backend_id = ?1 AND dir_stable_id = ?2",
+                rusqlite::params![backend_id, dir_stable_id],
+            )?;
+        }
+        Ok(keys.len() as u64)
+    }
+
     pub fn run_eviction(&self, conn: &Connection) -> Result<u64, rusqlite::Error> {
+        let snapshots = self.evict_expired_snapshots(conn)?;
         let expired = self.evict_expired(conn)?;
         let lru = self.evict_lru(conn)?;
         let thumbnails = self.evict_thumbnail_bytes(conn)?;
-        Ok(expired + lru + thumbnails)
+        Ok(snapshots + expired + lru + thumbnails)
     }
 }
 
@@ -158,6 +208,50 @@ mod tests {
     use super::*;
     use crate::schema;
     use tempfile::tempdir;
+
+    #[test]
+    fn evict_expired_snapshots_removes_committed_rows_without_a_revisit() {
+        let conn = schema::open(None, 0).expect("open in-memory sqlite");
+        conn.execute_batch(
+            "INSERT INTO directory_snapshots
+                (backend_id, dir_stable_id, generation, item_count, snapshot_at_secs, is_complete)
+             VALUES ('local', 'stale', 1, 1, 1, 1),
+                    ('local', 'fresh', 1, 1, 9999999999, 1);
+             INSERT INTO directory_snapshot_entries
+                (backend_id, dir_stable_id, generation, stable_id, display_path, name,
+                 is_dir, metadata_level)
+             VALUES ('local', 'stale', 1, 'old', '/stale', 'stale', 0, 0),
+                    ('local', 'fresh', 1, 'new', '/fresh', 'fresh', 0, 0);",
+        )
+        .expect("insert snapshots");
+
+        let policy = CachePolicy {
+            ttl: Duration::from_secs(60),
+            ..Default::default()
+        };
+        assert_eq!(policy.evict_expired_snapshots(&conn).expect("evict"), 1);
+        let snapshots: i64 = conn
+            .query_row("SELECT COUNT(*) FROM directory_snapshots", [], |row| {
+                row.get(0)
+            })
+            .expect("count snapshots");
+        let entries: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM directory_snapshot_entries",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count entries");
+        assert_eq!((snapshots, entries), (1, 1));
+        let fresh: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM directory_snapshots WHERE dir_stable_id = 'fresh'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fresh snapshot survives");
+        assert_eq!(fresh, 1);
+    }
 
     #[test]
     fn evict_thumbnail_bytes_removes_files_and_rows() {

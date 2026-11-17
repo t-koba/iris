@@ -98,6 +98,22 @@ impl CatalogRepository {
         Ok(generation as u64)
     }
 
+    /// Reclaim entries written by a generation whose owner exited before completion.
+    /// The committed generation is untouched, so readers keep seeing the last complete listing.
+    pub fn abandon_snapshot_generation(
+        &mut self,
+        backend_id: &str,
+        dir_stable_id: &str,
+        generation: u64,
+    ) -> Result<(), CatalogError> {
+        self.conn.execute(
+            "DELETE FROM directory_snapshot_entries
+             WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3",
+            rusqlite::params![backend_id, dir_stable_id, generation as i64],
+        )?;
+        Ok(())
+    }
+
     pub fn append_snapshot_entries(
         &mut self,
         backend_id: &str,
