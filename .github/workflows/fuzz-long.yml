@@ -58,6 +58,10 @@ jobs:
           tool: cargo-fuzz
 
       - name: Run long fuzz target
+        env:
+          # Match the ci.yml fuzz smoke: the installed cargo-fuzz binary may
+          # infer a musl target that cannot link ASan on the runner.
+          IRIS_FUZZ_TARGET: x86_64-unknown-linux-gnu
         run: FUZZ_MAX_TOTAL_TIME=3600 ./scripts/fuzz-target.sh "${{ matrix.target }}"
 
       - name: Upload fuzz artifacts

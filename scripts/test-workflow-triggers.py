@@ -14,6 +14,7 @@ linux = (root / ".github/workflows/linux-ffmpeg-validation.yml").read_text(encod
 macos = (root / ".github/workflows/macos-runtime-validation.yml").read_text(encoding="utf-8")
 media_probe = (root / ".github/workflows/windows-media-foundation-probe.yml").read_text(encoding="utf-8")
 release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+fuzz_long = (root / ".github/workflows/fuzz-long.yml").read_text(encoding="utf-8")
 macos_call = "uses: ./.github/workflows/macos-runtime-validation.yml"
 bootstrap_timeout = (
     "Downloading https://github.com/microsoft/vcpkg-tool/releases/download/2026-10-29/vcpkg.exe "
@@ -147,6 +148,18 @@ def matrix_runner_mutation_regression():
     )
     return ci_matrix_job_has(job, *expected) and not ci_matrix_job_has(
         job, *expected, workflow=mutated_workflow
+    )
+
+
+def fuzz_long_uses_asan_compatible_target():
+    step = re.search(
+        r"^      - name: Run long fuzz target\n(?P<body>(?:        [^\n]*\n)+)",
+        fuzz_long, re.MULTILINE,
+    )
+    return bool(
+        step
+        and "IRIS_FUZZ_TARGET: x86_64-unknown-linux-gnu" in step["body"]
+        and "FUZZ_MAX_TOTAL_TIME=3600 ./scripts/fuzz-target.sh" in step["body"]
     )
 
 
@@ -339,6 +352,8 @@ permissions:
         "smb3-signing-kdf",
         "cargo test -p iris-smb-client --lib --locked",
     ),
+    "Scheduled long fuzz builds for the ASan-compatible GNU target":
+        fuzz_long_uses_asan_compatible_target(),
     "CI manual, pull-request, and scheduled triggers": all(
         trigger in ci for trigger in ("  workflow_dispatch:\n", "  pull_request:\n", "  schedule:\n")
     ),
