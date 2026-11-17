@@ -1,6 +1,6 @@
 use crate::bloom::{BloomSignature, BLOOM_BYTES};
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -102,13 +102,18 @@ impl Segment {
 
     pub fn write_atomic(&self, path: &Path) -> Result<(), SegmentError> {
         let bytes = self.to_bytes()?;
-        let tmp_path = tmp_path_for(path);
-        {
-            let mut file = File::create(&tmp_path)?;
+        let (tmp_path, mut file) = create_staging_file(path)?;
+        let result = (|| {
             file.write_all(&bytes)?;
             file.sync_all()?;
+            // Close before renaming or removing, including on Windows.
+            drop(file);
+            std::fs::rename(&tmp_path, path)
+        })();
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(error.into());
         }
-        std::fs::rename(&tmp_path, path)?;
         if let Some(parent) = path.parent() {
             if let Ok(dir) = File::open(parent) {
                 let _ = dir.sync_all();
@@ -518,10 +523,28 @@ fn checksum64(bytes: &[u8]) -> u64 {
     hash
 }
 
-fn tmp_path_for(path: &Path) -> PathBuf {
-    let mut os = path.as_os_str().to_os_string();
-    os.push(".tmp");
-    PathBuf::from(os)
+// Bound contention work; exhausting the candidates must never overwrite a file.
+const STAGING_ATTEMPTS: u32 = 128;
+
+fn create_staging_file(path: &Path) -> std::io::Result<(PathBuf, File)> {
+    for index in 0..STAGING_ATTEMPTS {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(format!(".tmp.{index}"));
+        let candidate = PathBuf::from(name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "no search-index staging candidate is available",
+    ))
 }
 
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
@@ -629,13 +652,105 @@ mod tests {
     }
 
     #[test]
-    fn write_atomic_round_trips_from_disk() {
+    fn write_atomic_preserves_colliding_files_and_replaces_destination() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("photos.idx");
+        let sentinel = dir.path().join("photos.idx.tmp");
+        let occupied = dir.path().join("photos.idx.tmp.0");
+        fs::write(&sentinel, b"unrelated sentinel").unwrap();
+        fs::write(&occupied, b"occupied candidate").unwrap();
+
+        for index in 1..=2 {
+            let segment = Segment::new(vec![sample_record(index)]);
+            segment.write_atomic(&path).expect("write segment");
+            assert_eq!(Segment::read(&path).expect("read segment"), segment);
+            assert_eq!(fs::read(&sentinel).unwrap(), b"unrelated sentinel");
+            assert_eq!(fs::read(&occupied).unwrap(), b"occupied candidate");
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
+        }
+    }
+
+    #[test]
+    fn write_atomic_cleans_staging_file_after_rename_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("photos.idx");
+        let sentinel = dir.path().join("photos.idx.tmp");
+        fs::create_dir(&path).unwrap();
+        fs::write(&sentinel, b"unrelated sentinel").unwrap();
+
         let segment = Segment::new(vec![sample_record(1)]);
-        segment.write_atomic(&path).expect("write segment");
-        let restored = Segment::read(&path).expect("read segment");
-        assert_eq!(restored, segment);
+        assert!(matches!(
+            segment.write_atomic(&path),
+            Err(SegmentError::Io(_))
+        ));
+        assert!(path.is_dir());
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+        assert_eq!(fs::read(&sentinel).unwrap(), b"unrelated sentinel");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn write_atomic_fails_closed_when_staging_candidates_are_exhausted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("photos.idx");
+        fs::write(&path, b"original destination").unwrap();
+        for index in 0..STAGING_ATTEMPTS {
+            fs::write(dir.path().join(format!("photos.idx.tmp.{index}")), b"taken").unwrap();
+        }
+
+        let segment = Segment::new(vec![sample_record(1)]);
+        assert!(matches!(
+            segment.write_atomic(&path),
+            Err(SegmentError::Io(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"original destination");
+        for index in 0..STAGING_ATTEMPTS {
+            assert_eq!(
+                fs::read(dir.path().join(format!("photos.idx.tmp.{index}"))).unwrap(),
+                b"taken"
+            );
+        }
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            STAGING_ATTEMPTS as usize + 1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_atomic_writers_only_publish_complete_segments() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("photos.idx");
+        let first = Segment::new((0..32).map(sample_record).collect());
+        let second = Segment::new((100..164).map(sample_record).collect());
+        first.write_atomic(&path).unwrap();
+        let start = Barrier::new(3);
+
+        thread::scope(|scope| {
+            for segment in [&first, &second] {
+                let path = &path;
+                let start = &start;
+                scope.spawn(move || {
+                    start.wait();
+                    for _ in 0..64 {
+                        segment.write_atomic(path).expect("concurrent write");
+                        thread::yield_now();
+                    }
+                });
+            }
+            start.wait();
+            for _ in 0..512 {
+                let observed = Segment::read(&path).expect("read complete segment");
+                assert!(observed == first || observed == second);
+                thread::yield_now();
+            }
+        });
+        let observed = Segment::read(&path).unwrap();
+        assert!(observed == first || observed == second);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
