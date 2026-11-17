@@ -1,4 +1,5 @@
 use super::*;
+use iris_core_domain::path_identity::equality_key;
 
 fn remove_thumbnail_cache_entry(state: &mut AppState, key: &ThumbnailCacheKey) {
     if let Some(entry) = state.thumbnail_cache.remove(key) {
@@ -61,78 +62,63 @@ pub fn invalidate_changed_thumbnail_entries(
     previous_entries: &[ListEntry],
     new_entries: &[ListEntry],
 ) {
-    let previous_by_path = previous_entries
+    let new_keys_by_identity = new_entries
         .iter()
         .map(|entry| {
             (
-                entry.object_ref.display_path.clone(),
-                EntryCacheStamp::from_entry(entry),
+                (
+                    entry.object_ref.key.clone(),
+                    equality_key(&entry.object_ref.display_path),
+                ),
+                ThumbnailCacheKey::from_entry(entry),
             )
         })
         .collect::<std::collections::HashMap<_, _>>();
-
-    let changed_paths = new_entries
+    let stale_keys = previous_entries
         .iter()
         .filter_map(|entry| {
-            let path = &entry.object_ref.display_path;
-            let new_stamp = EntryCacheStamp::from_entry(entry);
-            previous_by_path
-                .get(path)
-                .filter(|previous_stamp| **previous_stamp != new_stamp)
-                .map(|_| path.clone())
+            let previous_key = ThumbnailCacheKey::from_entry(entry);
+            new_keys_by_identity
+                .get(&(
+                    entry.object_ref.key.clone(),
+                    equality_key(&entry.object_ref.display_path),
+                ))
+                .filter(|new_key| **new_key != previous_key)
+                .map(|_| previous_key)
         })
-        .collect::<Vec<_>>();
-
-    invalidate_thumbnail_paths(state, &changed_paths);
-}
-
-fn invalidate_thumbnail_paths(state: &mut AppState, paths: &[String]) {
-    if paths.is_empty() {
+        .collect::<std::collections::HashSet<_>>();
+    if stale_keys.is_empty() {
         return;
     }
 
-    app_runtime().cancel_thumbnails(paths.iter().map(String::as_str));
-
-    let path_set = paths
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
-    for path in &path_set {
-        let canceled_keys = state
-            .thumbnail_inflight
-            .iter()
-            .filter(|key| key.path() == path)
-            .cloned()
-            .collect::<Vec<_>>();
-        let stale_cache_keys = state
-            .thumbnail_cache
-            .keys()
-            .filter(|key| key.path() == path)
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in stale_cache_keys {
-            remove_thumbnail_cache_entry(state, &key);
-        }
-        state
-            .thumbnail_generation_queued
-            .retain(|key| key.path() != path);
-        state
-            .thumbnail_generation_requests
-            .retain(|key, _| key.path() != path);
-        state.thumbnail_inflight.retain(|key| key.path() != path);
-        state
-            .thumbnail_inflight_backends
-            .retain(|key, _| key.path() != path);
-        state.thumbnail_canceled.retain(|key| key.path() != path);
-        state.thumbnail_unsupported.retain(|key| key.path() != path);
-        state.thumbnail_canceled.extend(canceled_keys);
+    app_runtime().cancel_thumbnails(stale_keys.iter().map(ThumbnailCacheKey::path));
+    for key in &stale_keys {
+        remove_thumbnail_cache_entry(state, key);
     }
     state
+        .thumbnail_inflight
+        .retain(|key| !stale_keys.contains(key));
+    state
+        .thumbnail_generation_queued
+        .retain(|key| !stale_keys.contains(key));
+    state
+        .thumbnail_generation_requests
+        .retain(|key, _| !stale_keys.contains(key));
+    state
+        .thumbnail_inflight_backends
+        .retain(|key, _| !stale_keys.contains(key));
+    state
+        .thumbnail_canceled
+        .retain(|key| !stale_keys.contains(key));
+    state
+        .thumbnail_unsupported
+        .retain(|key| !stale_keys.contains(key));
+    state
         .thumbnail_cache_lru
-        .retain(|key| !path_set.contains(key.path()));
+        .retain(|key| !stale_keys.contains(key));
     state
         .thumbnail_generation_queue
-        .retain(|key| !path_set.contains(key.path()));
+        .retain(|key| !stale_keys.contains(key));
 }
 
 pub fn stop_thumbnail_work(state: &mut AppState) {
@@ -204,7 +190,7 @@ pub fn touch_thumbnail_cache_entry(state: &mut AppState, key: &ThumbnailCacheKey
 
 pub fn thumbnail_cache_key_is_current(state: &AppState, key: &ThumbnailCacheKey) -> bool {
     state.active_panes().into_iter().any(|pane| {
-        pane.entry_by_display_path(key.path())
+        pane.entry_by_object_key(&key.object_key)
             .is_some_and(|entry| ThumbnailCacheKey::from_entry(entry) == *key)
     })
 }
@@ -471,25 +457,105 @@ mod tests {
     }
 
     #[test]
-    fn invalidation_keeps_distinct_remote_objects_with_equivalent_paths() {
+    fn invalidation_removes_only_previous_keys_with_matching_identity() {
+        // Byte-identical paths exercise this on every platform; NFC/NFD paths
+        // additionally exercise normalization-insensitive identity on macOS.
+        for new_path in ["Café.jpg", "Cafe\u{301}.jpg"] {
+            let mut state = AppState::default();
+            let mut previous = entry("Café.jpg", 5);
+            previous.object_ref.key.backend_id = BackendId("s3:bucket".into());
+            let mut changed = previous.clone();
+            changed.object_ref.display_path = new_path.into();
+            changed.size = Some(6);
+            let mut distinct = previous.clone();
+            distinct.object_ref.key.stable_id = StableId("other-object".into());
+            distinct.object_ref.display_path = new_path.into();
+            let mut other_path = previous.clone();
+            other_path.object_ref.display_path = "other.jpg".into();
+            let old_key = ThumbnailCacheKey::from_entry(&previous);
+            let new_key = ThumbnailCacheKey::from_entry(&changed);
+            let distinct_key = ThumbnailCacheKey::from_entry(&distinct);
+            let other_path_key = ThumbnailCacheKey::from_entry(&other_path);
+            let keys = [&old_key, &new_key, &distinct_key, &other_path_key];
+            for key in keys {
+                insert_thumbnail_cache(&mut state, key.clone(), thumbnail(1));
+                state.thumbnail_inflight.insert(key.clone());
+                state
+                    .thumbnail_inflight_backends
+                    .insert(key.clone(), "s3".into());
+                state.thumbnail_canceled.insert(key.clone());
+                state.thumbnail_unsupported.insert(key.clone());
+                state.thumbnail_generation_queue.push_back(key.clone());
+                state.thumbnail_generation_queued.insert(key.clone());
+                state.thumbnail_generation_requests.insert(
+                    key.clone(),
+                    crate::state::QueuedThumbnailRequest {
+                        object_key: key.object_key.clone(),
+                        backend_type: "s3".into(),
+                        priority: RequestPriority::Nearby,
+                    },
+                );
+            }
+
+            let should_invalidate = new_path == "Café.jpg" || cfg!(target_os = "macos");
+            invalidate_changed_thumbnail_entries(
+                &mut state,
+                &[previous, distinct.clone(), other_path.clone()],
+                &[changed, distinct, other_path],
+            );
+
+            for key in keys {
+                let retained = key != &old_key || !should_invalidate;
+                assert_eq!(state.thumbnail_cache.contains_key(key), retained);
+                assert_eq!(state.thumbnail_inflight.contains(key), retained);
+                assert_eq!(
+                    state.thumbnail_inflight_backends.contains_key(key),
+                    retained
+                );
+                assert_eq!(state.thumbnail_canceled.contains(key), retained);
+                assert_eq!(state.thumbnail_unsupported.contains(key), retained);
+                assert_eq!(state.thumbnail_generation_queue.contains(key), retained);
+                assert_eq!(state.thumbnail_generation_queued.contains(key), retained);
+                assert_eq!(
+                    state.thumbnail_generation_requests.contains_key(key),
+                    retained
+                );
+            }
+            let expected_keys = keys
+                .into_iter()
+                .filter(|key| *key != &old_key || !should_invalidate)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(state.thumbnail_cache_bytes, expected_keys.len());
+            assert_eq!(state.thumbnail_cache_lru.len(), expected_keys.len());
+            for key in expected_keys {
+                assert_eq!(state.thumbnail_cache_lru.pop_front(), Some(key));
+            }
+        }
+    }
+
+    #[test]
+    fn current_key_uses_object_identity_and_path_equality() {
         let mut state = AppState::default();
-        let first = entry("Café.jpg", 5);
-        let second = entry("Cafe\u{301}.jpg", 5);
-        let first_key = ThumbnailCacheKey::from_entry(&first);
-        let second_key = ThumbnailCacheKey::from_entry(&second);
-        assert_ne!(first_key, second_key);
-        insert_thumbnail_cache(&mut state, first_key.clone(), thumbnail(1));
-        insert_thumbnail_cache(&mut state, second_key.clone(), thumbnail(1));
+        let original = entry("Café.jpg", 5);
+        let original_key = ThumbnailCacheKey::from_entry(&original);
+        let mut respelled = original.clone();
+        respelled.object_ref.display_path = "Cafe\u{301}.jpg".into();
+        let respelled_key = ThumbnailCacheKey::from_entry(&respelled);
+        let mut distinct = original.clone();
+        distinct.object_ref.key.backend_id = BackendId("s3:bucket".into());
+        distinct.object_ref.display_path = respelled.object_ref.display_path.clone();
+        // A display-path lookup would find the distinct object instead, or miss
+        // the original object entirely after a normalization-only spelling change.
+        state.pane_mut(0).replace_entries(vec![distinct, respelled]);
 
-        let mut changed_second = second.clone();
-        changed_second.size = Some(6);
-        invalidate_changed_thumbnail_entries(
-            &mut state,
-            &[first.clone(), second.clone()],
-            &[first.clone(), changed_second],
+        assert!(thumbnail_cache_key_is_current(&state, &respelled_key));
+        assert_eq!(
+            thumbnail_cache_key_is_current(&state, &original_key),
+            cfg!(target_os = "macos")
         );
-
-        assert!(state.thumbnail_cache.contains_key(&first_key));
-        assert!(!state.thumbnail_cache.contains_key(&second_key));
+        let mut stale = respelled_key;
+        stale.size = Some(6);
+        assert!(!thumbnail_cache_key_is_current(&state, &stale));
     }
 }

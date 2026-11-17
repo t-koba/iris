@@ -1,8 +1,6 @@
 use crate::messages::{Message, ThumbnailData};
 use crate::runtime::app_runtime;
-use crate::state::{
-    AppState, CachedThumbnail, EntryCacheStamp, EntryIndex, ThumbnailCacheKey, ViewMode,
-};
+use crate::state::{AppState, CachedThumbnail, EntryIndex, ThumbnailCacheKey, ViewMode};
 use crate::update::helpers::grid_items_per_row_for_pane;
 use iced::Task;
 use iris_core_domain::types::list::ListEntry;
