@@ -22,12 +22,16 @@ The fetch helper requires `IRIS_PREVIEW_CORPUS_MAX_BYTES`, validates the fixture
 set and total budget before network access, checks HTTPS redirect policy, streams
 under per-file size bounds, and verifies each pinned size and SHA-256. The default
 per-operation network timeout is 30 seconds (CI selects 60 seconds). Direct calls
-default to no retries; CI defaults to one transient-failure retry with a two-second
-delay. `IRIS_PREVIEW_CORPUS_RETRIES` and
-`IRIS_PREVIEW_CORPUS_RETRY_DELAY_SECONDS` configure that policy. Policy, status,
-size and digest failures are not retried. Downloads use private partial files and
-atomic installation. The output directory must not exist; on failure, the helper
-removes the directory it created. The caller removes successful output.
+default to no retries. The CI and validation workflows default to four retries for
+transient failures; a numeric `Retry-After` on HTTP 429 or 503 raises that wait up
+to the configured cap. Retries otherwise back off exponentially from
+`IRIS_PREVIEW_CORPUS_RETRY_DELAY_SECONDS` (default two seconds), capped by
+`IRIS_PREVIEW_CORPUS_MAX_RETRY_DELAY_SECONDS` (default 30 seconds).
+`IRIS_PREVIEW_CORPUS_RETRIES` sets the retry count; `release.yml` still defaults to
+one retry. Policy, status, size and digest failures are not retried. Downloads use
+private partial files and atomic installation. The output directory must not exist;
+on failure, the helper removes the directory it created. The caller removes
+successful output.
 
 ## Correctness and measurements
 
