@@ -152,3 +152,6 @@ block = { path = "vendor/block" }
 # Temporary jpegxr 0.3.1 vendor copy: update bindgen for newer libclang and
 # release the C decoder when initialization fails (the fuzz-discovered leak).
 jpegxr = { path = "vendor/jpegxr" }
+# Temporary openjpeg-sys 1.0.12 vendor copy: backport the JP2 header result
+# guard (CVE-2025-54874) and the tile-part index bounds check (OSV-2025-219).
+openjpeg-sys = { path = "vendor/openjpeg-sys" }

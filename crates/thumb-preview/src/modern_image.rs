@@ -364,6 +364,24 @@ mod tests {
     }
 
     #[test]
+    fn decodes_jpeg2000_preview() {
+        // Generated with ImageMagick: -size 1x1 xc:'#808080' -colorspace Gray -depth 8 -strip.
+        let jp2 = include_bytes!("../tests/fixtures/gray-1x1.jp2");
+        let j2k = &jp2[85..]; // Payload of the fixture's jp2c box.
+        for bytes in [jp2.as_slice(), j2k] {
+            let decoded = decode_bytes(bytes).expect("JPEG 2000 preview").to_luma8();
+            assert_eq!(decoded.dimensions(), (1, 1));
+            assert_eq!(decoded.as_raw(), &[128]);
+        }
+    }
+
+    #[test]
+    fn rejects_truncated_jpeg2000_codestream() {
+        // Recognizable SOC and SIZ markers, but the SIZ segment is missing.
+        assert!(decode_bytes(&[0xff, 0x4f, 0xff, 0x51]).is_none());
+    }
+
+    #[test]
     fn does_not_confuse_avif_with_heic() {
         let avif = b"\0\0\0\x18ftypavif\0\0\0\0mif1avif";
         assert_eq!(detect(avif), Some(ModernFormat::Avif));
