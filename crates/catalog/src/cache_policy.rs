@@ -1,6 +1,4 @@
-use crate::repository::SNAPSHOT_RESERVATION_STABLE_ID;
 use rusqlite::Connection;
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -116,16 +114,12 @@ impl CachePolicy {
     }
 
     /// Expired committed listings and their entries are removed together in one savepoint,
-    /// without waiting for the same directory to be listed again. Expired staging
-    /// generations are reclaimed only when they have no live owner.
-    pub fn evict_expired_snapshots(
-        &self,
-        conn: &Connection,
-        live_generations: &HashSet<(String, String, u64)>,
-    ) -> Result<u64, rusqlite::Error> {
+    /// without waiting for the same directory to be listed again. In-progress staging lives
+    /// in each writer's TEMP database and is never visible here.
+    pub fn evict_expired_snapshots(&self, conn: &Connection) -> Result<u64, rusqlite::Error> {
         let cutoff_secs = now_secs() - self.ttl.as_secs() as i64;
         conn.execute_batch("SAVEPOINT iris_snapshot_eviction")?;
-        match self.delete_expired_snapshots(conn, cutoff_secs, live_generations) {
+        match self.delete_expired_snapshots(conn, cutoff_secs) {
             Ok(deleted) => {
                 conn.execute_batch("RELEASE iris_snapshot_eviction")?;
                 Ok(deleted)
@@ -143,7 +137,6 @@ impl CachePolicy {
         &self,
         conn: &Connection,
         cutoff_secs: i64,
-        live_generations: &HashSet<(String, String, u64)>,
     ) -> Result<u64, rusqlite::Error> {
         let mut statement = conn.prepare(
             "SELECT backend_id, dir_stable_id, generation FROM directory_snapshots
@@ -175,51 +168,11 @@ impl CachePolicy {
             )?;
         }
 
-        // A writer that exited without running its Drop hook leaves a reserved
-        // generation behind; the configured lifetime gates recovery, not liveness.
-        let mut statement = conn.prepare(
-            "SELECT DISTINCT backend_id, dir_stable_id, generation
-             FROM directory_snapshot_entries
-             WHERE stable_id = ?1 AND mtime_secs < ?2",
-        )?;
-        let abandoned = statement
-            .query_map(
-                rusqlite::params![SNAPSHOT_RESERVATION_STABLE_ID, cutoff_secs],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
-            )?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(statement);
-        let mut reclaimed = 0;
-        for (backend_id, dir_stable_id, generation) in abandoned {
-            if live_generations.contains(&(
-                backend_id.clone(),
-                dir_stable_id.clone(),
-                generation as u64,
-            )) {
-                continue;
-            }
-            conn.execute(
-                "DELETE FROM directory_snapshot_entries
-                 WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3",
-                rusqlite::params![backend_id, dir_stable_id, generation],
-            )?;
-            reclaimed += 1;
-        }
-        Ok(expired.len() as u64 + reclaimed)
+        Ok(expired.len() as u64)
     }
 
-    pub fn run_eviction(
-        &self,
-        conn: &Connection,
-        live_generations: &HashSet<(String, String, u64)>,
-    ) -> Result<u64, rusqlite::Error> {
-        let snapshots = self.evict_expired_snapshots(conn, live_generations)?;
+    pub fn run_eviction(&self, conn: &Connection) -> Result<u64, rusqlite::Error> {
+        let snapshots = self.evict_expired_snapshots(conn)?;
         let expired = self.evict_expired(conn)?;
         let lru = self.evict_lru(conn)?;
         let thumbnails = self.evict_thumbnail_bytes(conn)?;
@@ -277,9 +230,7 @@ mod tests {
                 (backend_id, dir_stable_id, generation, stable_id, display_path, name,
                  is_dir, metadata_level)
              VALUES ('local', 'stale', 1, 'old', '/stale', 'stale', 0, 0),
-                    ('local', 'fresh', 1, 'new', '/fresh', 'fresh', 0, 0),
-                    ('local', 'stale', 2, '__iris_snapshot_reservation__', '', '', 0, 0),
-                    ('local', 'stale', 2, 'in-progress', '/stale/in-progress', 'in-progress', 0, 0);",
+                    ('local', 'fresh', 1, 'new', '/fresh', 'fresh', 0, 0);",
         )
         .expect("insert snapshots");
 
@@ -287,12 +238,7 @@ mod tests {
             ttl: Duration::from_secs(60),
             ..Default::default()
         };
-        assert_eq!(
-            policy
-                .evict_expired_snapshots(&conn, &HashSet::new())
-                .expect("evict"),
-            1
-        );
+        assert_eq!(policy.evict_expired_snapshots(&conn).expect("evict"), 1);
         let snapshots: i64 = conn
             .query_row("SELECT COUNT(*) FROM directory_snapshots", [], |row| {
                 row.get(0)
@@ -305,16 +251,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("count entries");
-        assert_eq!((snapshots, entries), (1, 3));
-        let in_progress: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM directory_snapshot_entries
-                 WHERE dir_stable_id = 'stale' AND generation = 2",
-                [],
-                |row| row.get(0),
-            )
-            .expect("in-progress generation survives eviction");
-        assert_eq!(in_progress, 2);
+        assert_eq!((snapshots, entries), (1, 1));
         let fresh: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM directory_snapshots WHERE dir_stable_id = 'fresh'",

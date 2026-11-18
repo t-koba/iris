@@ -2,7 +2,6 @@ use crate::schema;
 use iris_core_domain::types::metadata::MetadataLevel;
 use iris_core_domain::types::thumbnail::ImageFormat;
 use rusqlite::Connection;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -85,28 +84,23 @@ const CATALOG_MMAP_BYTES: u64 = 32 * 1024 * 1024;
 /// SQLite cache index for listings and thumbnails.
 pub struct CatalogRepository {
     conn: Connection,
-    // Owners serialize begin/append/complete/abandon and eviction through this repository.
-    live_snapshot_generations: HashSet<(String, String, u64)>,
 }
 
 impl CatalogRepository {
     pub fn open(db_path: &Path) -> Result<Self, CatalogError> {
         Ok(Self {
             conn: schema::open(Some(db_path), CATALOG_MMAP_BYTES)?,
-            live_snapshot_generations: HashSet::new(),
         })
     }
 
     pub fn open_in_memory() -> Result<Self, CatalogError> {
         Ok(Self {
             conn: schema::open(None, CATALOG_MMAP_BYTES)?,
-            live_snapshot_generations: HashSet::new(),
         })
     }
 
     pub fn evict(&self) -> Result<u64, CatalogError> {
-        Ok(crate::cache_policy::CachePolicy::default()
-            .run_eviction(&self.conn, &self.live_snapshot_generations)?)
+        Ok(crate::cache_policy::CachePolicy::default().run_eviction(&self.conn)?)
     }
 
     /// Recreates the database so browsing continues after cache corruption.
@@ -388,7 +382,10 @@ mod tests {
 
         repo.abandon_snapshot_generation("local", "root-id", abandoned)
             .unwrap();
-        assert!(repo.live_snapshot_generations.is_empty());
+        let recovered = repo.begin_snapshot_generation("local", "root-id").unwrap();
+        assert!(recovered > abandoned);
+        repo.abandon_snapshot_generation("local", "root-id", recovered)
+            .unwrap();
         assert_eq!(
             repo.get_snapshot_entries("local", "root-id")
                 .unwrap()
