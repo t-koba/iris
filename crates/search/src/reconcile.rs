@@ -1,5 +1,4 @@
 use crate::segment::{Segment, SegmentRecord};
-use iris_core_domain::path_identity::equality_key;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -20,18 +19,12 @@ pub fn reconcile_segment(
     existing: &Segment,
     scanned: impl IntoIterator<Item = SegmentRecord>,
 ) -> ReconcileResult {
-    // Reserve exact-path matches across the whole scan before falling back to
-    // normalized identity. Otherwise a respelled record can consume the original
-    // record a later exact match needs on a normalization-sensitive volume.
+    // Byte-exact identity is the only equality: reserve every existing record
+    // once so each scanned path reuses at most one original record.
     let mut existing_by_exact = HashMap::new();
-    let mut existing_by_equality = HashMap::new();
     for (index, record) in existing.records().iter().enumerate() {
         existing_by_exact
             .entry(exact_identity(record))
-            .or_insert_with(Vec::new)
-            .push(index);
-        existing_by_equality
-            .entry(normalized_identity(record))
             .or_insert_with(Vec::new)
             .push(index);
     }
@@ -43,21 +36,6 @@ pub fn reconcile_segment(
         let exact = exact_identity(record);
         let index = existing_by_exact
             .get(&exact)
-            .and_then(|indices| indices.iter().find(|index| !matched.contains(*index)))
-            .copied();
-        if let Some(index) = index {
-            matched.insert(index);
-            resolved[position] = Some(reuse_record(&existing.records()[index], record));
-        }
-    }
-
-    for (position, record) in scanned.iter().enumerate() {
-        if resolved[position].is_some() {
-            continue;
-        }
-        let normalized = normalized_identity(record);
-        let index = existing_by_equality
-            .get(&normalized)
             .and_then(|indices| indices.iter().find(|index| !matched.contains(*index)))
             .copied();
         if let Some(index) = index {
@@ -105,14 +83,6 @@ type RecordIdentity = (String, bool, Option<String>);
 fn exact_identity(record: &SegmentRecord) -> RecordIdentity {
     (
         record.path.clone(),
-        record.local_path_is_lossy,
-        record.native_locator.clone(),
-    )
-}
-
-fn normalized_identity(record: &SegmentRecord) -> RecordIdentity {
-    (
-        equality_key(&record.path),
         record.local_path_is_lossy,
         record.native_locator.clone(),
     )
@@ -237,9 +207,9 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_reserves_exact_matches_before_normalized_fallback() {
-        // The NFD path sorts before the NFC path; a fallback match would
-        // otherwise consume the existing NFC record.
+    fn reconcile_keeps_byte_distinct_spellings_separate() {
+        // The NFD path sorts before the NFC path, but byte equality cannot
+        // match one to the other: the missing spelling is inserted instead.
         let first = record("/root/Cafe\u{301}.jpg", 10, 100);
         let second = record("/root/Café.jpg", 10, 100);
         let existing = Segment::new(vec![second.clone()]);
