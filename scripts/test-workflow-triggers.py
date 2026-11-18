@@ -151,6 +151,43 @@ def matrix_runner_mutation_regression():
     )
 
 
+def ci_step_block(step_name, job_name, workflow=ci):
+    """Return the YAML text of one named step in a job, or '' if absent."""
+    job = ci_job_block(job_name, workflow)
+    if not job:
+        return ""
+    m = re.search(rf"(?m)^      - name: {re.escape(step_name)}\n", job)
+    if not m:
+        return ""
+    following = re.search(r"(?m)^      - name: ", job[m.end():])
+    end = m.end() + following.start() if following else len(job)
+    return job[m.start():end]
+
+
+def workspace_tests_unconditional(workflow=ci):
+    """The main test job must run whole-workspace tests without a step-level gate."""
+    step = ci_step_block("Tests", "test", workflow)
+    if "run: cargo test --workspace --locked" not in step:
+        return False
+    # A step-level `if:` sits at exactly eight spaces; a gated or disabled
+    # Tests step can silently skip workspace tests while this contract stays green.
+    return not re.search(r"(?m)^        if:", step)
+
+
+def workspace_tests_mutation_regression():
+    """Prove the workspace-tests guard rejects a disabled Tests step."""
+    step = ci_step_block("Tests", "test")
+    if not step:
+        return False
+    disabled = step.replace(
+        "      - name: Tests\n", "      - name: Tests\n        if: false\n", 1
+    )
+    mutated = ci.replace(step, disabled, 1)
+    return workspace_tests_unconditional() and not workspace_tests_unconditional(
+        workflow=mutated
+    )
+
+
 def fuzz_long_uses_asan_compatible_target():
     step = re.search(
         r"^      - name: Run long fuzz target\n(?P<body>(?:        [^\n]*\n)+)",
@@ -340,10 +377,8 @@ permissions:
         "cargo test -p iris-platform-integration --lib copy::tests::new_copy_destinations_are_private_until_success_under_umask --locked",
     ),
     "Matrix runner contracts reject a forced single Ubuntu runner": matrix_runner_mutation_regression(),
-    "Workspace tests run in the main CI test job": ci_job_has(
-        "test",
-        "\n        run: cargo test --workspace --locked\n",
-    ),
+    "Workspace tests run unconditionally in the main CI test job": workspace_tests_unconditional(),
+    "Workspace-tests guard rejects a disabled Tests step": workspace_tests_mutation_regression(),
     "Workflow contract checks run independently of platform integration": ci_job_has(
         "workflow-contracts",
         "run: python3 scripts/test-workflow-triggers.py",
