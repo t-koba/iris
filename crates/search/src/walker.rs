@@ -156,7 +156,7 @@ fn is_hidden(name: &str) -> bool {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn walk_local_distinguishes_colliding_lossy_native_locators() {
         use crate::reconcile::{reconcile_segment, ReconcileStats};
@@ -266,7 +266,7 @@ mod tests {
             .all(|record| record.native_locator != Some(encode_path(&first))));
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn walk_local_preserves_lossy_marker_through_cache_and_reconcile() {
         use crate::reconcile::{reconcile_segment, ReconcileStats};
@@ -350,6 +350,62 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn cache_and_reconcile_preserve_colliding_lossy_native_locators() {
+        use crate::reconcile::{reconcile_segment, ReconcileStats};
+        use crate::segment::Segment;
+
+        let records = ["native-first", "native-second"]
+            .into_iter()
+            .map(|locator| SegmentRecord {
+                native_locator: Some(locator.into()),
+                path: "a\u{FFFD}.txt".into(),
+                local_path_is_lossy: true,
+                name: "a\u{FFFD}.txt".into(),
+                size: 1,
+                mtime_secs: 0,
+                kind: IndexedKind::File,
+                width: None,
+                height: None,
+                capture_secs: None,
+                capture_offset_min: None,
+                camera: None,
+                lens: None,
+                gps_lat: None,
+                gps_lon: None,
+                content_signature: None,
+            })
+            .collect::<Vec<_>>();
+        let segment = Segment::new(records.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("colliding.idx");
+        fs::write(&cache_path, segment.to_bytes().unwrap()).unwrap();
+        let restored = Segment::read(&cache_path).unwrap();
+        assert_eq!(restored.records(), records);
+
+        let inserted = reconcile_segment(&Segment::default(), records.clone());
+        assert_eq!(
+            inserted.stats,
+            ReconcileStats {
+                inserted: 2,
+                ..ReconcileStats::default()
+            }
+        );
+        assert_eq!(inserted.segment, restored);
+
+        let remaining = [records[1].clone()];
+        let removed = reconcile_segment(&restored, remaining.clone());
+        assert_eq!(
+            removed.stats,
+            ReconcileStats {
+                removed: 1,
+                unchanged: 1,
+                ..ReconcileStats::default()
+            }
+        );
+        assert_eq!(removed.segment.records(), remaining);
     }
 
     #[test]
