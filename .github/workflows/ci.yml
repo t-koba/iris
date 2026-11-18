@@ -113,7 +113,7 @@ jobs:
       - name: Path identity regressions
         run: |
           cargo test -p iris-core-domain --lib path_identity::tests:: --locked
-          cargo test -p iris-catalog --lib schema::tests::snapshot_path_collation_uses_platform_policy --locked
+          cargo test -p iris-catalog --lib schema::tests::snapshot_path_collation_uses_byte_equality_on_every_platform --locked
           cargo test -p iris-search --lib reconcile::tests::reconcile_path_identity_preserves_original_records_with_byte_equality --locked
           cargo test -p iris-ui-shell --lib state::cache::tests::thumbnail_keys_use_path_identity_but_preserve_display_spelling --locked
 
