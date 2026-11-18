@@ -1,11 +1,14 @@
 use iris_backends::smb::adapter::SmbAdapter;
 use iris_backends::smb::connection::SmbConnectionConfig;
 use iris_core_domain::backend_adapter::BackendAdapter;
+use iris_core_domain::types::error::BackendError;
 use iris_core_domain::types::object::{BackendId, ObjectKey, ObjectRef, StableId};
 use iris_core_domain::types::options::{ConflictResolution, CopyOptions, DeleteMode, MoveOptions};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 const VERIFY_BUFFER_BYTES: usize = 64 * 1024;
+const CONNECT_READINESS_ATTEMPTS: usize = 30;
+const CONNECT_READINESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[tokio::main]
 async fn main() {
@@ -40,7 +43,7 @@ async fn run() -> Result<(), String> {
         },
         backend_id.clone(),
     );
-    adapter.connect().await.map_err(|error| error.to_string())?;
+    connect_when_ready(&adapter).await?;
 
     let suffix = std::process::id();
     let source = object_ref(&backend_id, &format!("iris-smoke-{suffix}.bin"));
@@ -155,6 +158,29 @@ async fn run() -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     println!("native SMB container smoke passed");
     Ok(())
+}
+
+/// A published container port accepts TCP before the Samba daemon inside is
+/// ready to negotiate, so retry transient network failures while the server
+/// starts. Configuration, authentication and protocol errors are returned
+/// immediately and still fail the smoke.
+async fn connect_when_ready(adapter: &SmbAdapter) -> Result<(), String> {
+    let mut last_error = String::new();
+    for attempt in 1..=CONNECT_READINESS_ATTEMPTS {
+        match adapter.connect().await {
+            Ok(_) => return Ok(()),
+            Err(BackendError::Network(error)) => {
+                last_error = error.to_string();
+                if attempt < CONNECT_READINESS_ATTEMPTS {
+                    tokio::time::sleep(CONNECT_READINESS_INTERVAL).await;
+                }
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err(format!(
+        "native SMB server was not ready after {CONNECT_READINESS_ATTEMPTS} connect attempts: {last_error}"
+    ))
 }
 
 async fn create_position_varying_payload(path: &str, length: u64) -> Result<(), String> {
