@@ -22,6 +22,23 @@ crate version, Rust API, or JPEG 2000 preview support:
   (upstream `master`, not in a release) guards both tile-part index writes
   in `opj_j2k_read_sod` with null and bounds checks.
 
+Guard-presence verification (external evidence, not execution): the raw GitHub
+patches for `f809b80c…` and `91d08b11…` were fetched and their SHA-256 digests
+are `13d5afb17d56f5cba3644585f08c29b1b2831c9cd54db73d1fc17b8cebdbe921` and
+`233bf4c149d7740dd802c36c3e78e80352454b27d5579c1a4ef3260c2f4e90a1`. The
+backported guards match those patches: `jp2.c` sets color space only under
+`if (ret && p_image && *p_image)`, and the two `end_header`/`end_pos` writes in
+`opj_j2k_read_sod` are inside one null-and-bounds guard. The separate guard in
+`opj_j2k_add_tlmarker` is already present in bundled OpenJPEG 2.5.3 and was not
+modified by this backport.
+
+These checks prove the guards are present in the source, not that a runtime
+decoder path reaches them. In particular the `rejects_truncated_jpeg2000_codestream`
+test fails during SIZ parsing, before `opj_j2k_read_sod` runs, so it does not
+exercise the tile-part guard. `scripts/test-openjpeg-backport.py` binds this
+guard-presence evidence to an exact source revision. Targeted decoder success
+and clean-rejection tests are bound separately via exact-revision CI.
+
 These are external advisory claims; no advisory proof of concept was reproduced
 in Iris. Remove the override when the resolved dependency demonstrably contains
 both fixes. Registry metadata, the duplicate manifest, and the crate lockfile

@@ -103,6 +103,12 @@ jobs:
           cargo test -p iris-thumb-preview --lib modern_image::tests::jpeg_xr_decoder_releases_after_failed_initialization --locked
           cargo test -p jpegxr --locked
 
+      - name: JPEG 2000 decoder and backport guard regressions
+        run: |
+          cargo test -p iris-thumb-preview --lib modern_image::tests::decodes_jpeg2000_preview --locked
+          cargo test -p iris-thumb-preview --lib modern_image::tests::rejects_truncated_jpeg2000_codestream --locked
+          python3 scripts/test-openjpeg-backport.py
+
       - name: Path identity regressions
         run: |
           cargo test -p iris-core-domain --lib path_identity::tests:: --locked
