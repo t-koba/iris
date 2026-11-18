@@ -4,6 +4,31 @@ use super::conversions::{
 };
 use super::*;
 
+/// In-progress listings live only in this connection's TEMP database, so another
+/// connection's eviction cannot see or delete them. Main-DB rows are committed atomically.
+const SNAPSHOT_STAGING_SCHEMA: &str = "
+CREATE TEMP TABLE IF NOT EXISTS iris_snapshot_staging (
+    backend_id          TEXT NOT NULL,
+    dir_stable_id       TEXT NOT NULL,
+    generation          INTEGER NOT NULL,
+    stable_id           TEXT NOT NULL,
+    display_path        TEXT NOT NULL COLLATE IRIS_PATH_IDENTITY,
+    name                TEXT NOT NULL,
+    is_dir              INTEGER NOT NULL,
+    metadata_level      INTEGER NOT NULL,
+    size                INTEGER,
+    mtime_secs          INTEGER,
+    mtime_nanos         INTEGER,
+    ctime_secs          INTEGER,
+    ctime_nanos         INTEGER,
+    is_symlink          INTEGER NOT NULL DEFAULT 0,
+    symlink_target      TEXT,
+    is_inaccessible     INTEGER NOT NULL DEFAULT 0,
+    local_path_is_lossy INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (backend_id, dir_stable_id, generation, display_path, stable_id)
+);
+";
+
 impl CatalogRepository {
     pub fn upsert_snapshot(&self, snapshot: &DirectorySnapshot) -> Result<(), CatalogError> {
         let snapshot_at_secs = system_time_to_secs(snapshot.snapshot_at);
@@ -84,6 +109,7 @@ impl CatalogRepository {
                 let transaction = self
                     .conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                transaction.execute_batch(SNAPSHOT_STAGING_SCHEMA)?;
                 let current: i64 = transaction.query_row(
                     "SELECT MAX(generation) FROM (
                         SELECT COALESCE(MAX(next_generation), 0) AS generation FROM snapshot_generation_counter
@@ -100,22 +126,8 @@ impl CatalogRepository {
                     "UPDATE snapshot_generation_counter SET next_generation = ?1 WHERE id = 1",
                     [generation],
                 )?;
-                // Keep the committed generation and every generation that is currently reserved.
-                transaction.execute(
-                    "DELETE FROM directory_snapshot_entries
-                     WHERE backend_id = ?1 AND dir_stable_id = ?2
-                       AND generation != COALESCE(
-                           (SELECT generation FROM directory_snapshots WHERE backend_id = ?1 AND dir_stable_id = ?2),
-                           -1
-                       )
-                       AND generation NOT IN (
-                           SELECT generation FROM directory_snapshot_entries
-                           WHERE backend_id = ?1 AND dir_stable_id = ?2 AND stable_id = ?3
-                       )",
-                    rusqlite::params![backend_id, dir_stable_id, SNAPSHOT_RESERVATION_STABLE_ID],
-                )?;
                 match transaction.execute(
-                    "INSERT INTO directory_snapshot_entries (
+                    "INSERT INTO iris_snapshot_staging (
                         backend_id, dir_stable_id, generation, stable_id, display_path, name,
                         is_dir, metadata_level, size, mtime_secs, mtime_nanos, ctime_secs,
                         ctime_nanos, is_symlink, symlink_target, is_inaccessible, local_path_is_lossy
@@ -142,14 +154,7 @@ impl CatalogRepository {
                 }
             })();
             match reserved {
-                Ok(Some(generation)) => {
-                    self.live_snapshot_generations.insert((
-                        backend_id.to_string(),
-                        dir_stable_id.to_string(),
-                        generation,
-                    ));
-                    return Ok(generation);
-                }
+                Ok(Some(generation)) => return Ok(generation),
                 Ok(None) => continue,
                 Err(rusqlite::Error::SqliteFailure(error, _))
                     if error.code == rusqlite::ErrorCode::ConstraintViolation
@@ -175,13 +180,9 @@ impl CatalogRepository {
         dir_stable_id: &str,
         generation: u64,
     ) -> Result<(), CatalogError> {
-        self.live_snapshot_generations.remove(&(
-            backend_id.to_string(),
-            dir_stable_id.to_string(),
-            generation,
-        ));
+        self.conn.execute_batch(SNAPSHOT_STAGING_SCHEMA)?;
         self.conn.execute(
-            "DELETE FROM directory_snapshot_entries
+            "DELETE FROM iris_snapshot_staging
              WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3",
             rusqlite::params![backend_id, dir_stable_id, generation as i64],
         )?;
@@ -199,7 +200,7 @@ impl CatalogRepository {
         require_snapshot_reservation(&transaction, backend_id, dir_stable_id, generation)?;
         {
             let mut statement = transaction.prepare(
-                "INSERT OR REPLACE INTO directory_snapshot_entries (
+                "INSERT OR REPLACE INTO iris_snapshot_staging (
                     backend_id, dir_stable_id, generation, stable_id, display_path, name,
                     is_dir, metadata_level, size, mtime_secs, mtime_nanos, ctime_secs,
                     ctime_nanos, is_symlink, symlink_target, is_inaccessible, local_path_is_lossy
@@ -241,10 +242,12 @@ impl CatalogRepository {
         dir_stable_id: &str,
         generation: u64,
     ) -> Result<DirectorySnapshot, CatalogError> {
-        let transaction = self.conn.transaction()?;
+        let transaction = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require_snapshot_reservation(&transaction, backend_id, dir_stable_id, generation)?;
         transaction.execute(
-            "DELETE FROM directory_snapshot_entries
+            "DELETE FROM iris_snapshot_staging
              WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3
                AND stable_id = ?4",
             rusqlite::params![
@@ -255,15 +258,9 @@ impl CatalogRepository {
             ],
         )?;
         let item_count: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM directory_snapshot_entries
-             WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3
-               AND stable_id != ?4",
-            rusqlite::params![
-                backend_id,
-                dir_stable_id,
-                generation as i64,
-                SNAPSHOT_RESERVATION_STABLE_ID,
-            ],
+            "SELECT COUNT(*) FROM iris_snapshot_staging
+             WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3",
+            rusqlite::params![backend_id, dir_stable_id, generation as i64],
             |row| row.get(0),
         )?;
         let snapshot = DirectorySnapshot {
@@ -294,24 +291,30 @@ impl CatalogRepository {
         )?;
         transaction.execute(
             "DELETE FROM directory_snapshot_entries
-             WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation != ?3
-               AND generation NOT IN (
-                   SELECT generation FROM directory_snapshot_entries
-                   WHERE backend_id = ?1 AND dir_stable_id = ?2 AND stable_id = ?4
-               )",
-            rusqlite::params![
-                backend_id,
-                dir_stable_id,
-                generation as i64,
-                SNAPSHOT_RESERVATION_STABLE_ID,
-            ],
+             WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation != ?3",
+            rusqlite::params![backend_id, dir_stable_id, generation as i64],
+        )?;
+        transaction.execute(
+            "INSERT INTO directory_snapshot_entries (
+                backend_id, dir_stable_id, generation, stable_id, display_path, name,
+                is_dir, metadata_level, size, mtime_secs, mtime_nanos, ctime_secs,
+                ctime_nanos, is_symlink, symlink_target, is_inaccessible, local_path_is_lossy
+             )
+             SELECT backend_id, dir_stable_id, generation, stable_id, display_path, name,
+                    is_dir, metadata_level, size, mtime_secs, mtime_nanos, ctime_secs,
+                    ctime_nanos, is_symlink, symlink_target, is_inaccessible, local_path_is_lossy
+             FROM iris_snapshot_staging
+             WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3
+             ORDER BY rowid",
+            rusqlite::params![backend_id, dir_stable_id, generation as i64],
         )?;
         transaction.commit()?;
-        self.live_snapshot_generations.remove(&(
-            backend_id.to_string(),
-            dir_stable_id.to_string(),
-            generation,
-        ));
+        // Only a committed generation may lose its connection-local reservation.
+        self.conn.execute(
+            "DELETE FROM iris_snapshot_staging
+             WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3",
+            rusqlite::params![backend_id, dir_stable_id, generation as i64],
+        )?;
         Ok(snapshot)
     }
 
@@ -366,15 +369,16 @@ impl CatalogRepository {
     }
 }
 
-/// Check inside the write transaction so reclaimed staging data cannot be resurrected.
+/// Check inside the write transaction so an abandoned reservation cannot be resurrected.
 fn require_snapshot_reservation(
     transaction: &rusqlite::Transaction<'_>,
     backend_id: &str,
     dir_stable_id: &str,
     generation: u64,
 ) -> Result<(), CatalogError> {
+    transaction.execute_batch(SNAPSHOT_STAGING_SCHEMA)?;
     let exists: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM directory_snapshot_entries
+        "SELECT EXISTS(SELECT 1 FROM iris_snapshot_staging
          WHERE backend_id = ?1 AND dir_stable_id = ?2 AND generation = ?3 AND stable_id = ?4)",
         rusqlite::params![
             backend_id,
