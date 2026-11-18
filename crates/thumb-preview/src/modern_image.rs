@@ -130,8 +130,17 @@ fn decode_jpeg2000(data: &[u8]) -> Option<DynamicImage> {
 /// OSV-2025-219: unpatched OpenJPEG sizes a tile's tile-part index from the
 /// number of TLM entries for that tile, then writes through the SOT's TPsot
 /// without a bounds check. Reject that inconsistent pair in Rust before the
-/// decoder is called. Only the main and tile-part headers are inspected;
-/// Psot skips tile data, where marker-like bytes must not be interpreted.
+/// decoder is called. The parser keeps three explicit states: main header,
+/// tile-part header (after SOT, before SOD), and between tile parts (after
+/// SOD). Tile data is opaque; the only marker accepted there is the terminal
+/// EOC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum J2kParseState {
+    MainHeader,
+    TilePartHeader,
+    BetweenTileParts,
+}
+
 fn j2k_tlm_sot_consistent(data: &[u8]) -> bool {
     let Some(codestream) = jpeg2000_codestream(data) else {
         return false;
@@ -141,34 +150,57 @@ fn j2k_tlm_sot_consistent(data: &[u8]) -> bool {
     }
 
     let mut pos = 2usize; // after SOC
-    let mut tile_end = 0usize;
-    let mut in_tile_part = false;
+    let mut state = J2kParseState::MainHeader;
+    let mut tile_end = 0usize; // start of the next tile part or EOC
+    let mut final_tile_part = false; // SOT declared Psot == 0
     let mut counts: HashMap<u32, u32> = HashMap::new();
     let mut entries_seen = 0u32;
     let mut saw_tlm = false;
-    let mut tlm_invalid = false;
 
     while pos < codestream.len() {
-        if codestream[pos] != 0xff || pos + 2 > codestream.len() {
+        if final_tile_part && state == J2kParseState::BetweenTileParts {
+            // Psot == 0: SOD has been parsed, so everything up to the terminal
+            // EOC is tile data and must not be interpreted as markers.
+            return pos + 2 <= codestream.len()
+                && codestream[codestream.len() - 2..] == [0xff, 0xd9];
+        }
+        if pos + 2 > codestream.len() {
             return false;
         }
         let marker = u16::from_be_bytes([codestream[pos], codestream[pos + 1]]);
         match marker {
-            0xffd9 => return true, // EOC
+            0xffd9 => {
+                // EOC is terminal: only the between-tile-parts state may end
+                // the codestream, and the marker must be its last two bytes.
+                return state == J2kParseState::BetweenTileParts && pos + 2 == codestream.len();
+            }
             0xff93 => {
-                // SOD: skip the tile-part body declared by the preceding SOT.
-                if !in_tile_part || pos + 2 > tile_end {
+                // SOD closes the tile-part header. Do not skip it silently:
+                // even the final (Psot == 0) tile part must contain one.
+                if state != J2kParseState::TilePartHeader {
                     return false;
                 }
-                pos = tile_end;
-                in_tile_part = false;
+                let sod_end = pos + 2;
+                if !final_tile_part && sod_end > tile_end {
+                    return false;
+                }
+                state = J2kParseState::BetweenTileParts;
+                pos = sod_end;
+                if !final_tile_part {
+                    if pos > tile_end || tile_end > codestream.len() {
+                        return false;
+                    }
+                    pos = tile_end;
+                }
                 continue;
             }
-            0xff4f => return false,                 // duplicate SOC
-            0xff90 if in_tile_part => return false, // SOT before SOD
+            0xff4f => return false, // duplicate SOC
             _ => {}
         }
-
+        // Between tile parts only the next SOT or the terminal EOC is valid.
+        if state == J2kParseState::BetweenTileParts && marker != 0xff90 {
+            return false;
+        }
         if pos + 4 > codestream.len() {
             return false;
         }
@@ -185,7 +217,7 @@ fn j2k_tlm_sot_consistent(data: &[u8]) -> bool {
         else {
             return false;
         };
-        let limit = if in_tile_part {
+        let limit = if state == J2kParseState::TilePartHeader {
             tile_end
         } else {
             codestream.len()
@@ -196,18 +228,18 @@ fn j2k_tlm_sot_consistent(data: &[u8]) -> bool {
 
         match marker {
             0xff55 => {
-                // TLM: OpenJPEG ignores all TLM data after an invalid segment.
-                if !tlm_invalid {
-                    saw_tlm = true;
-                    if !read_tlm(&codestream[pos + 4..end], &mut counts, &mut entries_seen) {
-                        tlm_invalid = true;
-                        counts.clear();
-                    }
+                // TLM belongs to the main header. A malformed TLM fails the
+                // whole codestream; it never waives the TPsot comparison.
+                if state != J2kParseState::MainHeader
+                    || !read_tlm(&codestream[pos + 4..end], &mut counts, &mut entries_seen)
+                {
+                    return false;
                 }
+                saw_tlm = true;
             }
             0xff90 => {
                 // SOT: Lsot is fixed at 10, so the marker segment is 12 bytes.
-                if length != 10 {
+                if length != 10 || final_tile_part {
                     return false;
                 }
                 let tile = u32::from(u16::from_be_bytes([
@@ -221,38 +253,41 @@ fn j2k_tlm_sot_consistent(data: &[u8]) -> bool {
                     codestream[pos + 9],
                 ]);
                 let tpsot = u32::from(codestream[pos + 10]);
-                if saw_tlm && !tlm_invalid && tpsot >= counts.get(&tile).copied().unwrap_or(0) {
+                if saw_tlm && tpsot >= counts.get(&tile).copied().unwrap_or(0) {
                     return false;
                 }
                 if psot == 0 {
-                    // A zero Psot declares the last tile-part; its data extends
-                    // to EOC, so there are no further headers to compare.
-                    return true;
+                    // A zero Psot declares the last tile-part; its tile data
+                    // extends to EOC, but SOD is still parsed below.
+                    final_tile_part = true;
+                } else {
+                    let Some(declared_end) = (pos as u64)
+                        .checked_add(u64::from(psot))
+                        .and_then(|value| usize::try_from(value).ok())
+                    else {
+                        return false;
+                    };
+                    if declared_end < end + 2 || declared_end > codestream.len() {
+                        return false;
+                    }
+                    tile_end = declared_end;
                 }
-                let Some(declared_end) = (pos as u64)
-                    .checked_add(u64::from(psot))
-                    .and_then(|value| usize::try_from(value).ok())
-                else {
-                    return false;
-                };
-                if declared_end < end + 2 || declared_end > codestream.len() {
-                    return false;
-                }
-                tile_end = declared_end;
-                in_tile_part = true;
+                state = J2kParseState::TilePartHeader;
             }
             _ => {}
         }
         pos = end;
     }
 
-    // A SOT whose SOD is missing has no bounded tile-part body to skip.
-    !in_tile_part
+    // EOF is never a valid terminal marker, whatever state we stopped in.
+    false
 }
 
 /// Counts TLM tile-part entries like unpatched OpenJPEG's `opj_j2k_read_tlm`:
 /// ST selects the tile-index width, SP selects the Ptlm width, and ST == 0
 /// uses a running entry counter as the tile index. False invalidates TLM.
+/// With ST == 0 the implicit index saturates at 255: TPsot is one byte, so no
+/// larger index can be named by a SOT marker.
 fn read_tlm(payload: &[u8], counts: &mut HashMap<u32, u32>, entries_seen: &mut u32) -> bool {
     if payload.len() < 2 {
         return false;
@@ -270,7 +305,7 @@ fn read_tlm(payload: &[u8], counts: &mut HashMap<u32, u32>, entries_seen: &mut u
     }
     for entry in entries.chunks_exact(entry_size) {
         let tile = if st == 0 {
-            *entries_seen
+            (*entries_seen).min(255)
         } else {
             let mut tile = 0u32;
             for byte in &entry[..usize::from(st)] {
@@ -278,7 +313,8 @@ fn read_tlm(payload: &[u8], counts: &mut HashMap<u32, u32>, entries_seen: &mut u
             }
             tile
         };
-        *counts.entry(tile).or_insert(0) += 1;
+        let count = counts.entry(tile).or_insert(0);
+        *count = count.saturating_add(1);
         *entries_seen = entries_seen.saturating_add(1);
     }
     true
@@ -300,7 +336,13 @@ fn jpeg2000_codestream(data: &[u8]) -> Option<&[u8]> {
                     return None;
                 }
                 let large = u64::from_be_bytes(data[pos + 8..pos + 16].try_into().ok()?);
-                (16usize, usize::try_from(large).ok()?.checked_add(pos + 16)?)
+                // XLBox counts the 16-byte extended box header itself.
+                if large < 16 {
+                    return None;
+                }
+                // XLBox is the full box size, header included.
+                let box_size = usize::try_from(large).ok()?;
+                (16usize, pos.checked_add(box_size)?)
             }
             size => {
                 if size < 8 {
@@ -543,6 +585,102 @@ fn unpremultiply_rgba(pixels: &mut [u8]) {
 mod tests {
     use super::*;
 
+    fn fixture_j2k() -> &'static [u8] {
+        &include_bytes!("../tests/fixtures/gray-1x1.jp2")[85..]
+    }
+
+    fn jp2_prefix() -> &'static [u8] {
+        &include_bytes!("../tests/fixtures/gray-1x1.jp2")[..77]
+    }
+
+    fn main_header(j2k: &[u8]) -> &[u8] {
+        let sot = j2k
+            .windows(2)
+            .position(|bytes| bytes == [0xff, 0x90])
+            .expect("fixture has no SOT");
+        &j2k[..sot]
+    }
+
+    fn boxed_jp2(codestream: &[u8]) -> Vec<u8> {
+        let mut file = jp2_prefix().to_vec();
+        let size = 8u32 + u32::try_from(codestream.len()).unwrap();
+        file.extend_from_slice(&size.to_be_bytes());
+        file.extend_from_slice(b"jp2c");
+        file.extend_from_slice(codestream);
+        file
+    }
+
+    fn extended_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut bytes = 1u32.to_be_bytes().to_vec();
+        bytes.extend_from_slice(kind);
+        bytes.extend_from_slice(&(16u64 + u64::try_from(payload.len()).unwrap()).to_be_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    fn sot_segment(tile: u16, psot: u32, tpsot: u8, tnsot: u8) -> [u8; 12] {
+        let mut segment = [0u8; 12];
+        segment[..2].copy_from_slice(&[0xff, 0x90]);
+        segment[2..4].copy_from_slice(&10u16.to_be_bytes());
+        segment[4..6].copy_from_slice(&tile.to_be_bytes());
+        segment[6..10].copy_from_slice(&psot.to_be_bytes());
+        segment[10] = tpsot;
+        segment[11] = tnsot;
+        segment
+    }
+
+    fn tile_part(tile: u16, tpsot: u8, tnsot: u8, data: &[u8]) -> Vec<u8> {
+        let psot = u32::try_from(12 + 2 + data.len()).unwrap();
+        let mut part = sot_segment(tile, psot, tpsot, tnsot).to_vec();
+        part.extend_from_slice(&[0xff, 0x93]);
+        part.extend_from_slice(data);
+        part
+    }
+
+    fn final_tile_part(tile: u16, tpsot: u8, data: &[u8]) -> Vec<u8> {
+        let mut part = sot_segment(tile, 0, tpsot, 1).to_vec();
+        part.extend_from_slice(&[0xff, 0x93]);
+        part.extend_from_slice(data);
+        part
+    }
+
+    fn synthetic_codestream(
+        main_extra: &[u8],
+        parts: &[Vec<u8>],
+        final_part: Option<&[u8]>,
+    ) -> Vec<u8> {
+        let mut codestream = main_header(fixture_j2k()).to_vec();
+        codestream.extend_from_slice(main_extra);
+        for part in parts {
+            codestream.extend_from_slice(part);
+        }
+        if let Some(part) = final_part {
+            codestream.extend_from_slice(part);
+        }
+        codestream.extend_from_slice(&[0xff, 0xd9]);
+        codestream
+    }
+
+    fn tlm_st1(tile: u8, ptlm: u16) -> [u8; 9] {
+        let mut marker = [0u8; 9];
+        marker[..4].copy_from_slice(&[0xff, 0x55, 0x00, 0x07]);
+        marker[4] = 0x00; // Ztlm
+        marker[5] = 0x10; // ST=1, SP=0
+        marker[6] = tile;
+        marker[7..].copy_from_slice(&ptlm.to_be_bytes());
+        marker
+    }
+
+    fn tlm_implicit(entries: usize) -> Vec<u8> {
+        let mut marker = vec![0xff, 0x55];
+        marker.extend_from_slice(&u16::try_from(2 + 2 + entries * 2).unwrap().to_be_bytes());
+        marker.extend_from_slice(&[0x00, 0x00]); // Ztlm, ST=0/SP=0
+        for _ in 0..entries {
+            marker.extend_from_slice(&15u16.to_be_bytes());
+        }
+        marker
+    }
+
     /// Adds one TLM entry for tile 0 to the fixture's main header and sets
     /// the SOT's TPsot. Ptlm is the fixture's Psot (15 bytes).
     fn fixture_with_tlm(tpsot: u8) -> Vec<u8> {
@@ -644,6 +782,169 @@ mod tests {
         // TLM at offset 45 with LTLM claiming more bytes than remain before SOT.
         j2k.splice(45..45, [0xff, 0x55, 0x7f, 0xff]);
         assert!(!j2k_tlm_sot_consistent(&j2k));
+    }
+
+    #[test]
+    fn extended_box_before_jp2c_selects_exact_payload() {
+        let j2k = fixture_j2k();
+        let mut file = jp2_prefix().to_vec();
+        file.extend_from_slice(&extended_box(b"free", &[0xaa, 0xbb, 0xcc]));
+        let payload_offset = file.len() + 16;
+        file.extend_from_slice(&extended_box(b"jp2c", j2k));
+        assert_eq!(jpeg2000_codestream(&file), Some(j2k));
+        assert_eq!(&file[payload_offset..payload_offset + j2k.len()], j2k);
+        assert!(j2k_tlm_sot_consistent(&file));
+        assert_eq!(j2k_tlm_sot_consistent(&file), j2k_tlm_sot_consistent(j2k));
+    }
+
+    #[test]
+    fn terminal_extended_jp2c_selects_exact_payload() {
+        let j2k = fixture_j2k();
+        let mut file = jp2_prefix().to_vec();
+        let payload_offset = file.len() + 16;
+        file.extend_from_slice(&extended_box(b"jp2c", j2k));
+        assert_eq!(jpeg2000_codestream(&file), Some(j2k));
+        assert_eq!(&file[payload_offset..], j2k);
+        assert!(j2k_tlm_sot_consistent(&file));
+        assert_eq!(j2k_tlm_sot_consistent(&file), j2k_tlm_sot_consistent(j2k));
+    }
+
+    #[test]
+    fn extended_jp2c_followed_by_another_box_selects_exact_payload() {
+        let j2k = fixture_j2k();
+        let mut file = jp2_prefix().to_vec();
+        let payload_offset = file.len() + 16;
+        file.extend_from_slice(&extended_box(b"jp2c", j2k));
+        file.extend_from_slice(&8u32.to_be_bytes());
+        file.extend_from_slice(b"free");
+        assert_eq!(jpeg2000_codestream(&file), Some(j2k));
+        assert_eq!(&file[payload_offset..payload_offset + j2k.len()], j2k);
+        assert!(j2k_tlm_sot_consistent(&file));
+        assert_eq!(j2k_tlm_sot_consistent(&file), j2k_tlm_sot_consistent(j2k));
+    }
+
+    #[test]
+    fn extended_box_with_xlbox_below_header_is_rejected() {
+        let mut file = jp2_prefix().to_vec();
+        file.extend_from_slice(&1u32.to_be_bytes());
+        file.extend_from_slice(b"jp2c");
+        file.extend_from_slice(&15u64.to_be_bytes());
+        file.extend_from_slice(fixture_j2k());
+        assert!(jpeg2000_codestream(&file).is_none());
+        assert!(!j2k_tlm_sot_consistent(&file));
+    }
+
+    #[test]
+    fn tlm_synthetic_multi_tile_and_multi_tile_part_headers_are_accepted() {
+        let parts = vec![
+            tile_part(0, 0, 2, &[0x80]),
+            tile_part(1, 0, 1, &[0x81]),
+            tile_part(1, 1, 1, &[0x82]),
+        ];
+        let raw = synthetic_codestream(&[], &parts, None);
+        assert!(j2k_tlm_sot_consistent(&raw));
+        let boxed = boxed_jp2(&raw);
+        assert_eq!(jpeg2000_codestream(&boxed), Some(raw.as_slice()));
+        assert!(j2k_tlm_sot_consistent(&boxed));
+        // These synthetic tile parts reuse the decodable 1x1 fixture's main
+        // header: SIZ still declares one tile and the packet bytes are copied
+        // from that single tile. Isot=1 and repeated parts therefore disagree
+        // with the declared tile grid, so jpeg2k rejects them. Only the
+        // byte-level guard is under test here.
+        assert!(decode_bytes(&raw).is_none());
+    }
+
+    #[test]
+    fn tlm_split_valid_marker_entries_still_gate_tpsot() {
+        let mut main_extra = Vec::new();
+        main_extra.extend_from_slice(&tlm_st1(0, 15));
+        main_extra.extend_from_slice(&tlm_st1(0, 15));
+        let parts = vec![tile_part(0, 0, 2, &[0x80]), tile_part(0, 1, 2, &[0x80])];
+        let accepted = synthetic_codestream(&main_extra, &parts, None);
+        assert!(j2k_tlm_sot_consistent(&accepted));
+
+        let rejected = synthetic_codestream(&main_extra, &[tile_part(0, 2, 1, &[0x80])], None);
+        assert!(!j2k_tlm_sot_consistent(&rejected));
+    }
+
+    #[test]
+    fn tlm_malformed_marker_is_rejected_without_waiving_comparison() {
+        // Each variant fails `read_tlm`; the old guard cleared its counts and
+        // then accepted an out-of-range TPsot instead of rejecting the input.
+        let bad_markers: [&[u8]; 3] = [
+            &[0xff, 0x55, 0x00, 0x06, 0x00, 0x30, 0x00, 0x00], // ST=3
+            &[0xff, 0x55, 0x00, 0x05, 0x00, 0x10, 0x00],       // partial entry
+            &[0xff, 0x55, 0x00, 0x04, 0x00, 0x10],             // no entries
+        ];
+        for marker in bad_markers {
+            let mut main_extra = marker.to_vec();
+            main_extra.extend_from_slice(&tlm_st1(0, 15)); // a later valid TLM
+            let codestream =
+                synthetic_codestream(&main_extra, &[tile_part(0, 1, 1, &[0x80])], None);
+            assert!(!j2k_tlm_sot_consistent(&codestream));
+            assert!(decode_bytes(&codestream).is_none());
+        }
+    }
+
+    #[test]
+    fn tlm_implicit_indices_saturate_within_tpsot_byte_range() {
+        let main_extra = tlm_implicit(300);
+        // Entries 0..=255 name tiles 0..=255 once; entries 256..=299 add 44
+        // more for tile 255, whose TLM count is therefore 45.
+        let accepted = synthetic_codestream(&main_extra, &[tile_part(255, 44, 1, &[0x80])], None);
+        assert!(j2k_tlm_sot_consistent(&accepted));
+        let rejected = synthetic_codestream(&main_extra, &[tile_part(255, 45, 1, &[0x80])], None);
+        assert!(!j2k_tlm_sot_consistent(&rejected));
+    }
+
+    #[test]
+    fn tlm_final_zero_psot_tile_part_requires_sod_and_terminal_eoc() {
+        let final_part = final_tile_part(0, 0, &[0x80, 0x81]);
+        let accepted = synthetic_codestream(&[], &[], Some(&final_part));
+        assert!(j2k_tlm_sot_consistent(&accepted));
+        let boxed = boxed_jp2(&accepted);
+        assert!(j2k_tlm_sot_consistent(&boxed));
+
+        let mut trailing = accepted.clone();
+        trailing.push(0x00); // bytes after EOC are not a valid end boundary
+        assert!(!j2k_tlm_sot_consistent(&trailing));
+
+        let mut missing_sod = main_header(fixture_j2k()).to_vec();
+        missing_sod.extend_from_slice(&sot_segment(0, 0, 0, 1));
+        missing_sod.extend_from_slice(&[0x80, 0xff, 0xd9]);
+        assert!(!j2k_tlm_sot_consistent(&missing_sod));
+
+        let mut eoc_in_header = main_header(fixture_j2k()).to_vec();
+        eoc_in_header.extend_from_slice(&sot_segment(0, 30, 0, 1));
+        eoc_in_header.extend_from_slice(&[0xff, 0x5c, 0x00, 0x04, 0x40, 0x40]);
+        eoc_in_header.extend_from_slice(&[0xff, 0xd9, 0xff, 0x93, 0x80]);
+        assert!(!j2k_tlm_sot_consistent(&eoc_in_header));
+    }
+
+    #[test]
+    fn tlm_eof_is_never_a_success_boundary() {
+        let header = main_header(fixture_j2k());
+        assert!(!j2k_tlm_sot_consistent(header)); // EOF in main header
+        let mut main_eoc = header.to_vec();
+        main_eoc.extend_from_slice(&[0xff, 0xd9]); // EOC with no tile part
+        assert!(!j2k_tlm_sot_consistent(&main_eoc));
+
+        let mut open_header = header.to_vec();
+        open_header.extend_from_slice(&sot_segment(0, 15, 0, 1));
+        assert!(!j2k_tlm_sot_consistent(&open_header)); // EOF after SOT
+        let mut eoc_after_sot = open_header.clone();
+        eoc_after_sot.extend_from_slice(&[0xff, 0xd9]);
+        assert!(!j2k_tlm_sot_consistent(&eoc_after_sot));
+
+        let part = tile_part(0, 0, 1, &[0x80]);
+        let full = synthetic_codestream(&[], std::slice::from_ref(&part), None);
+        assert!(j2k_tlm_sot_consistent(&full));
+        assert!(!j2k_tlm_sot_consistent(&full[..full.len() - 2])); // no EOC
+        let mut after_sod = header.to_vec();
+        after_sod.extend_from_slice(&part);
+        assert!(!j2k_tlm_sot_consistent(&after_sod)); // EOF after SOD, no EOC
+        after_sod.push(0x00); // stray byte where EOC is required
+        assert!(!j2k_tlm_sot_consistent(&after_sod));
     }
 
     #[test]
