@@ -6,7 +6,7 @@ use iris_ui_shell::messages::{
     ConflictMessage, DialogMessage, Message, PaneMessage, SettingsMessage, SidebarMessage,
 };
 use iris_ui_shell::state::{
-    PreviewPosition, PropertiesPosition, SettingsSection, SidebarDropTarget,
+    PreviewData, PreviewPosition, PropertiesPosition, SettingsSection, SidebarDropTarget,
 };
 
 #[test]
@@ -223,6 +223,52 @@ fn primary_messages_keep_state_transitions_stable() {
         sample_state(),
         Message::ModifiersChanged(iced::keyboard::Modifiers::SHIFT),
     );
+}
+
+#[test]
+fn stale_preview_completion_does_not_overwrite_current_result() {
+    let mut state = sample_state();
+    let path = state
+        .active_pane()
+        .selected_indices
+        .iter()
+        .copied()
+        .next()
+        .and_then(|index| state.active_pane().entry(index))
+        .map(|entry| entry.object_ref.display_path.clone())
+        .expect("selected photo");
+
+    let _ = iris_ui_shell::update::update(&mut state, Message::TogglePropertiesPanel);
+    let stale_version = state.preview_request_version;
+    assert!(state.preview_loading);
+
+    let _ = iris_ui_shell::update::update(&mut state, Message::TogglePropertiesPanel);
+    let current_version = state.preview_request_version;
+    assert!(current_version > stale_version);
+
+    let _ = iris_ui_shell::update::update(
+        &mut state,
+        Message::PreviewLoaded(
+            current_version,
+            path.clone(),
+            Some(PreviewData::Text {
+                content: "fresh".into(),
+            }),
+        ),
+    );
+    assert!(!state.preview_loading);
+    assert!(!state.preview_failed);
+
+    let _ = iris_ui_shell::update::update(
+        &mut state,
+        Message::PreviewLoaded(stale_version, path, None),
+    );
+    assert!(!state.preview_loading);
+    assert!(!state.preview_failed);
+    assert!(matches!(
+        state.preview_data,
+        Some(PreviewData::Text { ref content }) if content == "fresh"
+    ));
 }
 
 fn run_transition(case: &str, mut state: iris_ui_shell::state::AppState, message: Message) {

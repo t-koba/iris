@@ -245,8 +245,10 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
         Message::PreviewDebounced(version) => {
             return preview::start_preview_load(state, version);
         }
-        Message::PreviewLoaded(path, data) => {
-            if state.preview_target_path.as_ref() == Some(&path) {
+        Message::PreviewLoaded(version, path, data) => {
+            if state.preview_request_version == version
+                && state.preview_target_path.as_ref() == Some(&path)
+            {
                 state.preview_loading = false;
                 state.preview_failed = data.is_none();
                 state.preview_data = data;

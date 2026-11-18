@@ -292,7 +292,8 @@ pub enum Message {
     QuickLookSelectPrevious,
     TogglePropertiesPanel,
     PreviewDebounced(u64),
-    PreviewLoaded(String, Option<PreviewData>),
+    /// Carries the request version so stale async completions can be ignored.
+    PreviewLoaded(u64, String, Option<PreviewData>),
     SetPreviewPosition(PreviewPosition),
     SetPropertiesPosition(crate::state::PropertiesPosition),
     ConfigFileChanged,

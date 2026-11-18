@@ -172,7 +172,7 @@ pub fn start_preview_load(state: &mut AppState, version: u64) -> Task<Message> {
 
     Task::perform(
         load_preview_data(preview_entry.object_ref, mode, cached_thumbnail),
-        move |data| Message::PreviewLoaded(path, data),
+        move |data| Message::PreviewLoaded(version, path, data),
     )
 }
 
