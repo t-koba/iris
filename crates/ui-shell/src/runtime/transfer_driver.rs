@@ -246,15 +246,25 @@ impl AppRuntime {
         Ok(SymlinkTransfer::NotHandled)
     }
 
+    #[cfg(test)]
     fn admit_transfer(&self, job_id: &JobId) -> Result<TransferAdmission<'_>, String> {
+        self.admit_transfer_for(job_id, self.job_manager.cancel_generation(job_id))
+    }
+
+    fn admit_transfer_for(
+        &self,
+        job_id: &JobId,
+        dispatch_generation: u64,
+    ) -> Result<TransferAdmission<'_>, String> {
         let mut active = self
             .active_transfers
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        // Cancel publishes the authoritative state under this same lock, including when
-        // the first item has not registered yet. No canceled job can fabricate a control.
+        // Cancel changes the state and generation under this same lock. Resume can
+        // change the state back, but dispatches from before Cancel still cannot register.
         let state = self.job_manager.get_state(job_id);
-        if state == Some(JobState::Canceled) {
+        let current_generation = self.job_manager.cancel_generation(job_id);
+        if state == Some(JobState::Canceled) || current_generation != dispatch_generation {
             return Err("transfer canceled".into());
         }
         let control = active
@@ -276,7 +286,8 @@ impl AppRuntime {
         })
     }
 
-    pub async fn apply_pending_item(
+    /// Captures the job's cancellation generation before the returned future is polled.
+    pub fn apply_pending_item(
         self: Arc<Self>,
         job_id: JobId,
         task_index: usize,
@@ -284,11 +295,41 @@ impl AppRuntime {
         is_move: bool,
         resolution: ConflictResolution,
         base_bytes_completed: u64,
+    ) -> impl std::future::Future<Output = Result<TransferItemOutcome, String>> + Send + 'static
+    {
+        let dispatch_generation = self.job_manager.cancel_generation(&job_id);
+        async move {
+            self.apply_pending_item_inner(
+                job_id,
+                task_index,
+                item,
+                is_move,
+                resolution,
+                base_bytes_completed,
+                dispatch_generation,
+            )
+            .await
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Carries the captured generation alongside the transfer arguments"
+    )]
+    async fn apply_pending_item_inner(
+        self: Arc<Self>,
+        job_id: JobId,
+        task_index: usize,
+        item: PendingFileItem,
+        is_move: bool,
+        resolution: ConflictResolution,
+        base_bytes_completed: u64,
+        dispatch_generation: u64,
     ) -> Result<TransferItemOutcome, String> {
         #[cfg(test)]
         tests::pause_admission(&job_id, tests::AdmissionStage::BeforeRegistration).await;
 
-        let admission = self.admit_transfer(&job_id)?;
+        let admission = self.admit_transfer_for(&job_id, dispatch_generation)?;
         let control = admission.control();
         #[cfg(test)]
         tests::pause_admission(&job_id, tests::AdmissionStage::Preflight).await;
@@ -1150,6 +1191,79 @@ mod tests {
     #[tokio::test]
     async fn cancel_during_transfer_preflight_prevents_control_resurrection_and_writes() {
         assert_canceled_admission(AdmissionStage::Preflight, 9_100_010).await;
+    }
+
+    #[tokio::test]
+    async fn cancel_then_resume_rejects_a_stale_dispatched_item() {
+        let runtime = app_runtime();
+        let job_id = JobId(9_100_030);
+        runtime
+            .job_manager
+            .track_job(job_id.clone(), JobState::Running, 1, None, vec![]);
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        std::fs::write(&source, b"source content").unwrap();
+
+        let hook = Arc::new(AdmissionHook {
+            stage: AdmissionStage::BeforeRegistration,
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        ADMISSION_HOOKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(job_id.0, Arc::clone(&hook));
+
+        let dispatch = || {
+            Arc::clone(runtime).apply_pending_item(
+                job_id.clone(),
+                0,
+                PendingFileItem {
+                    source: local_ref(&source),
+                    destination_path: destination.to_str().unwrap().to_owned(),
+                },
+                false,
+                ConflictResolution::Overwrite,
+                0,
+            )
+        };
+        // Hold one dispatch immediately before admission and leave another unpolled.
+        let stale = tokio::spawn(dispatch());
+        let unpolled = dispatch();
+        tokio::time::timeout(StdDuration::from_secs(10), hook.entered.notified())
+            .await
+            .unwrap();
+
+        // Cancel then explicitly resume: a fresh lifecycle starts while the old dispatch
+        // is still stalled before admission.
+        runtime.cancel_job(&job_id);
+        runtime.resume_job(&job_id);
+        hook.release.notify_one();
+
+        let result = tokio::time::timeout(StdDuration::from_secs(10), stale)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.expect_err("stale dispatch must not transfer"),
+            "transfer canceled"
+        );
+        assert_eq!(
+            unpolled
+                .await
+                .expect_err("queued dispatch must not transfer"),
+            "transfer canceled"
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), b"source content");
+        assert!(!destination.exists());
+
+        dispatch()
+            .await
+            .expect("post-resume dispatch must transfer");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"source content");
+        runtime.cancel_job(&job_id);
     }
 
     #[tokio::test]

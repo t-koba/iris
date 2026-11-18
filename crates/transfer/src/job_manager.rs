@@ -25,6 +25,7 @@ impl Default for ConcurrencyLimits {
 
 struct ManagedJob {
     state: JobState,
+    cancel_generation: u64,
     backend_types: Vec<String>,
     progress: ProgressInfo,
 }
@@ -69,6 +70,7 @@ impl JobManager {
     ) {
         let job = ManagedJob {
             state,
+            cancel_generation: 0,
             backend_types,
             progress: job_progress(total_files, total_bytes),
         };
@@ -80,14 +82,22 @@ impl JobManager {
     }
 
     pub fn update_state(&self, job_id: &JobId, new_state: JobState) {
+        if new_state == JobState::Canceled {
+            self.cancel_job(job_id);
+            return;
+        }
         let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(job) = jobs.get_mut(&job_id.0) {
-            job.state = new_state.clone();
-            self.event_bus.publish(DomainEvent::JobStateChanged {
-                job_id: job_id.clone(),
-                new_state,
-            });
+            self.set_state(job_id, job, new_state);
         }
+    }
+
+    fn set_state(&self, job_id: &JobId, job: &mut ManagedJob, new_state: JobState) {
+        job.state = new_state.clone();
+        self.event_bus.publish(DomainEvent::JobStateChanged {
+            job_id: job_id.clone(),
+            new_state,
+        });
     }
 
     pub fn pause_job(&self, job_id: &JobId) {
@@ -101,7 +111,11 @@ impl JobManager {
     }
 
     pub fn cancel_job(&self, job_id: &JobId) {
-        self.update_state(job_id, JobState::Canceled);
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(job) = jobs.get_mut(&job_id.0) {
+            job.cancel_generation += 1;
+            self.set_state(job_id, job, JobState::Canceled);
+        }
         info!("canceled job {}", job_id.0);
     }
 
@@ -120,6 +134,12 @@ impl JobManager {
     pub fn get_state(&self, job_id: &JobId) -> Option<JobState> {
         let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         jobs.get(&job_id.0).map(|j| j.state.clone())
+    }
+
+    /// The in-memory cancellation generation is zero for new, restored, or unknown jobs.
+    pub fn cancel_generation(&self, job_id: &JobId) -> u64 {
+        let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        jobs.get(&job_id.0).map_or(0, |job| job.cancel_generation)
     }
 
     /// Restores incomplete jobs after an app restart.
@@ -146,16 +166,13 @@ impl JobManager {
                 JobState::UnknownRemoteState
             };
 
-            let job = ManagedJob {
-                state: restored_state.clone(),
+            self.track_job(
+                id.clone(),
+                restored_state.clone(),
+                total_files,
+                None,
                 backend_types,
-                progress: job_progress(total_files, None),
-            };
-
-            self.jobs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(id.0, job);
+            );
 
             info!("restored job {}: {}", id.0, pj.description);
             restored.push(RestoredJob {

@@ -366,27 +366,23 @@ fn spawn_apply_one_item(
     resolution: ConflictResolution,
     base_bytes_completed: u64,
 ) -> Task<Message> {
-    let job_id = job_id.clone();
     let callback_job_id = job_id.clone();
-    let runtime = Arc::clone(app_runtime());
-    let item = item.clone();
+    // Capture the lifecycle before handing the future to the task scheduler.
+    let transfer = Arc::clone(app_runtime()).apply_pending_item(
+        job_id.clone(),
+        task_index,
+        item.clone(),
+        is_move,
+        resolution,
+        base_bytes_completed,
+    );
 
     Task::perform(
         async move {
-            runtime
-                .apply_pending_item(
-                    job_id.clone(),
-                    task_index,
-                    item,
-                    is_move,
-                    resolution,
-                    base_bytes_completed,
-                )
-                .await
-                .map(|outcome| PendingItemResult {
-                    bytes_completed: outcome.bytes_completed,
-                    files_completed: 1,
-                })
+            transfer.await.map(|outcome| PendingItemResult {
+                bytes_completed: outcome.bytes_completed,
+                files_completed: 1,
+            })
         },
         move |result| Message::PendingItemCompleted(callback_job_id, task_index, result),
     )
