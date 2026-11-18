@@ -2,8 +2,9 @@
 """Guard-level patch-integrity evidence for the vendored OpenJPEG backport.
 
 This checks that the two upstream decoder guards are present verbatim in the
-vendored C sources. It is guard-presence evidence, not execution evidence: it
-does not prove a runtime path reaches a guard.
+vendored C sources and that the vendored build compiles those sources rather
+than falling back to an unpatched system library. It is guard-presence evidence,
+not execution evidence: it does not prove a runtime path reaches a guard.
 
 In particular, the early-truncation rejection exercised by
 ``modern_image::tests::rejects_truncated_jpeg2000_codestream`` fails during SIZ
@@ -15,6 +16,7 @@ to verify the guards (external-untrusted evidence, retained as fetch receipts).
 """
 
 from pathlib import Path
+import re
 import unittest
 
 root = Path(__file__).resolve().parents[1]
@@ -22,11 +24,16 @@ jp2 = (root / "vendor/openjpeg-sys/vendor/src/lib/openjp2/jp2.c").read_text(enco
 j2k = (root / "vendor/openjpeg-sys/vendor/src/lib/openjp2/j2k.c").read_text(encoding="utf-8")
 vendor_record = (root / "vendor/openjpeg-sys/IRIS-VENDOR.md").read_text(encoding="utf-8")
 modern_image = (root / "crates/thumb-preview/src/modern_image.rs").read_text(encoding="utf-8")
+build_script = (root / "vendor/openjpeg-sys/build.rs").read_text(encoding="utf-8")
 
 CVE_COMMIT = "f809b80c67717c152a5ad30bf06774f00da4fd2d"
 CVE_PATCH_SHA256 = "13d5afb17d56f5cba3644585f08c29b1b2831c9cd54db73d1fc17b8cebdbe921"
 OSV_COMMIT = "91d08b11a72764f6d199f32fa0c1b1abd4edc2ad"
 OSV_PATCH_SHA256 = "233bf4c149d7740dd802c36c3e78e80352454b27d5579c1a4ef3260c2f4e90a1"
+
+TILE_GUARD_START = (
+    "if (l_cstr_index->tile_index[p_j2k->m_current_tile_number].tp_index &&"
+)
 
 
 class OpenJpegBackportIntegrity(unittest.TestCase):
@@ -36,15 +43,39 @@ class OpenJpegBackportIntegrity(unittest.TestCase):
 
     def test_tile_part_guard_present(self):
         # OSV-2025-219: both end_header and end_pos writes in opj_j2k_read_sod
-        # sit inside one null-and-bounds guard.
-        self.assertIn(
-            "l_cstr_index->tile_index[p_j2k->m_current_tile_number].tp_index &&",
-            j2k,
-        )
+        # sit inside one null-and-bounds guard. Check the guarded block, not
+        # just the two substrings anywhere in the file: a regression that moves
+        # either write outside the guard must fail this check.
+        start = j2k.find(TILE_GUARD_START)
+        self.assertNotEqual(start, -1, "tile-part null-and-bounds guard is absent")
+        end = j2k.find("\n        }\n", start)
+        self.assertNotEqual(end, -1, "tile-part guard block is not closed as expected")
+        guarded = j2k[start:end]
         self.assertIn(
             "l_current_tile_part < l_cstr_index->tile_index[p_j2k->m_current_tile_number].nb_tps) {",
-            j2k,
+            guarded,
         )
+        for field in ("end_header", "end_pos"):
+            self.assertRegex(
+                guarded,
+                r"\.tp_index\[l_current_tile_part\]\." + field + r"\s*=",
+                f"{field} write is not inside the tile-part guard",
+            )
+
+    def test_build_compiles_patched_sources(self):
+        # Guard presence in vendored C only matters if the build actually
+        # compiles those files. build.rs has no system-library fallback.
+        start = build_script.find("let files = [")
+        end = build_script.find("];", start)
+        self.assertNotEqual(start, -1, "vendored source list is absent")
+        self.assertNotEqual(end, -1, "vendored source list is not closed")
+        source_list = build_script[start:end]
+        for name in ('"j2k.c"', '"jp2.c"'):
+            self.assertIn(name, source_list, f"{name} is not built from vendored sources")
+        self.assertIn("cc.file(jp2dir.join(file))", build_script)
+        self.assertIn('cc.compile("openjp2")', build_script)
+        self.assertNotIn("probe_library", build_script)
+        self.assertNotIn("pkg_config", build_script)
 
     def test_upstream_fix_identity_recorded(self):
         for value in (CVE_COMMIT, CVE_PATCH_SHA256, OSV_COMMIT, OSV_PATCH_SHA256):
