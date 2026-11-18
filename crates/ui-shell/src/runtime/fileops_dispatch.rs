@@ -523,7 +523,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[tokio::test]
     async fn native_name_ui_listing_cache_and_operations_refuse_lossy_alias() {
         use std::os::unix::ffi::OsStringExt;

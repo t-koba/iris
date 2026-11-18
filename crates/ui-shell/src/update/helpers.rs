@@ -1277,7 +1277,7 @@ mod tests {
         assert!(fallback[0].is_inaccessible);
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[tokio::test]
     async fn recursive_pdf_lossy_paths_never_read_unicode_siblings() {
         use std::ffi::OsString;
@@ -1404,7 +1404,7 @@ mod tests {
         assert_eq!(repeated[0].object_ref.key, lossy.object_ref.key);
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[tokio::test]
     async fn recursive_image_lossy_paths_never_read_unicode_siblings() {
         use std::ffi::OsString;

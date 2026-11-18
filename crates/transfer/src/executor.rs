@@ -2372,6 +2372,13 @@ mod tests {
             "final conflict",
             "terminal failure",
         ] {
+            // macOS filesystems reject non-UTF-8 path bytes, so the synthetic
+            // lossy-root scenario cannot be created there. Other platforms and
+            // the fail-closed adapter tests still cover that contract.
+            #[cfg(target_os = "macos")]
+            if scenario == "lossless path" {
+                continue;
+            }
             let total_len = CHUNKED_RANGE_MIN_BYTES + 1;
             let root = tempdir().unwrap();
             let destination_root = {

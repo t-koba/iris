@@ -814,7 +814,7 @@ mod cloud_config_tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, not(target_os = "macos")))]
 mod native_path_tests {
     use super::*;
 
