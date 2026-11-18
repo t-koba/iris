@@ -80,7 +80,12 @@ The upstream security page (https://ffmpeg.org/security.html) lists fixes for
 CVE-2026-8461 and CVE-2026-30999 in 8.1.2; this runtime selects 8.1.3 (libavcodec
 62.28.103). CVE-2026-70629 (RSCC decoder) and CVE-2026-70631 (TIFF decoder) are
 uninitialized-heap-read disclosures affecting FFmpeg before 9.0; 8.1.3 is in range and
-TIFF decoding is enabled. Their documented impact needs a crafted file in a persistent,
+both decoders are enabled. A retained exact-SHA Linux CI inventory (source revision
+e753c3164efe06221266c848016a6424fbcb198e, workflow run 44263681973) records both
+RSCC_DECODER and TIFF_DECODER in `runtime.enabled_codecs` for this pinned 8.1.3 build
+(libavcodec 62.28.103); that is external CI evidence about the tested runner build, not a
+claim of Iris reachability, release-artifact equivalence, or a required runtime change.
+Their documented impact needs a crafted file in a persistent,
 multi-user decoding service; for a single-user desktop preview flow this is a bounded
 residual risk, not an assumption that untrusted media is safe. This is not a claim of a
 broader security review.

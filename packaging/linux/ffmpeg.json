@@ -47,7 +47,7 @@
     "liblzma.so.5"
   ],
   "security_reference": "https://ffmpeg.org/security.html",
-  "security_scope": "Upstream lists fixes for CVE-2026-8461 and CVE-2026-30999 in 8.1.2; selected 8.1.3 is newer. CVE-2026-70629 (RSCC decoder) and CVE-2026-70631 (TIFF decoder) are uninitialized-heap-read disclosures affecting FFmpeg before 9.0; pinned 8.1.3 is in range and TIFF decoding is enabled. Documented impact needs a crafted file in a persistent, multi-user decoding service; for a single-user desktop preview flow this is a bounded residual risk, not an assumption that untrusted media is safe. No broader security review is claimed.",
+  "security_scope": "Upstream lists fixes for CVE-2026-8461 and CVE-2026-30999 in 8.1.2; selected 8.1.3 is newer. CVE-2026-70629 (RSCC decoder) and CVE-2026-70631 (TIFF decoder) are uninitialized-heap-read disclosures affecting FFmpeg before 9.0; pinned 8.1.3 is in range and both decoders are enabled. A retained exact-SHA Linux CI inventory (source revision e753c3164efe06221266c848016a6424fbcb198e, workflow run 44263681973) records both RSCC_DECODER and TIFF_DECODER in runtime.enabled_codecs for this pinned 8.1.3 build (libavcodec 62.28.103); that is external CI evidence about the tested runner build, not a claim of Iris reachability, release-artifact equivalence, or a required runtime change. Documented impact needs a crafted file in a persistent, multi-user decoding service; for a single-user desktop preview flow this is a bounded residual risk, not an assumption that untrusted media is safe. No broader security review is claimed.",
   "system_packages": {
     "libc6": "LGPL-2.1-or-later (glibc runtime; see distro copyright)",
     "libatomic1": "GPL-3.0-or-later WITH GCC-exception-3.1 (GCC runtime library exception)",
