@@ -260,6 +260,40 @@ mod tests {
     use crate::undo::{UndoItem, UndoOpKind, UndoableOp};
 
     #[test]
+    fn right_pane_back_and_forward_preserve_history() {
+        let mut state = AppState::default();
+        state.active_pane = 1;
+        {
+            let pane = state.pane_mut(1);
+            pane.navigation_history = vec!["/a".into(), "/b".into(), "/c".into()];
+            pane.history_index = 3;
+            pane.current_path = "/c".into();
+        }
+
+        for (message, expected_path, expected_index) in [
+            (NavigationMessage::Back, "/b", 2),
+            (NavigationMessage::Back, "/a", 1),
+            (NavigationMessage::Forward, "/b", 2),
+            (NavigationMessage::Forward, "/c", 3),
+        ] {
+            let _ = update(&mut state, Message::Navigation(message));
+            let pane = state.pane(1);
+            assert_eq!(pane.current_path, expected_path);
+            assert_eq!(pane.history_index, expected_index);
+            assert_eq!(pane.navigation_history, vec!["/a", "/b", "/c"]);
+        }
+
+        let _ = update(&mut state, Message::Navigation(NavigationMessage::Back));
+        let _ = update(
+            &mut state,
+            Message::Pane(1, PaneMessage::NavigateToPath("/d".into())),
+        );
+        assert_eq!(state.pane(1).current_path, "/d");
+        assert_eq!(state.pane(1).navigation_history, vec!["/a", "/b", "/d"]);
+        assert_eq!(state.pane(1).history_index, 3);
+    }
+
+    #[test]
     fn reset_pane_directory_state_clears_filter_and_selection() {
         let mut state = AppState::default();
         {

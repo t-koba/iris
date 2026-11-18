@@ -13,7 +13,7 @@ pub fn handle(state: &mut AppState, message: NavigationMessage) -> Task<Message>
                     refresh_breadcrumbs(state, 0);
                     return load_directory_progressively(path, state.show_hidden_files);
                 }
-                return Task::done(Message::Pane(1, PaneMessage::NavigateToPath(path)));
+                return pane::load_pane_1_history_target(state, path);
             }
         }
         NavigationMessage::Forward => {
@@ -26,7 +26,7 @@ pub fn handle(state: &mut AppState, message: NavigationMessage) -> Task<Message>
                     refresh_breadcrumbs(state, 0);
                     return load_directory_progressively(path, state.show_hidden_files);
                 }
-                return Task::done(Message::Pane(1, PaneMessage::NavigateToPath(path)));
+                return pane::load_pane_1_history_target(state, path);
             }
         }
         NavigationMessage::Up => {

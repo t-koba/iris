@@ -1308,6 +1308,15 @@ fn accept_path_suggestion(state: &mut AppState, pane_idx: usize) {
     }
 }
 
+/// Loads an already canonical right-pane history target without changing its history.
+pub(crate) fn load_pane_1_history_target(state: &mut AppState, canonical: String) -> Task<Message> {
+    state.pane_mut(1).current_path = canonical.clone();
+    reset_pane_directory_state(state, 1);
+    state.pane_mut(1).load_state = PaneLoadState::LoadingInitial;
+    refresh_breadcrumbs(state, 1);
+    load_secondary_directory_task(canonical, state.show_hidden_files)
+}
+
 /// Pane 0 loads progressively, pane 1 loads in full.
 pub(crate) fn navigate_pane_to_path(
     state: &mut AppState,
@@ -1318,14 +1327,7 @@ pub(crate) fn navigate_pane_to_path(
         navigate_to_path(state, path)
     } else {
         let canonical = pane_display_path(path);
-        {
-            let pane = state.pane_mut(1);
-            pane.current_path = canonical.clone();
-            pane.push_to_history(canonical.clone());
-        }
-        reset_pane_directory_state(state, 1);
-        state.pane_mut(1).load_state = PaneLoadState::LoadingInitial;
-        refresh_breadcrumbs(state, 1);
-        load_secondary_directory_task(canonical, state.show_hidden_files)
+        state.pane_mut(1).push_to_history(canonical.clone());
+        load_pane_1_history_target(state, canonical)
     }
 }
