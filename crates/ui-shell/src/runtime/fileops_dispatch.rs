@@ -47,18 +47,21 @@ impl AppRuntime {
         let resolved = self.resolve_backend(&old_path);
         if resolved.kind == VolumeKind::Local && !self.is_virtual_display_path(&target.display_path)
         {
-            if tokio::fs::try_exists(&new_path)
-                .await
-                .map_err(|error| error.to_string())?
-            {
-                return Err(format!(
-                    "destination already exists: {}",
-                    new_path.to_string_lossy()
-                ));
+            let (src, dst) = (old_path.clone(), new_path.clone());
+            let renamed = tokio::task::spawn_blocking(move || {
+                iris_backends::common::rename_no_replace(&src, &dst)
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+            if let Err(error) = renamed {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    return Err(format!(
+                        "destination already exists: {}",
+                        new_path.to_string_lossy()
+                    ));
+                }
+                return Err(error.to_string());
             }
-            tokio::fs::rename(&old_path, &new_path)
-                .await
-                .map_err(|error| error.to_string())?;
             self.rebind_cached_display_path_prefix(
                 &resolved.backend_id,
                 &target.display_path,
@@ -635,6 +638,49 @@ mod tests {
         assert!(!temp.path().join("copy.txt").exists());
         assert_eq!(fs::read(native).unwrap(), b"A");
         assert_eq!(fs::read(alias).unwrap(), b"replacement sibling B");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rename_object_refuses_dangling_local_symlink_destination() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let src_path = temp.path().join("src.txt");
+        let dst_path = temp.path().join("dangling");
+        let missing_target = temp.path().join("missing-target");
+        fs::write(&src_path, b"source").expect("write source");
+        symlink(&missing_target, &dst_path).expect("create dangling symlink");
+
+        let source = ObjectRef {
+            local_path_is_lossy: false,
+            key: ObjectKey {
+                backend_id: BackendId("local".to_string()),
+                stable_id: StableId("src".to_string()),
+            },
+            parent_stable_id: Some(StableId("root".to_string())),
+            display_path: src_path.to_string_lossy().to_string(),
+        };
+
+        let error = app_runtime()
+            .rename_object(&source, "dangling")
+            .await
+            .expect_err("rename must not replace a dangling symlink");
+        assert!(error.contains("destination already exists"));
+        assert_eq!(fs::read(&src_path).expect("read source"), b"source");
+        assert_eq!(
+            fs::read_link(&dst_path).expect("read dangling symlink"),
+            missing_target
+        );
+
+        app_runtime()
+            .rename_object(&source, "renamed.txt")
+            .await
+            .expect("rename to an unused sibling should succeed");
+        assert_eq!(
+            fs::read(temp.path().join("renamed.txt")).expect("read renamed source"),
+            b"source"
+        );
     }
 
     #[tokio::test]
