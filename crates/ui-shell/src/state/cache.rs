@@ -322,16 +322,16 @@ mod tests {
             path: "Cafe\u{301}.jpg".into(),
             ..nfc.clone()
         };
-        assert_eq!(nfc == nfd, cfg!(target_os = "macos"));
+        assert_ne!(nfc, nfd);
         let mut cache = HashMap::new();
         cache.insert(nfc.clone(), 1);
         cache.insert(nfd.clone(), 2);
-        assert_eq!(cache.len(), if cfg!(target_os = "macos") { 1 } else { 2 });
+        assert_eq!(cache.len(), 2);
         assert_eq!(cache.get(&nfd), Some(&2));
         assert_eq!(nfc.path(), "Café.jpg");
         assert_eq!(nfd.path(), "Cafe\u{301}.jpg");
-        // A cloud/remote object with a canonically equivalent display path is a
-        // different object; it must never reuse the APFS-normalized entry.
+        // Canonically equivalent spellings are distinct byte paths, and a
+        // different object must never reuse another object's entry.
         assert_ne!(
             nfd,
             ThumbnailCacheKey {
