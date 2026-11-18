@@ -72,6 +72,13 @@ CREATE TABLE IF NOT EXISTS directory_snapshot_entries (
 
 CREATE INDEX IF NOT EXISTS idx_directory_snapshot_entries_generation
     ON directory_snapshot_entries (backend_id, dir_stable_id, generation);
+
+CREATE TABLE IF NOT EXISTS snapshot_generation_counter (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    next_generation INTEGER NOT NULL
+);
+
+INSERT OR IGNORE INTO snapshot_generation_counter (id, next_generation) VALUES (1, 1);
 ";
 
 /// A database with a different schema version is a disposable cache; it is rebuilt.
@@ -238,6 +245,44 @@ mod tests {
     fn version(conn: &Connection) -> i64 {
         conn.pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn generation_counter_survives_reopen_and_is_restored_on_old_caches() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("catalog.sqlite3");
+        let conn = open(Some(&db), 0).unwrap();
+        conn.execute(
+            "UPDATE snapshot_generation_counter SET next_generation = 9 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = open(Some(&db), 0).unwrap();
+        assert_eq!(version(&conn), SCHEMA_VERSION);
+        let next: i64 = conn
+            .query_row(
+                "SELECT next_generation FROM snapshot_generation_counter WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(next, 9);
+
+        // A cache written before the counter existed keeps its version but gains the table.
+        conn.execute("DROP TABLE snapshot_generation_counter", [])
+            .unwrap();
+        drop(conn);
+        let conn = open(Some(&db), 0).unwrap();
+        let next: i64 = conn
+            .query_row(
+                "SELECT next_generation FROM snapshot_generation_counter WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(next, 1);
     }
 
     #[test]

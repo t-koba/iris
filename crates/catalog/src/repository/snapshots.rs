@@ -71,10 +71,9 @@ impl CatalogRepository {
     }
 
     /// Reserve a generation by writing a sentinel row. An IMMEDIATE transaction takes the
-    /// write lock before reading the generation, so two connections cannot both read the
-    /// same maximum and then fail to promote a deferred read to a write. Busy responses are
-    /// retried within a bounded budget; the sentinel lets cleanup distinguish live work
-    /// from abandoned rows.
+    /// write lock before reading and advancing the durable counter, so no connection can
+    /// reuse a generation, even across restarts. Busy responses are retried within a bounded
+    /// budget; the sentinel lets cleanup distinguish live work from abandoned rows.
     pub fn begin_snapshot_generation(
         &mut self,
         backend_id: &str,
@@ -86,15 +85,21 @@ impl CatalogRepository {
                     .conn
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 let current: i64 = transaction.query_row(
-                    "SELECT COALESCE(MAX(generation), 0) FROM (
-                        SELECT generation FROM directory_snapshots WHERE backend_id = ?1 AND dir_stable_id = ?2
+                    "SELECT MAX(generation) FROM (
+                        SELECT COALESCE(MAX(next_generation), 0) AS generation FROM snapshot_generation_counter
                         UNION ALL
-                        SELECT generation FROM directory_snapshot_entries WHERE backend_id = ?1 AND dir_stable_id = ?2
-                    )",
-                    rusqlite::params![backend_id, dir_stable_id],
+                        SELECT COALESCE(MAX(generation), 0) FROM directory_snapshots
+                        UNION ALL
+                        SELECT COALESCE(MAX(generation), 0) FROM directory_snapshot_entries
+                     )",
+                    [],
                     |row| row.get(0),
                 )?;
                 let generation = current.saturating_add(1);
+                transaction.execute(
+                    "UPDATE snapshot_generation_counter SET next_generation = ?1 WHERE id = 1",
+                    [generation],
+                )?;
                 // Keep the committed generation and every generation that is currently reserved.
                 transaction.execute(
                     "DELETE FROM directory_snapshot_entries
