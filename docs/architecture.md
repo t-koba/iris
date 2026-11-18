@@ -128,14 +128,14 @@ FFmpeg（動画と一部の静止画のフォールバック）の範囲は `pac
 
 #### JPEG 2000（OpenJPEG 2.5.3）
 
-`crates/thumb-preview` は `jpeg2k` 0.10.1 を `openjpeg-sys` フィーチャーで使用します。`openjpeg-sys` 1.0.12 は `cc` で同梱の C ソースをビルドして静的リンクします。`config/opj_config.h` が宣言する OpenJPEG のバージョンは 2.5.3 です。同梱ソースの出典は [ベンダー記録](../vendor/openjpeg-sys/IRIS-VENDOR.md) を参照してください。`modern_image::detect` が JP2/J2K のシグネチャを `decode_jpeg2000` に振り分け、ローカル・リモートを問わず `jpeg2k::Image::from_bytes` に渡します。
+`crates/thumb-preview` は `jpeg2k` 0.10.1 を `openjpeg-sys` フィーチャーで使用します。`openjpeg-sys` 1.0.12 は crates.io の未改変のクレートを `Cargo.lock` のチェックサムで固定し、`cc` で同梱の C ソースをビルドして静的リンクします。`config/opj_config.h` が宣言する OpenJPEG のバージョンは 2.5.3 です。リポジトリ内のコピーや Cargo パッチは残していません。`modern_image::detect` が JP2/J2K のシグネチャを `decode_jpeg2000` に振り分けます。`decode_jpeg2000` は `jpeg2k::Image::from_bytes` を呼ぶ前に、Iris 側の純 Rust ガードで TLM/SOT の一貫性を検査します。
 
 外部の報告では、この OpenJPEG リビジョンに 2 件のヒープ領域外書き込みがあります。Iris ではいずれの PoC も再現していません。
 
-- CVE-2025-54874: JP2 ヘッダーの読み取り失敗時に `opj_jp2_read_header` で領域外書き込みが起こり得るという報告です。修正は OpenJPEG 2.5.4 に含まれます。Iris が使う `jpeg2k` は出力画像ポインターを null で初期化するため、報告の前提条件を満たさず、この修正は追加の防御です。
-- OSV-2025-219 / GHSA-78g4-xqwv-q3g8: TLM マーカーを伴う `opj_j2k_read_sod` の領域外書き込みです。上流の修正は `master` にあり、2.5.3 と 2.5.4 には含まれません。
+- CVE-2025-54874: JP2 ヘッダーの読み取り失敗時に `opj_jp2_read_header` で領域外書き込みが起こり得るという報告です。修正は OpenJPEG 2.5.4 に含まれます。Iris が使う `jpeg2k` は出力画像ポインターを null で初期化するため、報告の前提条件を満たしません。
+- OSV-2025-219 / GHSA-78g4-xqwv-q3g8: TLM マーカーを伴う `opj_j2k_read_sod` の領域外書き込みです。上流の修正は `master` にあり、2.5.3 と 2.5.4 には含まれません。未修正の 2.5.3 では、タイルの tile-part 索引サイズが有効な TLM エントリ数から決まる一方、SOT の TPsot がその範囲外でも索引に書き込めます。
 
-ベンダー化した `openjpeg-sys` への Cargo パッチで上流の両修正をバックポートし、JPEG 2000（JP2/J2K）のプレビュー対応は維持しています。
+`j2k_tlm_sot_consistent` は JP2 の `jp2c` ペイロードまたは生の J2K バイト列から TLM と SOT だけを読み、Psot でタイルデータ部分を飛ばして、同じタイルの TLM エントリ数以上の TPsot をデコーダ呼び出し前に拒否します。TLM のない入力と、OpenJPEG が TLM を無効化する ST=3 や不正なエントリ列の入力は、従来どおりデコーダに渡します。マーカー長が不正な場合も拒否します。`scripts/test-openjpeg-unpatched.py` はリポジトリ内にコピーやパッチが残っていないことと、依存がチェックサム付きの crates.io 版であることを確認します。これは限定的な入力ガードの記録であり、安全性の保証やリリース判断ではありません。
 
 #### PDFium（chromium/8138）
 

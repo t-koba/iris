@@ -2,4 +2,3 @@
 
 # Retain the upstream C headers byte-for-byte, including their existing whitespace.
 vendor/jpegxr/** -whitespace
-vendor/openjpeg-sys/** -text -whitespace
