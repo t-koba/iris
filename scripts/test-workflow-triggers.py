@@ -340,6 +340,10 @@ permissions:
         "cargo test -p iris-platform-integration --lib copy::tests::new_copy_destinations_are_private_until_success_under_umask --locked",
     ),
     "Matrix runner contracts reject a forced single Ubuntu runner": matrix_runner_mutation_regression(),
+    "Workspace tests run in the main CI test job": ci_job_has(
+        "test",
+        "\n        run: cargo test --workspace --locked\n",
+    ),
     "Workflow contract checks run independently of platform integration": ci_job_has(
         "workflow-contracts",
         "run: python3 scripts/test-workflow-triggers.py",

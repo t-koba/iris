@@ -212,6 +212,9 @@ jobs:
           cargo bloat --release -p iris-ui-shell --no-default-features --features minimal -n 20 --crates > /tmp/iris-bloat.txt
           ! rg -i 'ffmpeg|pdfium' /tmp/iris-bloat.txt
 
+      - name: Tests
+        run: cargo test --workspace --locked
+
       - name: UI shell integration smoke
         run: cargo test -p iris-ui-shell --test integration_smoke --locked
 
