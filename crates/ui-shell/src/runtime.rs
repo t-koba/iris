@@ -84,6 +84,10 @@ use tokio::task::AbortHandle;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
 
+// Internal completion marker, distinct from formatted backend errors.
+pub(crate) const STALE_TRANSFER_DISPATCH: &str =
+    "transfer dispatch superseded by a newer cancel generation";
+
 #[derive(Clone, Debug)]
 pub struct TransferItemOutcome {
     pub bytes_completed: u64,

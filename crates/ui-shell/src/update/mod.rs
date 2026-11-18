@@ -599,6 +599,36 @@ mod tests {
     }
 
     #[test]
+    fn stale_transfer_completion_does_not_cancel_the_resumed_job() {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 2, 1);
+        let _ = process_pending_operation(&mut state);
+
+        let task = update(
+            &mut state,
+            Message::PendingItemCompleted(
+                job_id.clone(),
+                0,
+                Err(crate::runtime::STALE_TRANSFER_DISPATCH.to_string()),
+            ),
+        );
+
+        assert_eq!(task.units(), 0);
+        assert_eq!(state.jobs[0].state, JobState::Running);
+        let pending = state.pending_operation.as_ref().expect("pending");
+        assert_eq!(pending.job_id, job_id);
+        assert_eq!(pending.in_flight, 1);
+
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(job_id, 0, Err("transfer canceled".to_string())),
+        );
+
+        assert_eq!(state.jobs[0].state, JobState::Canceled);
+        assert!(state.pending_operation.is_none());
+    }
+
+    #[test]
     fn skip_after_a_failure_skips_the_failed_file_not_the_next_one() {
         let mut state = AppState::default();
         let job_id = running_transfer(&mut state, 4, 2);

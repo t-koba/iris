@@ -4,7 +4,7 @@ use super::undo_ops::*;
 use super::update;
 use crate::i18n::{tr, tr_args};
 use crate::messages::{Message, PaneMessage, SidebarMessage};
-use crate::runtime::app_runtime;
+use crate::runtime::{app_runtime, STALE_TRANSFER_DISPATCH};
 use crate::state::{
     AppState, BatchRenameDialogState, BatchRenameEntry, BatchRenameMode, BatchRenamePreviewItem,
     ClipboardContent, ContextMenuKind, ContextMenuState, DialogState, NotificationAction,
@@ -850,6 +850,10 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                     if is_current_job {
                         state.pending_operation = None;
                     }
+                    return Task::none();
+                }
+                Err(error) if error == STALE_TRANSFER_DISPATCH => {
+                    // This dispatch was never admitted to the resumed operation.
                     return Task::none();
                 }
                 Err(error) => {
