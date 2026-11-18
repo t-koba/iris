@@ -1066,12 +1066,19 @@ mod tests {
         assert!(runtime.append_directory_snapshot_entries(&write, &[entry]));
         drop(write);
 
-        // Generation numbers come from both snapshots and entries. With no committed
-        // snapshot the counter restarts, so a leftover staging row would advance it.
+        // Generations come from a durable counter and are never reused. A cancelled write
+        // leaves no committed listing behind, and the next write still gets a fresh number.
+        assert!(runtime
+            .catalog
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_snapshot_entries(&backend_id.0, &parent_stable_id.0)
+            .expect("catalog read")
+            .is_none_or(|entries| entries.is_empty()));
         let next = runtime
             .begin_directory_snapshot_for_path(&root)
             .expect("next snapshot generation");
-        assert_eq!(next.generation, generation);
+        assert!(next.generation > generation);
         drop(next);
     }
 
