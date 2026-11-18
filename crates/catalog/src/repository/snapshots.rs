@@ -97,8 +97,10 @@ impl CatalogRepository {
 
     /// Reserve a generation by writing a sentinel row into this connection's TEMP staging.
     /// An IMMEDIATE transaction takes the write lock before reading and advancing the durable
-    /// counter, so no connection can reuse a generation, even across restarts. Busy responses
-    /// are retried within a bounded budget; the sentinel marks an owned, incomplete listing.
+    /// counter, so no connection can reuse a generation, even across restarts. The counter is
+    /// authoritative after schema initialization, making a reservation O(1) rather than a scan
+    /// of every committed snapshot and entry. Busy responses are retried within a bounded budget;
+    /// the sentinel marks an owned, incomplete listing.
     pub fn begin_snapshot_generation(
         &mut self,
         backend_id: &str,
@@ -111,17 +113,16 @@ impl CatalogRepository {
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 transaction.execute_batch(SNAPSHOT_STAGING_SCHEMA)?;
                 let current: i64 = transaction.query_row(
-                    "SELECT MAX(generation) FROM (
-                        SELECT COALESCE(MAX(next_generation), 0) AS generation FROM snapshot_generation_counter
-                        UNION ALL
-                        SELECT COALESCE(MAX(generation), 0) FROM directory_snapshots
-                        UNION ALL
-                        SELECT COALESCE(MAX(generation), 0) FROM directory_snapshot_entries
-                     )",
+                    "SELECT next_generation FROM snapshot_generation_counter WHERE id = 1",
                     [],
                     |row| row.get(0),
                 )?;
-                let generation = current.saturating_add(1);
+                let Some(generation) = current.checked_add(1) else {
+                    return Err(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+                        Some("snapshot generation counter exhausted".to_string()),
+                    ));
+                };
                 transaction.execute(
                     "UPDATE snapshot_generation_counter SET next_generation = ?1 WHERE id = 1",
                     [generation],

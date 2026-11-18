@@ -770,6 +770,39 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_reservations_use_the_counter_and_fail_closed_at_exhaustion() {
+        let mut repo = CatalogRepository::open_in_memory().unwrap();
+        repo.conn
+            .execute(
+                "UPDATE snapshot_generation_counter SET next_generation = 5 WHERE id = 1",
+                [],
+            )
+            .unwrap();
+        // Even a committed row with a much larger generation must not make the
+        // reservation scan the catalog: the counter is the sole authority.
+        repo.conn
+            .execute(
+                "INSERT INTO directory_snapshots
+                    (backend_id, dir_stable_id, generation, item_count, snapshot_at_secs, is_complete)
+                 VALUES ('local', 'other-id', 10000, 0, 0, 1)",
+                [],
+            )
+            .unwrap();
+        let generation = repo.begin_snapshot_generation("local", "root-id").unwrap();
+        assert_eq!(generation, 6);
+        repo.abandon_snapshot_generation("local", "root-id", generation)
+            .unwrap();
+
+        repo.conn
+            .execute(
+                "UPDATE snapshot_generation_counter SET next_generation = 9223372036854775807 WHERE id = 1",
+                [],
+            )
+            .unwrap();
+        assert!(repo.begin_snapshot_generation("local", "root-id").is_err());
+    }
+
+    #[test]
     fn concurrent_generations_from_separate_connections_are_distinct() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("catalog.sqlite3");

@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS snapshot_generation_counter (
     next_generation INTEGER NOT NULL
 );
 
-INSERT OR IGNORE INTO snapshot_generation_counter (id, next_generation) VALUES (1, 1);
+INSERT OR IGNORE INTO snapshot_generation_counter (id, next_generation) VALUES (1, 0);
 ";
 
 /// A database with a different schema version is a disposable cache; it is rebuilt.
@@ -100,12 +100,42 @@ pub fn open(path: Option<&Path>, mmap_bytes: u64) -> rusqlite::Result<Connection
         retire_before_rebuild(path, owned)?;
     }
     let conn = iris_core_domain::sqlite::open(path, mmap_bytes, SCHEMA_VERSION, SCHEMA)?;
+    initialize_generation_counter(&conn)?;
     if let Some(owned) = owned {
         // Failed deletions remain owned by this directory and are retried on every open,
         // including opens where the schema already has the current version.
         reclaim_retired(&owned);
     }
     Ok(conn)
+}
+
+/// A zero counter means the table was just created (or restored on an older cache).
+/// Seed it once from the highest generation already present; afterwards the counter
+/// is authoritative and reservations never scan the snapshot tables.
+fn initialize_generation_counter(conn: &Connection) -> rusqlite::Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT next_generation FROM snapshot_generation_counter WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    if current != 0 {
+        return Ok(());
+    }
+    let highest: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(generation), 0) FROM (
+            SELECT generation FROM directory_snapshots
+            UNION ALL
+            SELECT generation FROM directory_snapshot_entries
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "UPDATE snapshot_generation_counter SET next_generation = ?1
+         WHERE id = 1 AND next_generation = 0",
+        [highest],
+    )?;
+    Ok(())
 }
 
 fn io_error(error: io::Error) -> rusqlite::Error {
@@ -278,7 +308,15 @@ mod tests {
             .unwrap();
         assert_eq!(next, 9);
 
-        // A cache written before the counter existed keeps its version but gains the table.
+        // A cache written before the counter existed keeps its version but gains
+        // the table, seeded from the highest generation already stored.
+        conn.execute(
+            "INSERT INTO directory_snapshots
+                (backend_id, dir_stable_id, generation, item_count, snapshot_at_secs, is_complete)
+             VALUES ('local', 'root-id', 100, 0, 0, 1)",
+            [],
+        )
+        .unwrap();
         conn.execute("DROP TABLE snapshot_generation_counter", [])
             .unwrap();
         drop(conn);
@@ -290,7 +328,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(next, 1);
+        assert_eq!(next, 100);
     }
 
     #[test]
