@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS cached_objects (
@@ -216,14 +216,22 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_path_collation_uses_platform_policy() {
+    fn snapshot_path_collation_uses_byte_equality_on_every_platform() {
         let conn = open(None, 0).unwrap();
         let paths = insert_spellings(&conn);
-        if cfg!(target_os = "macos") {
-            assert_eq!(paths, ["Cafe\u{301}.jpg"]);
-        } else {
-            assert_eq!(paths, ["Cafe\u{301}.jpg", "Café.jpg"]);
-        }
+        assert_eq!(paths, ["Cafe\u{301}.jpg", "Café.jpg"]);
+        // The named collation itself must not match a canonically equivalent respelling.
+        let matches = conn
+            .prepare(
+                "SELECT display_path FROM directory_snapshot_entries
+                 WHERE display_path = ?1 COLLATE IRIS_PATH_IDENTITY",
+            )
+            .unwrap()
+            .query_map(["Café.jpg"], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(matches, ["Café.jpg"]);
     }
 
     fn old_catalog(db: &Path, paths: &[&Path]) {
