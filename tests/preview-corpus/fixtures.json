@@ -1,10 +1,10 @@
 {
   "files": [
     {
-      "notes": "Landscape photograph 'Landscape with clouds', 4000x3000 JPEG, CC0 1.0; author Aammell; Wikimedia Commons source and license: https://commons.wikimedia.org/wiki/File:Landscape_with_clouds.jpg",
-      "sha256": "d266b5bfa1179a6298f1c084e8c539ef81698643f7c45d9adb34d43a30ed2758",
-      "size": 399226,
-      "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Landscape_with_clouds.jpg",
+      "notes": "Deterministic 4000x3000 DC-only baseline gradient JPEG, generated locally by scripts/generate-preview-fixture.py",
+      "sha256": "69c1f13fddc9697986ec11f30676ea3fe1703540c17b49e142a6ce74e924904e",
+      "size": 405187,
+      "generator": "gradient-jpeg-v1",
       "filename": "landscape.jpg"
     },
     {
@@ -44,8 +44,6 @@
     }
   ],
   "allowed_hosts": [
-    "commons.wikimedia.org",
-    "upload.wikimedia.org",
     "raw.githubusercontent.com",
     "github.com",
     "release-assets.githubusercontent.com",

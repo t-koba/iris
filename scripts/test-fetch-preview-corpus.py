@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline boundary tests: no network and no corpus bytes."""
+"""Offline boundary tests: no network or downloaded fixtures."""
 
 import copy
 import hashlib
@@ -18,6 +18,11 @@ import urllib.request
 spec = importlib.util.spec_from_file_location('fetch_corpus', Path(__file__).with_name('fetch-preview-corpus.py'))
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
+
+
+def read_corpus_manifest():
+    root = Path(__file__).resolve().parents[1]
+    return json.loads((root / 'tests/preview-corpus/fixtures.json').read_text(encoding='utf-8'))
 
 
 class Response(io.BytesIO):
@@ -51,6 +56,46 @@ class FetchTests(unittest.TestCase):
         self.fetch(self.body)
         self.assertEqual((self.output / 'test.jpg').read_bytes(), self.body)
         self.assertEqual([p.name for p in self.output.iterdir()], ['test.jpg'])
+
+    def local_jpeg_manifest(self):
+        manifest = read_corpus_manifest()
+        entry, = [entry for entry in manifest['files'] if entry['filename'] == 'landscape.jpg']
+        manifest['files'] = [entry]
+        return manifest, entry
+
+    def test_generated_jpeg_matches_pins_without_network(self):
+        manifest, entry = self.local_jpeg_manifest()
+        opener = Mock()
+        helper.fetch(manifest, self.output, entry['size'], 1, opener)
+        opener.open.assert_not_called()
+        self.assertEqual(list(self.output.iterdir()), [self.output / 'landscape.jpg'])
+        data = (self.output / 'landscape.jpg').read_bytes()
+        self.assertEqual(len(data), entry['size'])
+        self.assertEqual(hashlib.sha256(data).hexdigest(), entry['sha256'])
+
+    def test_generated_jpeg_pin_mismatch_prevents_installation(self):
+        manifest, entry = self.local_jpeg_manifest()
+        for changes in ({'size': entry['size'] + 1}, {'sha256': '0' * 64}):
+            corrupted = dict(manifest, files=[dict(entry, **changes)])
+            opener = Mock()
+            with self.subTest(changes=changes), patch.object(helper.os, 'replace') as replace:
+                with self.assertRaisesRegex(ValueError, 'fixture size or SHA-256 mismatch'):
+                    helper.fetch(corrupted, self.output, 40_000_000, 1, opener)
+                replace.assert_not_called()
+                opener.open.assert_not_called()
+                self.assertFalse(self.output.exists())
+
+    def test_manifest_rejects_invalid_fixture_sources(self):
+        entry = dict(self.manifest['files'][0])
+        url = entry.pop('url')
+        for sources, error in (
+            ({'url': url, 'generator': 'gradient-jpeg-v1'}, 'exactly one'),
+            ({}, 'exactly one'),
+            ({'generator': 'unknown'}, 'unknown fixture generator'),
+        ):
+            manifest = dict(self.manifest, files=[dict(entry, **sources)])
+            with self.subTest(sources=sources), self.assertRaisesRegex(ValueError, error):
+                helper.validate_manifest(manifest, len(self.body))
 
     def test_user_agent_has_public_contact(self):
         opener = self.fetch(self.body)
@@ -275,14 +320,12 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(sentinel.read_bytes(), b'caller data')
 
     def test_real_manifest_is_within_ci_budget(self):
-        root = Path(__file__).resolve().parents[1]
-        manifest = json.loads((root / 'tests/preview-corpus/fixtures.json').read_text())
+        manifest = read_corpus_manifest()
         _, files = helper.validate_manifest(manifest, 40_000_000)
         self.assertEqual(len(files), 6)
 
     def test_real_manifest_hevc_contract(self):
-        root = Path(__file__).resolve().parents[1]
-        manifest = json.loads((root / 'tests/preview-corpus/fixtures.json').read_text())
+        manifest = read_corpus_manifest()
         self.assertIn('cdn.truefilesize.com', manifest['allowed_hosts'])
         hevc, = [entry for entry in manifest['files'] if entry['filename'] == 'hevc.mp4']
         self.assertEqual(hevc['url'], 'https://cdn.truefilesize.com/mp4/sample-h265.mp4')
@@ -290,7 +333,7 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(hevc['sha256'],
                          'f110da4f156dde1c5fcf38895109568660b6464aa9c33d3c042d2470e2a9c364')
         total = sum(entry['size'] for entry in manifest['files'])
-        self.assertEqual(total, 38_554_056)
+        self.assertEqual(total, 38_560_017)
         self.assertLessEqual(total, 40_000_000)
 
 

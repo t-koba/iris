@@ -1,8 +1,11 @@
 # Preview correctness corpus
 
-`fixtures.json` pins six externally hosted assets (38,554,056 bytes total),
-including source/license notes and exact HTTPS hosts/redirect destinations. The
-assets are never stored in the repository or uploaded as CI artifacts.
+`fixtures.json` pins six fixtures (38,560,017 bytes total): five externally hosted
+assets with source/license notes and exact HTTPS hosts/redirect destinations, and
+one locally generated JPEG. A deterministic DC-only baseline encoder generates
+`landscape.jpg` at 4000x3000 without contacting Wikimedia. Its exact bytes are pinned
+by size and SHA-256, just like the external assets. External assets and generated
+fixture bytes are never stored in the repository or uploaded as CI artifacts.
 
 ## Fetch and run
 
@@ -28,15 +31,15 @@ to the configured cap. Retries otherwise back off exponentially from
 `IRIS_PREVIEW_CORPUS_RETRY_DELAY_SECONDS` (default two seconds), capped by
 `IRIS_PREVIEW_CORPUS_MAX_RETRY_DELAY_SECONDS` (default 30 seconds).
 `IRIS_PREVIEW_CORPUS_RETRIES` sets the retry count; `release.yml` still defaults to
-one retry. Policy, status, size and digest failures are not retried. Downloads use
-private partial files and atomic installation. The output directory must not exist;
-on failure, the helper removes the directory it created. The caller removes
-successful output.
+one retry. Policy, status, size and digest failures are not retried. Downloads and
+generated fixtures use private partial files and atomic installation. The output
+directory must not exist; on failure, the helper removes the directory it created.
+The caller removes successful output.
 
 ## Correctness and measurements
 
 The smoke requires the product-default `video`, `pdf` and `raw-full` features. It
-checks a high-resolution JPEG resize, small JPEG passthrough, CR3 embedded preview,
+checks resize of the 4000x3000 JPEG, small JPEG passthrough, CR3 embedded preview,
 H.264 and H.265/HEVC video decode, and one-page PDF render/page count. Outputs must
 be decodable, bounded JPEGs; photo, RAW and PDF outputs must contain nonuniform
 pixels. First-frame uniformity is not established for either pinned video, so their

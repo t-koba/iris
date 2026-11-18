@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Fetch digest-pinned preview fixtures into a new, caller-owned directory."""
+"""Prepare digest-pinned preview fixtures in a new, caller-owned directory."""
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -17,9 +18,16 @@ import urllib.request
 from urllib.parse import urlsplit
 
 
-# Wikimedia's UA policy requires a public contact for automated clients.
 USER_AGENT = ('Iris-preview-corpus-smoke/1.0 (https://github.com/t-koba/iris) '
               'Python-urllib/3')
+
+
+# Load the sibling CLI script explicitly because its filename contains hyphens.
+generator_spec = importlib.util.spec_from_file_location(
+    'preview_fixture_generator', Path(__file__).with_name('generate-preview-fixture.py'))
+generator = importlib.util.module_from_spec(generator_spec)
+generator_spec.loader.exec_module(generator)
+GENERATORS = {'gradient-jpeg-v1': generator.generate_gradient_jpeg}
 
 
 def validate_url(url, hosts):
@@ -65,11 +73,32 @@ def validate_manifest(manifest, budget):
             raise ValueError("fixture size must be a positive integer")
         if not re.fullmatch(r"[0-9a-f]{64}", entry['sha256']):
             raise ValueError("fixture SHA-256 must be lowercase hex")
-        validate_url(entry['url'], hosts)
+        if ('url' in entry) == ('generator' in entry):
+            raise ValueError("fixture must specify exactly one of url or generator")
+        if 'url' in entry:
+            validate_url(entry['url'], hosts)
+        elif not isinstance(entry['generator'], str) or entry['generator'] not in GENERATORS:
+            raise ValueError("unknown fixture generator")
         total += entry['size']
     if budget <= 0 or total > budget:
         raise ValueError("declared corpus exceeds IRIS_PREVIEW_CORPUS_MAX_BYTES")
     return hosts, files
+
+
+def verify_pins(entry, size, digest):
+    if size != entry['size'] or digest != entry['sha256']:
+        raise ValueError("fixture size or SHA-256 mismatch")
+
+
+def generate_entry(entry, output):
+    data = GENERATORS[entry['generator']]()
+    size = len(data)
+    verify_pins(entry, size, hashlib.sha256(data).hexdigest())
+    partial = output / f".{entry['filename']}.part"
+    with partial.open('xb') as dest:
+        dest.write(data)
+    os.replace(partial, output / entry['filename'])
+    return size
 
 
 def transient_fetch_error(error):
@@ -109,8 +138,7 @@ def fetch_entry(opener, entry, output, hosts, timeout, retries, retry_delay, max
                             raise ValueError("fixture exceeds pinned size")
                         dest.write(chunk)
                         digest.update(chunk)
-                if size != entry['size'] or digest.hexdigest() != entry['sha256']:
-                    raise ValueError("fixture size or SHA-256 mismatch")
+                verify_pins(entry, size, digest.hexdigest())
             os.replace(partial, destination)
             return size
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ConnectionError) as error:
@@ -146,8 +174,11 @@ def fetch(manifest, output, budget, timeout, opener=None, retries=0, retry_delay
     output.mkdir(mode=0o700)
     try:
         for entry in files:
-            size = fetch_entry(opener, entry, output, hosts, timeout, retries, retry_delay,
-                               max_retry_delay)
+            if 'generator' in entry:
+                size = generate_entry(entry, output)
+            else:
+                size = fetch_entry(opener, entry, output, hosts, timeout, retries, retry_delay,
+                                   max_retry_delay)
             print(f"verified {entry['filename']}: {size} bytes")
     except BaseException:
         shutil.rmtree(output)
