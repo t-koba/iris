@@ -286,8 +286,9 @@ fn j2k_tlm_sot_consistent(data: &[u8]) -> bool {
 /// Counts TLM tile-part entries like unpatched OpenJPEG's `opj_j2k_read_tlm`:
 /// ST selects the tile-index width, SP selects the Ptlm width, and ST == 0
 /// uses a running entry counter as the tile index. False invalidates TLM.
-/// With ST == 0 the implicit index saturates at 255: TPsot is one byte, so no
-/// larger index can be named by a SOT marker.
+/// That implicit value is a TILE index, not the one-byte TPsot tile-part index;
+/// SOT's Isot is two bytes, so tail entries must keep their native indices
+/// rather than being folded into tile 255.
 fn read_tlm(payload: &[u8], counts: &mut HashMap<u32, u32>, entries_seen: &mut u32) -> bool {
     if payload.len() < 2 {
         return false;
@@ -305,7 +306,7 @@ fn read_tlm(payload: &[u8], counts: &mut HashMap<u32, u32>, entries_seen: &mut u
     }
     for entry in entries.chunks_exact(entry_size) {
         let tile = if st == 0 {
-            (*entries_seen).min(255)
+            *entries_seen
         } else {
             let mut tile = 0u32;
             for byte in &entry[..usize::from(st)] {
@@ -887,14 +888,19 @@ mod tests {
     }
 
     #[test]
-    fn tlm_implicit_indices_saturate_within_tpsot_byte_range() {
-        let main_extra = tlm_implicit(300);
-        // Entries 0..=255 name tiles 0..=255 once; entries 256..=299 add 44
-        // more for tile 255, whose TLM count is therefore 45.
-        let accepted = synthetic_codestream(&main_extra, &[tile_part(255, 44, 1, &[0x80])], None);
-        assert!(j2k_tlm_sot_consistent(&accepted));
-        let rejected = synthetic_codestream(&main_extra, &[tile_part(255, 45, 1, &[0x80])], None);
-        assert!(!j2k_tlm_sot_consistent(&rejected));
+    fn tlm_implicit_indices_remain_faithful_for_tile_255() {
+        // ST=0 assigns entry N to tile N: 257 entries give tile 255 exactly
+        // one entry, so TPsot=1 must be rejected rather than folded into a
+        // saturated tail count. The same holds with further tail entries.
+        for entries in [257, 300] {
+            let main_extra = tlm_implicit(entries);
+            let accepted =
+                synthetic_codestream(&main_extra, &[tile_part(255, 0, 1, &[0x80])], None);
+            assert!(j2k_tlm_sot_consistent(&accepted));
+            let rejected =
+                synthetic_codestream(&main_extra, &[tile_part(255, 1, 1, &[0x80])], None);
+            assert!(!j2k_tlm_sot_consistent(&rejected));
+        }
     }
 
     #[test]
