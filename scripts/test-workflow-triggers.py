@@ -164,15 +164,6 @@ def ci_step_block(step_name, job_name, workflow=ci):
     return job[m.start():end]
 
 
-def ci_job_header(job_name, workflow=ci):
-    """Return the job-level keys before the first step, or '' if absent."""
-    block = ci_job_block(job_name, workflow)
-    if not block:
-        return ""
-    m = re.search(r"(?m)^      - ", block)
-    return block[:m.start()] if m else block
-
-
 def workspace_tests_unconditional(workflow=ci):
     """The main test job must run whole-workspace tests without a gate."""
     step = ci_step_block("Tests", "test", workflow)
@@ -182,9 +173,9 @@ def workspace_tests_unconditional(workflow=ci):
     # Tests step can silently skip workspace tests while this contract stays green.
     if re.search(r"(?m)^        if:", step):
         return False
-    # A job-level `if:` sits at exactly four spaces in the header before the
-    # first step; gating the job makes every step, including Tests, unreachable.
-    return not re.search(r"(?m)^    if:", ci_job_header("test", workflow))
+    # A job-level `if:` is a four-space key anywhere in the job block (YAML
+    # mapping keys are unordered); gating the job makes Tests unreachable.
+    return not re.search(r"(?m)^    if:", ci_job_block("test", workflow))
 
 
 def workspace_tests_mutation_regression():
@@ -202,12 +193,12 @@ def workspace_tests_mutation_regression():
 
 
 def workspace_tests_job_gate_mutation_regression():
-    """Prove the workspace-tests guard rejects a gated test job."""
-    header = ci_job_header("test")
-    if not header:
+    """Prove the guard rejects a job gate even when `if:` follows the steps."""
+    block = ci_job_block("test")
+    if not block:
         return False
-    gated = header.replace("  test:\n", "  test:\n    if: false\n", 1)
-    mutated = ci.replace(header, gated, 1)
+    gated = block.rstrip("\n") + "\n    if: false\n"
+    mutated = ci.replace(block, gated, 1)
     return workspace_tests_unconditional() and not workspace_tests_unconditional(
         workflow=mutated
     )
