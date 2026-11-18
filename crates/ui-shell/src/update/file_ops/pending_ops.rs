@@ -368,7 +368,9 @@ fn spawn_apply_one_item(
 ) -> Task<Message> {
     let callback_job_id = job_id.clone();
     // Capture the lifecycle before handing the future to the task scheduler.
-    let transfer = Arc::clone(app_runtime()).apply_pending_item(
+    let runtime = app_runtime();
+    let dispatch_generation = runtime.cancel_generation(job_id);
+    let transfer = Arc::clone(runtime).apply_pending_item(
         job_id.clone(),
         task_index,
         item.clone(),
@@ -384,7 +386,9 @@ fn spawn_apply_one_item(
                 files_completed: 1,
             })
         },
-        move |result| Message::PendingItemCompleted(callback_job_id, task_index, result),
+        move |result| {
+            Message::PendingItemCompleted(callback_job_id, task_index, dispatch_generation, result)
+        },
     )
 }
 

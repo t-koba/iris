@@ -813,7 +813,17 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                 }
             }
         }
-        Message::PendingItemCompleted(job_id, index, result) => {
+        Message::PendingItemCompleted(job_id, index, dispatch_generation, result) => {
+            // A completion can be queued before Cancel/Resume but applied after it.
+            let superseded = app_runtime().cancel_generation(&job_id) != dispatch_generation;
+            let currently_canceled = state
+                .jobs
+                .iter()
+                .any(|job| job.id == job_id && job.state == JobState::Canceled);
+            if superseded && !currently_canceled {
+                return Task::none();
+            }
+
             let is_current_job = state
                 .pending_operation
                 .as_ref()

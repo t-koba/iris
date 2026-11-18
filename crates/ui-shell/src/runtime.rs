@@ -243,6 +243,19 @@ pub struct AppRuntime {
     remote_transport_mappings: Mutex<Vec<crate::remote_transport::RemoteTransportMapping>>,
 }
 
+impl AppRuntime {
+    /// Returns the in-memory cancellation generation for a job.
+    pub fn cancel_generation(&self, job_id: &JobId) -> u64 {
+        self.job_manager.cancel_generation(job_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn track_running_job_for_test(&self, job_id: JobId, total_files: u64) {
+        self.job_manager
+            .track_job(job_id, JobState::Running, total_files, None, vec![]);
+    }
+}
+
 static APP_RUNTIME: OnceLock<Arc<AppRuntime>> = OnceLock::new();
 const REMOTE_SOURCE_METADATA_CACHE_TTL: StdDuration = StdDuration::from_secs(300);
 const NEGATIVE_PATH_CACHE_TTL: StdDuration = StdDuration::from_secs(3);

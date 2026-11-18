@@ -254,6 +254,7 @@ mod tests {
 
     use iris_core_domain::types::transfer::JobId;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::state::{PendingFileOperation, PendingUndoAction, ThumbnailCacheKey};
     use crate::undo::{UndoItem, UndoOpKind, UndoableOp};
@@ -544,7 +545,8 @@ mod tests {
     }
 
     fn running_transfer(state: &mut AppState, item_count: usize, max_in_flight: usize) -> JobId {
-        let job_id = JobId(8_000_000 + item_count as u64);
+        static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(8_000_000);
+        let job_id = JobId(NEXT_JOB_ID.fetch_add(1, Ordering::Relaxed));
         let items = (0..item_count)
             .map(|index| PendingFileItem {
                 source: local_entry(&format!("/src/{index}"), false).object_ref,
@@ -591,7 +593,7 @@ mod tests {
 
         let _ = update(
             &mut state,
-            Message::PendingItemCompleted(job_id, 1, item_done()),
+            Message::PendingItemCompleted(job_id, 1, 0, item_done()),
         );
 
         let pending = state.pending_operation.as_ref().expect("pending");
@@ -609,6 +611,7 @@ mod tests {
             Message::PendingItemCompleted(
                 job_id.clone(),
                 0,
+                0,
                 Err(crate::runtime::STALE_TRANSFER_DISPATCH.to_string()),
             ),
         );
@@ -621,11 +624,52 @@ mod tests {
 
         let _ = update(
             &mut state,
-            Message::PendingItemCompleted(job_id, 0, Err("transfer canceled".to_string())),
+            Message::PendingItemCompleted(job_id, 0, 0, Err("transfer canceled".to_string())),
         );
 
         assert_eq!(state.jobs[0].state, JobState::Canceled);
         assert!(state.pending_operation.is_none());
+    }
+
+    fn assert_completion_ignored_after_resume(
+        result: Result<crate::messages::PendingItemResult, String>,
+    ) {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 2, 1);
+        let runtime = app_runtime();
+        runtime.track_running_job_for_test(job_id.clone(), 2);
+        let dispatch_generation = runtime.cancel_generation(&job_id);
+        let _ = process_pending_operation(&mut state);
+
+        runtime.cancel_job(&job_id);
+        state.jobs[0].state = JobState::Canceled;
+        let completion =
+            Message::PendingItemCompleted(job_id.clone(), 0, dispatch_generation, result);
+        runtime.resume_job(&job_id);
+        state.jobs[0].state = JobState::Running;
+        assert_ne!(runtime.cancel_generation(&job_id), dispatch_generation);
+
+        let task = update(&mut state, completion);
+
+        assert_eq!(task.units(), 0);
+        let job = &state.jobs[0];
+        assert_eq!(job.state, JobState::Running);
+        assert_eq!(job.progress.files_completed, 0);
+        assert_eq!(job.progress.bytes_completed, 0);
+        assert_eq!(job.progress.bytes_total, None);
+        let pending = state.pending_operation.as_ref().expect("resumed operation");
+        assert_eq!(pending.job_id, job_id);
+        assert_eq!((pending.in_flight, pending.current_index), (1, 1));
+    }
+
+    #[test]
+    fn queued_cancellation_does_not_cancel_the_resumed_job() {
+        assert_completion_ignored_after_resume(Err("transfer canceled".to_string()));
+    }
+
+    #[test]
+    fn queued_success_does_not_advance_the_resumed_job() {
+        assert_completion_ignored_after_resume(item_done());
     }
 
     #[test]
@@ -636,12 +680,12 @@ mod tests {
 
         let _ = update(
             &mut state,
-            Message::PendingItemCompleted(job_id.clone(), 0, Err("disk full".to_string())),
+            Message::PendingItemCompleted(job_id.clone(), 0, 0, Err("disk full".to_string())),
         );
         // The other file in flight finishes, but nothing new starts while a decision is pending.
         let _ = update(
             &mut state,
-            Message::PendingItemCompleted(job_id.clone(), 1, item_done()),
+            Message::PendingItemCompleted(job_id.clone(), 1, 0, item_done()),
         );
         let pending = state.pending_operation.as_ref().expect("pending");
         assert_eq!(pending.failed, vec![0]);
@@ -667,7 +711,7 @@ mod tests {
         let _ = process_pending_operation(&mut state);
         let _ = update(
             &mut state,
-            Message::PendingItemCompleted(job_id.clone(), 0, Err("timeout".to_string())),
+            Message::PendingItemCompleted(job_id.clone(), 0, 0, Err("timeout".to_string())),
         );
 
         let _ = update(

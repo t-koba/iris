@@ -384,8 +384,8 @@ pub enum Message {
     },
     OpenObjectCompleted(Result<(), String>),
     ConflictCheckCompleted(JobId, usize, Result<Option<ConflictMetadata>, String>),
-    /// Job, item index, outcome.
-    PendingItemCompleted(JobId, usize, Result<PendingItemResult, String>),
+    /// Job, item index, cancellation generation at dispatch, outcome.
+    PendingItemCompleted(JobId, usize, u64, Result<PendingItemResult, String>),
 
     ToggleHiddenFiles,
     PruneExpiredNotifications,
