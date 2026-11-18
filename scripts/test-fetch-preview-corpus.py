@@ -356,6 +356,65 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(total, 38_559_104)
         self.assertLessEqual(total, 40_000_000)
 
+    def test_only_selects_hevc_without_network(self):
+        manifest = read_corpus_manifest()
+        hevc, = [entry for entry in manifest['files'] if entry['filename'] == 'hevc.mp4']
+        output = Path(self.temp.name) / 'hevc-only'
+        opener = Mock()
+
+        def write_selected(opener, entry, output, hosts, timeout, retries, retry_delay, max_retry_delay):
+            (output / entry['filename']).write_bytes(b'synthetic fixture bytes')
+            return entry['size']
+
+        with patch.object(helper, 'fetch_entry', side_effect=write_selected) as fetch_entry:
+            helper.fetch(manifest, output, hevc['size'], 1, opener, only='hevc.mp4')
+        fetch_entry.assert_called_once()
+        args = fetch_entry.call_args.args
+        self.assertEqual(args[1], hevc)
+        self.assertEqual(args[3], manifest['allowed_hosts'])
+        opener.open.assert_not_called()
+        self.assertEqual([p.name for p in output.iterdir()], ['hevc.mp4'])
+
+    def test_only_rejects_unknown_name_and_still_validates_manifest_and_budget(self):
+        manifest = read_corpus_manifest()
+        hevc, = [entry for entry in manifest['files'] if entry['filename'] == 'hevc.mp4']
+        opener = Mock()
+        for index, name in enumerate(('missing.mp4', 'HEVC.MP4', '')):
+            output = Path(self.temp.name) / f'unknown-{index}'
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'unknown preview fixture'):
+                helper.fetch(manifest, output, 40_000_000, 1, opener, only=name)
+            self.assertFalse(output.exists())
+
+        corrupted = copy.deepcopy(manifest)
+        corrupted['files'][0]['sha256'] = 'bad'
+        corrupt_output = Path(self.temp.name) / 'corrupt-manifest'
+        with self.assertRaisesRegex(ValueError, 'SHA-256'):
+            helper.fetch(corrupted, corrupt_output, 40_000_000, 1, opener, only='hevc.mp4')
+        over_budget = Path(self.temp.name) / 'over-budget'
+        with self.assertRaisesRegex(ValueError, 'exceeds IRIS_PREVIEW_CORPUS_MAX_BYTES'):
+            helper.fetch(manifest, over_budget, hevc['size'] - 1, 1, opener, only='hevc.mp4')
+        self.assertFalse(corrupt_output.exists())
+        self.assertFalse(over_budget.exists())
+        opener.open.assert_not_called()
+
+    def test_main_passes_only_selector_to_fetch(self):
+        manifest = read_corpus_manifest()
+        hevc, = [entry for entry in manifest['files'] if entry['filename'] == 'hevc.mp4']
+        manifest_path = Path(self.temp.name) / 'manifest.json'
+        manifest_path.write_text(json.dumps(manifest), encoding='utf-8')
+        output = Path(self.temp.name) / 'cli-hevc'
+        with patch.dict(os.environ, {'IRIS_PREVIEW_CORPUS_MAX_BYTES': str(hevc['size'])}), \
+                patch.object(helper.sys, 'argv', [
+                    'fetch-preview-corpus.py', '--manifest', str(manifest_path),
+                    '--output', str(output), '--only', 'hevc.mp4',
+                ]), patch.object(helper, 'fetch') as fetch:
+            helper.main()
+        fetch.assert_called_once()
+        self.assertEqual(fetch.call_args.args[0], manifest)
+        self.assertEqual(fetch.call_args.args[1], output)
+        self.assertEqual(fetch.call_args.args[2], hevc['size'])
+        self.assertEqual(fetch.call_args.kwargs['only'], 'hevc.mp4')
+
 
 if __name__ == '__main__':
     unittest.main()

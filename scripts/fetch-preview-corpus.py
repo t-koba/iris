@@ -66,7 +66,7 @@ class SafeRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def validate_manifest(manifest, budget):
+def validate_manifest(manifest, budget, only=None):
     hosts = manifest['allowed_hosts']
     if not hosts or any(not isinstance(h, str) or not re.fullmatch(r"[a-z0-9]+(?:[.-][a-z0-9]+)*", h)
                         for h in hosts):
@@ -100,6 +100,15 @@ def validate_manifest(manifest, budget):
         elif not isinstance(entry['generator'], str) or entry['generator'] not in GENERATORS:
             raise ValueError("unknown fixture generator")
         total += entry['size']
+    if only is not None:
+        # Every entry in the pinned manifest was validated above; the
+        # caller's budget bounds just the one fixture it asked to fetch.
+        selected = [entry for entry in files if entry['filename'] == only]
+        if not selected:
+            raise ValueError(f"unknown preview fixture: {only}")
+        if budget <= 0 or selected[0]['size'] > budget:
+            raise ValueError("declared corpus exceeds IRIS_PREVIEW_CORPUS_MAX_BYTES")
+        return hosts, selected
     if budget <= 0 or total > budget:
         raise ValueError("declared corpus exceeds IRIS_PREVIEW_CORPUS_MAX_BYTES")
     return hosts, files
@@ -181,8 +190,8 @@ def fetch_entry(opener, entry, output, hosts, timeout, retries, retry_delay, max
 
 
 def fetch(manifest, output, budget, timeout, opener=None, retries=0, retry_delay=0,
-          max_retry_delay=30):
-    hosts, files = validate_manifest(manifest, budget)
+          max_retry_delay=30, only=None):
+    hosts, files = validate_manifest(manifest, budget, only)
     if type(retries) is not int or retries < 0:
         raise ValueError("retries must be a non-negative integer")
     for delay in (retry_delay, max_retry_delay):
@@ -209,6 +218,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest', type=Path, default=Path('tests/preview-corpus/fixtures.json'))
     parser.add_argument('--output', type=Path, required=True, help='new directory; must not already exist')
+    parser.add_argument('--only', help='fetch only this manifest filename; full manifest is still validated')
     args = parser.parse_args()
     # No implicit download allowance. CI/operator must choose the total budget.
     budget = int(os.environ['IRIS_PREVIEW_CORPUS_MAX_BYTES'])
@@ -219,7 +229,8 @@ def main():
     if not 0 < timeout < float('inf'):
         raise ValueError("timeout must be finite and positive")
     fetch(json.loads(args.manifest.read_text(encoding='utf-8')), args.output, budget, timeout,
-          retries=retries, retry_delay=retry_delay, max_retry_delay=max_retry_delay)
+          retries=retries, retry_delay=retry_delay, max_retry_delay=max_retry_delay,
+          only=args.only)
 
 
 if __name__ == '__main__':

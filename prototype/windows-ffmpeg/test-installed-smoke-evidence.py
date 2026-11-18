@@ -65,6 +65,18 @@ class SmokeEvidenceTests(unittest.TestCase):
             self.assertIn(f"if (${process}.ExitCode -ne 0)", SMOKE)
         self.assertIn('if ($LASTEXITCODE -ne 0) { throw "prototype preview smoke failed', SMOKE)
 
+    def test_hevc_observation_is_pinned_bounded_and_not_primary(self):
+        observation = SMOKE.index("# Test-only pinned HEVC observation")
+        uninstall = SMOKE.index("} -Uninstall {", observation)
+        self.assertIn("--only hevc.mp4", SMOKE[observation:uninstall])
+        self.assertIn("4948915", SMOKE[observation:uninstall])
+        self.assertIn("f110da4f156dde1c5fcf38895109568660b6464aa9c33d3c042d2470e2a9c364", SMOKE)
+        self.assertIn("$evidence.hevc.decoded = $true", SMOKE[observation:uninstall])
+        self.assertIn("$evidence.hevc.decoded = $false", SMOKE[observation:uninstall])
+        self.assertIn("$evidence.hevc.error = $message.Substring(0, [Math]::Min($message.Length, $ErrorLimit))", SMOKE)
+        self.assertIn("Remove-Item -LiteralPath $hevcDir -Recurse -Force", SMOKE[observation:uninstall])
+        self.assertNotIn('$evidence.result = "pass"', SMOKE[observation:uninstall])
+
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell unavailable; no runtime execution claimed")
     def test_fault_injection(self):
         subprocess.run(

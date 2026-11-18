@@ -23,6 +23,12 @@ $evidence = [ordered]@{
     smoke = "not_attempted"
     uninstall = "not_attempted"
     cleanup = "not_attempted"
+    hevc = [ordered]@{
+        filename = "hevc.mp4"
+        size = 4948915
+        sha256 = "f110da4f156dde1c5fcf38895109568660b6464aa9c33d3c042d2470e2a9c364"
+        decoded = $false
+    }
 }
 # Invalidate previous success before any preflight/build/install can fail.
 $evidence | ConvertTo-Json -Depth 5 | Out-File -Encoding utf8 $resultPath
@@ -146,6 +152,52 @@ try {
             try {
                 & $installedSmoke --app-dir $installDir --work-dir $workDir
                 if ($LASTEXITCODE -ne 0) { throw "prototype preview smoke failed (video, pdf, raw)" }
+
+                # Test-only pinned HEVC observation. Only starts after the primary
+                # video/pdf/raw smoke passed; a failure here is recorded, never
+                # promoted into the primary lifecycle result or a release claim.
+                $hevcSize = 4948915
+                $hevcSha = "f110da4f156dde1c5fcf38895109568660b6464aa9c33d3c042d2470e2a9c364"
+                $hevcFetch = Join-Path $repoRoot "scripts/fetch-preview-corpus.py"
+                $hevcManifest = Join-Path $repoRoot "tests/preview-corpus/fixtures.json"
+                $hevcDir = Join-Path $baseTemp ("Iris-hevc-" + [Guid]::NewGuid().ToString("N"))
+                try {
+                    foreach ($p in @($hevcFetch, $hevcManifest)) {
+                        if (!(Test-Path -LiteralPath $p -PathType Leaf)) { throw "HEVC fixture input missing: $p" }
+                    }
+                    if (Test-Path -LiteralPath $hevcDir) { throw "HEVC fixture dir already exists: $hevcDir" }
+                    $prevBudget = $env:IRIS_PREVIEW_CORPUS_MAX_BYTES
+                    try {
+                        $env:IRIS_PREVIEW_CORPUS_MAX_BYTES = "4948915"
+                        & python $hevcFetch --manifest $hevcManifest --output $hevcDir --only hevc.mp4
+                        if ($LASTEXITCODE -ne 0) { throw "HEVC fixture fetch failed (exit $LASTEXITCODE)" }
+                    } finally {
+                        $env:IRIS_PREVIEW_CORPUS_MAX_BYTES = $prevBudget
+                    }
+                    $hevcFile = Join-Path $hevcDir "hevc.mp4"
+                    if (!(Test-Path -LiteralPath $hevcFile -PathType Leaf)) { throw "HEVC fixture missing: $hevcFile" }
+                    $actualSize = (Get-Item -LiteralPath $hevcFile).Length
+                    if ($actualSize -ne $hevcSize) { throw "HEVC fixture size $actualSize != $hevcSize" }
+                    $actualSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $hevcFile).Hash.ToLowerInvariant()
+                    if ($actualSha -ne $hevcSha) { throw "HEVC fixture SHA-256 mismatch: $actualSha" }
+                    & $installedSmoke --app-dir $installDir --work-dir $workDir --video $hevcFile
+                    if ($LASTEXITCODE -ne 0) { throw "HEVC preview decode failed (exit $LASTEXITCODE)" }
+                    $evidence.hevc.decoded = $true
+                    Write-Host "pinned HEVC fixture decoded in the installed prototype preview smoke"
+                } catch {
+                    $evidence.hevc.decoded = $false
+                    $message = $_.Exception.Message
+                    $evidence.hevc.error = $message.Substring(0, [Math]::Min($message.Length, $ErrorLimit))
+                    Write-Host "HEVC observation (not a primary smoke result): $($evidence.hevc.error)"
+                } finally {
+                    try {
+                        if (Test-Path -LiteralPath $hevcDir) { Remove-Item -LiteralPath $hevcDir -Recurse -Force }
+                    } catch {
+                        $message = $_.Exception.Message
+                        $bounded = $message.Substring(0, [Math]::Min($message.Length, $ErrorLimit))
+                        Write-Host "HEVC fixture cleanup observation: $bounded"
+                    }
+                }
             } finally {
                 Pop-Location
             }
