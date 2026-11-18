@@ -31,6 +31,8 @@ pub fn open(
             conn
         }
     };
+    // Keep the collation name for existing SQL, but its semantics are byte equality
+    // on every platform. No client-OS normalization policy is applied here.
     conn.create_collation(
         crate::path_identity::PATH_IDENTITY_COLLATION,
         crate::path_identity::compare,
