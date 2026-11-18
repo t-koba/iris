@@ -475,8 +475,8 @@ mod tests {
 
     #[test]
     fn invalidation_removes_only_previous_keys_with_matching_identity() {
-        // Byte-identical paths exercise this on every platform; NFC/NFD paths
-        // additionally exercise normalization-insensitive identity on macOS.
+        // The NFC respelling changes bytes and must invalidate the previous key;
+        // the canonically equivalent NFD respelling must not.
         for new_path in ["Café.jpg", "Cafe\u{301}.jpg"] {
             let mut state = AppState::default();
             let mut previous = entry("Café.jpg", 5);
@@ -514,7 +514,7 @@ mod tests {
                 );
             }
 
-            let should_invalidate = new_path == "Café.jpg" || cfg!(target_os = "macos");
+            let should_invalidate = new_path == "Café.jpg";
             invalidate_changed_thumbnail_entries(
                 &mut state,
                 &[previous, distinct.clone(), other_path.clone()],
@@ -588,10 +588,7 @@ mod tests {
         state.pane_mut(0).replace_entries(vec![distinct, respelled]);
 
         assert!(thumbnail_cache_key_is_current(&state, &respelled_key));
-        assert_eq!(
-            thumbnail_cache_key_is_current(&state, &original_key),
-            cfg!(target_os = "macos")
-        );
+        assert!(!thumbnail_cache_key_is_current(&state, &original_key));
         let mut stale = respelled_key;
         stale.size = Some(6);
         assert!(!thumbnail_cache_key_is_current(&state, &stale));
