@@ -40,6 +40,19 @@ def validate_url(url, hosts):
     return url
 
 
+def notes_have_source_url(notes):
+    """True when free-text notes contain a usable HTTPS URL with a hostname.
+
+    Offline inspection only: no request is made and download-host rules are
+    unchanged. A bare "https://" scheme has no hostname and does not count.
+    """
+    for token in notes.split():
+        parts = urlsplit(token)
+        if parts.scheme == "https" and parts.hostname:
+            return True
+    return False
+
+
 class SafeRedirects(urllib.request.HTTPRedirectHandler):
     def __init__(self, hosts):
         super().__init__()
@@ -79,7 +92,7 @@ def validate_manifest(manifest, budget):
             validate_url(entry['url'], hosts)
             notes = entry.get('notes')
             if (not isinstance(notes, str) or not notes.strip()
-                    or 'https://' not in notes):
+                    or not notes_have_source_url(notes)):
                 raise ValueError("external fixture notes must include a source/license URL")
         elif not isinstance(entry['generator'], str) or entry['generator'] not in GENERATORS:
             raise ValueError("unknown fixture generator")

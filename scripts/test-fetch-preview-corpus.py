@@ -100,7 +100,8 @@ class FetchTests(unittest.TestCase):
 
     def test_external_fixture_requires_source_license_notes(self):
         entry = dict(self.manifest['files'][0])
-        for notes in (None, '', 'CC0 sample without a source URL'):
+        for notes in (None, '', 'CC0 sample without a source URL',
+                      'source pending (https://)', 'scheme only: https://'):
             candidate = dict(entry)
             if notes is None:
                 candidate.pop('notes', None)
