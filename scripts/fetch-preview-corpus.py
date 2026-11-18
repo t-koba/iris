@@ -77,6 +77,10 @@ def validate_manifest(manifest, budget):
             raise ValueError("fixture must specify exactly one of url or generator")
         if 'url' in entry:
             validate_url(entry['url'], hosts)
+            notes = entry.get('notes')
+            if (not isinstance(notes, str) or not notes.strip()
+                    or 'https://' not in notes):
+                raise ValueError("external fixture notes must include a source/license URL")
         elif not isinstance(entry['generator'], str) or entry['generator'] not in GENERATORS:
             raise ValueError("unknown fixture generator")
         total += entry['size']

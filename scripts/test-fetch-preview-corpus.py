@@ -41,6 +41,7 @@ class FetchTests(unittest.TestCase):
         self.body = b'test fixture'
         self.manifest = {'allowed_hosts': ['assets.example'], 'files': [{
             'filename': 'test.jpg', 'url': 'https://assets.example/fixture',
+            'notes': 'CC0 sample; source/license: https://assets.example/license',
             'size': len(self.body), 'sha256': hashlib.sha256(self.body).hexdigest()}]}
 
     def fetch(self, body, **changes):
@@ -95,6 +96,19 @@ class FetchTests(unittest.TestCase):
         ):
             manifest = dict(self.manifest, files=[dict(entry, **sources)])
             with self.subTest(sources=sources), self.assertRaisesRegex(ValueError, error):
+                helper.validate_manifest(manifest, len(self.body))
+
+    def test_external_fixture_requires_source_license_notes(self):
+        entry = dict(self.manifest['files'][0])
+        for notes in (None, '', 'CC0 sample without a source URL'):
+            candidate = dict(entry)
+            if notes is None:
+                candidate.pop('notes', None)
+            else:
+                candidate['notes'] = notes
+            manifest = dict(self.manifest, files=[candidate])
+            with self.subTest(notes=notes), self.assertRaisesRegex(
+                    ValueError, 'source/license URL'):
                 helper.validate_manifest(manifest, len(self.body))
 
     def test_user_agent_has_public_contact(self):
