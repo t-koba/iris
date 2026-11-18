@@ -95,10 +95,10 @@ impl CatalogRepository {
         }
     }
 
-    /// Reserve a generation by writing a sentinel row. An IMMEDIATE transaction takes the
-    /// write lock before reading and advancing the durable counter, so no connection can
-    /// reuse a generation, even across restarts. Busy responses are retried within a bounded
-    /// budget; the sentinel lets cleanup distinguish live work from abandoned rows.
+    /// Reserve a generation by writing a sentinel row into this connection's TEMP staging.
+    /// An IMMEDIATE transaction takes the write lock before reading and advancing the durable
+    /// counter, so no connection can reuse a generation, even across restarts. Busy responses
+    /// are retried within a bounded budget; the sentinel marks an owned, incomplete listing.
     pub fn begin_snapshot_generation(
         &mut self,
         backend_id: &str,
@@ -172,8 +172,8 @@ impl CatalogRepository {
         )))
     }
 
-    /// Reclaim entries written by a generation whose owner exited before completion.
-    /// The committed generation is untouched, so readers keep seeing the last complete listing.
+    /// Discard this connection's TEMP staging for an abandoned generation. The committed
+    /// generation is untouched, so readers keep seeing the last complete listing.
     pub fn abandon_snapshot_generation(
         &mut self,
         backend_id: &str,

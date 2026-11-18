@@ -88,15 +88,15 @@ pub struct CatalogRepository {
 
 impl CatalogRepository {
     pub fn open(db_path: &Path) -> Result<Self, CatalogError> {
-        Ok(Self {
-            conn: schema::open(Some(db_path), CATALOG_MMAP_BYTES)?,
-        })
+        let conn = schema::open(Some(db_path), CATALOG_MMAP_BYTES)?;
+        discard_legacy_staging(&conn)?;
+        Ok(Self { conn })
     }
 
     pub fn open_in_memory() -> Result<Self, CatalogError> {
-        Ok(Self {
-            conn: schema::open(None, CATALOG_MMAP_BYTES)?,
-        })
+        let conn = schema::open(None, CATALOG_MMAP_BYTES)?;
+        discard_legacy_staging(&conn)?;
+        Ok(Self { conn })
     }
 
     pub fn evict(&self) -> Result<u64, CatalogError> {
@@ -110,6 +110,20 @@ impl CatalogRepository {
         }
         Self::open(db_path)
     }
+}
+
+/// Earlier versions staged listings in the main database. Such generations were never
+/// committed; drop them once on open so an upgrade cannot leave them accumulating forever.
+fn discard_legacy_staging(conn: &Connection) -> Result<(), CatalogError> {
+    conn.execute(
+        "DELETE FROM directory_snapshot_entries
+         WHERE (backend_id, dir_stable_id, generation) IN (
+             SELECT backend_id, dir_stable_id, generation FROM directory_snapshot_entries
+             WHERE stable_id = ?1
+         )",
+        [SNAPSHOT_RESERVATION_STABLE_ID],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -516,6 +530,37 @@ mod tests {
     }
 
     #[test]
+    fn opening_a_cache_discards_legacy_main_database_staging() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("catalog.sqlite3");
+        {
+            let repo = CatalogRepository::open(&db_path).unwrap();
+            repo.conn
+                .execute_batch(&format!(
+                    "INSERT INTO directory_snapshot_entries
+                        (backend_id, dir_stable_id, generation, stable_id, display_path, name,
+                         is_dir, metadata_level)
+                     VALUES ('local', 'root-id', 7, '{SNAPSHOT_RESERVATION_STABLE_ID}', '', '', 0, 0);
+                     INSERT INTO directory_snapshot_entries
+                        (backend_id, dir_stable_id, generation, stable_id, display_path, name,
+                         is_dir, metadata_level)
+                     VALUES ('local', 'root-id', 7, 'staged-id', '/root/staged', 'staged', 0, 0);"
+                ))
+                .unwrap();
+        }
+        let repo = CatalogRepository::open(&db_path).unwrap();
+        let rows: i64 = repo
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM directory_snapshot_entries",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
     fn eviction_on_another_connection_does_not_delete_live_staging() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("catalog.sqlite3");
@@ -554,6 +599,15 @@ mod tests {
             .unwrap();
         writer
             .append_snapshot_entries("local", "root-id", generation, std::slice::from_ref(&entry))
+            .unwrap();
+        // Age any main-database reservation the old design would have left behind, so a
+        // TTL eviction on the other connection must not reclaim a writer that is still live.
+        writer
+            .conn
+            .execute(
+                "UPDATE directory_snapshot_entries SET mtime_secs = 1 WHERE stable_id = ?1",
+                [SNAPSHOT_RESERVATION_STABLE_ID],
+            )
             .unwrap();
         assert_eq!(other.evict().unwrap(), 1);
         for repo in [&writer, &other] {
