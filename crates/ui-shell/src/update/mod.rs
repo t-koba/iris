@@ -1905,6 +1905,30 @@ mod tests {
     }
 
     #[test]
+    fn shift_focus_ignores_anchor_hidden_by_filter() {
+        let mut state = AppState::default();
+        state.keyboard_modifiers = iced::keyboard::Modifiers::SHIFT;
+        {
+            let pane = state.pane_mut(0);
+            pane.replace_entries(vec![
+                local_entry("/tmp/file.txt", false),
+                local_entry("/tmp/a", true),
+                local_entry("/tmp/b", true),
+                local_entry("/tmp/c", true),
+            ]);
+            pane.select_single(0);
+            pane.set_filter_query("kind:folder".into());
+            assert_eq!(pane.focused_index, Some(1));
+        }
+
+        let _ = update(&mut state, Message::Pane(0, PaneMessage::FocusNext));
+
+        let pane = state.pane(0);
+        assert_eq!(pane.focused_index, Some(2));
+        assert_eq!(pane.selected_indices, [1, 2].into_iter().collect());
+    }
+
+    #[test]
     fn cancel_recursive_filter_cancels_token_and_invalidates_run() {
         let mut state = AppState::default();
         let (run_id, token) = state.pane_mut(0).begin_recursive_filter();

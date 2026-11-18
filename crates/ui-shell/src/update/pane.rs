@@ -37,7 +37,7 @@ fn move_focus(
     let command = state.keyboard_modifiers.command();
     let pane = state.pane_mut(pane_idx);
     let anchor = pane
-        .selection_anchor_index()
+        .visible_selection_anchor_index()
         .or(pane.focused_index)
         .or_else(|| pane.selected_indices.iter().copied().min());
     step(pane);

@@ -38,7 +38,7 @@ impl PaneState {
         }
 
         let anchor_index = self
-            .selection_anchor_index()
+            .visible_selection_anchor_index()
             .or(self.focused_index)
             .or_else(|| self.selected_indices.iter().copied().min())
             .unwrap_or(index);
@@ -94,6 +94,13 @@ impl PaneState {
             .and_then(|path| self.entry_index_by_display_path(path))
     }
 
+    /// The stored anchor is deliberately retained while hidden so it can reappear when a
+    /// filter is cleared, but range selection must fall back to a visible starting point.
+    pub(crate) fn visible_selection_anchor_index(&self) -> Option<EntryIndex> {
+        self.selection_anchor_index()
+            .filter(|index| self.visible_position(*index).is_some())
+    }
+
     fn set_selection_anchor(&mut self, index: EntryIndex) {
         self.selection_anchor_path = self.entry_display_path(index);
     }
@@ -143,5 +150,30 @@ impl PaneState {
         self.selected_entries()
             .map(|entry| entry.name.clone())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::local_entry;
+    use std::collections::HashSet;
+
+    #[test]
+    fn shift_selection_uses_visible_focus_when_filter_hides_anchor() {
+        let mut pane = PaneState::default();
+        pane.replace_entries(vec![
+            local_entry("/tmp/file.txt", false),
+            local_entry("/tmp/a", true),
+            local_entry("/tmp/b", true),
+            local_entry("/tmp/c", true),
+        ]);
+        pane.select_single(0);
+        pane.set_filter_query("kind:folder".into());
+        assert_eq!(pane.visible_indices(), &[1, 2, 3]);
+        assert_eq!(pane.focused_index, Some(1));
+
+        pane.select_range_to(3, false);
+        assert_eq!(pane.selected_indices, HashSet::from([1, 2, 3]));
     }
 }
