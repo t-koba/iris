@@ -299,7 +299,7 @@ pub fn extract_raw_metadata(file_path: &Path) -> Option<RawMetadata> {
         .unwrap_or_default();
     structured.width = structured.width.or(exif.width);
     structured.height = structured.height.or(exif.height);
-    merge_metadata_entries(&mut structured.entries, exif.entries);
+    crate::metadata::merge_metadata_entries(&mut structured.entries, exif.entries);
 
     Some(RawMetadata {
         width: structured.width,
