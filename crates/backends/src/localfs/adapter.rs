@@ -1148,7 +1148,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(unix, windows))]
+    #[cfg(all(any(unix, windows), not(target_os = "macos")))]
     async fn native_name_fixture() -> (TempDir, LocalFsAdapter, ObjectRef, PathBuf, PathBuf) {
         #[cfg(unix)]
         let name = {
@@ -1207,7 +1207,56 @@ mod tests {
         ));
     }
 
+    /// The fail-closed contract must hold even on filesystems (such as macOS APFS)
+    /// that never produce a lossy native name during listing: a lossy ObjectRef can
+    /// still arrive from a cache or foreign backend and must be refused.
     #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn lossy_object_ref_is_refused_without_a_native_name() {
+        let root = TempDir::new().unwrap();
+        let id = BackendId("lossy-ref".into());
+        let adapter = LocalFsAdapter::new(root.path().into(), id.clone());
+        let alias = root.path().join("native-\u{fffd}.txt");
+        std::fs::write(&alias, b"replacement sibling B").unwrap();
+        let object = ObjectRef {
+            local_path_is_lossy: true,
+            ..file_ref(&id, "native-\u{fffd}.txt")
+        };
+
+        assert_native_refusal(adapter.read(&object, None).await);
+        assert_native_refusal(adapter.stat(&object).await);
+        let copy_dst = file_ref(&id, "copy.txt");
+        assert_native_refusal(
+            adapter
+                .copy(
+                    &object,
+                    &copy_dst,
+                    CopyOptions {
+                        on_conflict: ConflictResolution::Fail,
+                    },
+                )
+                .await,
+        );
+        let rename_dst = file_ref(&id, "renamed.txt");
+        assert_native_refusal(
+            adapter
+                .move_object(
+                    &object,
+                    &rename_dst,
+                    MoveOptions {
+                        on_conflict: ConflictResolution::Fail,
+                    },
+                )
+                .await,
+        );
+        assert_native_refusal(adapter.delete(&object, DeleteMode::Permanent).await);
+
+        assert_eq!(std::fs::read(&alias).unwrap(), b"replacement sibling B");
+        assert!(!root.path().join("copy.txt").exists());
+        assert!(!root.path().join("renamed.txt").exists());
+    }
+
+    #[cfg(all(any(unix, windows), not(target_os = "macos")))]
     #[tokio::test]
     async fn native_name_read_and_metadata_refuse_lossy_alias() {
         let (_root, adapter, object, native, alias) = native_name_fixture().await;
@@ -1217,7 +1266,7 @@ mod tests {
         assert_eq!(std::fs::read(alias).unwrap(), b"replacement sibling B");
     }
 
-    #[cfg(any(unix, windows))]
+    #[cfg(all(any(unix, windows), not(target_os = "macos")))]
     #[tokio::test]
     async fn native_name_copy_refuses_lossy_alias() {
         let (root, adapter, object, native, alias) = native_name_fixture().await;
@@ -1238,7 +1287,7 @@ mod tests {
         assert_eq!(std::fs::read(alias).unwrap(), b"replacement sibling B");
     }
 
-    #[cfg(any(unix, windows))]
+    #[cfg(all(any(unix, windows), not(target_os = "macos")))]
     #[tokio::test]
     async fn native_name_rename_refuses_lossy_alias() {
         let (root, adapter, object, native, alias) = native_name_fixture().await;
@@ -1259,7 +1308,7 @@ mod tests {
         assert_eq!(std::fs::read(alias).unwrap(), b"replacement sibling B");
     }
 
-    #[cfg(any(unix, windows))]
+    #[cfg(all(any(unix, windows), not(target_os = "macos")))]
     #[tokio::test]
     async fn native_name_delete_refuses_lossy_alias() {
         let (_root, adapter, object, native, alias) = native_name_fixture().await;
