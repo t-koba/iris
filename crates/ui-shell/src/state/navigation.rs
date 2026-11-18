@@ -263,6 +263,13 @@ impl Default for PaneState {
 }
 
 impl PaneState {
+    pub fn close_path_editor(&mut self) {
+        self.path_editing = false;
+        self.path_input.clear();
+        self.path_suggestions.clear();
+        self.path_suggestion_selected = None;
+    }
+
     pub fn update_viewport(&mut self, offset_y: f32, viewport_height: f32) -> bool {
         let offset_changed = (self.scroll_y - offset_y).abs() > 2.0;
         let viewport_changed = (self.viewport_height - viewport_height).abs() > 1.0;

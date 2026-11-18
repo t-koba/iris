@@ -19,12 +19,24 @@ pub struct ImageMetadata {
     pub exif_entries: Vec<(String, String)>,
 }
 
+impl ImageMetadata {
+    /// Fills what is still unknown from EXIF and adds its entries.
+    fn apply_exif(&mut self, exif: ExtractedExifMetadata) {
+        self.width = self.width.or(exif.width);
+        self.height = self.height.or(exif.height);
+        self.media = exif.media;
+        self.media.width = self.media.width.or(self.width);
+        self.media.height = self.media.height.or(self.height);
+        merge_metadata_entries(&mut self.exif_entries, exif.entries);
+    }
+}
+
 #[derive(Default)]
-struct ExtractedExifMetadata {
-    width: Option<u32>,
-    height: Option<u32>,
-    media: MediaMetadata,
-    entries: Vec<(String, String)>,
+pub(crate) struct ExtractedExifMetadata {
+    pub(crate) width: Option<u32>,
+    pub(crate) height: Option<u32>,
+    pub(crate) media: MediaMetadata,
+    pub(crate) entries: Vec<(String, String)>,
 }
 
 pub fn extract_image_metadata_from_path(file_path: &Path) -> ImageMetadata {
@@ -48,21 +60,7 @@ pub fn extract_image_metadata_from_path(file_path: &Path) -> ImageMetadata {
     }
 
     if let Ok(file) = std::fs::File::open(file_path) {
-        let extracted = extract_filtered_exif_metadata(file);
-        if metadata.width.is_none() {
-            metadata.width = extracted.width;
-        }
-        if metadata.height.is_none() {
-            metadata.height = extracted.height;
-        }
-        metadata.media = extracted.media;
-        if metadata.media.width.is_none() {
-            metadata.media.width = metadata.width;
-        }
-        if metadata.media.height.is_none() {
-            metadata.media.height = metadata.height;
-        }
-        metadata.exif_entries = extracted.entries;
+        metadata.apply_exif(extract_filtered_exif_metadata(file, false));
     }
 
     metadata
@@ -121,21 +119,10 @@ fn extract_image_metadata_remote_blocking(
         }
     }
 
-    let extracted = extract_filtered_exif_metadata(RemoteRangeReader::new(&source));
-    if metadata.width.is_none() {
-        metadata.width = extracted.width;
-    }
-    if metadata.height.is_none() {
-        metadata.height = extracted.height;
-    }
-    metadata.media = extracted.media;
-    if metadata.media.width.is_none() {
-        metadata.media.width = metadata.width;
-    }
-    if metadata.media.height.is_none() {
-        metadata.media.height = metadata.height;
-    }
-    merge_metadata_entries(&mut metadata.exif_entries, extracted.entries);
+    metadata.apply_exif(extract_filtered_exif_metadata(
+        RemoteRangeReader::new(&source),
+        false,
+    ));
 
     metadata
 }
@@ -147,7 +134,12 @@ fn probe_image_dimensions<R: Read + Seek>(reader: R) -> Option<(u32, u32)> {
     reader.into_dimensions().ok()
 }
 
-fn extract_filtered_exif_metadata<R: Read + Seek>(reader: R) -> ExtractedExifMetadata {
+/// EXIF of an image file. For RAW files the container's own fields (image layout, embedded
+/// previews) are left out of the entries as well.
+pub(crate) fn extract_filtered_exif_metadata<R: Read + Seek>(
+    reader: R,
+    raw: bool,
+) -> ExtractedExifMetadata {
     let mut reader = std::io::BufReader::new(reader);
     let Ok(exif_data) = exif::Reader::new().read_from_container(&mut reader) else {
         return ExtractedExifMetadata::default();
@@ -195,6 +187,7 @@ fn extract_filtered_exif_metadata<R: Read + Seek>(reader: R) -> ExtractedExifMet
             && !tag_name.contains("Unknown")
             && !tag_name.starts_with("Tag(")
             && !should_skip_exif_tag(field.tag)
+            && !(raw && should_skip_raw_exif_tag(&tag_name, field.tag))
             && seen_tags.insert(tag_name.clone())
         {
             entries.push((tag_name, value));
@@ -351,13 +344,56 @@ fn should_skip_exif_tag(tag: exif::Tag) -> bool {
     )
 }
 
-fn is_effectively_blank_exif_value(value: &str) -> bool {
+/// Fields that describe the RAW container rather than the photo.
+fn should_skip_raw_exif_tag(tag_name: &str, tag: exif::Tag) -> bool {
+    matches!(
+        tag,
+        exif::Tag::PixelXDimension
+            | exif::Tag::PixelYDimension
+            | exif::Tag::ImageWidth
+            | exif::Tag::ImageLength
+            | exif::Tag::Compression
+            | exif::Tag::JPEGInterchangeFormat
+            | exif::Tag::JPEGInterchangeFormatLength
+            | exif::Tag::StripOffsets
+            | exif::Tag::StripByteCounts
+            | exif::Tag::XResolution
+            | exif::Tag::YResolution
+            | exif::Tag::ResolutionUnit
+            | exif::Tag::WhitePoint
+            | exif::Tag::PrimaryChromaticities
+            | exif::Tag::YCbCrCoefficients
+            | exif::Tag::YCbCrPositioning
+    ) || matches!(
+        tag_name,
+        "Bits Per Sample"
+            | "Compressed Bits Per Pixel"
+            | "Components Configuration"
+            | "Flashpix Version"
+            | "Color Space"
+            | "Thumbnail Offset"
+            | "Thumbnail Length"
+            | "Preview Image Start"
+            | "Preview Image Length"
+            | "Preview Image Size"
+            | "Encoding Process"
+            | "Color Components"
+            | "Y Cb Cr Sub Sampling"
+            | "Subfile Type"
+    )
+}
+
+pub(crate) fn is_effectively_blank_exif_value(value: &str) -> bool {
     value
         .chars()
         .all(|ch| ch.is_whitespace() || matches!(ch, '"' | ',' | '\0'))
 }
 
-fn merge_metadata_entries(entries: &mut Vec<(String, String)>, additional: Vec<(String, String)>) {
+/// Appends entries whose tag is new; very long values are dropped.
+pub(crate) fn merge_metadata_entries(
+    entries: &mut Vec<(String, String)>,
+    additional: Vec<(String, String)>,
+) {
     let mut seen: HashSet<String> = entries.iter().map(|(tag, _)| tag.clone()).collect();
     for (tag, value) in additional {
         if value.len() >= 500 || !seen.insert(tag.clone()) {

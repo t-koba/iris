@@ -1,4 +1,5 @@
 use crate::io::binary_reader::{BlockingBinaryReader, RemoteWindowSource, SourceFile};
+use crate::metadata::is_effectively_blank_exif_value;
 use iris_core_domain::backend_adapter::BackendAdapter;
 use iris_core_domain::types::error::BackendError;
 use iris_core_domain::types::metadata::MediaMetadata;
@@ -6,7 +7,6 @@ use iris_core_domain::types::object::ObjectRef;
 use iris_core_domain::types::thumbnail::{ThumbnailResult, ThumbnailSource};
 use std::collections::HashSet;
 use std::io;
-use std::io::Seek;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -294,14 +294,12 @@ pub fn extract_raw_metadata(file_path: &Path) -> Option<RawMetadata> {
     }
     .unwrap_or_default();
 
-    let (exif_width, exif_height, exif_entries) = extract_filtered_exif_metadata(file_path);
-    if structured.width.is_none() {
-        structured.width = exif_width;
-    }
-    if structured.height.is_none() {
-        structured.height = exif_height;
-    }
-    merge_metadata_entries(&mut structured.entries, exif_entries);
+    let exif = std::fs::File::open(file_path)
+        .map(|file| crate::metadata::extract_filtered_exif_metadata(file, true))
+        .unwrap_or_default();
+    structured.width = structured.width.or(exif.width);
+    structured.height = structured.height.or(exif.height);
+    merge_metadata_entries(&mut structured.entries, exif.entries);
 
     Some(RawMetadata {
         width: structured.width,

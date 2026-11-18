@@ -1,3 +1,6 @@
+//! Thumbnails, previews and metadata for images, RAW files, video and PDF, from local paths or
+//! through range reads on a backend.
+
 #[cfg(target_os = "macos")]
 mod macos_ffi;
 
