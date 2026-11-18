@@ -2,6 +2,8 @@
 name = "iris-ui-shell"
 version.workspace = true
 edition = "2021"
+description = "The Iris file manager application."
+publish = false
 default-run = "Iris"
 
 [[bin]]

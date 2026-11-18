@@ -2,6 +2,8 @@
 name = "iris-core-domain"
 version.workspace = true
 edition = "2021"
+description = "Shared types and the storage backend interface used across Iris."
+publish = false
 
 [features]
 sqlite = ["dep:rusqlite"]

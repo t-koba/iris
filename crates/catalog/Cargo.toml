@@ -2,6 +2,8 @@
 name = "iris-catalog"
 version.workspace = true
 edition = "2021"
+description = "SQLite cache index for directory listings and thumbnails."
+publish = false
 
 [dependencies]
 iris-core-domain = { workspace = true, features = ["sqlite"] }
