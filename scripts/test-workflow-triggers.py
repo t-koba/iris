@@ -164,14 +164,27 @@ def ci_step_block(step_name, job_name, workflow=ci):
     return job[m.start():end]
 
 
+def ci_job_header(job_name, workflow=ci):
+    """Return the job-level keys before the first step, or '' if absent."""
+    block = ci_job_block(job_name, workflow)
+    if not block:
+        return ""
+    m = re.search(r"(?m)^      - ", block)
+    return block[:m.start()] if m else block
+
+
 def workspace_tests_unconditional(workflow=ci):
-    """The main test job must run whole-workspace tests without a step-level gate."""
+    """The main test job must run whole-workspace tests without a gate."""
     step = ci_step_block("Tests", "test", workflow)
     if "run: cargo test --workspace --locked" not in step:
         return False
     # A step-level `if:` sits at exactly eight spaces; a gated or disabled
     # Tests step can silently skip workspace tests while this contract stays green.
-    return not re.search(r"(?m)^        if:", step)
+    if re.search(r"(?m)^        if:", step):
+        return False
+    # A job-level `if:` sits at exactly four spaces in the header before the
+    # first step; gating the job makes every step, including Tests, unreachable.
+    return not re.search(r"(?m)^    if:", ci_job_header("test", workflow))
 
 
 def workspace_tests_mutation_regression():
@@ -183,6 +196,18 @@ def workspace_tests_mutation_regression():
         "      - name: Tests\n", "      - name: Tests\n        if: false\n", 1
     )
     mutated = ci.replace(step, disabled, 1)
+    return workspace_tests_unconditional() and not workspace_tests_unconditional(
+        workflow=mutated
+    )
+
+
+def workspace_tests_job_gate_mutation_regression():
+    """Prove the workspace-tests guard rejects a gated test job."""
+    header = ci_job_header("test")
+    if not header:
+        return False
+    gated = header.replace("  test:\n", "  test:\n    if: false\n", 1)
+    mutated = ci.replace(header, gated, 1)
     return workspace_tests_unconditional() and not workspace_tests_unconditional(
         workflow=mutated
     )
@@ -379,6 +404,7 @@ permissions:
     "Matrix runner contracts reject a forced single Ubuntu runner": matrix_runner_mutation_regression(),
     "Workspace tests run unconditionally in the main CI test job": workspace_tests_unconditional(),
     "Workspace-tests guard rejects a disabled Tests step": workspace_tests_mutation_regression(),
+    "Workspace-tests guard rejects a gated test job": workspace_tests_job_gate_mutation_regression(),
     "Workflow contract checks run independently of platform integration": ci_job_has(
         "workflow-contracts",
         "run: python3 scripts/test-workflow-triggers.py",
