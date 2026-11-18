@@ -99,7 +99,8 @@ fn restore_pending_operation(state: &mut AppState, job_id: &JobId) -> bool {
     if state.pending_operation.is_some() {
         return false;
     }
-    let Ok(Some((items, current_index, is_move))) = app_runtime().restore_pending_operation(job_id)
+    let Ok(Some((items, current_index, is_move, skipped))) =
+        app_runtime().restore_pending_operation(job_id)
     else {
         return false;
     };
@@ -112,6 +113,7 @@ fn restore_pending_operation(state: &mut AppState, job_id: &JobId) -> bool {
         max_in_flight,
     );
     pending.current_index = current_index;
+    pending.skipped = skipped;
     // Restored from the job store, so it is already persisted.
     pending.persisted = true;
     state.pending_operation = Some(pending);

@@ -1,4 +1,7 @@
 use super::*;
+use std::collections::BTreeSet;
+
+type RestoredPendingOperation = (Vec<PendingFileItem>, usize, bool, BTreeSet<usize>);
 
 impl AppRuntime {
     pub fn restore_jobs(&self) -> Vec<iris_transfer::job_manager::RestoredJob> {
@@ -75,10 +78,11 @@ impl AppRuntime {
         Ok(())
     }
 
+    /// Restores the requested items, the next index and the indices the user skipped.
     pub fn restore_pending_operation(
         &self,
         job_id: &JobId,
-    ) -> Result<Option<(Vec<PendingFileItem>, usize, bool)>, String> {
+    ) -> Result<Option<RestoredPendingOperation>, String> {
         let job = self
             .job_store
             .load_job(job_id)
@@ -90,6 +94,7 @@ impl AppRuntime {
         let mut items = Vec::with_capacity(job.tasks.len());
         let mut current_index = job.tasks.len();
         let mut is_move = false;
+        let mut skipped = BTreeSet::new();
 
         for (index, task) in job.tasks.iter().enumerate() {
             if index == 0 {
@@ -121,6 +126,9 @@ impl AppRuntime {
                 destination_path,
             });
 
+            if task.state == TaskState::Skipped {
+                skipped.insert(index);
+            }
             if current_index == job.tasks.len()
                 && !matches!(task.state, TaskState::Completed | TaskState::Skipped)
             {
@@ -132,7 +140,7 @@ impl AppRuntime {
             current_index = items.len();
         }
 
-        Ok(Some((items, current_index, is_move)))
+        Ok(Some((items, current_index, is_move, skipped)))
     }
 
     /// Transfer callbacks cannot overwrite cancellation, even if they passed an earlier
@@ -228,6 +236,21 @@ impl AppRuntime {
 
     pub fn skip_task(&self, job_id: &JobId, task_index: usize) {
         self.update_task_state(job_id, task_index, TaskState::Skipped, None);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn persisted_task_state(
+        &self,
+        job_id: &JobId,
+        task_index: usize,
+    ) -> Option<TaskState> {
+        // Task state updates go through the batching writer; flush before reading them back.
+        let _ = self.job_store.flush();
+        self.job_store
+            .load_job(job_id)
+            .ok()
+            .flatten()
+            .and_then(|job| job.tasks.get(task_index).map(|task| task.state.clone()))
     }
 
     pub(super) fn update_active_job_progress(

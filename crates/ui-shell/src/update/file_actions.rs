@@ -848,6 +848,9 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                         return Task::none();
                     }
                     if let Some(pending) = &mut state.pending_operation {
+                        if !item_result.applied {
+                            pending.mark_skipped(index);
+                        }
                         pending.in_flight = pending.in_flight.saturating_sub(1);
                     }
                     return process_pending_operation(state);

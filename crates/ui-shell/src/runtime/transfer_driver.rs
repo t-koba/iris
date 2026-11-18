@@ -425,7 +425,11 @@ impl AppRuntime {
 
         match transfer_result {
             Ok(outcome) => {
-                self.update_task_state(&job_id, task_index, TaskState::Completed, None);
+                if outcome.applied {
+                    self.update_task_state(&job_id, task_index, TaskState::Completed, None);
+                } else {
+                    self.skip_task(&job_id, task_index);
+                }
                 Ok(outcome)
             }
             Err(error) => {
@@ -476,7 +480,10 @@ impl AppRuntime {
                 && self.destination_entry_exists(dst_path).await?
             {
                 self.update_task_state(job_id, task_index, TaskState::Skipped, None);
-                return Ok(TransferItemOutcome { bytes_completed: 0 });
+                return Ok(TransferItemOutcome {
+                    bytes_completed: 0,
+                    applied: false,
+                });
             }
 
             let final_dst = self
@@ -488,10 +495,17 @@ impl AppRuntime {
                 .await?
             {
                 SymlinkTransfer::Recreated => {
-                    return Ok(TransferItemOutcome { bytes_completed: 0 });
+                    return Ok(TransferItemOutcome {
+                        bytes_completed: 0,
+                        applied: true,
+                    });
                 }
                 SymlinkTransfer::LinksToAncestor => {
-                    return Ok(TransferItemOutcome { bytes_completed: 0 });
+                    // Nothing was copied; undoing it would target an unrelated destination.
+                    return Ok(TransferItemOutcome {
+                        bytes_completed: 0,
+                        applied: false,
+                    });
                 }
                 SymlinkTransfer::NotHandled => {}
             }
@@ -514,6 +528,7 @@ impl AppRuntime {
                 .await
                 .map(|result| TransferItemOutcome {
                     bytes_completed: result.bytes_transferred,
+                    applied: true,
                 })
         })
     }
@@ -573,7 +588,10 @@ impl AppRuntime {
                     &resolution,
                 )
                 .await?;
-                return Ok(TransferItemOutcome { bytes_completed: 0 });
+                return Ok(TransferItemOutcome {
+                    bytes_completed: 0,
+                    applied: true,
+                });
             }
 
             let created = self
@@ -592,6 +610,7 @@ impl AppRuntime {
             };
 
             let mut total_bytes = 0u64;
+            let mut all_children_applied = true;
             for child in self.list_directory_children(source, &src_resolved).await? {
                 child
                     .object_ref
@@ -611,6 +630,7 @@ impl AppRuntime {
                     )
                     .await?;
                 total_bytes += outcome.bytes_completed;
+                all_children_applied &= outcome.applied;
             }
 
             // Creating the directory and its children stamped it with the current time.
@@ -646,6 +666,9 @@ impl AppRuntime {
 
             Ok(TransferItemOutcome {
                 bytes_completed: total_bytes,
+                // A partially skipped directory cannot be undone as a whole: Undo would
+                // delete the destination the user chose to keep.
+                applied: all_children_applied,
             })
         })
     }

@@ -252,7 +252,7 @@ mod tests {
     use super::*;
     use crate::test_support::local_entry;
 
-    use iris_core_domain::types::transfer::JobId;
+    use iris_core_domain::types::transfer::{JobId, TaskState};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -613,6 +613,7 @@ mod tests {
         Ok(crate::messages::PendingItemResult {
             bytes_completed: 10,
             files_completed: 1,
+            applied: true,
         })
     }
 
@@ -730,6 +731,7 @@ mod tests {
 
         let pending = state.pending_operation.as_ref().expect("pending");
         assert!(pending.failed.is_empty());
+        assert!(pending.skipped.contains(&0), "the failed file was skipped");
         // Files 2 and 3 start; none of them was skipped in place of file 0.
         assert_eq!((pending.in_flight, pending.current_index), (2, 4));
         assert!(
@@ -755,6 +757,10 @@ mod tests {
 
         let pending = state.pending_operation.as_ref().expect("pending");
         assert!(pending.failed.is_empty() && pending.retry.is_empty());
+        assert!(
+            pending.skipped.is_empty(),
+            "the retried file was not skipped"
+        );
         assert_eq!((pending.in_flight, pending.current_index), (1, 1));
         assert_eq!(
             state
@@ -2227,5 +2233,110 @@ mod tests {
 
         assert!(state.pane(0).filter_map_tiles_loading.contains(&tile));
         assert!(!state.pane(0).filter_map_tiles_failed.contains_key(&tile));
+    }
+
+    /// Drives only the messages of the transfer completion path; unrelated refresh and
+    /// directory tasks are deliberately left unrun so the test stays deterministic.
+    async fn drain_completion_tasks(task: Task<Message>, state: &mut AppState) {
+        use iced::futures::StreamExt;
+
+        let mut tasks = vec![task];
+        while let Some(task) = tasks.pop() {
+            let Some(mut stream) = iced_runtime::task::into_stream(task) else {
+                continue;
+            };
+            while let Some(action) = stream.next().await {
+                let iced_runtime::Action::Output(message) = action else {
+                    continue;
+                };
+                match message {
+                    Message::Job(crate::messages::JobMessage::Persisted(_))
+                    | Message::PendingItemCompleted(..)
+                    | Message::RecordUndoOp { .. } => tasks.push(update(state, message)),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn skipped_conflict_destination_stays_out_of_undo() {
+        static NEXT_TEST_JOB: AtomicU64 = AtomicU64::new(9_200_000);
+        let mut state = AppState::default();
+        state.jobs.push(JobDisplayInfo {
+            id: JobId(NEXT_TEST_JOB.fetch_add(2, Ordering::Relaxed)),
+            description: String::new(),
+            state: JobState::Completed,
+            progress: ProgressInfo {
+                bytes_completed: 0,
+                bytes_total: None,
+                files_completed: 0,
+                files_total: None,
+            },
+            speed_samples: std::collections::VecDeque::new(),
+            speed_bps: None,
+        });
+
+        let temp = tempfile::tempdir().expect("temp directory");
+        let src = temp.path().join("src");
+        let dst = temp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        let empty_source = src.join("empty.txt");
+        let colliding_source = src.join("colliding.txt");
+        let empty_destination = dst.join("empty.txt");
+        let colliding_destination = dst.join("colliding.txt");
+        let sentinel = b"keep this destination";
+        std::fs::write(&empty_source, b"").unwrap();
+        std::fs::write(&colliding_source, b"replacement").unwrap();
+        std::fs::write(&colliding_destination, sentinel).unwrap();
+
+        let items = [
+            (&empty_source, &empty_destination),
+            (&colliding_source, &colliding_destination),
+        ]
+        .into_iter()
+        .map(|(source, destination)| PendingFileItem {
+            source: local_entry(source.to_str().unwrap(), false).object_ref,
+            destination_path: destination.to_str().unwrap().to_owned(),
+        })
+        .collect();
+        let start = start_pending_file_operation_with_undo_action(
+            &mut state,
+            items,
+            false,
+            Some(PendingUndoAction::RecordTransfer),
+        );
+        let job_id = state
+            .pending_operation
+            .as_ref()
+            .expect("pending job")
+            .job_id
+            .clone();
+        // SkipAll is remembered as the same per-item resolution as a single Skip choice.
+        if let Some(pending) = &mut state.pending_operation {
+            pending.remember_resolution = Some(ConflictResolution::Skip);
+        }
+        drain_completion_tasks(start, &mut state).await;
+
+        assert!(empty_destination.exists(), "the empty file was copied");
+        assert_eq!(std::fs::read(&empty_destination).unwrap(), b"");
+        assert_eq!(std::fs::read(&colliding_destination).unwrap(), sentinel);
+        assert!(state.pending_operation.is_none(), "the job completed");
+
+        let undo = state.undo_journal.peek_undo().expect("an undo record");
+        assert_eq!(undo.kind, UndoOpKind::Copy);
+        assert_eq!(undo.items.len(), 1, "only the applied copy is undoable");
+        assert_eq!(undo.items[0].source_path, empty_source);
+        assert_eq!(undo.items[0].destination_path, empty_destination);
+        let runtime = app_runtime();
+        assert_eq!(
+            runtime.persisted_task_state(&job_id, 0),
+            Some(TaskState::Completed)
+        );
+        assert_eq!(
+            runtime.persisted_task_state(&job_id, 1),
+            Some(TaskState::Skipped)
+        );
     }
 }

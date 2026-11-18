@@ -10,7 +10,7 @@ use iris_core_domain::types::object::ObjectRef;
 use iris_core_domain::types::options::ConflictResolution;
 use iris_core_domain::types::progress::ProgressInfo;
 use iris_core_domain::types::transfer::{JobId, JobState};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
@@ -200,6 +200,9 @@ pub struct PendingFileOperation {
     pub max_in_flight: usize,
     /// The job is in the job store, so its tasks can be updated and resumed after a restart.
     pub persisted: bool,
+    /// Items whose destination was left untouched (conflict Skip or a skipped failure).
+    /// They must not enter the Undo record even when the rest of the job was applied.
+    pub skipped: BTreeSet<usize>,
 }
 
 impl PendingFileOperation {
@@ -223,7 +226,20 @@ impl PendingFileOperation {
             retry: Vec::new(),
             max_in_flight: max_in_flight.max(1),
             persisted: false,
+            skipped: BTreeSet::new(),
         }
+    }
+
+    pub fn mark_skipped(&mut self, index: usize) {
+        self.skipped.insert(index);
+    }
+
+    /// Requested items that actually changed a destination, in their original order.
+    pub fn applied_items(&self) -> impl Iterator<Item = &PendingFileItem> {
+        self.items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| (!self.skipped.contains(&index)).then_some(item))
     }
 
     /// The item to start next: a retried one first, then the next new one.

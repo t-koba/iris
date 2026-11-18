@@ -91,6 +91,9 @@ pub(crate) const STALE_TRANSFER_DISPATCH: &str =
 #[derive(Clone, Debug)]
 pub struct TransferItemOutcome {
     pub bytes_completed: u64,
+    /// Whether the item changed its destination. A skipped item transfers no bytes but must
+    /// not be recorded for Undo; an empty file copies zero bytes and still is applied.
+    pub applied: bool,
 }
 
 /// Owns an in-progress directory snapshot generation. Dropping it before completion

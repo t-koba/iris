@@ -1,6 +1,8 @@
 use super::*;
 use crate::i18n::{tr, tr_with};
 use crate::state::PendingUndoAction;
+use crate::undo::UndoableOp;
+use std::collections::BTreeSet;
 
 pub fn start_pending_file_operation(
     state: &mut AppState,
@@ -172,12 +174,14 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
 
     // rsync fast path for all remaining files: only for a fresh start (nothing in flight or to
     // retry), when both ends are local-mount paths, rsync is available, and the policy is not
-    // Rename (rsync cannot rename).
+    // Rename (rsync cannot rename). A batch reports only aggregate success, so an undoable job
+    // with Skip must use the normal per-item path to learn which destinations were left alone.
     let remaining = pending.items.len() - pending.current_index;
     if remaining >= 2
         && pending.in_flight == 0
         && pending.retry.is_empty()
         && !matches!(resolution, ConflictResolution::Rename)
+        && !(pending.undo_action.is_some() && matches!(resolution, ConflictResolution::Skip))
         && !pending.rsync_failed
     {
         let items = pending.items[pending.current_index..].to_vec();
@@ -196,11 +200,13 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
                     Ok(Some(total_bytes)) => Ok(PendingItemResult {
                         bytes_completed: total_bytes,
                         files_completed: item_count as u64,
+                        applied: true,
                     }),
                     // Sentinel meaning "fall back to the normal path".
                     _ => Ok(PendingItemResult {
                         bytes_completed: 0,
                         files_completed: 0,
+                        applied: true,
                     }),
                 }
             },
@@ -231,6 +237,18 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
     Task::batch(tasks)
 }
 
+/// An undo or redo op is replayed as one pending item per op entry, so skipped indices
+/// refer to the same entries even when some of them were left untouched.
+fn undo_op_without_skipped(op: UndoableOp, skipped: &BTreeSet<usize>) -> UndoableOp {
+    let items = op
+        .items
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, item)| (!skipped.contains(&index)).then_some(item))
+        .collect();
+    UndoableOp { items, ..op }
+}
+
 fn finish_pending_operation(state: &mut AppState) -> Task<Message> {
     let Some(pending) = state.pending_operation.take() else {
         return Task::none();
@@ -244,8 +262,7 @@ fn finish_pending_operation(state: &mut AppState) -> Task<Message> {
                 UndoOpKind::Copy
             };
             let undo_items = pending
-                .items
-                .iter()
+                .applied_items()
                 .map(|item| UndoItem {
                     source_path: PathBuf::from(&item.source.display_path),
                     destination_path: PathBuf::from(&item.destination_path),
@@ -259,10 +276,16 @@ fn finish_pending_operation(state: &mut AppState) -> Task<Message> {
             completion_tasks.push(record_undo_op_task(undo_kind, undo_items));
         }
         Some(PendingUndoAction::RecordOp(op)) => {
-            state.undo_journal.push_undo_from_redo(op);
+            let op = undo_op_without_skipped(op, &pending.skipped);
+            if !op.items.is_empty() {
+                state.undo_journal.push_undo_from_redo(op);
+            }
         }
         Some(PendingUndoAction::PushRedo(op)) => {
-            state.undo_journal.push_redo(op);
+            let op = undo_op_without_skipped(op, &pending.skipped);
+            if !op.items.is_empty() {
+                state.undo_journal.push_redo(op);
+            }
         }
         None => {}
     }
@@ -323,6 +346,7 @@ pub fn resolve_failed_items(state: &mut AppState, job_id: &JobId, retry: bool) -
         pending.retry.extend(failed.into_iter().rev());
     } else {
         for index in failed {
+            pending.mark_skipped(index);
             app_runtime().skip_task(job_id, index);
         }
     }
@@ -384,6 +408,7 @@ fn spawn_apply_one_item(
             transfer.await.map(|outcome| PendingItemResult {
                 bytes_completed: outcome.bytes_completed,
                 files_completed: 1,
+                applied: outcome.applied,
             })
         },
         move |result| {

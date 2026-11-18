@@ -32,6 +32,8 @@ pub struct PendingItemResult {
     pub bytes_completed: u64,
     /// Usually 1; an rsync batch reports every file it transferred.
     pub files_completed: u64,
+    /// False when the destination was left untouched by a user Skip.
+    pub applied: bool,
 }
 
 #[derive(Debug, Clone)]
