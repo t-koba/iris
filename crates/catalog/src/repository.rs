@@ -516,6 +516,149 @@ mod tests {
     }
 
     #[test]
+    fn eviction_on_another_connection_does_not_delete_live_staging() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("catalog.sqlite3");
+        let mut writer = CatalogRepository::open(&db_path).unwrap();
+        let other = CatalogRepository::open(&db_path).unwrap();
+        let entry = CachedDirectoryEntry {
+            local_path_is_lossy: false,
+            stable_id: "staged-id".to_string(),
+            display_path: "/root/staged".to_string(),
+            name: "staged".to_string(),
+            is_dir: false,
+            metadata_level: MetadataLevel::L1,
+            size: Some(7),
+            mtime: None,
+            ctime: None,
+            is_symlink: false,
+            symlink_target: None,
+            is_inaccessible: false,
+        };
+        // An expired committed listing gives the other connection something to evict.
+        writer
+            .conn
+            .execute_batch(
+                "INSERT INTO directory_snapshots
+                    (backend_id, dir_stable_id, generation, item_count, snapshot_at_secs, is_complete)
+                 VALUES ('local', 'stale-id', 1, 1, 1, 1);
+                 INSERT INTO directory_snapshot_entries
+                    (backend_id, dir_stable_id, generation, stable_id, display_path, name,
+                     is_dir, metadata_level)
+                 VALUES ('local', 'stale-id', 1, 'old', '/stale/old', 'old', 0, 0);",
+            )
+            .unwrap();
+
+        let generation = writer
+            .begin_snapshot_generation("local", "root-id")
+            .unwrap();
+        writer
+            .append_snapshot_entries("local", "root-id", generation, std::slice::from_ref(&entry))
+            .unwrap();
+        assert_eq!(other.evict().unwrap(), 1);
+        for repo in [&writer, &other] {
+            let staged: i64 = repo
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM directory_snapshot_entries WHERE generation = ?1",
+                    [generation as i64],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(staged, 0);
+            assert!(repo.get_snapshot("local", "root-id").unwrap().is_none());
+        }
+
+        let completed = writer
+            .complete_snapshot_generation("local", "root-id", generation)
+            .unwrap();
+        assert_eq!(completed.item_count, 1);
+        for repo in [&writer, &other] {
+            let snapshot = repo.get_snapshot("local", "root-id").unwrap().unwrap();
+            assert!(snapshot.is_complete);
+            assert_eq!(snapshot.generation, generation);
+            assert_eq!(snapshot.item_count, 1);
+            assert_eq!(
+                repo.get_snapshot_entries("local", "root-id")
+                    .unwrap()
+                    .unwrap(),
+                vec![entry.clone()]
+            );
+        }
+    }
+
+    #[test]
+    fn dropped_writer_leaves_no_staged_rows_and_generations_are_not_reused() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("catalog.sqlite3");
+        let entry = CachedDirectoryEntry {
+            local_path_is_lossy: false,
+            stable_id: "staged-id".to_string(),
+            display_path: "/root/staged".to_string(),
+            name: "staged".to_string(),
+            is_dir: false,
+            metadata_level: MetadataLevel::L1,
+            size: None,
+            mtime: None,
+            ctime: None,
+            is_symlink: false,
+            symlink_target: None,
+            is_inaccessible: false,
+        };
+        let generation = {
+            let mut writer = CatalogRepository::open(&db_path).unwrap();
+            let generation = writer
+                .begin_snapshot_generation("local", "root-id")
+                .unwrap();
+            writer
+                .append_snapshot_entries(
+                    "local",
+                    "root-id",
+                    generation,
+                    std::slice::from_ref(&entry),
+                )
+                .unwrap();
+            generation // Dropped without completion or abandon, like a crashed writer.
+        };
+
+        let mut reopened = CatalogRepository::open(&db_path).unwrap();
+        let rows: i64 = reopened
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM directory_snapshot_entries",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0);
+        assert!(reopened.get_snapshot("local", "root-id").unwrap().is_none());
+
+        let recovered = reopened
+            .begin_snapshot_generation("local", "root-id")
+            .unwrap();
+        assert!(recovered > generation);
+        reopened
+            .abandon_snapshot_generation("local", "root-id", recovered)
+            .unwrap();
+        let next = reopened
+            .begin_snapshot_generation("local", "root-id")
+            .unwrap();
+        assert!(next > recovered);
+        reopened
+            .abandon_snapshot_generation("local", "root-id", next)
+            .unwrap();
+        let count: i64 = reopened
+            .conn
+            .query_row(
+                "SELECT next_generation FROM snapshot_generation_counter WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, next as i64);
+    }
+
+    #[test]
     fn concurrent_generations_are_reserved_and_abandoned_independently() {
         let mut repo = CatalogRepository::open_in_memory().unwrap();
         let entry = |name: &str| CachedDirectoryEntry {
