@@ -8,10 +8,10 @@
       "filename": "landscape.jpg"
     },
     {
-      "notes": "CC0 1.0 sample JPEG from domdomegg/sample-files; source license: https://github.com/domdomegg/sample-files/blob/main/LICENSE",
-      "sha256": "222b1b549832a367667d5e1188e1f3abcc43dc6576e4a6c09ed89356f66bf146",
-      "size": 2576,
-      "url": "https://raw.githubusercontent.com/domdomegg/sample-files/main/sample.jpg",
+      "notes": "Deterministic 200x200 DC-only baseline gradient JPEG, generated locally by scripts/generate-preview-fixture.py",
+      "sha256": "a9209ce466bdcc93f7e1b8539949e6c01c49f6c8c11278c994392724444972ae",
+      "size": 1663,
+      "generator": "gradient-jpeg-v1-200",
       "filename": "sample.jpg"
     },
     {

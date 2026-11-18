@@ -27,7 +27,10 @@ generator_spec = importlib.util.spec_from_file_location(
     'preview_fixture_generator', Path(__file__).with_name('generate-preview-fixture.py'))
 generator = importlib.util.module_from_spec(generator_spec)
 generator_spec.loader.exec_module(generator)
-GENERATORS = {'gradient-jpeg-v1': generator.generate_gradient_jpeg}
+GENERATORS = {
+    'gradient-jpeg-v1': generator.generate_gradient_jpeg,
+    'gradient-jpeg-v1-200': generator.generate_small_gradient_jpeg,
+}
 
 
 def validate_url(url, hosts):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the byte-pinned 4000x3000 gradient JPEG for the preview corpus."""
+"""Generate the byte-pinned gradient JPEGs for the preview corpus."""
 
 import argparse
 from pathlib import Path
@@ -7,9 +7,8 @@ import struct
 import sys
 
 
-def generate_gradient_jpeg():
-    """Return the fixed gradient-jpeg-v1 baseline JPEG as bytes."""
-    width, height = 4000, 3000
+def generate_gradient_jpeg(width=4000, height=3000):
+    """Return the fixed gradient-jpeg-v1 baseline JPEG at the given size."""
     jpeg = bytearray(b'\xff\xd8')  # SOI
 
     def segment(marker, payload):
@@ -66,6 +65,11 @@ def generate_gradient_jpeg():
         write_bits((1 << padding) - 1, padding)
     jpeg.extend(b'\xff\xd9')  # EOI
     return bytes(jpeg)
+
+
+def generate_small_gradient_jpeg():
+    """Return the byte-pinned 200x200 gradient-jpeg-v1-200 variant."""
+    return generate_gradient_jpeg(200, 200)
 
 
 def main():

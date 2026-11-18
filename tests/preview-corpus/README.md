@@ -1,11 +1,12 @@
 # Preview correctness corpus
 
-`fixtures.json` pins six fixtures (38,560,017 bytes total): five externally hosted
+`fixtures.json` pins six fixtures (38,559,104 bytes total): four externally hosted
 assets with source/license notes and exact HTTPS hosts/redirect destinations, and
-one locally generated JPEG. A deterministic DC-only baseline encoder generates
-`landscape.jpg` at 4000x3000 without contacting Wikimedia. Its exact bytes are pinned
-by size and SHA-256, just like the external assets. External assets and generated
-fixture bytes are never stored in the repository or uploaded as CI artifacts.
+two locally generated JPEGs. A deterministic DC-only baseline encoder generates
+`landscape.jpg` at 4000x3000 and `sample.jpg` at 200x200 without contacting external
+hosts. Their exact bytes are pinned by size and SHA-256, just like the external assets.
+External assets and generated fixture bytes are never stored in the repository or
+uploaded as CI artifacts.
 
 ## Fetch and run
 

@@ -58,33 +58,38 @@ class FetchTests(unittest.TestCase):
         self.assertEqual((self.output / 'test.jpg').read_bytes(), self.body)
         self.assertEqual([p.name for p in self.output.iterdir()], ['test.jpg'])
 
-    def local_jpeg_manifest(self):
+    def generated_jpeg_manifests(self):
         manifest = read_corpus_manifest()
-        entry, = [entry for entry in manifest['files'] if entry['filename'] == 'landscape.jpg']
-        manifest['files'] = [entry]
-        return manifest, entry
+        generated = [entry for entry in manifest['files'] if 'generator' in entry]
+        self.assertEqual([entry['filename'] for entry in generated],
+                         ['landscape.jpg', 'sample.jpg'])
+        return [(dict(manifest, files=[entry]), entry) for entry in generated]
 
     def test_generated_jpeg_matches_pins_without_network(self):
-        manifest, entry = self.local_jpeg_manifest()
-        opener = Mock()
-        helper.fetch(manifest, self.output, entry['size'], 1, opener)
-        opener.open.assert_not_called()
-        self.assertEqual(list(self.output.iterdir()), [self.output / 'landscape.jpg'])
-        data = (self.output / 'landscape.jpg').read_bytes()
-        self.assertEqual(len(data), entry['size'])
-        self.assertEqual(hashlib.sha256(data).hexdigest(), entry['sha256'])
+        for manifest, entry in self.generated_jpeg_manifests():
+            with self.subTest(filename=entry['filename']):
+                output = Path(self.temp.name) / entry['filename']
+                opener = Mock()
+                helper.fetch(manifest, output, entry['size'], 1, opener)
+                opener.open.assert_not_called()
+                self.assertEqual(list(output.iterdir()), [output / entry['filename']])
+                data = (output / entry['filename']).read_bytes()
+                self.assertEqual(len(data), entry['size'])
+                self.assertEqual(hashlib.sha256(data).hexdigest(), entry['sha256'])
 
     def test_generated_jpeg_pin_mismatch_prevents_installation(self):
-        manifest, entry = self.local_jpeg_manifest()
-        for changes in ({'size': entry['size'] + 1}, {'sha256': '0' * 64}):
-            corrupted = dict(manifest, files=[dict(entry, **changes)])
-            opener = Mock()
-            with self.subTest(changes=changes), patch.object(helper.os, 'replace') as replace:
-                with self.assertRaisesRegex(ValueError, 'fixture size or SHA-256 mismatch'):
-                    helper.fetch(corrupted, self.output, 40_000_000, 1, opener)
-                replace.assert_not_called()
-                opener.open.assert_not_called()
-                self.assertFalse(self.output.exists())
+        for manifest, entry in self.generated_jpeg_manifests():
+            for index, changes in enumerate(({'size': entry['size'] + 1}, {'sha256': '0' * 64})):
+                corrupted = dict(manifest, files=[dict(entry, **changes)])
+                output = Path(self.temp.name) / f"{entry['filename']}-{index}"
+                opener = Mock()
+                with self.subTest(filename=entry['filename'], changes=changes), patch.object(
+                        helper.os, 'replace') as replace:
+                    with self.assertRaisesRegex(ValueError, 'fixture size or SHA-256 mismatch'):
+                        helper.fetch(corrupted, output, 40_000_000, 1, opener)
+                    replace.assert_not_called()
+                    opener.open.assert_not_called()
+                    self.assertFalse(output.exists())
 
     def test_manifest_rejects_invalid_fixture_sources(self):
         entry = dict(self.manifest['files'][0])
@@ -348,7 +353,7 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(hevc['sha256'],
                          'f110da4f156dde1c5fcf38895109568660b6464aa9c33d3c042d2470e2a9c364')
         total = sum(entry['size'] for entry in manifest['files'])
-        self.assertEqual(total, 38_560_017)
+        self.assertEqual(total, 38_559_104)
         self.assertLessEqual(total, 40_000_000)
 
 
