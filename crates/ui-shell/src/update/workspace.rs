@@ -264,17 +264,7 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
             return resolve_failed_items(state, &job_id, false);
         }
         Message::AbortJob(job_id) => {
-            dismiss_job_decisions(state, &job_id);
-            app_runtime().cancel_job(&job_id);
-            if let Some(job) = state.jobs.iter_mut().find(|job| job.id == job_id) {
-                job.state = JobState::Canceled;
-            }
-            if let Some(pending) = &state.pending_operation {
-                if pending.job_id == job_id {
-                    state.pending_operation = None;
-                    state.active_dialog = None;
-                }
-            }
+            cancel_job_state(state, &job_id);
         }
         Message::SetPreviewPosition(position) => {
             state.preview_position = position;

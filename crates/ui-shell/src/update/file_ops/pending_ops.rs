@@ -436,6 +436,39 @@ pub fn dismiss_job_decisions(state: &mut AppState, job_id: &JobId) {
     });
 }
 
+/// Replay entries are popped from the journal before their transfer starts. An abort with no
+/// confirmed installation has not changed any destination, so the entry must remain retryable.
+/// A confirmed installation means the replay was partly applied; its journal outcome cannot be
+/// reconstructed from the abort alone, so the stacks are left untouched.
+enum ReplayRestore {
+    Undo(UndoableOp),
+    Redo(UndoableOp),
+}
+
+fn replay_entry_to_restore(pending: &PendingFileOperation) -> Option<ReplayRestore> {
+    if pending
+        .items
+        .iter()
+        .any(|item| item.installed_path.is_some())
+    {
+        return None;
+    }
+    match &pending.undo_action {
+        // Redo replay popped the entry from the redo stack.
+        Some(PendingUndoAction::RecordOp(op)) => Some(ReplayRestore::Redo(op.clone())),
+        // Undo replay popped the entry from the undo stack.
+        Some(PendingUndoAction::PushRedo(op)) => Some(ReplayRestore::Undo(op.clone())),
+        _ => None,
+    }
+}
+
+fn restore_replay_entry(state: &mut AppState, replay: ReplayRestore) {
+    match replay {
+        ReplayRestore::Undo(op) => state.undo_journal.push_undo_from_redo(op),
+        ReplayRestore::Redo(op) => state.undo_journal.push_redo(op),
+    }
+}
+
 /// Cancels a job in the runtime and marks it canceled in the UI state.
 pub fn cancel_job_state(state: &mut AppState, job_id: &JobId) {
     dismiss_job_decisions(state, job_id);
@@ -443,11 +476,21 @@ pub fn cancel_job_state(state: &mut AppState, job_id: &JobId) {
     if let Some(job) = state.jobs.iter_mut().find(|job| job.id == *job_id) {
         job.state = JobState::Canceled;
     }
-    if let Some(pending) = &state.pending_operation {
-        if pending.job_id == *job_id {
-            state.pending_operation = None;
-            state.active_dialog = None;
-        }
+    let replay = state
+        .pending_operation
+        .as_ref()
+        .filter(|pending| pending.job_id == *job_id)
+        .and_then(replay_entry_to_restore);
+    if let Some(action) = replay {
+        restore_replay_entry(state, action);
+    }
+    if state
+        .pending_operation
+        .as_ref()
+        .is_some_and(|pending| pending.job_id == *job_id)
+    {
+        state.pending_operation = None;
+        state.active_dialog = None;
     }
 }
 

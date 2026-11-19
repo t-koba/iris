@@ -1654,6 +1654,117 @@ mod tests {
         assert_eq!(undo.items[0].source_path, PathBuf::from("/src/0"));
     }
 
+    fn replay_that_fails_before_writing(op: UndoableOp, push_redo: bool) -> (AppState, JobId) {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 1, 1);
+        state.pending_operation.as_mut().unwrap().undo_action = Some(if push_redo {
+            PendingUndoAction::PushRedo(op)
+        } else {
+            PendingUndoAction::RecordOp(op)
+        });
+        let _ = process_pending_operation(&mut state);
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(job_id.clone(), 0, 0, Err("disk full".into())),
+        );
+        assert!(state.pending_operation.as_ref().is_some_and(|pending| {
+            pending.failed == [0]
+                && pending
+                    .items
+                    .iter()
+                    .all(|item| item.installed_path.is_none())
+        }));
+        (state, job_id)
+    }
+
+    fn replay_op() -> UndoableOp {
+        UndoableOp {
+            kind: UndoOpKind::Move,
+            items: vec![UndoItem {
+                source_path: PathBuf::from("/src/0"),
+                destination_path: PathBuf::from("/dst/0"),
+                size: None,
+                mtime: None,
+                trashed_path: None,
+                trash_id: None,
+                normalized_path: None,
+            }],
+            performed_at: std::time::SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn aborting_failed_undo_replay_keeps_it_undoable() {
+        let op = replay_op();
+        let (mut state, job_id) = replay_that_fails_before_writing(op.clone(), true);
+
+        let _ = update(&mut state, Message::AbortJob(job_id));
+
+        assert!(state.pending_operation.is_none());
+        assert_eq!(state.undo_journal.pop_undo(), Some(op));
+        assert!(!state.undo_journal.can_redo());
+    }
+
+    #[test]
+    fn aborting_failed_redo_replay_keeps_it_redoable() {
+        let op = replay_op();
+        let (mut state, job_id) = replay_that_fails_before_writing(op.clone(), false);
+
+        let _ = update(&mut state, Message::AbortJob(job_id));
+
+        assert!(state.pending_operation.is_none());
+        assert_eq!(state.undo_journal.pop_redo(), Some(op));
+        assert!(!state.undo_journal.can_undo());
+    }
+
+    #[test]
+    fn canceling_failed_undo_replay_keeps_it_undoable() {
+        let op = replay_op();
+        let (mut state, job_id) = replay_that_fails_before_writing(op.clone(), true);
+
+        let _ = update(
+            &mut state,
+            Message::Job(crate::messages::JobMessage::Cancel(job_id)),
+        );
+
+        assert!(state.pending_operation.is_none());
+        assert_eq!(state.undo_journal.pop_undo(), Some(op));
+    }
+
+    #[test]
+    fn aborting_partly_applied_replay_does_not_guess_the_journal() {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 2, 2);
+        state.pending_operation.as_mut().unwrap().undo_action =
+            Some(PendingUndoAction::PushRedo(replay_op()));
+        let _ = process_pending_operation(&mut state);
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(
+                job_id.clone(),
+                0,
+                0,
+                Ok(crate::messages::PendingItemResult {
+                    bytes_completed: 10,
+                    files_completed: 1,
+                    applied: true,
+                    installed_path: Some("/dst/0".into()),
+                    undoable: true,
+                }),
+            ),
+        );
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(job_id.clone(), 1, 0, Err("disk full".into())),
+        );
+
+        let _ = update(&mut state, Message::AbortJob(job_id));
+
+        assert!(state.pending_operation.is_none());
+        assert!(!state.undo_journal.can_undo());
+        assert!(!state.undo_journal.can_redo());
+    }
+
     #[test]
     fn recursive_filter_batches_ignore_stale_runs() {
         let mut state = AppState::default();
