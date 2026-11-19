@@ -201,12 +201,14 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
                         bytes_completed: total_bytes,
                         files_completed: item_count as u64,
                         applied: true,
+                        installed_path: None,
                     }),
                     // Sentinel meaning "fall back to the normal path".
                     _ => Ok(PendingItemResult {
                         bytes_completed: 0,
                         files_completed: 0,
                         applied: true,
+                        installed_path: None,
                     }),
                 }
             },
@@ -265,7 +267,11 @@ fn finish_pending_operation(state: &mut AppState) -> Task<Message> {
                 .applied_items()
                 .map(|item| UndoItem {
                     source_path: PathBuf::from(&item.source.display_path),
-                    destination_path: PathBuf::from(&item.destination_path),
+                    destination_path: PathBuf::from(
+                        item.installed_path
+                            .as_deref()
+                            .unwrap_or(&item.destination_path),
+                    ),
                     size: None,
                     mtime: None,
                     trashed_path: None,
@@ -409,6 +415,7 @@ fn spawn_apply_one_item(
                 bytes_completed: outcome.bytes_completed,
                 files_completed: 1,
                 applied: outcome.applied,
+                installed_path: outcome.installed_path,
             })
         },
         move |result| {

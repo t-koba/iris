@@ -34,6 +34,8 @@ pub struct PendingItemResult {
     pub files_completed: u64,
     /// False when the destination was left untouched by a user Skip.
     pub applied: bool,
+    /// The path actually installed when a conflict chose a numbered sibling.
+    pub installed_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]

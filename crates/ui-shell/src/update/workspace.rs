@@ -359,6 +359,7 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                         .join(file_name_from_path(&source.display_path))
                         .to_string_lossy()
                         .to_string(),
+                    installed_path: None,
                 })
                 .collect();
             return start_pending_file_operation(state, items, is_move);

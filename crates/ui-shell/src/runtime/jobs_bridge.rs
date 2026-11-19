@@ -124,6 +124,9 @@ impl AppRuntime {
                     display_path: source_path,
                 },
                 destination_path,
+                // The job store only keeps the requested destination; a restored task falls
+                // back to it instead of guessing which sibling a conflict installed.
+                installed_path: None,
             });
 
             if task.state == TaskState::Skipped {

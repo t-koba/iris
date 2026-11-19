@@ -610,6 +610,7 @@ mod tests {
                         PendingFileItem {
                             source: object.clone(),
                             destination_path: temp.path().join("copy.txt").to_str().unwrap().into(),
+                            installed_path: None,
                         },
                         is_move,
                         ConflictResolution::Overwrite,
@@ -627,6 +628,7 @@ mod tests {
                     &[PendingFileItem {
                         source: object,
                         destination_path: temp.path().join("copy.txt").to_str().unwrap().into(),
+                        installed_path: None,
                     }],
                     false
                 )

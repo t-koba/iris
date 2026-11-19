@@ -360,6 +360,7 @@ mod tests {
         let items = vec![PendingFileItem {
             source: object_ref(&source),
             destination_path: destination.to_string_lossy().to_string(),
+            installed_path: None,
         }];
         let map = mapping(&mount_root);
 
@@ -403,6 +404,7 @@ mod tests {
         let items = vec![PendingFileItem {
             source: object_ref(&mounted_source),
             destination_path: destination.to_string_lossy().to_string(),
+            installed_path: None,
         }];
         let map = mapping(&mount_root);
 

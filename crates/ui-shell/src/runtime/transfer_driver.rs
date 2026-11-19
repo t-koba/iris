@@ -483,12 +483,17 @@ impl AppRuntime {
                 return Ok(TransferItemOutcome {
                     bytes_completed: 0,
                     applied: false,
+                    installed_path: None,
                 });
             }
 
             let final_dst = self
                 .resolve_destination_path_async(dst_path, &resolution)
                 .await?;
+            // Only a numbered sibling differs from the requested path. Every other transfer
+            // keeps using `destination_path` exactly as before.
+            let installed_path =
+                (final_dst != dst_path).then(|| final_dst.to_string_lossy().into_owned());
 
             match self
                 .transfer_local_symlink(source, &final_dst, is_move, &resolution)
@@ -498,6 +503,7 @@ impl AppRuntime {
                     return Ok(TransferItemOutcome {
                         bytes_completed: 0,
                         applied: true,
+                        installed_path,
                     });
                 }
                 SymlinkTransfer::LinksToAncestor => {
@@ -505,6 +511,7 @@ impl AppRuntime {
                     return Ok(TransferItemOutcome {
                         bytes_completed: 0,
                         applied: false,
+                        installed_path: None,
                     });
                 }
                 SymlinkTransfer::NotHandled => {}
@@ -521,7 +528,13 @@ impl AppRuntime {
                             resolution,
                         },
                     )
-                    .await;
+                    .await
+                    .map(|mut outcome| {
+                        if outcome.applied {
+                            outcome.installed_path = installed_path;
+                        }
+                        outcome
+                    });
             }
 
             self.transfer_file(context, source, &final_dst, is_move, resolution)
@@ -529,6 +542,7 @@ impl AppRuntime {
                 .map(|result| TransferItemOutcome {
                     bytes_completed: result.bytes_transferred,
                     applied: true,
+                    installed_path,
                 })
         })
     }
@@ -591,6 +605,7 @@ impl AppRuntime {
                 return Ok(TransferItemOutcome {
                     bytes_completed: 0,
                     applied: true,
+                    installed_path: None,
                 });
             }
 
@@ -669,6 +684,7 @@ impl AppRuntime {
                 // A partially skipped directory cannot be undone as a whole: Undo would
                 // delete the destination the user chose to keep.
                 applied: all_children_applied,
+                installed_path: None,
             })
         })
     }
@@ -1178,6 +1194,7 @@ mod tests {
                     PendingFileItem {
                         source: local_ref(&source),
                         destination_path: destination.to_str().unwrap().to_owned(),
+                        installed_path: None,
                     },
                     is_move,
                     ConflictResolution::Overwrite,
@@ -1259,6 +1276,7 @@ mod tests {
                 PendingFileItem {
                     source: local_ref(&source),
                     destination_path: destination.to_str().unwrap().to_owned(),
+                    installed_path: None,
                 },
                 false,
                 ConflictResolution::Overwrite,
@@ -1321,6 +1339,7 @@ mod tests {
             PendingFileItem {
                 source: local_ref(&source),
                 destination_path: destination.to_str().unwrap().to_owned(),
+                installed_path: None,
             },
             true,
             ConflictResolution::Overwrite,
@@ -1398,6 +1417,7 @@ mod tests {
                 PendingFileItem {
                     source: local_ref(temp.path()),
                     destination_path: temp.path().join("child").to_str().unwrap().to_owned(),
+                    installed_path: None,
                 },
                 true,
                 ConflictResolution::Overwrite,
@@ -1436,6 +1456,7 @@ mod tests {
                         PendingFileItem {
                             source: local_ref(source),
                             destination_path: destination.to_string_lossy().into_owned(),
+                            installed_path: None,
                         },
                         is_move,
                         resolution,
@@ -1499,6 +1520,7 @@ mod tests {
                 PendingFileItem {
                     source: local_ref(&source),
                     destination_path: destination.to_string_lossy().into_owned(),
+                    installed_path: None,
                 },
                 false,
                 ConflictResolution::Fail,
@@ -1522,6 +1544,7 @@ mod tests {
         let items = [sibling.clone(), source.join("copy")].map(|destination| PendingFileItem {
             source: local_ref(&source),
             destination_path: destination.to_string_lossy().into_owned(),
+            installed_path: None,
         });
         let error = app_runtime()
             .try_rsync_batch(&items, false, &ConflictResolution::Overwrite)
@@ -1579,6 +1602,7 @@ mod tests {
                 PendingFileItem {
                     source: local_ref(&prefix),
                     destination_path: destination.to_string_lossy().into_owned(),
+                    installed_path: None,
                 },
                 false,
                 ConflictResolution::Fail,
@@ -1664,6 +1688,7 @@ mod tests {
                     PendingFileItem {
                         source: local_ref(&source),
                         destination_path: destination.to_string_lossy().into_owned(),
+                        installed_path: None,
                     },
                     false,
                     resolution.clone(),
@@ -1757,6 +1782,7 @@ mod tests {
                     PendingFileItem {
                         source: local_ref(&source),
                         destination_path: destination.to_string_lossy().into_owned(),
+                        installed_path: None,
                     },
                     false,
                     resolution,

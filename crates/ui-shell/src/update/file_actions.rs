@@ -406,6 +406,7 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                                 .join(file_name_from_path(&source.display_path))
                                 .to_string_lossy()
                                 .to_string(),
+                            installed_path: None,
                         })
                         .collect();
                     let task = start_pending_file_operation(state, items, is_move);
@@ -868,6 +869,8 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                     if let Some(pending) = &mut state.pending_operation {
                         if !item_result.applied {
                             pending.mark_skipped(index);
+                        } else if let Some(item) = pending.items.get_mut(index) {
+                            item.installed_path = item_result.installed_path.clone();
                         }
                         pending.in_flight = pending.in_flight.saturating_sub(1);
                     }

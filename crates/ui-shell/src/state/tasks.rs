@@ -178,6 +178,9 @@ pub struct JobDisplayInfo {
 pub struct PendingFileItem {
     pub source: ObjectRef,
     pub destination_path: String,
+    /// The installed path when a conflict chose a numbered sibling; otherwise `None`, and
+    /// `destination_path` is the path that was used.
+    pub installed_path: Option<String>,
 }
 
 /// File operation in progress (paste or drag and drop).

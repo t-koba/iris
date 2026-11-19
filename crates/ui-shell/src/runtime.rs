@@ -94,6 +94,8 @@ pub struct TransferItemOutcome {
     /// Whether the item changed its destination. A skipped item transfers no bytes but must
     /// not be recorded for Undo; an empty file copies zero bytes and still is applied.
     pub applied: bool,
+    /// Set only when a conflict installed a numbered sibling instead of the requested path.
+    pub installed_path: Option<String>,
 }
 
 /// Owns an in-progress directory snapshot generation. Dropping it before completion

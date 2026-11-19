@@ -100,6 +100,7 @@ pub fn perform_dnd_drop(state: &mut AppState) -> Task<Message> {
         items.push(PendingFileItem {
             source: entry.object_ref.clone(),
             destination_path: target_dir.join(&entry.name).to_string_lossy().to_string(),
+            installed_path: None,
         });
     }
 
@@ -161,6 +162,7 @@ pub fn perform_external_drop(
         items.push(PendingFileItem {
             source,
             destination_path: target_dir.join(file_name).to_string_lossy().to_string(),
+            installed_path: None,
         });
     }
 

@@ -585,6 +585,7 @@ mod tests {
             .map(|index| PendingFileItem {
                 source: local_entry(&format!("/src/{index}"), false).object_ref,
                 destination_path: format!("/dst/{index}"),
+                installed_path: None,
             })
             .collect();
         let mut pending =
@@ -614,6 +615,7 @@ mod tests {
             bytes_completed: 10,
             files_completed: 1,
             applied: true,
+            installed_path: None,
         })
     }
 
@@ -2251,12 +2253,30 @@ mod tests {
                 };
                 match message {
                     Message::Job(crate::messages::JobMessage::Persisted(_))
+                    | Message::ConflictCheckCompleted(..)
                     | Message::PendingItemCompleted(..)
                     | Message::RecordUndoOp { .. } => tasks.push(update(state, message)),
                     _ => {}
                 }
             }
         }
+    }
+
+    /// Collects a task's output messages so a test can dispatch the one it is exercising.
+    async fn collect_task_messages(task: Task<Message>) -> Vec<Message> {
+        use iced::futures::StreamExt;
+
+        let Some(mut stream) = iced_runtime::task::into_stream(task) else {
+            return Vec::new();
+        };
+        let mut messages = Vec::new();
+        while let Some(action) = stream.next().await {
+            let iced_runtime::Action::Output(message) = action else {
+                continue;
+            };
+            messages.push(message);
+        }
+        messages
     }
 
     #[tokio::test]
@@ -2299,6 +2319,7 @@ mod tests {
         .map(|(source, destination)| PendingFileItem {
             source: local_entry(source.to_str().unwrap(), false).object_ref,
             destination_path: destination.to_str().unwrap().to_owned(),
+            installed_path: None,
         })
         .collect();
         let start = start_pending_file_operation_with_undo_action(
@@ -2338,5 +2359,82 @@ mod tests {
             runtime.persisted_task_state(&job_id, 1),
             Some(TaskState::Skipped)
         );
+    }
+
+    #[tokio::test]
+    async fn renamed_conflict_destination_is_journaled_and_undone() {
+        let mut state = AppState::default();
+        let temp = tempfile::tempdir().expect("temp directory");
+        let src = temp.path().join("src");
+        let dst = temp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        let source = src.join("report.txt");
+        let requested = dst.join("report.txt");
+        let renamed = dst.join("report (1).txt");
+        let payload = b"original report";
+        let sentinel = b"pre-existing report";
+        std::fs::write(&source, payload).unwrap();
+        std::fs::write(&requested, sentinel).unwrap();
+
+        let start = start_pending_file_operation_with_undo_action(
+            &mut state,
+            vec![PendingFileItem {
+                source: local_entry(source.to_str().unwrap(), false).object_ref,
+                destination_path: requested.to_str().unwrap().to_owned(),
+                installed_path: None,
+            }],
+            true,
+            Some(PendingUndoAction::RecordTransfer),
+        );
+        let mut conflict_check = Task::none();
+        for message in collect_task_messages(start).await {
+            if matches!(
+                message,
+                Message::Job(crate::messages::JobMessage::Persisted(_))
+            ) {
+                conflict_check = update(&mut state, message);
+            }
+        }
+        let mut checked = false;
+        for message in collect_task_messages(conflict_check).await {
+            if matches!(message, Message::ConflictCheckCompleted(..)) {
+                checked = true;
+                let _ = update(&mut state, message);
+            }
+        }
+        assert!(
+            checked,
+            "the occupied destination is checked before transfer"
+        );
+        assert!(
+            state.active_dialog.is_some(),
+            "the conflict is offered to the user"
+        );
+
+        // The user picks Rename: the runtime installs a numbered sibling, never the occupied path.
+        let transfer = file_ops::apply_conflict_resolution(&mut state, ConflictResolution::Rename);
+        drain_completion_tasks(transfer, &mut state).await;
+
+        assert!(!source.exists(), "the source was moved");
+        assert_eq!(std::fs::read(&requested).unwrap(), sentinel.to_vec());
+        assert_eq!(std::fs::read(&renamed).unwrap(), payload.to_vec());
+        assert!(state.pending_operation.is_none(), "the move completed");
+
+        let undo = state.undo_journal.peek_undo().expect("an undo record");
+        assert_eq!(undo.kind, UndoOpKind::Move);
+        assert_eq!(undo.items.len(), 1);
+        assert_eq!(undo.items[0].source_path, source);
+        assert_eq!(
+            undo.items[0].destination_path, renamed,
+            "Undo must name the file the transfer actually installed"
+        );
+
+        let undo_task = update(&mut state, Message::Undo);
+        drain_completion_tasks(undo_task, &mut state).await;
+
+        assert_eq!(std::fs::read(&source).unwrap(), payload.to_vec());
+        assert_eq!(std::fs::read(&requested).unwrap(), sentinel.to_vec());
+        assert!(!renamed.exists(), "the renamed sibling was moved back");
     }
 }

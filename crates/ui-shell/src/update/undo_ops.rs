@@ -268,6 +268,7 @@ fn undo_transfer_items(op: &UndoableOp) -> Vec<PendingFileItem> {
         .map(|item| PendingFileItem {
             source: pending_object_ref(&item.destination_path),
             destination_path: item.source_path.to_string_lossy().to_string(),
+            installed_path: None,
         })
         .collect()
 }
@@ -278,6 +279,7 @@ fn redo_transfer_items(op: &UndoableOp) -> Vec<PendingFileItem> {
         .map(|item| PendingFileItem {
             source: pending_object_ref(&item.source_path),
             destination_path: item.destination_path.to_string_lossy().to_string(),
+            installed_path: None,
         })
         .collect()
 }
