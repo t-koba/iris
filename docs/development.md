@@ -144,7 +144,7 @@ fuzz 用のクレートは各 `fuzz/` ディレクトリで同じ操作をしま
 
 ## リリース
 
-1. ルートの `Cargo.toml` にある `[workspace.package].version` を上げます。各クレートのバージョンはここから継承されます。`cargo check --workspace` で `Cargo.lock` を更新し、両方をコミットします。
+1. ルートの `Cargo.toml` にある `[workspace.package].version` を上げます。各クレートのバージョンはここから継承され、Windows 実行ファイルの VERSIONINFO とインストーラーのバージョンもこの値から生成されます。`cargo check --workspace` で `Cargo.lock` を更新し、両方をコミットします。
 2. 更新したバージョンと一致する `v<version>` タグ（例: `v0.4.0`）を `main` 上のコミットに付けて push します。リリース前検証はタグとルートのワークスペースバージョンの一致を確認します。
 3. `release.yml` が macOS・Linux・Windows のパッケージを作り、GitHub の Release に添付します。
 

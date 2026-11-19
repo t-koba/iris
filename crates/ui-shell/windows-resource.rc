@@ -1,8 +1,8 @@
-IDI_APP_ICON ICON "../../assets/icons/iris-icon.ico"
+IDI_APP_ICON ICON "@IRIS_ICON_PATH@"
 
 1 VERSIONINFO
-FILEVERSION 0,4,0,0
-PRODUCTVERSION 0,4,0,0
+FILEVERSION @IRIS_FILE_VERSION@
+PRODUCTVERSION @IRIS_PRODUCT_VERSION@
 FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
 FILEFLAGS 0x1L
@@ -18,11 +18,11 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "FileDescription", "Iris\0"
-            VALUE "FileVersion", "0.4.0\0"
+            VALUE "FileVersion", "@IRIS_FILE_VERSION_STRING@\0"
             VALUE "InternalName", "Iris\0"
             VALUE "OriginalFilename", "Iris.exe\0"
             VALUE "ProductName", "Iris\0"
-            VALUE "ProductVersion", "0.4.0\0"
+            VALUE "ProductVersion", "@IRIS_PRODUCT_VERSION_STRING@\0"
         END
     END
     BLOCK "VarFileInfo"
