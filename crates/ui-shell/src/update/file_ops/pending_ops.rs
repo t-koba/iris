@@ -283,17 +283,15 @@ fn undo_op_after_replay(
     }
 }
 
-/// The part of an undo/redo replay that did not change a destination. It must remain in the
-/// journal entry it came from, otherwise a skipped item cannot be retried later.
+/// The part of an undo/redo replay that left its destination untouched. It must remain in the
+/// journal entry it came from, otherwise a skipped item cannot be retried later. An applied item
+/// that is deliberately not undoable (for example a merged folder) belongs in neither stack.
 fn unreplayed_op(op: &UndoableOp, pending: &PendingFileOperation) -> UndoableOp {
     let items = op
         .items
         .iter()
         .enumerate()
-        .filter(|(index, _)| {
-            pending.skipped.contains(index)
-                || pending.items.get(*index).is_some_and(|item| !item.undoable)
-        })
+        .filter(|(index, _)| pending.skipped.contains(index))
         .map(|(_, item)| item.clone())
         .collect();
     UndoableOp {

@@ -1429,7 +1429,11 @@ mod tests {
         assert_eq!(state.undo_journal.pop_redo(), Some(op));
     }
 
-    fn replay_transfer_with_skipped_second_item(push_redo: bool) -> AppState {
+    fn replay_transfer_with_second_item(
+        push_redo: bool,
+        second_applied: bool,
+        second_undoable: bool,
+    ) -> AppState {
         let mut state = AppState::default();
         let job_id = running_transfer(&mut state, 2, 2);
         let op = UndoableOp {
@@ -1481,11 +1485,11 @@ mod tests {
                 1,
                 0,
                 Ok(crate::messages::PendingItemResult {
-                    bytes_completed: 0,
-                    files_completed: 0,
-                    applied: false,
-                    installed_path: None,
-                    undoable: true,
+                    bytes_completed: 10,
+                    files_completed: u64::from(second_applied),
+                    applied: second_applied,
+                    installed_path: second_applied.then(|| "/dst/1 (2)".to_string()),
+                    undoable: second_undoable,
                 }),
             ),
         );
@@ -1494,7 +1498,7 @@ mod tests {
 
     #[test]
     fn skipped_undo_replay_item_remains_undoable() {
-        let mut state = replay_transfer_with_skipped_second_item(true);
+        let mut state = replay_transfer_with_second_item(true, false, true);
 
         let redo = state.undo_journal.pop_redo().expect("redo entry");
         assert_eq!(redo.items[0].source_path, PathBuf::from("/dst/0 (2)"));
@@ -1505,13 +1509,28 @@ mod tests {
 
     #[test]
     fn skipped_redo_replay_item_remains_redoable() {
-        let mut state = replay_transfer_with_skipped_second_item(false);
+        let mut state = replay_transfer_with_second_item(false, false, true);
 
         let undo = state.undo_journal.pop_undo().expect("undo entry");
         assert_eq!(undo.items[0].destination_path, PathBuf::from("/dst/0 (2)"));
         let redo = state.undo_journal.pop_redo().expect("redo entry");
         assert_eq!(redo.items.len(), 1);
         assert_eq!(redo.items[0].source_path, PathBuf::from("/src/1"));
+    }
+
+    #[test]
+    fn applied_but_not_undoable_replay_item_is_dropped_from_both_stacks() {
+        let mut undo_replay = replay_transfer_with_second_item(true, true, false);
+        assert!(!undo_replay.undo_journal.can_undo());
+        let redo = undo_replay.undo_journal.pop_redo().expect("redo entry");
+        assert_eq!(redo.items.len(), 1);
+        assert_eq!(redo.items[0].source_path, PathBuf::from("/dst/0 (2)"));
+
+        let mut redo_replay = replay_transfer_with_second_item(false, true, false);
+        assert!(!redo_replay.undo_journal.can_redo());
+        let undo = redo_replay.undo_journal.pop_undo().expect("undo entry");
+        assert_eq!(undo.items.len(), 1);
+        assert_eq!(undo.items[0].destination_path, PathBuf::from("/dst/0 (2)"));
     }
 
     #[test]
