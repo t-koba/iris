@@ -744,13 +744,22 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                     );
                 }
                 Err(error) => {
+                    // A partial Rename replay reports the moved items in the
+                    // opposite slot and keeps failed/unattempted items in `op`.
+                    if op.kind == UndoOpKind::Rename {
+                        if let Some(moved) = redo_op {
+                            if !moved.items.is_empty() {
+                                state.undo_journal.push_redo(moved);
+                            }
+                            state.undo_journal.push_undo_from_redo(op);
+                        }
+                    }
                     state.add_notification(
                         NotificationSeverity::Warning,
                         tr("notification-undo-failed-title"),
                         error,
                         vec![NotificationAction::Dismiss],
                     );
-                    drop(op);
                 }
             }
             return update(state, Message::Refresh);
@@ -773,13 +782,22 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                     );
                 }
                 Err(error) => {
+                    // A partial Rename replay reports the moved items in the
+                    // opposite slot and keeps failed/unattempted items in `op`.
+                    if op.kind == UndoOpKind::Rename {
+                        if let Some(moved) = undo_op {
+                            if !moved.items.is_empty() {
+                                state.undo_journal.push_undo_from_redo(moved);
+                            }
+                            state.undo_journal.push_redo(op);
+                        }
+                    }
                     state.add_notification(
                         NotificationSeverity::Warning,
                         tr("notification-redo-failed-title"),
                         error,
                         vec![NotificationAction::Dismiss],
                     );
-                    drop(op);
                 }
             }
             return update(state, Message::Refresh);

@@ -74,17 +74,10 @@ pub(crate) fn perform_undo(state: &mut AppState, op: UndoableOp) -> Task<Message
             if let Err(error) = validate_undo_op(&op, UndoValidationTarget::Destination) {
                 return undo_failure_task(op, error);
             }
-            let Some(item) = op.items.first().cloned() else {
+            if op.items.is_empty() {
                 return undo_failure_task(op, "nothing to undo".to_string());
-            };
-            Task::perform(
-                async move { rename_path(item.destination_path, item.source_path).await },
-                move |result| Message::UndoCompleted {
-                    op: op.clone(),
-                    redo_op: Some(op),
-                    result,
-                },
-            )
+            }
+            Task::perform(replay_rename(op, RenameDirection::Undo), |message| message)
         }
         UndoOpKind::CreateFolder => {
             if let Err(error) = validate_undo_op(&op, UndoValidationTarget::Destination) {
@@ -144,17 +137,10 @@ pub(crate) fn perform_redo(state: &mut AppState, op: UndoableOp) -> Task<Message
             if let Err(error) = validate_undo_op(&op, UndoValidationTarget::Source) {
                 return redo_failure_task(op, error);
             }
-            let Some(item) = op.items.first().cloned() else {
+            if op.items.is_empty() {
                 return redo_failure_task(op, "nothing to redo".to_string());
-            };
-            Task::perform(
-                async move { rename_path(item.source_path, item.destination_path).await },
-                move |result| Message::RedoCompleted {
-                    op: op.clone(),
-                    undo_op: Some(op),
-                    result,
-                },
-            )
+            }
+            Task::perform(replay_rename(op, RenameDirection::Redo), |message| message)
         }
         UndoOpKind::CreateFolder => {
             let Some(item) = op.items.first().cloned() else {
@@ -335,6 +321,95 @@ async fn rename_path(from: PathBuf, to: PathBuf) -> Result<(), String> {
     app_runtime().rename_object(&target, new_name).await
 }
 
+#[derive(Clone, Copy)]
+enum RenameDirection {
+    Undo,
+    Redo,
+}
+
+// Rename batches are non-atomic: replay stops at the first failure and splits
+// the items into what moved and what still needs to be retried.
+async fn replay_rename(op: UndoableOp, direction: RenameDirection) -> Message {
+    let mut indices = (0..op.items.len()).collect::<Vec<_>>();
+    if matches!(direction, RenameDirection::Undo) {
+        indices.reverse();
+    }
+    let mut completed = vec![false; op.items.len()];
+    let mut error = None;
+    for index in indices {
+        let item = &op.items[index];
+        let (from, to) = match direction {
+            RenameDirection::Undo => (&item.destination_path, &item.source_path),
+            RenameDirection::Redo => (&item.source_path, &item.destination_path),
+        };
+        if let Err(failure) = rename_path(from.clone(), to.clone()).await {
+            error = Some(failure);
+            break;
+        }
+        completed[index] = true;
+    }
+    let mut moved = Vec::new();
+    let mut remaining = Vec::new();
+    for (index, item) in op.items.iter().cloned().enumerate() {
+        if completed[index] {
+            moved.push(item);
+        } else {
+            remaining.push(item);
+        }
+    }
+    rename_completion(direction, op, moved, remaining, error)
+}
+
+fn rename_completion(
+    direction: RenameDirection,
+    op: UndoableOp,
+    moved: Vec<UndoItem>,
+    remaining: Vec<UndoItem>,
+    error: Option<String>,
+) -> Message {
+    match error {
+        None => {
+            let completed = op.clone();
+            match direction {
+                RenameDirection::Undo => Message::UndoCompleted {
+                    op,
+                    redo_op: Some(completed),
+                    result: Ok(()),
+                },
+                RenameDirection::Redo => Message::RedoCompleted {
+                    op,
+                    undo_op: Some(completed),
+                    result: Ok(()),
+                },
+            }
+        }
+        Some(error) => {
+            // The opposite slot holds only entries that moved (possibly none),
+            // while `op` keeps the failed and unattempted entries for retry.
+            let moved = Some(UndoableOp {
+                items: moved,
+                ..op.clone()
+            });
+            let retry = UndoableOp {
+                items: remaining,
+                ..op
+            };
+            match direction {
+                RenameDirection::Undo => Message::UndoCompleted {
+                    op: retry,
+                    redo_op: moved,
+                    result: Err(error),
+                },
+                RenameDirection::Redo => Message::RedoCompleted {
+                    op: retry,
+                    undo_op: moved,
+                    result: Err(error),
+                },
+            }
+        }
+    }
+}
+
 async fn create_folder_path(path: PathBuf) -> Result<(), String> {
     let Some(parent) = path.parent() else {
         return Err(format!("{} has no parent", path.display()));
@@ -471,8 +546,22 @@ fn undo_operation_key(kind: &UndoOpKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::NotificationSeverity;
     use std::fs;
     use tempfile::TempDir;
+
+    fn rename_item(original: &Path, renamed: &Path) -> UndoItem {
+        let metadata = fs::metadata(renamed).unwrap();
+        UndoItem {
+            source_path: original.to_path_buf(),
+            destination_path: renamed.to_path_buf(),
+            size: Some(metadata.len()),
+            mtime: metadata.modified().ok(),
+            trashed_path: None,
+            trash_id: None,
+            normalized_path: None,
+        }
+    }
 
     // Receipt injection keeps this regression deterministic and avoids mutating OS/user Trash.
     #[test]
@@ -604,6 +693,117 @@ mod tests {
             .unwrap();
         assert!(original.exists());
         assert!(!renamed.exists());
+    }
+
+    #[tokio::test]
+    async fn batch_rename_undo_redo_replays_every_item() {
+        let dir = TempDir::new().unwrap();
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        let first_renamed = dir.path().join("one.txt");
+        let second_renamed = dir.path().join("two.txt");
+        fs::write(&first, "first bytes").unwrap();
+        fs::write(&second, "second bytes").unwrap();
+        rename_path(first.clone(), first_renamed.clone())
+            .await
+            .unwrap();
+        rename_path(second.clone(), second_renamed.clone())
+            .await
+            .unwrap();
+
+        let op = UndoableOp {
+            kind: UndoOpKind::Rename,
+            items: vec![
+                rename_item(&first, &first_renamed),
+                rename_item(&second, &second_renamed),
+            ],
+            performed_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+        assert!(validate_undo_op(&op, UndoValidationTarget::Destination).is_ok());
+        let mut state = AppState::default();
+        state.undo_journal.record(op.clone());
+
+        let undo = state.undo_journal.pop_undo().unwrap();
+        let message = replay_rename(undo, RenameDirection::Undo).await;
+        let _ = super::super::file_actions::handle(&mut state, message);
+
+        assert_eq!(fs::read_to_string(&first).unwrap(), "first bytes");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "second bytes");
+        assert!(!first_renamed.exists());
+        assert!(!second_renamed.exists());
+        assert!(!state.undo_journal.can_undo());
+        let redo = state.undo_journal.pop_redo().unwrap();
+        assert_eq!(redo.items, op.items);
+        assert_eq!(state.notifications.len(), 1);
+        assert_eq!(state.notifications[0].severity, NotificationSeverity::Info);
+
+        assert!(validate_undo_op(&redo, UndoValidationTarget::Source).is_ok());
+        let message = replay_rename(redo, RenameDirection::Redo).await;
+        let _ = super::super::file_actions::handle(&mut state, message);
+
+        assert!(!first.exists());
+        assert!(!second.exists());
+        assert_eq!(fs::read_to_string(&first_renamed).unwrap(), "first bytes");
+        assert_eq!(fs::read_to_string(&second_renamed).unwrap(), "second bytes");
+        assert!(!state.undo_journal.can_redo());
+        assert_eq!(state.undo_journal.pop_undo().unwrap().items, op.items);
+        assert_eq!(state.notifications.len(), 2);
+        assert!(state
+            .notifications
+            .iter()
+            .all(|note| note.severity == NotificationSeverity::Info));
+    }
+
+    #[tokio::test]
+    async fn batch_rename_undo_partial_keeps_failed_item_for_retry() {
+        let dir = TempDir::new().unwrap();
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        let first_renamed = dir.path().join("one.txt");
+        let second_renamed = dir.path().join("two.txt");
+        fs::write(&first, "first bytes").unwrap();
+        fs::write(&second, "second bytes").unwrap();
+        rename_path(first.clone(), first_renamed.clone())
+            .await
+            .unwrap();
+        rename_path(second.clone(), second_renamed.clone())
+            .await
+            .unwrap();
+        fs::write(&first, "sentinel bytes").unwrap();
+
+        let op = UndoableOp {
+            kind: UndoOpKind::Rename,
+            items: vec![
+                rename_item(&first, &first_renamed),
+                rename_item(&second, &second_renamed),
+            ],
+            performed_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+        assert!(validate_undo_op(&op, UndoValidationTarget::Destination).is_ok());
+        let mut state = AppState::default();
+        state.undo_journal.record(op.clone());
+
+        let undo = state.undo_journal.pop_undo().unwrap();
+        let message = replay_rename(undo, RenameDirection::Undo).await;
+        let _ = super::super::file_actions::handle(&mut state, message);
+
+        // The second replay step (the first item) hit the sentinel and stopped.
+        assert_eq!(fs::read_to_string(&first).unwrap(), "sentinel bytes");
+        assert!(first_renamed.exists());
+        assert_eq!(fs::read_to_string(&second).unwrap(), "second bytes");
+        assert!(!second_renamed.exists());
+        assert_eq!(
+            state.undo_journal.pop_undo().unwrap().items,
+            vec![op.items[0].clone()]
+        );
+        assert_eq!(
+            state.undo_journal.pop_redo().unwrap().items,
+            vec![op.items[1].clone()]
+        );
+        assert!(state.notifications.iter().all(|note| {
+            note.severity == NotificationSeverity::Warning
+                || note.severity == NotificationSeverity::Error
+        }));
     }
 
     #[tokio::test]
