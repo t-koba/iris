@@ -18,6 +18,18 @@ fn batch_source_is_directory(item: &PendingFileItem) -> bool {
     Path::new(&item.source.display_path).is_dir()
 }
 
+/// rsync places every source under its own basename in the destination directory and
+/// never receives the per-item requested basename. A batch whose requested name differs
+/// would be recorded as installed at a path rsync did not write, which Undo and Redo
+/// later treat as their own. SFTP transfers carry explicit per-item paths and do not
+/// need this restriction.
+fn rsync_batch_preserves_names(items: &[PendingFileItem]) -> bool {
+    items.iter().all(|item| {
+        let source_name = Path::new(&item.source.display_path).file_name();
+        source_name.is_some() && source_name == Path::new(&item.destination_path).file_name()
+    })
+}
+
 impl AppRuntime {
     pub async fn try_rsync_batch(
         &self,
@@ -115,6 +127,10 @@ impl AppRuntime {
             RemoteTransportKind::RsyncSsh => RsyncStrategy::Ssh,
             _ => return Ok(None),
         };
+
+        if !rsync_batch_preserves_names(items) {
+            return Ok(None);
+        }
 
         self.run_rsync_batch(RsyncBatchRequest {
             strategy,
@@ -480,6 +496,57 @@ mod tests {
             .iter()
             .any(batch_source_is_directory));
     }
+    #[test]
+    fn rsync_batch_declines_renamed_replay_destinations() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let first = temp.path().join("photo.jpg");
+        let second = temp.path().join("note.txt");
+        // A remembered Overwrite can replay a numbered destination for one item while
+        // another item in the same batch keeps its name. rsync would install both under
+        // their source basenames, so the numbered request cannot use this batch.
+        let items = [
+            PendingFileItem {
+                source: object_ref(&first),
+                destination_path: temp
+                    .path()
+                    .join("out")
+                    .join("photo (1).jpg")
+                    .to_string_lossy()
+                    .into_owned(),
+                installed_path: None,
+                undoable: true,
+            },
+            PendingFileItem {
+                source: object_ref(&second),
+                destination_path: temp
+                    .path()
+                    .join("out")
+                    .join("note.txt")
+                    .to_string_lossy()
+                    .into_owned(),
+                installed_path: None,
+                undoable: true,
+            },
+        ];
+        assert!(!rsync_batch_preserves_names(&items));
+
+        let matching = [
+            PendingFileItem {
+                source: object_ref(&first),
+                destination_path: temp
+                    .path()
+                    .join("out")
+                    .join("photo.jpg")
+                    .to_string_lossy()
+                    .into_owned(),
+                installed_path: None,
+                undoable: true,
+            },
+            items[1].clone(),
+        ];
+        assert!(rsync_batch_preserves_names(&matching));
+    }
+
     #[tokio::test]
     async fn transferred_bytes_are_captured_before_move_removes_sources() {
         let temp = tempfile::tempdir().expect("tempdir");
