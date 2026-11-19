@@ -186,6 +186,7 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
         let items = pending.items[pending.current_index..].to_vec();
         let job_id = pending.job_id.clone();
         let is_move = pending.is_move;
+        let require_file_sources = pending.undo_action.is_some();
         let item_count = items.len();
         // Advance current_index past every file; the single rsync task is the one in flight.
         if let Some(pending) = &mut state.pending_operation {
@@ -195,7 +196,10 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
         return Task::perform(
             async move {
                 let runtime = app_runtime();
-                match runtime.try_rsync_batch(&items, is_move, &resolution).await {
+                match runtime
+                    .try_rsync_batch(&items, is_move, &resolution, require_file_sources)
+                    .await
+                {
                     Ok(Some(total_bytes)) => Ok(PendingItemResult {
                         bytes_completed: total_bytes,
                         files_completed: item_count as u64,

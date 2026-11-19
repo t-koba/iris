@@ -14,16 +14,29 @@ struct SftpBatchPlan {
     transfer: crate::remote_transport::SftpTransferPlan,
 }
 
+fn batch_source_is_directory(item: &PendingFileItem) -> bool {
+    Path::new(&item.source.display_path).is_dir()
+}
+
 impl AppRuntime {
     pub async fn try_rsync_batch(
         &self,
         items: &[PendingFileItem],
         is_move: bool,
         resolution: &ConflictResolution,
+        require_file_sources: bool,
     ) -> Result<Option<u64>, String> {
         use crate::remote_transport::RemoteTransportKind;
 
         if items.is_empty() {
+            return Ok(None);
+        }
+
+        // An aggregate batch result cannot prove that a directory was newly created:
+        // rsync/SFTP happily merge a source folder into an existing destination folder.
+        // During Undo/Redo replay those directories must take the per-item path, which
+        // records creation as the condition for journaling them.
+        if require_file_sources && items.iter().any(batch_source_is_directory) {
             return Ok(None);
         }
 
@@ -432,5 +445,62 @@ mod tests {
             }]
         );
         assert!(plan.transfer.delete_sources);
+    }
+    #[test]
+    fn replay_batch_rejects_directory_sources() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let directory = temp.path().join("album");
+        let file = temp.path().join("photo.jpg");
+        std::fs::create_dir(&directory).expect("directory");
+        std::fs::write(&file, b"jpeg").expect("file");
+
+        let directory_item = PendingFileItem {
+            source: object_ref(&directory),
+            destination_path: temp.path().join("out-album").to_string_lossy().into_owned(),
+            installed_path: None,
+            undoable: true,
+        };
+        let file_item = PendingFileItem {
+            source: object_ref(&file),
+            destination_path: temp
+                .path()
+                .join("out-photo.jpg")
+                .to_string_lossy()
+                .into_owned(),
+            installed_path: None,
+            undoable: true,
+        };
+
+        assert!(batch_source_is_directory(&directory_item));
+        assert!(!batch_source_is_directory(&file_item));
+        assert!([directory_item, file_item]
+            .iter()
+            .any(batch_source_is_directory));
+    }
+    #[tokio::test]
+    async fn replay_directory_batch_declines_before_transfer() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let directory = temp.path().join("album");
+        std::fs::create_dir(&directory).expect("directory");
+        // A destination inside the source is rejected during validation. Replay must
+        // decline the aggregate batch before validation, leaving the directory to the
+        // per-item path that records creation ownership.
+        let items = vec![PendingFileItem {
+            source: object_ref(&directory),
+            destination_path: directory.join("nested").to_string_lossy().into_owned(),
+            installed_path: None,
+            undoable: true,
+        }];
+
+        let guarded = app_runtime()
+            .try_rsync_batch(&items, false, &ConflictResolution::Overwrite, true)
+            .await
+            .expect("guarded batch");
+        assert!(guarded.is_none());
+
+        let unguarded = app_runtime()
+            .try_rsync_batch(&items, false, &ConflictResolution::Overwrite, false)
+            .await;
+        assert!(unguarded.is_err());
     }
 }

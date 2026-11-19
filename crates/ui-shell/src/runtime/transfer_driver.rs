@@ -1571,7 +1571,7 @@ mod tests {
             undoable: true,
         });
         let error = app_runtime()
-            .try_rsync_batch(&items, false, &ConflictResolution::Overwrite)
+            .try_rsync_batch(&items, false, &ConflictResolution::Overwrite, false)
             .await
             .unwrap_err();
         assert!(error.contains("into itself or one of its descendants"));
