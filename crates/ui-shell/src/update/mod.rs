@@ -2532,6 +2532,69 @@ mod tests {
         messages
     }
 
+    /// A batch cannot tell whether a directory source created its destination or merged
+    /// into an existing folder, so a fresh copy of directories must fall back to the
+    /// per-item path, which establishes creation ownership for Undo.
+    #[tokio::test]
+    async fn fresh_directory_batch_falls_back_to_per_item_transfers() {
+        static NEXT_TEST_JOB: AtomicU64 = AtomicU64::new(9_610_000);
+        let mut state = AppState::default();
+        let job_id = JobId(NEXT_TEST_JOB.fetch_add(1, Ordering::Relaxed));
+        state.jobs.push(JobDisplayInfo {
+            id: job_id.clone(),
+            description: String::new(),
+            state: JobState::Running,
+            progress: ProgressInfo {
+                bytes_completed: 0,
+                bytes_total: None,
+                files_completed: 0,
+                files_total: Some(2),
+            },
+            speed_samples: std::collections::VecDeque::new(),
+            speed_bps: None,
+        });
+
+        let temp = tempfile::tempdir().expect("temp directory");
+        let source_dir = temp.path().join("album");
+        let destination_dir = temp.path().join("out");
+        std::fs::create_dir(&source_dir).expect("source directory");
+        std::fs::create_dir(&destination_dir).expect("destination directory");
+        let source = local_entry(&source_dir.to_string_lossy(), true).object_ref;
+        let items = (0..2)
+            .map(|index| PendingFileItem {
+                source: source.clone(),
+                destination_path: destination_dir
+                    .join(format!("copy-{index}"))
+                    .to_string_lossy()
+                    .into_owned(),
+                installed_path: None,
+                undoable: true,
+            })
+            .collect();
+        // No undo action: this is a fresh copy, not an Undo/Redo replay.
+        let mut pending = PendingFileOperation::new(job_id.clone(), items, false, None, 2);
+        pending.persisted = true;
+        pending.remember_resolution = Some(ConflictResolution::Overwrite);
+        state.pending_operation = Some(pending);
+
+        let task = process_pending_operation(&mut state);
+        let messages = collect_task_messages(task).await;
+        let [Message::RsyncBatchCompleted(batch_job, 2, Ok(result))] = messages.as_slice() else {
+            panic!("expected one declined batch completion: {messages:?}");
+        };
+        assert_eq!(batch_job, &job_id);
+        assert_eq!(result.files_completed, 0, "no aggregate batch ownership");
+        assert_eq!(std::fs::read_dir(&destination_dir).unwrap().count(), 0);
+
+        // The sentinel completion rewinds the batch and starts each directory as its own
+        // item, where installation and creation are checked separately.
+        let task = update(&mut state, messages.into_iter().next().unwrap());
+        let pending = state.pending_operation.as_ref().expect("pending operation");
+        assert!(pending.rsync_failed);
+        assert_eq!((pending.in_flight, pending.current_index), (2, 2));
+        drop(task);
+    }
+
     /// A successful batch installs every item at the path it requested: its branch never
     /// renames and never skips an undoable job. The completion itself carries no per-file
     /// paths, so Undo must recover them from the pending items.

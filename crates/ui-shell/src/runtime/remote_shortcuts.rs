@@ -24,7 +24,6 @@ impl AppRuntime {
         items: &[PendingFileItem],
         is_move: bool,
         resolution: &ConflictResolution,
-        require_file_sources: bool,
     ) -> Result<Option<u64>, String> {
         use crate::remote_transport::RemoteTransportKind;
 
@@ -34,9 +33,9 @@ impl AppRuntime {
 
         // An aggregate batch result cannot prove that a directory was newly created:
         // rsync/SFTP happily merge a source folder into an existing destination folder.
-        // During Undo/Redo replay those directories must take the per-item path, which
-        // records creation as the condition for journaling them.
-        if require_file_sources && items.iter().any(batch_source_is_directory) {
+        // Fresh batches and Undo/Redo replay alike must leave directories to the per-item
+        // path, which records creation as the condition for journaling them.
+        if items.iter().any(batch_source_is_directory) {
             return Ok(None);
         }
 
@@ -447,7 +446,7 @@ mod tests {
         assert!(plan.transfer.delete_sources);
     }
     #[test]
-    fn replay_batch_rejects_directory_sources() {
+    fn batch_detects_directory_sources() {
         let temp = tempfile::tempdir().expect("tempdir");
         let directory = temp.path().join("album");
         let file = temp.path().join("photo.jpg");
@@ -478,12 +477,13 @@ mod tests {
             .any(batch_source_is_directory));
     }
     #[tokio::test]
-    async fn replay_directory_batch_declines_before_transfer() {
+    async fn directory_source_batch_declines_before_transfer() {
         let temp = tempfile::tempdir().expect("tempdir");
         let directory = temp.path().join("album");
         std::fs::create_dir(&directory).expect("directory");
-        // A destination inside the source is rejected during validation. Replay must
-        // decline the aggregate batch before validation, leaving the directory to the
+        // This is a fresh batch: no Undo/Redo replay is involved. A destination inside
+        // the source would be rejected by validation, so reaching that error would prove
+        // the batch was not declined up front. The directory must instead go to the
         // per-item path that records creation ownership.
         let items = vec![PendingFileItem {
             source: object_ref(&directory),
@@ -492,15 +492,11 @@ mod tests {
             undoable: true,
         }];
 
-        let guarded = app_runtime()
-            .try_rsync_batch(&items, false, &ConflictResolution::Overwrite, true)
+        let declined = app_runtime()
+            .try_rsync_batch(&items, false, &ConflictResolution::Overwrite)
             .await
-            .expect("guarded batch");
-        assert!(guarded.is_none());
-
-        let unguarded = app_runtime()
-            .try_rsync_batch(&items, false, &ConflictResolution::Overwrite, false)
-            .await;
-        assert!(unguarded.is_err());
+            .expect("fresh directory batch declined before validation");
+        assert!(declined.is_none());
+        assert!(!directory.join("nested").exists());
     }
 }

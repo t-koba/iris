@@ -1559,7 +1559,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_preflight_rejects_recursive_copy_before_any_destination_write() {
+    async fn directory_source_batch_declines_before_validation_without_writes() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
         let sibling = temp.path().join("sibling");
@@ -1570,13 +1570,38 @@ mod tests {
             installed_path: None,
             undoable: true,
         });
-        let error = app_runtime()
-            .try_rsync_batch(&items, false, &ConflictResolution::Overwrite, false)
+        // The recursive destination would fail validation, but an aggregate batch cannot
+        // own directory creation: it must be declined before validation or any transfer.
+        let outcome = app_runtime()
+            .try_rsync_batch(&items, false, &ConflictResolution::Overwrite)
             .await
-            .unwrap_err();
-        assert!(error.contains("into itself or one of its descendants"));
+            .expect("directory batch declined");
+        assert!(outcome.is_none());
         assert!(!sibling.exists());
         assert_eq!(std::fs::read_dir(&source).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn file_source_batch_still_reaches_preflight_validation() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("photo.jpg");
+        std::fs::write(&source, b"jpeg").unwrap();
+        let mut source_ref = local_ref(&source);
+        source_ref.local_path_is_lossy = true;
+        let destination = temp.path().join("out").join("photo.jpg");
+        let items = vec![PendingFileItem {
+            source: source_ref,
+            destination_path: destination.to_string_lossy().into_owned(),
+            installed_path: None,
+            undoable: true,
+        }];
+
+        let error = app_runtime()
+            .try_rsync_batch(&items, false, &ConflictResolution::Overwrite)
+            .await
+            .expect_err("regular files keep the batch fast path");
+        assert!(error.contains("losslessly"), "{error}");
+        assert!(!destination.parent().unwrap().exists());
     }
 
     #[tokio::test]
