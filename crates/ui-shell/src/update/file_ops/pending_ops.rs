@@ -2,7 +2,6 @@ use super::*;
 use crate::i18n::{tr, tr_with};
 use crate::state::PendingUndoAction;
 use crate::undo::UndoableOp;
-use std::collections::BTreeSet;
 
 pub fn start_pending_file_operation(
     state: &mut AppState,
@@ -240,15 +239,41 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
 }
 
 /// An undo or redo op is replayed as one pending item per op entry, so skipped indices
-/// refer to the same entries even when some of them were left untouched.
-fn undo_op_without_skipped(op: UndoableOp, skipped: &BTreeSet<usize>) -> UndoableOp {
+/// refer to the same entries even when some of them were left untouched. When a conflict
+/// installed a numbered sibling, the opposite journal must record that path instead of the
+/// requested one.
+fn undo_op_after_replay(
+    op: &UndoableOp,
+    pending: &PendingFileOperation,
+    rewrite_source: bool,
+) -> UndoableOp {
     let items = op
         .items
-        .into_iter()
+        .iter()
         .enumerate()
-        .filter_map(|(index, item)| (!skipped.contains(&index)).then_some(item))
+        .filter_map(|(index, item)| {
+            if pending.skipped.contains(&index) {
+                return None;
+            }
+            let mut item = item.clone();
+            if let Some(installed) = pending
+                .items
+                .get(index)
+                .and_then(|item| item.installed_path.as_deref())
+            {
+                if rewrite_source {
+                    item.source_path = PathBuf::from(installed);
+                } else {
+                    item.destination_path = PathBuf::from(installed);
+                }
+            }
+            Some(item)
+        })
         .collect();
-    UndoableOp { items, ..op }
+    UndoableOp {
+        items,
+        ..op.clone()
+    }
 }
 
 fn finish_pending_operation(state: &mut AppState) -> Task<Message> {
@@ -256,7 +281,7 @@ fn finish_pending_operation(state: &mut AppState) -> Task<Message> {
         return Task::none();
     };
     let mut completion_tasks = vec![Task::done(Message::Refresh)];
-    match pending.undo_action {
+    match &pending.undo_action {
         Some(PendingUndoAction::RecordTransfer) => {
             let undo_kind = if pending.is_move {
                 UndoOpKind::Move
@@ -282,13 +307,15 @@ fn finish_pending_operation(state: &mut AppState) -> Task<Message> {
             completion_tasks.push(record_undo_op_task(undo_kind, undo_items));
         }
         Some(PendingUndoAction::RecordOp(op)) => {
-            let op = undo_op_without_skipped(op, &pending.skipped);
+            // Redo installed the file at its (possibly numbered) destination.
+            let op = undo_op_after_replay(op, &pending, false);
             if !op.items.is_empty() {
                 state.undo_journal.push_undo_from_redo(op);
             }
         }
         Some(PendingUndoAction::PushRedo(op)) => {
-            let op = undo_op_without_skipped(op, &pending.skipped);
+            // Undo moved the file to its (possibly numbered) destination.
+            let op = undo_op_after_replay(op, &pending, true);
             if !op.items.is_empty() {
                 state.undo_journal.push_redo(op);
             }

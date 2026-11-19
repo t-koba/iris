@@ -1401,6 +1401,93 @@ mod tests {
         assert_eq!(state.undo_journal.pop_redo().unwrap(), op);
     }
 
+    fn replay_transfer_with_installed_path(
+        action: PendingUndoAction,
+        installed_path: &str,
+    ) -> AppState {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 1, 1);
+        state
+            .pending_operation
+            .as_mut()
+            .expect("pending")
+            .undo_action = Some(action);
+
+        let _ = process_pending_operation(&mut state);
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(
+                job_id,
+                0,
+                0,
+                Ok(crate::messages::PendingItemResult {
+                    bytes_completed: 10,
+                    files_completed: 1,
+                    applied: true,
+                    installed_path: Some(installed_path.to_string()),
+                }),
+            ),
+        );
+        state
+    }
+
+    #[test]
+    fn undo_replay_records_installed_path_in_redo() {
+        let requested = PathBuf::from("/dst/0");
+        let installed = PathBuf::from("/dst/0 (2)");
+        let original_source = PathBuf::from("/src/0");
+        let op = UndoableOp {
+            kind: UndoOpKind::Move,
+            items: vec![UndoItem {
+                source_path: requested,
+                destination_path: original_source.clone(),
+                size: None,
+                mtime: None,
+                trashed_path: None,
+                trash_id: None,
+                normalized_path: None,
+            }],
+            performed_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+
+        let mut state = replay_transfer_with_installed_path(
+            PendingUndoAction::PushRedo(op),
+            installed.to_str().unwrap(),
+        );
+
+        let redo = state.undo_journal.pop_redo().expect("redo entry");
+        assert_eq!(redo.items[0].source_path, installed);
+        assert_eq!(redo.items[0].destination_path, original_source);
+    }
+
+    #[test]
+    fn redo_replay_records_installed_path_in_undo() {
+        let requested = PathBuf::from("/dst/0");
+        let installed = PathBuf::from("/dst/0 (2)");
+        let op = UndoableOp {
+            kind: UndoOpKind::Move,
+            items: vec![UndoItem {
+                source_path: PathBuf::from("/src/0"),
+                destination_path: requested,
+                size: None,
+                mtime: None,
+                trashed_path: None,
+                trash_id: None,
+                normalized_path: None,
+            }],
+            performed_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+
+        let mut state = replay_transfer_with_installed_path(
+            PendingUndoAction::RecordOp(op),
+            installed.to_str().unwrap(),
+        );
+
+        let undo = state.undo_journal.pop_undo().expect("undo entry");
+        assert_eq!(undo.items[0].destination_path, installed);
+        assert_eq!(undo.items[0].source_path, PathBuf::from("/src/0"));
+    }
+
     #[test]
     fn recursive_filter_batches_ignore_stale_runs() {
         let mut state = AppState::default();
