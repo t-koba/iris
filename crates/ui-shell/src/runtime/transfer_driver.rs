@@ -431,7 +431,11 @@ impl AppRuntime {
                         task_index,
                         TaskState::Completed,
                         None,
-                        outcome.installed_path.as_deref(),
+                        if outcome.undoable {
+                            outcome.installed_path.as_deref()
+                        } else {
+                            None
+                        },
                     );
                 } else {
                     self.skip_task(&job_id, task_index);
@@ -490,6 +494,7 @@ impl AppRuntime {
                     bytes_completed: 0,
                     applied: false,
                     installed_path: None,
+                    undoable: false,
                 });
             }
 
@@ -509,6 +514,7 @@ impl AppRuntime {
                         bytes_completed: 0,
                         applied: true,
                         installed_path,
+                        undoable: true,
                     });
                 }
                 SymlinkTransfer::LinksToAncestor => {
@@ -517,6 +523,7 @@ impl AppRuntime {
                         bytes_completed: 0,
                         applied: false,
                         installed_path: None,
+                        undoable: false,
                     });
                 }
                 SymlinkTransfer::NotHandled => {}
@@ -548,6 +555,7 @@ impl AppRuntime {
                     bytes_completed: result.bytes_transferred,
                     applied: true,
                     installed_path,
+                    undoable: true,
                 })
         })
     }
@@ -611,6 +619,7 @@ impl AppRuntime {
                     bytes_completed: 0,
                     applied: true,
                     installed_path: None,
+                    undoable: true,
                 });
             }
 
@@ -690,6 +699,9 @@ impl AppRuntime {
                 // delete the destination the user chose to keep.
                 applied: all_children_applied,
                 installed_path: None,
+                // A merged folder is not owned as a whole: Undo would delete the user's
+                // pre-existing children along with the transferred ones.
+                undoable: created && all_children_applied,
             })
         })
     }
@@ -1200,6 +1212,7 @@ mod tests {
                         source: local_ref(&source),
                         destination_path: destination.to_str().unwrap().to_owned(),
                         installed_path: None,
+                        undoable: true,
                     },
                     is_move,
                     ConflictResolution::Overwrite,
@@ -1282,6 +1295,7 @@ mod tests {
                     source: local_ref(&source),
                     destination_path: destination.to_str().unwrap().to_owned(),
                     installed_path: None,
+                    undoable: true,
                 },
                 false,
                 ConflictResolution::Overwrite,
@@ -1345,6 +1359,7 @@ mod tests {
                 source: local_ref(&source),
                 destination_path: destination.to_str().unwrap().to_owned(),
                 installed_path: None,
+                undoable: true,
             },
             true,
             ConflictResolution::Overwrite,
@@ -1423,6 +1438,7 @@ mod tests {
                     source: local_ref(temp.path()),
                     destination_path: temp.path().join("child").to_str().unwrap().to_owned(),
                     installed_path: None,
+                    undoable: true,
                 },
                 true,
                 ConflictResolution::Overwrite,
@@ -1462,6 +1478,7 @@ mod tests {
                             source: local_ref(source),
                             destination_path: destination.to_string_lossy().into_owned(),
                             installed_path: None,
+                            undoable: true,
                         },
                         is_move,
                         resolution,
@@ -1526,6 +1543,7 @@ mod tests {
                     source: local_ref(&source),
                     destination_path: destination.to_string_lossy().into_owned(),
                     installed_path: None,
+                    undoable: true,
                 },
                 false,
                 ConflictResolution::Fail,
@@ -1550,6 +1568,7 @@ mod tests {
             source: local_ref(&source),
             destination_path: destination.to_string_lossy().into_owned(),
             installed_path: None,
+            undoable: true,
         });
         let error = app_runtime()
             .try_rsync_batch(&items, false, &ConflictResolution::Overwrite)
@@ -1608,6 +1627,7 @@ mod tests {
                     source: local_ref(&prefix),
                     destination_path: destination.to_string_lossy().into_owned(),
                     installed_path: None,
+                    undoable: true,
                 },
                 false,
                 ConflictResolution::Fail,
@@ -1694,6 +1714,7 @@ mod tests {
                         source: local_ref(&source),
                         destination_path: destination.to_string_lossy().into_owned(),
                         installed_path: None,
+                        undoable: true,
                     },
                     false,
                     resolution.clone(),
@@ -1788,6 +1809,7 @@ mod tests {
                         source: local_ref(&source),
                         destination_path: destination.to_string_lossy().into_owned(),
                         installed_path: None,
+                        undoable: true,
                     },
                     false,
                     resolution,

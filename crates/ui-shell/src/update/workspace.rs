@@ -360,6 +360,7 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                         .to_string_lossy()
                         .to_string(),
                     installed_path: None,
+                    undoable: true,
                 })
                 .collect();
             return start_pending_file_operation(state, items, is_move);

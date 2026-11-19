@@ -136,6 +136,7 @@ impl AppRuntime {
                 } else {
                     None
                 },
+                undoable: true,
             });
 
             if task.state == TaskState::Skipped {
@@ -445,6 +446,7 @@ mod tests {
             source: crate::test_support::local_entry(source.to_str().unwrap(), false).object_ref,
             destination_path: destination.to_str().unwrap().to_owned(),
             installed_path: None,
+            undoable: true,
         };
         let runtime = app_runtime();
         runtime

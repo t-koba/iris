@@ -407,6 +407,7 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                                 .to_string_lossy()
                                 .to_string(),
                             installed_path: None,
+                            undoable: true,
                         })
                         .collect();
                     let task = start_pending_file_operation(state, items, is_move);
@@ -871,6 +872,7 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                             pending.mark_skipped(index);
                         } else if let Some(item) = pending.items.get_mut(index) {
                             item.installed_path = item_result.installed_path.clone();
+                            item.undoable = item_result.undoable;
                         }
                         pending.in_flight = pending.in_flight.saturating_sub(1);
                     }

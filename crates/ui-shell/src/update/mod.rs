@@ -586,6 +586,7 @@ mod tests {
                 source: local_entry(&format!("/src/{index}"), false).object_ref,
                 destination_path: format!("/dst/{index}"),
                 installed_path: None,
+                undoable: true,
             })
             .collect();
         let mut pending =
@@ -616,6 +617,7 @@ mod tests {
             files_completed: 1,
             applied: true,
             installed_path: None,
+            undoable: true,
         })
     }
 
@@ -1425,6 +1427,7 @@ mod tests {
                     files_completed: 1,
                     applied: true,
                     installed_path: Some(installed_path.to_string()),
+                    undoable: true,
                 }),
             ),
         );
@@ -2407,6 +2410,7 @@ mod tests {
             source: local_entry(source.to_str().unwrap(), false).object_ref,
             destination_path: destination.to_str().unwrap().to_owned(),
             installed_path: None,
+            undoable: true,
         })
         .collect();
         let start = start_pending_file_operation_with_undo_action(
@@ -2470,6 +2474,7 @@ mod tests {
                 source: local_entry(source.to_str().unwrap(), false).object_ref,
                 destination_path: requested.to_str().unwrap().to_owned(),
                 installed_path: None,
+                undoable: true,
             }],
             true,
             Some(PendingUndoAction::RecordTransfer),
@@ -2568,11 +2573,13 @@ mod tests {
                     source: local_entry(first_source.to_str().unwrap(), false).object_ref,
                     destination_path: requested.to_str().unwrap().to_owned(),
                     installed_path: None,
+                    undoable: true,
                 },
                 PendingFileItem {
                     source: local_entry(second_source.to_str().unwrap(), false).object_ref,
                     destination_path: second_destination.to_str().unwrap().to_owned(),
                     installed_path: None,
+                    undoable: true,
                 },
             ],
             false,
@@ -2677,6 +2684,204 @@ mod tests {
             std::fs::read(&requested).unwrap(),
             sentinel,
             "the pre-existing conflict file stays untouched"
+        );
+    }
+
+    /// Drives one single-item copy up to its completion message. No rsync batch shortcut is
+    /// involved: there is only one item. The caller decides whether to dispatch the completion.
+    async fn start_one_item_copy(
+        state: &mut AppState,
+        source: &std::path::Path,
+        destination: &std::path::Path,
+        expect_conflict: bool,
+    ) -> (JobId, Message) {
+        let start = start_pending_file_operation_with_undo_action(
+            state,
+            vec![PendingFileItem {
+                source: local_entry(source.to_str().unwrap(), true).object_ref,
+                destination_path: destination.to_str().unwrap().to_owned(),
+                installed_path: None,
+                undoable: true,
+            }],
+            false,
+            Some(PendingUndoAction::RecordTransfer),
+        );
+        let job_id = state
+            .pending_operation
+            .as_ref()
+            .expect("pending job")
+            .job_id
+            .clone();
+        let persisted = collect_task_messages(start)
+            .await
+            .into_iter()
+            .find(|message| {
+                matches!(
+                    message,
+                    Message::Job(crate::messages::JobMessage::Persisted(_))
+                )
+            })
+            .expect("persisted job");
+        let checked = collect_task_messages(update(state, persisted))
+            .await
+            .into_iter()
+            .find(|message| matches!(message, Message::ConflictCheckCompleted(..)))
+            .expect("conflict check");
+        let transfer = update(state, checked);
+        assert_eq!(state.active_dialog.is_some(), expect_conflict);
+        let task = if expect_conflict {
+            // Overwrite merges the children into the directory that was already there.
+            file_ops::apply_conflict_resolution(state, ConflictResolution::Overwrite)
+        } else {
+            transfer
+        };
+        let completion = collect_task_messages(task)
+            .await
+            .into_iter()
+            .find(|message| matches!(message, Message::PendingItemCompleted(..)))
+            .expect("item completion");
+        (job_id, completion)
+    }
+
+    async fn copy_one_item(
+        state: &mut AppState,
+        source: &std::path::Path,
+        destination: &std::path::Path,
+        expect_conflict: bool,
+    ) -> JobId {
+        let (job_id, completion) =
+            start_one_item_copy(state, source, destination, expect_conflict).await;
+        drain_completion_tasks(update(state, completion), state).await;
+        job_id
+    }
+
+    fn next_job(state: &mut AppState, base: u64) -> JobId {
+        static NEXT_TEST_JOB: AtomicU64 = AtomicU64::new(9_600_000);
+        let job_id = JobId(NEXT_TEST_JOB.fetch_add(1, Ordering::Relaxed) + base);
+        state.jobs.push(JobDisplayInfo {
+            id: job_id.clone(),
+            description: String::new(),
+            state: JobState::Running,
+            progress: ProgressInfo {
+                bytes_completed: 0,
+                bytes_total: None,
+                files_completed: 0,
+                files_total: Some(1),
+            },
+            speed_samples: std::collections::VecDeque::new(),
+            speed_bps: None,
+        });
+        job_id
+    }
+
+    /// A folder copied into an existing same-name folder merges into a directory Iris did
+    /// not create. The whole directory must not enter the Undo journal: Undo would delete a
+    /// pre-existing sentinel along with the transferred child.
+    #[tokio::test]
+    async fn merged_directory_copy_stays_out_of_undo() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let source = temp.path().join("source");
+        let merged = temp.path().join("merged");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&merged).unwrap();
+        std::fs::write(source.join("new.txt"), b"new payload").unwrap();
+        std::fs::write(merged.join("sentinel.txt"), b"keep this file").unwrap();
+
+        let mut state = AppState::default();
+        let _ = next_job(&mut state, 0);
+        let job_id = copy_one_item(&mut state, &source, &merged, true).await;
+
+        assert!(state.pending_operation.is_none(), "the copy completed");
+        assert_eq!(
+            std::fs::read(merged.join("new.txt")).unwrap(),
+            b"new payload"
+        );
+        assert_eq!(
+            std::fs::read(merged.join("sentinel.txt")).unwrap(),
+            b"keep this file"
+        );
+        assert!(
+            state
+                .undo_journal
+                .peek_undo()
+                .is_none_or(|op| op.items.iter().all(|item| item.destination_path != merged)),
+            "a merged folder is not owned by Iris and must not become an Undo target"
+        );
+        assert_eq!(
+            app_runtime().persisted_task_installed_path(&job_id, 0),
+            None,
+            "without ownership there is no installed path to restore for Undo"
+        );
+
+        // A directory Iris creates is still owned by the transfer and stays undoable.
+        let created = temp.path().join("created");
+        let mut state = AppState::default();
+        let _ = next_job(&mut state, 1_000_000);
+        copy_one_item(&mut state, &source, &created, false).await;
+
+        assert!(created.join("new.txt").exists());
+        let undo = state.undo_journal.peek_undo().expect("created folder undo");
+        assert_eq!(undo.kind, UndoOpKind::Copy);
+        assert_eq!(undo.items.len(), 1);
+        assert_eq!(undo.items[0].destination_path, created);
+    }
+
+    /// The ownership decision survives a restart: a completed merge is restored without an
+    /// installed path, so it is excluded from the replayed Undo journal too.
+    #[tokio::test]
+    async fn restarted_merged_directory_copy_stays_out_of_undo() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let source = temp.path().join("source");
+        let merged = temp.path().join("merged");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&merged).unwrap();
+        std::fs::write(source.join("new.txt"), b"new payload").unwrap();
+        std::fs::write(merged.join("sentinel.txt"), b"keep this file").unwrap();
+
+        let mut state = AppState::default();
+        let _ = next_job(&mut state, 2_000_000);
+        let (job_id, completion) = start_one_item_copy(&mut state, &source, &merged, true).await;
+        // Leave the completion undispatched: the next session restores from the job store.
+        assert!(matches!(completion, Message::PendingItemCompleted(..)));
+        assert_eq!(
+            app_runtime().persisted_task_installed_path(&job_id, 0),
+            None
+        );
+
+        let mut state = AppState::default();
+        state.jobs.push(JobDisplayInfo {
+            id: job_id.clone(),
+            description: String::new(),
+            state: JobState::Paused,
+            progress: ProgressInfo {
+                bytes_completed: 0,
+                bytes_total: None,
+                files_completed: 0,
+                files_total: Some(1),
+            },
+            speed_samples: std::collections::VecDeque::new(),
+            speed_bps: None,
+        });
+        let resumed = update(
+            &mut state,
+            Message::Job(crate::messages::JobMessage::Resume(job_id)),
+        );
+        drain_completion_tasks(resumed, &mut state).await;
+
+        assert!(
+            state.pending_operation.is_none(),
+            "the resumed job completed"
+        );
+        assert!(
+            state
+                .undo_journal
+                .peek_undo()
+                .is_none_or(|op| op.items.iter().all(|item| item.destination_path != merged)),
+            "a restored merge must not become an Undo target"
+        );
+        assert_eq!(
+            std::fs::read(merged.join("sentinel.txt")).unwrap(),
+            b"keep this file"
         );
     }
 }

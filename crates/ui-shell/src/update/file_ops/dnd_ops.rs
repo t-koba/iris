@@ -101,6 +101,7 @@ pub fn perform_dnd_drop(state: &mut AppState) -> Task<Message> {
             source: entry.object_ref.clone(),
             destination_path: target_dir.join(&entry.name).to_string_lossy().to_string(),
             installed_path: None,
+            undoable: true,
         });
     }
 
@@ -163,6 +164,7 @@ pub fn perform_external_drop(
             source,
             destination_path: target_dir.join(file_name).to_string_lossy().to_string(),
             installed_path: None,
+            undoable: true,
         });
     }
 

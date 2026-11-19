@@ -611,6 +611,7 @@ mod tests {
                             source: object.clone(),
                             destination_path: temp.path().join("copy.txt").to_str().unwrap().into(),
                             installed_path: None,
+                            undoable: true,
                         },
                         is_move,
                         ConflictResolution::Overwrite,
@@ -629,6 +630,7 @@ mod tests {
                         source: object,
                         destination_path: temp.path().join("copy.txt").to_str().unwrap().into(),
                         installed_path: None,
+                        undoable: true,
                     }],
                     false
                 )

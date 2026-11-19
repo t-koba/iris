@@ -201,6 +201,9 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
                         files_completed: item_count as u64,
                         applied: true,
                         installed_path: None,
+                        // A batch does not report installed paths, so it cannot own Undo
+                        // targets.
+                        undoable: false,
                     }),
                     // Sentinel meaning "fall back to the normal path".
                     _ => Ok(PendingItemResult {
@@ -208,6 +211,7 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
                         files_completed: 0,
                         applied: true,
                         installed_path: None,
+                        undoable: false,
                     }),
                 }
             },
@@ -252,7 +256,9 @@ fn undo_op_after_replay(
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
-            if pending.skipped.contains(&index) {
+            if pending.skipped.contains(&index)
+                || pending.items.get(index).is_some_and(|item| !item.undoable)
+            {
                 return None;
             }
             let mut item = item.clone();
@@ -290,18 +296,20 @@ fn finish_pending_operation(state: &mut AppState) -> Task<Message> {
             };
             let undo_items = pending
                 .applied_items()
-                .map(|item| UndoItem {
-                    source_path: PathBuf::from(&item.source.display_path),
-                    destination_path: PathBuf::from(
-                        item.installed_path
-                            .as_deref()
-                            .unwrap_or(&item.destination_path),
-                    ),
-                    size: None,
-                    mtime: None,
-                    trashed_path: None,
-                    trash_id: None,
-                    normalized_path: None,
+                .filter(|item| item.undoable)
+                .filter_map(|item| {
+                    // An installed path is the proof that the target belongs to this
+                    // operation; the requested destination alone is not ownership.
+                    let installed = item.installed_path.as_deref()?;
+                    Some(UndoItem {
+                        source_path: PathBuf::from(&item.source.display_path),
+                        destination_path: PathBuf::from(installed),
+                        size: None,
+                        mtime: None,
+                        trashed_path: None,
+                        trash_id: None,
+                        normalized_path: None,
+                    })
                 })
                 .collect();
             completion_tasks.push(record_undo_op_task(undo_kind, undo_items));
@@ -443,6 +451,7 @@ fn spawn_apply_one_item(
                 files_completed: 1,
                 applied: outcome.applied,
                 installed_path: outcome.installed_path,
+                undoable: outcome.undoable,
             })
         },
         move |result| {
@@ -467,4 +476,39 @@ pub fn fail_pending_job(state: &mut AppState, job_id: &JobId, reason: &str) {
             NotificationAction::AbortAll(job_id.clone()),
         ],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::PendingUndoAction;
+    use crate::test_support::local_entry;
+    use iris_core_domain::types::transfer::JobId;
+
+    #[test]
+    fn applied_item_without_installed_path_is_not_journaled() {
+        let mut state = AppState::default();
+        let job_id = JobId(9_700_000);
+        let mut pending = PendingFileOperation::new(
+            job_id.clone(),
+            vec![PendingFileItem {
+                source: local_entry("/src/file.txt", false).object_ref,
+                destination_path: "/dst/file.txt".to_owned(),
+                installed_path: None,
+                undoable: true,
+            }],
+            false,
+            Some(PendingUndoAction::RecordTransfer),
+            1,
+        );
+        pending.current_index = 1;
+        state.pending_operation = Some(pending);
+
+        let _ = finish_pending_operation(&mut state);
+
+        assert!(
+            !state.undo_journal.can_undo(),
+            "the requested destination is not proof of an installed path"
+        );
+    }
 }

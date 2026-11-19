@@ -97,6 +97,9 @@ pub struct TransferItemOutcome {
     /// The authoritative installed path for an applied completion, including when it equals
     /// the requested destination. `None` means no install path is known.
     pub installed_path: Option<String>,
+    /// Whether Iris owns the installed item well enough to put it in the Undo journal. A
+    /// folder merged into a pre-existing destination is applied but not owned as a whole.
+    pub undoable: bool,
 }
 
 /// Owns an in-progress directory snapshot generation. Dropping it before completion

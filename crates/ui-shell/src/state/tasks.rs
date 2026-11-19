@@ -178,9 +178,11 @@ pub struct JobDisplayInfo {
 pub struct PendingFileItem {
     pub source: ObjectRef,
     pub destination_path: String,
-    /// The installed path when a conflict chose a numbered sibling; otherwise `None`, and
-    /// `destination_path` is the path that was used.
+    /// The authoritative installed path after completion. `None` means there is no proof of
+    /// an installed path and the item cannot be journaled for Undo.
     pub installed_path: Option<String>,
+    /// Whether the completed item is owned by this operation and can be undone as a whole.
+    pub undoable: bool,
 }
 
 /// File operation in progress (paste or drag and drop).

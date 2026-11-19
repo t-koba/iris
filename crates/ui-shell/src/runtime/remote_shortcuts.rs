@@ -361,6 +361,7 @@ mod tests {
             source: object_ref(&source),
             destination_path: destination.to_string_lossy().to_string(),
             installed_path: None,
+            undoable: true,
         }];
         let map = mapping(&mount_root);
 
@@ -405,6 +406,7 @@ mod tests {
             source: object_ref(&mounted_source),
             destination_path: destination.to_string_lossy().to_string(),
             installed_path: None,
+            undoable: true,
         }];
         let map = mapping(&mount_root);
 

@@ -37,6 +37,8 @@ pub struct PendingItemResult {
     /// The authoritative installed path for an applied item, including when it equals the
     /// requested destination. `None` means no install path is known.
     pub installed_path: Option<String>,
+    /// Whether the applied item may enter the Undo journal as a whole.
+    pub undoable: bool,
 }
 
 #[derive(Debug, Clone)]
