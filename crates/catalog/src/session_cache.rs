@@ -184,6 +184,16 @@ impl SessionCache {
         Ok(removed)
     }
 
+    /// Remove the disposable directory at process shutdown. The runtime cache is held by a
+    /// static, so its `Drop` never runs; relying on it leaves every session's encrypted
+    /// thumbnails behind in the OS temp directory.
+    pub fn shutdown(&self) {
+        self.clear();
+        if self.owned {
+            let _ = std::fs::remove_dir_all(&self.base_dir);
+        }
+    }
+
     fn clear(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         for entry in state.entries.values() {
@@ -533,5 +543,20 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         assert!(!state.entries.contains_key("missing"));
+    }
+    #[test]
+    fn shutdown_removes_owned_cache_and_its_unindexed_files() {
+        let cache = SessionCache::new().unwrap();
+        let base_dir = cache.base_dir.clone();
+        let sibling = TempDir::new_in(base_dir.parent().unwrap()).unwrap();
+        let unrelated = sibling.path().join("unrelated");
+        std::fs::write(&unrelated, b"keep me").unwrap();
+        cache.put("key", b"cached").unwrap();
+        std::fs::write(base_dir.join("unfinished.tmp"), b"temporary").unwrap();
+
+        cache.shutdown();
+        assert!(!base_dir.exists());
+        assert_eq!(std::fs::read(unrelated).unwrap(), b"keep me");
+        cache.shutdown();
     }
 }

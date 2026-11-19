@@ -40,7 +40,9 @@ fn main() -> iced::Result {
         .font(MATERIAL_SYMBOLS_OUTLINED)
         .default_font(Font::with_name("Noto Sans CJK JP"));
 
-    builder.run()
+    let result = builder.run();
+    iris_ui_shell::runtime::shutdown();
+    result
 }
 
 fn application_settings() -> Settings {

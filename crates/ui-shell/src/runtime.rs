@@ -274,6 +274,14 @@ pub fn app_runtime() -> &'static Arc<AppRuntime> {
     APP_RUNTIME.get_or_init(AppRuntime::initialize)
 }
 
+/// Release process-lifetime temporary state before the GUI exits. The runtime is held in a
+/// static, so its session-cache `Drop` cannot run on normal shutdown.
+pub fn shutdown() {
+    if let Some(runtime) = APP_RUNTIME.get() {
+        runtime.session_cache.shutdown();
+    }
+}
+
 fn user_facing_backend_error(error: BackendError) -> String {
     let detail = error.to_string();
     tracing::debug!(error = %detail, "backend operation failed");
