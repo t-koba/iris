@@ -21,8 +21,8 @@ fn batch_source_is_directory(item: &PendingFileItem) -> bool {
 /// rsync places every source under its own basename in the destination directory and
 /// never receives the per-item requested basename. A batch whose requested name differs
 /// would be recorded as installed at a path rsync did not write, which Undo and Redo
-/// later treat as their own. SFTP transfers carry explicit per-item paths and do not
-/// need this restriction.
+/// later treat as their own. Declining the whole aggregate batch sends these items
+/// through the per-item path, where SFTP transfers keep their explicit per-item names.
 fn rsync_batch_preserves_names(items: &[PendingFileItem]) -> bool {
     items.iter().all(|item| {
         let source_name = Path::new(&item.source.display_path).file_name();
@@ -48,6 +48,10 @@ impl AppRuntime {
         // Fresh batches and Undo/Redo replay alike must leave directories to the per-item
         // path, which records creation as the condition for journaling them.
         if items.iter().any(batch_source_is_directory) {
+            return Ok(None);
+        }
+
+        if !rsync_batch_preserves_names(items) {
             return Ok(None);
         }
 
@@ -127,10 +131,6 @@ impl AppRuntime {
             RemoteTransportKind::RsyncSsh => RsyncStrategy::Ssh,
             _ => return Ok(None),
         };
-
-        if !rsync_batch_preserves_names(items) {
-            return Ok(None);
-        }
 
         self.run_rsync_batch(RsyncBatchRequest {
             strategy,
@@ -496,55 +496,54 @@ mod tests {
             .iter()
             .any(batch_source_is_directory));
     }
-    #[test]
-    fn rsync_batch_declines_renamed_replay_destinations() {
+    #[tokio::test]
+    async fn renamed_replay_batch_declines_before_validation_without_writes() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let first = temp.path().join("photo.jpg");
-        let second = temp.path().join("note.txt");
-        // A remembered Overwrite can replay a numbered destination for one item while
-        // another item in the same batch keeps its name. rsync would install both under
-        // their source basenames, so the numbered request cannot use this batch.
-        let items = [
-            PendingFileItem {
-                source: object_ref(&first),
-                destination_path: temp
-                    .path()
-                    .join("out")
-                    .join("photo (1).jpg")
-                    .to_string_lossy()
-                    .into_owned(),
-                installed_path: None,
-                undoable: true,
-            },
-            PendingFileItem {
-                source: object_ref(&second),
-                destination_path: temp
-                    .path()
-                    .join("out")
-                    .join("note.txt")
-                    .to_string_lossy()
-                    .into_owned(),
-                installed_path: None,
-                undoable: true,
-            },
-        ];
-        assert!(!rsync_batch_preserves_names(&items));
+        let source = temp.path().join("photo.jpg");
+        std::fs::write(&source, b"jpeg").expect("source file");
+        let destination_dir = temp.path().join("out");
+        std::fs::create_dir(&destination_dir).expect("destination directory");
+        let sentinel = destination_dir.join("photo.jpg");
+        std::fs::write(&sentinel, b"untouched").expect("sentinel");
 
-        let matching = [
-            PendingFileItem {
-                source: object_ref(&first),
-                destination_path: temp
-                    .path()
-                    .join("out")
-                    .join("photo.jpg")
-                    .to_string_lossy()
-                    .into_owned(),
-                installed_path: None,
-                undoable: true,
-            },
-            items[1].clone(),
-        ];
-        assert!(rsync_batch_preserves_names(&matching));
+        // A lossy source would fail preflight with an error if the batch were not
+        // declined first. The numbered destination mirrors a replay after Keep Both;
+        // rsync would have written the sentinel's name instead.
+        let mut source_ref = object_ref(&source);
+        source_ref.local_path_is_lossy = true;
+        let items = [PendingFileItem {
+            source: source_ref.clone(),
+            destination_path: destination_dir
+                .join("photo (1).jpg")
+                .to_string_lossy()
+                .into_owned(),
+            installed_path: None,
+            undoable: true,
+        }];
+
+        let declined = app_runtime()
+            .try_rsync_batch(&items, false, &ConflictResolution::Overwrite)
+            .await
+            .expect("renamed batch declined before validation");
+        assert!(declined.is_none());
+        assert_eq!(
+            std::fs::read(&sentinel).expect("sentinel intact"),
+            b"untouched"
+        );
+        assert!(!destination_dir.join("photo (1).jpg").exists());
+
+        // The same source with its original name still reaches preflight validation.
+        let matching = [PendingFileItem {
+            source: source_ref,
+            destination_path: sentinel.to_string_lossy().into_owned(),
+            installed_path: None,
+            undoable: true,
+        }];
+        let error = app_runtime()
+            .try_rsync_batch(&matching, false, &ConflictResolution::Overwrite)
+            .await
+            .expect_err("matching names keep the batch fast path");
+        assert!(error.contains("losslessly"), "{error}");
     }
 
     #[tokio::test]
