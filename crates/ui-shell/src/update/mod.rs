@@ -2369,6 +2369,109 @@ mod tests {
         messages
     }
 
+    /// A successful batch installs every item at the path it requested: its branch never
+    /// renames and never skips an undoable job. The completion itself carries no per-file
+    /// paths, so Undo must recover them from the pending items.
+    #[tokio::test]
+    async fn successful_rsync_batch_undo_covers_every_destination() {
+        static NEXT_TEST_JOB: AtomicU64 = AtomicU64::new(9_600_000);
+        let mut state = AppState::default();
+        state.jobs.push(JobDisplayInfo {
+            id: JobId(NEXT_TEST_JOB.fetch_add(1, Ordering::Relaxed)),
+            description: String::new(),
+            state: JobState::Running,
+            progress: ProgressInfo {
+                bytes_completed: 0,
+                bytes_total: None,
+                files_completed: 0,
+                files_total: Some(2),
+            },
+            speed_samples: std::collections::VecDeque::new(),
+            speed_bps: None,
+        });
+        let job_id = state.jobs[0].id.clone();
+
+        let temp = tempfile::tempdir().expect("temp directory");
+        let source_dir = temp.path().join("src");
+        let destination_dir = temp.path().join("dst");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::create_dir_all(&destination_dir).unwrap();
+        let sources: Vec<_> = ["first.txt", "second.txt"]
+            .into_iter()
+            .map(|name| {
+                let source = source_dir.join(name);
+                std::fs::write(&source, name.as_bytes()).unwrap();
+                source
+            })
+            .collect();
+        let destinations: Vec<_> = sources
+            .iter()
+            .map(|source| destination_dir.join(source.file_name().unwrap()))
+            .collect();
+        for (source, destination) in sources.iter().zip(&destinations) {
+            std::fs::copy(source, destination).unwrap();
+        }
+
+        let items = sources
+            .iter()
+            .zip(&destinations)
+            .map(|(source, destination)| PendingFileItem {
+                source: local_entry(source.to_str().unwrap(), false).object_ref,
+                destination_path: destination.to_str().unwrap().to_owned(),
+                installed_path: None,
+                undoable: true,
+            })
+            .collect();
+        let mut pending = PendingFileOperation::new(
+            job_id.clone(),
+            items,
+            false,
+            Some(PendingUndoAction::RecordTransfer),
+            4,
+        );
+        pending.persisted = true;
+        pending.remember_resolution = Some(ConflictResolution::Overwrite);
+        // Dispatch of a two-item batch advances past every item and holds its one task.
+        pending.current_index = 2;
+        pending.in_flight = 1;
+        state.pending_operation = Some(pending);
+
+        // The aggregate completion has no per-item path and is not itself undoable; the
+        // handler must recover ownership from the batch's pending state.
+        let task = update(
+            &mut state,
+            Message::RsyncBatchCompleted(
+                job_id,
+                2,
+                Ok(crate::messages::PendingItemResult {
+                    bytes_completed: 22,
+                    files_completed: 2,
+                    applied: true,
+                    installed_path: None,
+                    undoable: false,
+                }),
+            ),
+        );
+        drain_completion_tasks(task, &mut state).await;
+
+        assert!(state.pending_operation.is_none(), "the job completed");
+        let undo = state.undo_journal.peek_undo().expect("an undo record");
+        assert_eq!(undo.kind, UndoOpKind::Copy);
+        assert_eq!(undo.items.len(), 2, "every batch item is undoable");
+        let undo_sources: Vec<_> = undo
+            .items
+            .iter()
+            .map(|item| item.source_path.clone())
+            .collect();
+        let undo_destinations: Vec<_> = undo
+            .items
+            .iter()
+            .map(|item| item.destination_path.clone())
+            .collect();
+        assert_eq!(undo_sources, sources);
+        assert_eq!(undo_destinations, destinations);
+    }
+
     #[tokio::test]
     async fn skipped_conflict_destination_stays_out_of_undo() {
         static NEXT_TEST_JOB: AtomicU64 = AtomicU64::new(9_200_000);

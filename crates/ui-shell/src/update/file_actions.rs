@@ -816,6 +816,20 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                     if let Some(pending) = &mut state.pending_operation {
                         if pending.job_id == job_id {
                             pending.in_flight = 0;
+                            // The batch branch of `process_pending_operation` excludes Rename
+                            // and Skip for undoable jobs, so every item it sent is installed
+                            // at exactly its requested destination. Per-item results and
+                            // restored completions still need an authoritative installed path.
+                            if let Some(first) = pending.current_index.checked_sub(item_count) {
+                                if let Some(batch) =
+                                    pending.items.get_mut(first..pending.current_index)
+                                {
+                                    for item in batch {
+                                        item.installed_path = Some(item.destination_path.clone());
+                                        item.undoable = true;
+                                    }
+                                }
+                            }
                         }
                     }
                     return process_pending_operation(state);

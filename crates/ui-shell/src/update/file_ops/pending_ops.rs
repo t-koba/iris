@@ -201,8 +201,9 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
                         files_completed: item_count as u64,
                         applied: true,
                         installed_path: None,
-                        // A batch does not report installed paths, so it cannot own Undo
-                        // targets.
+                        // The aggregate carries no path. On success the handler fills each
+                        // batch item's installed path from the proven branch state, where
+                        // neither Rename nor Skip can change the requested destination.
                         undoable: false,
                     }),
                     // Sentinel meaning "fall back to the normal path".
