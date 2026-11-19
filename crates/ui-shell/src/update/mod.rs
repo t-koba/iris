@@ -1371,6 +1371,150 @@ mod tests {
     }
 
     #[test]
+    fn failed_undo_keeps_operation_available_for_retry() {
+        let mut state = AppState::default();
+        let op = UndoableOp {
+            kind: UndoOpKind::Copy,
+            items: vec![UndoItem {
+                source_path: PathBuf::from("/tmp/source.txt"),
+                destination_path: PathBuf::from("/tmp/copy.txt"),
+                size: None,
+                mtime: None,
+                trashed_path: None,
+                trash_id: None,
+                normalized_path: None,
+            }],
+            performed_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+
+        let _ = update(
+            &mut state,
+            Message::UndoCompleted {
+                op: op.clone(),
+                redo_op: Some(op.clone()),
+                result: Err("delete failed".to_string()),
+            },
+        );
+
+        assert_eq!(state.undo_journal.pop_undo(), Some(op));
+        assert!(!state.undo_journal.can_redo());
+    }
+
+    #[test]
+    fn failed_redo_keeps_operation_available_for_retry() {
+        let mut state = AppState::default();
+        let op = UndoableOp {
+            kind: UndoOpKind::CreateFolder,
+            items: vec![UndoItem {
+                source_path: PathBuf::from("/tmp/parent"),
+                destination_path: PathBuf::from("/tmp/parent/new"),
+                size: None,
+                mtime: None,
+                trashed_path: None,
+                trash_id: None,
+                normalized_path: None,
+            }],
+            performed_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+
+        let _ = update(
+            &mut state,
+            Message::RedoCompleted {
+                op: op.clone(),
+                undo_op: None,
+                result: Err("create failed".to_string()),
+            },
+        );
+
+        assert_eq!(state.undo_journal.pop_redo(), Some(op));
+    }
+
+    fn replay_transfer_with_skipped_second_item(push_redo: bool) -> AppState {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 2, 2);
+        let op = UndoableOp {
+            kind: UndoOpKind::Move,
+            items: (0..2)
+                .map(|index| UndoItem {
+                    source_path: PathBuf::from(format!("/src/{index}")),
+                    destination_path: PathBuf::from(format!("/dst/{index}")),
+                    size: None,
+                    mtime: None,
+                    trashed_path: None,
+                    trash_id: None,
+                    normalized_path: None,
+                })
+                .collect(),
+            performed_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+        let action = if push_redo {
+            PendingUndoAction::PushRedo(op)
+        } else {
+            PendingUndoAction::RecordOp(op)
+        };
+        state
+            .pending_operation
+            .as_mut()
+            .expect("pending")
+            .undo_action = Some(action);
+
+        let _ = process_pending_operation(&mut state);
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(
+                job_id.clone(),
+                0,
+                0,
+                Ok(crate::messages::PendingItemResult {
+                    bytes_completed: 10,
+                    files_completed: 1,
+                    applied: true,
+                    installed_path: Some("/dst/0 (2)".to_string()),
+                    undoable: true,
+                }),
+            ),
+        );
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(
+                job_id,
+                1,
+                0,
+                Ok(crate::messages::PendingItemResult {
+                    bytes_completed: 0,
+                    files_completed: 0,
+                    applied: false,
+                    installed_path: None,
+                    undoable: true,
+                }),
+            ),
+        );
+        state
+    }
+
+    #[test]
+    fn skipped_undo_replay_item_remains_undoable() {
+        let mut state = replay_transfer_with_skipped_second_item(true);
+
+        let redo = state.undo_journal.pop_redo().expect("redo entry");
+        assert_eq!(redo.items[0].source_path, PathBuf::from("/dst/0 (2)"));
+        let undo = state.undo_journal.pop_undo().expect("undo entry");
+        assert_eq!(undo.items.len(), 1);
+        assert_eq!(undo.items[0].source_path, PathBuf::from("/src/1"));
+    }
+
+    #[test]
+    fn skipped_redo_replay_item_remains_redoable() {
+        let mut state = replay_transfer_with_skipped_second_item(false);
+
+        let undo = state.undo_journal.pop_undo().expect("undo entry");
+        assert_eq!(undo.items[0].destination_path, PathBuf::from("/dst/0 (2)"));
+        let redo = state.undo_journal.pop_redo().expect("redo entry");
+        assert_eq!(redo.items.len(), 1);
+        assert_eq!(redo.items[0].source_path, PathBuf::from("/src/1"));
+    }
+
+    #[test]
     fn pending_completion_moves_transfer_ops_to_expected_stack() {
         let mut state = AppState::default();
         let job_id = JobId(99);

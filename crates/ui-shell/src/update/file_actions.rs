@@ -755,6 +755,9 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                             }
                             state.undo_journal.push_undo_from_redo(op);
                         }
+                    } else {
+                        // The failed undo did not happen; keep it available for a retry.
+                        state.undo_journal.push_undo_from_redo(op);
                     }
                     state.add_notification(
                         NotificationSeverity::Warning,
@@ -793,6 +796,9 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                             }
                             state.undo_journal.push_redo(op);
                         }
+                    } else {
+                        // The failed redo did not happen; keep it available for a retry.
+                        state.undo_journal.push_redo(op);
                     }
                     state.add_notification(
                         NotificationSeverity::Warning,

@@ -283,6 +283,25 @@ fn undo_op_after_replay(
     }
 }
 
+/// The part of an undo/redo replay that did not change a destination. It must remain in the
+/// journal entry it came from, otherwise a skipped item cannot be retried later.
+fn unreplayed_op(op: &UndoableOp, pending: &PendingFileOperation) -> UndoableOp {
+    let items = op
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            pending.skipped.contains(index)
+                || pending.items.get(*index).is_some_and(|item| !item.undoable)
+        })
+        .map(|(_, item)| item.clone())
+        .collect();
+    UndoableOp {
+        items,
+        ..op.clone()
+    }
+}
+
 fn finish_pending_operation(state: &mut AppState) -> Task<Message> {
     let Some(pending) = state.pending_operation.take() else {
         return Task::none();
@@ -317,16 +336,26 @@ fn finish_pending_operation(state: &mut AppState) -> Task<Message> {
         }
         Some(PendingUndoAction::RecordOp(op)) => {
             // Redo installed the file at its (possibly numbered) destination.
-            let op = undo_op_after_replay(op, &pending, false);
-            if !op.items.is_empty() {
-                state.undo_journal.push_undo_from_redo(op);
+            let replayed = undo_op_after_replay(op, &pending, false);
+            if !replayed.items.is_empty() {
+                state.undo_journal.push_undo_from_redo(replayed);
+            }
+            // A skipped replay item was never redone, so it stays available in redo.
+            let remaining = unreplayed_op(op, &pending);
+            if !remaining.items.is_empty() {
+                state.undo_journal.push_redo(remaining);
             }
         }
         Some(PendingUndoAction::PushRedo(op)) => {
             // Undo moved the file to its (possibly numbered) destination.
-            let op = undo_op_after_replay(op, &pending, true);
-            if !op.items.is_empty() {
-                state.undo_journal.push_redo(op);
+            let replayed = undo_op_after_replay(op, &pending, true);
+            if !replayed.items.is_empty() {
+                state.undo_journal.push_redo(replayed);
+            }
+            // A skipped replay item was never undone, so it stays available in undo.
+            let remaining = unreplayed_op(op, &pending);
+            if !remaining.items.is_empty() {
+                state.undo_journal.push_undo_from_redo(remaining);
             }
         }
         None => {}
