@@ -24,6 +24,7 @@ fn sample_job(task_count: u64) -> PersistedJob {
                 dst_backend: Some("local".into()),
                 dst_stable_id: Some(format!("dst-{index}")),
                 dst_display_path: Some(format!("/dst/{index}")),
+                installed_path: None,
                 bytes_total: 1024,
                 bytes_completed: 0,
                 error_message: None,

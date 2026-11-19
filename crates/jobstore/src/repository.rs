@@ -35,6 +35,9 @@ pub struct PersistedTask {
     pub dst_backend: Option<String>,
     pub dst_stable_id: Option<String>,
     pub dst_display_path: Option<String>,
+    /// The path actually installed on completion; null for legacy tasks whose
+    /// installation path was never recorded.
+    pub installed_path: Option<String>,
     pub bytes_total: u64,
     pub bytes_completed: u64,
     pub error_message: Option<String>,
@@ -144,12 +147,13 @@ impl JobStoreRepository {
 
         for task in &job.tasks {
             tx.execute(
-                "INSERT INTO persisted_tasks (id, job_id, kind, state, src_backend, src_stable_id, src_display_path, dst_backend, dst_stable_id, dst_display_path, bytes_total, bytes_completed, error_message)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                "INSERT INTO persisted_tasks (id, job_id, kind, state, src_backend, src_stable_id, src_display_path, dst_backend, dst_stable_id, dst_display_path, installed_path, bytes_total, bytes_completed, error_message)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT (id) DO UPDATE SET
                     state = excluded.state,
                     bytes_completed = excluded.bytes_completed,
-                    error_message = excluded.error_message",
+                    error_message = excluded.error_message,
+                    installed_path = COALESCE(excluded.installed_path, persisted_tasks.installed_path)",
                 rusqlite::params![
                     task.id.0 as i64,
                     job.id.0 as i64,
@@ -161,6 +165,7 @@ impl JobStoreRepository {
                     task.dst_backend,
                     task.dst_stable_id,
                     task.dst_display_path,
+                    task.installed_path,
                     task.bytes_total as i64,
                     task.bytes_completed as i64,
                     task.error_message,
@@ -255,14 +260,34 @@ impl JobStoreRepository {
         state: &TaskState,
         error_message: Option<&str>,
     ) -> Result<(), JobStoreError> {
+        self.update_task_state_with_installed_path(task_id, state, error_message, None)
+    }
+
+    /// Records the installed path only on completion. Other states must not
+    /// overwrite durable evidence from an earlier attempt.
+    pub fn update_task_state_with_installed_path(
+        &self,
+        task_id: &TaskId,
+        state: &TaskState,
+        error_message: Option<&str>,
+        installed_path: Option<&str>,
+    ) -> Result<(), JobStoreError> {
         self.conn.execute(
-            "UPDATE persisted_tasks SET state = ?1, error_message = ?2 WHERE id = ?3",
-            rusqlite::params![task_state_to_str(state), error_message, task_id.0 as i64],
+            "UPDATE persisted_tasks SET state = ?1, error_message = ?2,
+             installed_path = CASE WHEN ?1 = 'Completed' THEN ?4 ELSE installed_path END
+             WHERE id = ?3",
+            rusqlite::params![
+                task_state_to_str(state),
+                error_message,
+                task_id.0 as i64,
+                installed_path
+            ],
         )?;
         debug!(
             task_id = task_id.0,
             state = ?state,
             has_error = error_message.is_some(),
+            has_installed_path = installed_path.is_some(),
             "jobstore.update_task_state"
         );
         Ok(())
@@ -732,7 +757,7 @@ impl JobStoreRepository {
 
     fn load_tasks(&self, job_id: &JobId) -> Result<Vec<PersistedTask>, JobStoreError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, kind, state, src_backend, src_stable_id, src_display_path, dst_backend, dst_stable_id, dst_display_path, bytes_total, bytes_completed, error_message
+            "SELECT id, kind, state, src_backend, src_stable_id, src_display_path, dst_backend, dst_stable_id, dst_display_path, bytes_total, bytes_completed, error_message, installed_path
              FROM persisted_tasks WHERE job_id = ?1",
         )?;
 
@@ -757,6 +782,7 @@ impl JobStoreRepository {
                 bytes_total: bytes_total as u64,
                 bytes_completed: bytes_completed as u64,
                 error_message: row.get(11)?,
+                installed_path: row.get(12)?,
             })
         })?;
 
@@ -880,6 +906,7 @@ mod tests {
                     dst_backend: Some("nas-1".to_string()),
                     dst_stable_id: Some("inode-200".to_string()),
                     dst_display_path: Some("/dst/a.jpg".to_string()),
+                    installed_path: None,
                     bytes_total: 1024,
                     bytes_completed: 1024,
                     error_message: None,
@@ -895,6 +922,7 @@ mod tests {
                     dst_backend: Some("nas-1".to_string()),
                     dst_stable_id: Some("inode-200".to_string()),
                     dst_display_path: Some("/dst/a.jpg".to_string()),
+                    installed_path: None,
                     bytes_total: 0,
                     bytes_completed: 0,
                     error_message: None,
@@ -1082,6 +1110,71 @@ mod tests {
         let loaded = repo.load_job(&JobId(1)).unwrap().unwrap();
         assert_eq!(loaded.tasks[1].state, TaskState::Failed);
         assert_eq!(loaded.tasks[1].error_message.as_deref(), Some("disk full"));
+    }
+
+    #[test]
+    fn installed_path_migrates_and_is_stored_on_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("jobs.sqlite3");
+        let repo = JobStoreRepository::open(&db).unwrap();
+        let job = make_test_job();
+        repo.save_job(&job).unwrap();
+
+        // A v1 store predating the column keeps its jobs; legacy completions have
+        // no evidence of which sibling was installed.
+        repo.conn
+            .execute_batch("ALTER TABLE persisted_tasks DROP COLUMN installed_path;")
+            .unwrap();
+        drop(repo);
+        let repo = JobStoreRepository::open(&db).unwrap();
+        let loaded = repo.load_job(&job.id).unwrap().unwrap();
+        assert_eq!(loaded.tasks[0].state, TaskState::Completed);
+        assert_eq!(loaded.tasks[0].installed_path, None);
+
+        // A non-completion update never turns the requested path into evidence.
+        repo.update_task_state_with_installed_path(
+            &TaskId(1),
+            &TaskState::Running,
+            None,
+            Some("/dst/a.jpg"),
+        )
+        .unwrap();
+        assert_eq!(
+            repo.load_job(&job.id).unwrap().unwrap().tasks[0].installed_path,
+            None
+        );
+
+        // Completion persists the exact installed path, including a numbered
+        // sibling and an ordinary path equal to the requested destination.
+        repo.update_task_state_with_installed_path(
+            &TaskId(1),
+            &TaskState::Completed,
+            None,
+            Some("/dst/a (1).jpg"),
+        )
+        .unwrap();
+        repo.update_task_state_with_installed_path(
+            &TaskId(2),
+            &TaskState::Completed,
+            None,
+            Some("/dst/b.jpg"),
+        )
+        .unwrap();
+        let reopened = JobStoreRepository::open(&db).unwrap();
+        let tasks = reopened.load_job(&job.id).unwrap().unwrap().tasks;
+        assert_eq!(tasks[0].installed_path.as_deref(), Some("/dst/a (1).jpg"));
+        assert_eq!(tasks[1].installed_path.as_deref(), Some("/dst/b.jpg"));
+
+        // Re-saving a stale task snapshot must not discard recorded proof.
+        let mut stale = loaded;
+        stale.tasks[0].installed_path = None;
+        reopened.save_job(&stale).unwrap();
+        assert_eq!(
+            reopened.load_job(&job.id).unwrap().unwrap().tasks[0]
+                .installed_path
+                .as_deref(),
+            Some("/dst/a (1).jpg")
+        );
     }
 
     #[test]

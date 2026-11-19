@@ -2524,4 +2524,159 @@ mod tests {
         assert_eq!(std::fs::read(&requested).unwrap(), sentinel.to_vec());
         assert!(!renamed.exists(), "the renamed sibling was moved back");
     }
+
+    #[tokio::test]
+    async fn restarted_multi_item_copy_undo_targets_installed_conflict_sibling() {
+        static NEXT_TEST_JOB: AtomicU64 = AtomicU64::new(9_400_000);
+        let mut state = AppState::default();
+        let base = JobId(NEXT_TEST_JOB.fetch_add(2, Ordering::Relaxed));
+        state.jobs.push(JobDisplayInfo {
+            id: base,
+            description: String::new(),
+            state: JobState::Running,
+            progress: ProgressInfo {
+                bytes_completed: 0,
+                bytes_total: None,
+                files_completed: 0,
+                files_total: Some(2),
+            },
+            speed_samples: std::collections::VecDeque::new(),
+            speed_bps: None,
+        });
+
+        let temp = tempfile::tempdir().expect("temp directory");
+        let src = temp.path().join("src");
+        let dst = temp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        let first_source = src.join("first.txt");
+        let second_source = src.join("second.txt");
+        let requested = dst.join("first.txt");
+        let renamed = dst.join("first (1).txt");
+        let second_destination = dst.join("second.txt");
+        let first_payload = b"first source";
+        let second_payload = b"second source";
+        let sentinel = b"pre-existing conflict";
+        std::fs::write(&first_source, first_payload).unwrap();
+        std::fs::write(&second_source, second_payload).unwrap();
+        std::fs::write(&requested, sentinel).unwrap();
+
+        let start = start_pending_file_operation_with_undo_action(
+            &mut state,
+            vec![
+                PendingFileItem {
+                    source: local_entry(first_source.to_str().unwrap(), false).object_ref,
+                    destination_path: requested.to_str().unwrap().to_owned(),
+                    installed_path: None,
+                },
+                PendingFileItem {
+                    source: local_entry(second_source.to_str().unwrap(), false).object_ref,
+                    destination_path: second_destination.to_str().unwrap().to_owned(),
+                    installed_path: None,
+                },
+            ],
+            false,
+            Some(PendingUndoAction::RecordTransfer),
+        );
+        let job_id = state
+            .pending_operation
+            .as_ref()
+            .expect("pending job")
+            .job_id
+            .clone();
+        if let Some(pending) = &mut state.pending_operation {
+            pending.max_in_flight = 1;
+        }
+
+        let persisted = collect_task_messages(start)
+            .await
+            .into_iter()
+            .find(|message| {
+                matches!(
+                    message,
+                    Message::Job(crate::messages::JobMessage::Persisted(_))
+                )
+            })
+            .expect("persisted job");
+        let conflict_check = update(&mut state, persisted);
+        let checked = collect_task_messages(conflict_check)
+            .await
+            .into_iter()
+            .find(|message| matches!(message, Message::ConflictCheckCompleted(..)))
+            .expect("first item's conflict check");
+        let _ = update(&mut state, checked);
+        assert!(state.active_dialog.is_some(), "the conflict is offered");
+
+        // Keep Both/Rename installs a numbered sibling for the first item.
+        let transfer = file_ops::apply_conflict_resolution(&mut state, ConflictResolution::Rename);
+        assert!(collect_task_messages(transfer)
+            .await
+            .into_iter()
+            .any(|message| matches!(message, Message::PendingItemCompleted(..))));
+        // The completion message is deliberately not dispatched: a restart must
+        // restore the remaining item from the job store instead of this UI state.
+        assert_eq!(state.pending_operation.as_ref().unwrap().current_index, 1);
+
+        let runtime = app_runtime();
+        assert_eq!(
+            runtime.persisted_task_state(&job_id, 0),
+            Some(TaskState::Completed)
+        );
+        assert_eq!(
+            runtime.persisted_task_installed_path(&job_id, 0),
+            Some(renamed.to_str().unwrap().to_owned()),
+            "the installed sibling is persisted with task completion"
+        );
+        assert_eq!(std::fs::read(&requested).unwrap(), sentinel);
+        assert_eq!(std::fs::read(&renamed).unwrap(), first_payload);
+
+        // Fresh UI state: Resume restores the operation through the job store's
+        // real reader, and the remaining item finishes there.
+        let mut state = AppState::default();
+        state.jobs.push(JobDisplayInfo {
+            id: job_id.clone(),
+            description: String::new(),
+            state: JobState::Paused,
+            progress: ProgressInfo {
+                bytes_completed: 0,
+                bytes_total: None,
+                files_completed: 0,
+                files_total: Some(2),
+            },
+            speed_samples: std::collections::VecDeque::new(),
+            speed_bps: None,
+        });
+        let resumed = update(
+            &mut state,
+            Message::Job(crate::messages::JobMessage::Resume(job_id.clone())),
+        );
+        {
+            let pending = state
+                .pending_operation
+                .as_ref()
+                .expect("restored pending operation");
+            assert_eq!(pending.current_index, 1);
+            assert_eq!(
+                pending.items[0].installed_path.as_deref(),
+                Some(renamed.to_str().unwrap())
+            );
+            assert_eq!(pending.items[1].installed_path, None);
+        }
+        drain_completion_tasks(resumed, &mut state).await;
+
+        assert!(state.pending_operation.is_none(), "the job completed");
+        assert_eq!(std::fs::read(&second_destination).unwrap(), second_payload);
+        let undo = state.undo_journal.peek_undo().expect("an undo record");
+        assert_eq!(undo.kind, UndoOpKind::Copy);
+        assert_eq!(undo.items.len(), 2);
+        assert_eq!(undo.items[0].source_path, first_source);
+        assert_eq!(undo.items[0].destination_path, renamed);
+        assert_ne!(undo.items[0].destination_path, requested);
+        assert_eq!(undo.items[1].destination_path, second_destination);
+        assert_eq!(
+            std::fs::read(&requested).unwrap(),
+            sentinel,
+            "the pre-existing conflict file stays untouched"
+        );
+    }
 }

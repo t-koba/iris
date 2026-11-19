@@ -47,6 +47,7 @@ impl AppRuntime {
                         .ok()
                         .map(|_| self.stable_id_for_path(Path::new(&item.destination_path)).0),
                     dst_display_path: Some(item.destination_path.clone()),
+                    installed_path: None,
                     bytes_total: path_total_bytes(Path::new(&item.source.display_path))
                         .unwrap_or(0),
                     bytes_completed: 0,
@@ -103,6 +104,12 @@ impl AppRuntime {
 
             let source_path = task.src_display_path.clone().unwrap_or_default();
             let destination_path = task.dst_display_path.clone().unwrap_or_default();
+            // Only a recorded path proves which sibling was installed. A legacy
+            // completed task has no such proof; skip it so Undo cannot target the
+            // requested path and trash a pre-existing conflict file.
+            if task.state == TaskState::Completed && task.installed_path.is_none() {
+                skipped.insert(index);
+            }
             let source_backend = BackendId(
                 task.src_backend
                     .clone()
@@ -124,9 +131,11 @@ impl AppRuntime {
                     display_path: source_path,
                 },
                 destination_path,
-                // The job store only keeps the requested destination; a restored task falls
-                // back to it instead of guessing which sibling a conflict installed.
-                installed_path: None,
+                installed_path: if task.state == TaskState::Completed {
+                    task.installed_path.clone()
+                } else {
+                    None
+                },
             });
 
             if task.state == TaskState::Skipped {
@@ -247,13 +256,26 @@ impl AppRuntime {
         job_id: &JobId,
         task_index: usize,
     ) -> Option<TaskState> {
+        self.persisted_task(job_id, task_index)
+            .map(|task| task.state)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn persisted_task_installed_path(
+        &self,
+        job_id: &JobId,
+        task_index: usize,
+    ) -> Option<String> {
+        self.persisted_task(job_id, task_index)
+            .and_then(|task| task.installed_path)
+    }
+
+    #[cfg(test)]
+    fn persisted_task(&self, job_id: &JobId, task_index: usize) -> Option<PersistedTask> {
         // Task state updates go through the batching writer; flush before reading them back.
         let _ = self.job_store.flush();
-        self.job_store
-            .load_job(job_id)
-            .ok()
-            .flatten()
-            .and_then(|job| job.tasks.get(task_index).map(|task| task.state.clone()))
+        let job = self.job_store.load_job(job_id).ok().flatten()?;
+        job.tasks.into_iter().nth(task_index)
     }
 
     pub(super) fn update_active_job_progress(
@@ -325,10 +347,24 @@ impl AppRuntime {
         state: TaskState,
         error_message: Option<&str>,
     ) {
+        self.update_task_state_with_installed_path(job_id, task_index, state, error_message, None);
+    }
+
+    pub(super) fn update_task_state_with_installed_path(
+        &self,
+        job_id: &JobId,
+        task_index: usize,
+        state: TaskState,
+        error_message: Option<&str>,
+        installed_path: Option<&str>,
+    ) {
         let task_id = persisted_task_id(job_id, task_index);
-        let _ = self
-            .job_store
-            .update_task_state(&task_id, &state, error_message);
+        let _ = self.job_store.update_task_state_with_installed_path(
+            &task_id,
+            &state,
+            error_message,
+            installed_path,
+        );
     }
 
     pub(super) fn backend_types_for_items(&self, items: &[PendingFileItem]) -> Vec<String> {
@@ -388,5 +424,62 @@ impl AppRuntime {
             })
             .unwrap_or(false);
         src_ok && dst_ok
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{PendingFileOperation, PendingUndoAction};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn completed_task_without_installed_path_cannot_enter_copy_undo() {
+        static NEXT_TEST_JOB: AtomicU64 = AtomicU64::new(9_500_000);
+        let job_id = JobId(NEXT_TEST_JOB.fetch_add(1, Ordering::Relaxed));
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.txt");
+        let destination = temp.path().join("destination.txt");
+        std::fs::write(&source, b"payload").unwrap();
+        let item = PendingFileItem {
+            source: crate::test_support::local_entry(source.to_str().unwrap(), false).object_ref,
+            destination_path: destination.to_str().unwrap().to_owned(),
+            installed_path: None,
+        };
+        let runtime = app_runtime();
+        runtime
+            .persist_pending_job(&job_id, "legacy copy", std::slice::from_ref(&item), false)
+            .unwrap();
+        // The old writer recorded state alone: there is no proof of the installed path.
+        runtime
+            .job_store
+            .update_task_state(&persisted_task_id(&job_id, 0), &TaskState::Completed, None)
+            .unwrap();
+        assert_eq!(
+            runtime.persisted_task_state(&job_id, 0),
+            Some(TaskState::Completed)
+        );
+
+        let (items, current_index, is_move, skipped) = runtime
+            .restore_pending_operation(&job_id)
+            .unwrap()
+            .expect("restored job");
+        assert_eq!(current_index, 1);
+        assert!(!is_move);
+        assert_eq!(items[0].installed_path, None);
+        assert!(
+            skipped.contains(&0),
+            "unknown completion must not be undone"
+        );
+
+        let mut pending = PendingFileOperation::new(
+            job_id,
+            items,
+            is_move,
+            Some(PendingUndoAction::RecordTransfer),
+            1,
+        );
+        pending.skipped = skipped;
+        assert_eq!(pending.applied_items().count(), 0);
     }
 }

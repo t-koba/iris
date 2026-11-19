@@ -61,6 +61,7 @@ enum WriteCommand {
         task_id: TaskId,
         state: TaskState,
         error_message: Option<String>,
+        installed_path: Option<String>,
     },
     UpdateJobState {
         job_id: JobId,
@@ -171,10 +172,21 @@ impl JobStore {
         state: &TaskState,
         error_message: Option<&str>,
     ) -> Result<(), JobStoreError> {
+        self.update_task_state_with_installed_path(task_id, state, error_message, None)
+    }
+
+    pub fn update_task_state_with_installed_path(
+        &self,
+        task_id: &TaskId,
+        state: &TaskState,
+        error_message: Option<&str>,
+        installed_path: Option<&str>,
+    ) -> Result<(), JobStoreError> {
         self.writer.update_task_state(
             task_id.clone(),
             state.clone(),
             error_message.map(str::to_string),
+            installed_path.map(str::to_string),
         )
     }
 
@@ -356,11 +368,13 @@ impl JobStoreWriterTask {
         task_id: TaskId,
         state: TaskState,
         error_message: Option<String>,
+        installed_path: Option<String>,
     ) -> Result<(), JobStoreError> {
         self.send(WriteCommand::UpdateTaskState {
             task_id,
             state,
             error_message,
+            installed_path,
         })
     }
 
@@ -531,7 +545,13 @@ fn apply_command(
             task_id,
             state,
             error_message,
-        } => repository.update_task_state(&task_id, &state, error_message.as_deref()),
+            installed_path,
+        } => repository.update_task_state_with_installed_path(
+            &task_id,
+            &state,
+            error_message.as_deref(),
+            installed_path.as_deref(),
+        ),
         WriteCommand::UpdateJobState {
             job_id,
             state,
@@ -644,6 +664,7 @@ mod tests {
                 dst_backend: Some("local".into()),
                 dst_stable_id: Some("dst".into()),
                 dst_display_path: Some("/tmp/dst".into()),
+                installed_path: None,
                 bytes_total: 1024,
                 bytes_completed: 0,
                 error_message: None,

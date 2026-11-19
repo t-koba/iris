@@ -426,7 +426,13 @@ impl AppRuntime {
         match transfer_result {
             Ok(outcome) => {
                 if outcome.applied {
-                    self.update_task_state(&job_id, task_index, TaskState::Completed, None);
+                    self.update_task_state_with_installed_path(
+                        &job_id,
+                        task_index,
+                        TaskState::Completed,
+                        None,
+                        outcome.installed_path.as_deref(),
+                    );
                 } else {
                     self.skip_task(&job_id, task_index);
                 }
@@ -490,10 +496,9 @@ impl AppRuntime {
             let final_dst = self
                 .resolve_destination_path_async(dst_path, &resolution)
                 .await?;
-            // Only a numbered sibling differs from the requested path. Every other transfer
-            // keeps using `destination_path` exactly as before.
-            let installed_path =
-                (final_dst != dst_path).then(|| final_dst.to_string_lossy().into_owned());
+            // Record the exact installed path, including when it equals the requested
+            // destination: a completion without this proof cannot support Undo later.
+            let installed_path = Some(final_dst.to_string_lossy().into_owned());
 
             match self
                 .transfer_local_symlink(source, &final_dst, is_move, &resolution)

@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS persisted_tasks (
     dst_backend     TEXT,
     dst_stable_id   TEXT,
     dst_display_path TEXT,
+    installed_path  TEXT,
     bytes_total     INTEGER NOT NULL DEFAULT 0,
     bytes_completed INTEGER NOT NULL DEFAULT 0,
     error_message   TEXT,
@@ -78,7 +79,18 @@ CREATE TABLE IF NOT EXISTS persisted_multipart_uploads (
 /// A database with a different schema version holds jobs that cannot be resumed; it is rebuilt.
 pub fn open(path: Option<&Path>, mmap_bytes: u64) -> rusqlite::Result<Connection> {
     let conn = iris_core_domain::sqlite::open(path, mmap_bytes, SCHEMA_VERSION, SCHEMA)?;
-    // Additive migration: rebuilding the store would orphan resumable uploads.
+    // Additive migrations: rebuilding the store would orphan resumable uploads.
+    // Legacy completed tasks keep a null installed path: no durable proof exists
+    // of which sibling was installed.
+    let has_installed_path: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('persisted_tasks')
+         WHERE name = 'installed_path')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_installed_path {
+        conn.execute_batch("ALTER TABLE persisted_tasks ADD COLUMN installed_path TEXT;")?;
+    }
     let has_cleanup_pending: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('persisted_multipart_uploads')
          WHERE name = 'cleanup_pending')",

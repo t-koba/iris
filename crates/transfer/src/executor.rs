@@ -1993,6 +1993,7 @@ mod tests {
                     dst_backend: Some("local".into()),
                     dst_stable_id: Some("test".into()),
                     dst_display_path: Some("resume-copy.bin".into()),
+                    installed_path: None,
                     bytes_total: 0,
                     bytes_completed: 0,
                     error_message: None,

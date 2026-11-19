@@ -34,7 +34,8 @@ pub struct PendingItemResult {
     pub files_completed: u64,
     /// False when the destination was left untouched by a user Skip.
     pub applied: bool,
-    /// The path actually installed when a conflict chose a numbered sibling.
+    /// The authoritative installed path for an applied item, including when it equals the
+    /// requested destination. `None` means no install path is known.
     pub installed_path: Option<String>,
 }
 
