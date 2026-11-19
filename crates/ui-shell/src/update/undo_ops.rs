@@ -809,6 +809,210 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_rename_redo_partial_keeps_failed_item_for_retry() {
+        let dir = TempDir::new().unwrap();
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        let first_renamed = dir.path().join("one.txt");
+        let second_renamed = dir.path().join("two.txt");
+        fs::write(&first_renamed, "first bytes").unwrap();
+        fs::write(&second_renamed, "second bytes").unwrap();
+
+        let op = UndoableOp {
+            kind: UndoOpKind::Rename,
+            items: vec![
+                rename_item(&first, &first_renamed),
+                rename_item(&second, &second_renamed),
+            ],
+            performed_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+        for (renamed, original) in [
+            (first_renamed.clone(), first.clone()),
+            (second_renamed.clone(), second.clone()),
+        ] {
+            rename_path(renamed, original).await.unwrap();
+        }
+        fs::write(&second_renamed, "sentinel bytes").unwrap();
+        assert!(validate_undo_op(&op, UndoValidationTarget::Source).is_ok());
+
+        let mut state = AppState::default();
+        state.undo_journal.push_redo(op.clone());
+        let redo = state.undo_journal.pop_redo().unwrap();
+        let message = replay_rename(redo, RenameDirection::Redo).await;
+        let _ = super::super::file_actions::handle(&mut state, message);
+
+        assert!(!first.exists());
+        assert_eq!(fs::read_to_string(&first_renamed).unwrap(), "first bytes");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "second bytes");
+        assert_eq!(
+            fs::read_to_string(&second_renamed).unwrap(),
+            "sentinel bytes"
+        );
+        assert_eq!(
+            state.undo_journal.pop_undo().unwrap().items,
+            vec![op.items[0].clone()]
+        );
+        assert_eq!(
+            state.undo_journal.pop_redo().unwrap().items,
+            vec![op.items[1].clone()]
+        );
+        assert_eq!(state.notifications.len(), 1);
+        assert_eq!(
+            state.notifications[0].severity,
+            NotificationSeverity::Warning
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_rename_all_failed_keeps_retry_on_original_stack() {
+        let dir = TempDir::new().unwrap();
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        let first_renamed = dir.path().join("one.txt");
+        let second_renamed = dir.path().join("two.txt");
+        for path in [&first, &second, &first_renamed, &second_renamed] {
+            fs::write(path, "sentinel bytes").unwrap();
+        }
+        let op = UndoableOp {
+            kind: UndoOpKind::Rename,
+            items: vec![
+                rename_item(&first, &first_renamed),
+                rename_item(&second, &second_renamed),
+            ],
+            performed_at: std::time::SystemTime::UNIX_EPOCH,
+        };
+
+        // Every destination is occupied, so the first replay step fails and
+        // neither direction has any moved items to hand to the opposite stack.
+        for direction in [RenameDirection::Undo, RenameDirection::Redo] {
+            let mut state = AppState::default();
+            match direction {
+                RenameDirection::Undo => state.undo_journal.record(op.clone()),
+                RenameDirection::Redo => state.undo_journal.push_redo(op.clone()),
+            }
+            let message = match direction {
+                RenameDirection::Undo => {
+                    replay_rename(state.undo_journal.pop_undo().unwrap(), direction).await
+                }
+                RenameDirection::Redo => {
+                    replay_rename(state.undo_journal.pop_redo().unwrap(), direction).await
+                }
+            };
+            let _ = super::super::file_actions::handle(&mut state, message);
+
+            match direction {
+                RenameDirection::Undo => {
+                    assert_eq!(state.undo_journal.pop_undo().unwrap(), op);
+                    assert!(!state.undo_journal.can_redo());
+                }
+                RenameDirection::Redo => {
+                    assert_eq!(state.undo_journal.pop_redo().unwrap(), op);
+                    assert!(!state.undo_journal.can_undo());
+                }
+            }
+            assert_eq!(state.notifications.len(), 1);
+            assert_eq!(
+                state.notifications[0].severity,
+                NotificationSeverity::Warning
+            );
+        }
+        for path in [&first, &second, &first_renamed, &second_renamed] {
+            assert_eq!(fs::read_to_string(path).unwrap(), "sentinel bytes");
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_rename_three_item_middle_failure_splits_in_original_order() {
+        for direction in [RenameDirection::Undo, RenameDirection::Redo] {
+            let dir = TempDir::new().unwrap();
+            let originals: Vec<_> = ["first.txt", "second.txt", "third.txt"]
+                .iter()
+                .map(|name| dir.path().join(name))
+                .collect();
+            let renamed: Vec<_> = ["one.txt", "two.txt", "three.txt"]
+                .iter()
+                .map(|name| dir.path().join(name))
+                .collect();
+            for (path, content) in
+                renamed
+                    .iter()
+                    .zip(["first bytes", "second bytes", "third bytes"])
+            {
+                fs::write(path, content).unwrap();
+            }
+            let op = UndoableOp {
+                kind: UndoOpKind::Rename,
+                items: originals
+                    .iter()
+                    .zip(&renamed)
+                    .map(|(original, renamed)| rename_item(original, renamed))
+                    .collect(),
+                performed_at: std::time::SystemTime::UNIX_EPOCH,
+            };
+
+            // Item 1 is blocked in both directions; items 0 and 2 are each
+            // ready for only one direction, so the other one stays unattempted.
+            fs::remove_file(&renamed[0]).unwrap();
+            fs::write(&renamed[1], "sentinel bytes").unwrap();
+            fs::write(&originals[0], "first bytes").unwrap();
+            fs::write(&originals[1], "sentinel bytes").unwrap();
+
+            let mut state = AppState::default();
+            match direction {
+                RenameDirection::Undo => state.undo_journal.record(op.clone()),
+                RenameDirection::Redo => state.undo_journal.push_redo(op.clone()),
+            }
+            let message = match direction {
+                RenameDirection::Undo => {
+                    replay_rename(state.undo_journal.pop_undo().unwrap(), direction).await
+                }
+                RenameDirection::Redo => {
+                    replay_rename(state.undo_journal.pop_redo().unwrap(), direction).await
+                }
+            };
+            let _ = super::super::file_actions::handle(&mut state, message);
+
+            assert_eq!(fs::read_to_string(&renamed[1]).unwrap(), "sentinel bytes");
+            assert_eq!(fs::read_to_string(&originals[1]).unwrap(), "sentinel bytes");
+            let (expected_moved, expected_retry, moved_content, unattempted) = match direction {
+                RenameDirection::Undo => (
+                    vec![op.items[2].clone()],
+                    vec![op.items[0].clone(), op.items[1].clone()],
+                    (&renamed[2], &originals[2], "third bytes"),
+                    (&renamed[0], &originals[0], "first bytes"),
+                ),
+                RenameDirection::Redo => (
+                    vec![op.items[0].clone()],
+                    vec![op.items[1].clone(), op.items[2].clone()],
+                    (&originals[0], &renamed[0], "first bytes"),
+                    (&originals[2], &renamed[2], "third bytes"),
+                ),
+            };
+            let (moved_from, moved_to, content) = moved_content;
+            assert!(!moved_from.exists());
+            assert_eq!(fs::read_to_string(moved_to).unwrap(), content);
+            assert!(!unattempted.0.exists());
+            assert_eq!(fs::read_to_string(unattempted.1).unwrap(), unattempted.2);
+
+            match direction {
+                RenameDirection::Undo => {
+                    assert_eq!(state.undo_journal.pop_undo().unwrap().items, expected_retry);
+                    assert_eq!(state.undo_journal.pop_redo().unwrap().items, expected_moved);
+                }
+                RenameDirection::Redo => {
+                    assert_eq!(state.undo_journal.pop_undo().unwrap().items, expected_moved);
+                    assert_eq!(state.undo_journal.pop_redo().unwrap().items, expected_retry);
+                }
+            }
+            assert_eq!(state.notifications.len(), 1);
+            assert_eq!(
+                state.notifications[0].severity,
+                NotificationSeverity::Warning
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn create_folder_undo_removes_only_empty_local_folder() {
         let dir = TempDir::new().unwrap();
         let folder = dir.path().join("created");
