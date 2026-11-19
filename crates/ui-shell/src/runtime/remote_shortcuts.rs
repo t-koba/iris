@@ -161,6 +161,10 @@ impl AppRuntime {
             return Ok(None);
         }
 
+        // A Move batch passes --remove-source-files, so source sizes must be captured
+        // before rsync runs; the aggregate completion reports these bytes to job progress.
+        let transferred_bytes = sum_transferred_bytes(items).await;
+
         let mut cmd = tokio::process::Command::new("rsync");
         cmd.arg("-a").arg("--protect-args").arg("--info=progress2");
 
@@ -214,7 +218,7 @@ impl AppRuntime {
             tracing::warn!("rsync ({}) failed, falling back: {}", label, stderr);
             return Ok(None);
         }
-        Ok(Some(sum_transferred_bytes(items).await))
+        Ok(Some(transferred_bytes))
     }
 
     async fn run_sftp_batch(
@@ -476,6 +480,37 @@ mod tests {
             .iter()
             .any(batch_source_is_directory));
     }
+    #[tokio::test]
+    async fn transferred_bytes_are_captured_before_move_removes_sources() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let items: Vec<_> = [("first.bin", 17usize), ("second.bin", 34)]
+            .into_iter()
+            .map(|(name, size)| {
+                let source = temp.path().join(name);
+                std::fs::write(&source, vec![1u8; size]).expect("source file");
+                PendingFileItem {
+                    source: object_ref(&source),
+                    destination_path: temp
+                        .path()
+                        .join("out")
+                        .join(name)
+                        .to_string_lossy()
+                        .into_owned(),
+                    installed_path: None,
+                    undoable: true,
+                }
+            })
+            .collect();
+
+        // Mirrors run_rsync_batch: snapshot the sizes first, then let a Move remove them.
+        let transferred_bytes = sum_transferred_bytes(&items).await;
+        for item in &items {
+            std::fs::remove_file(Path::new(&item.source.display_path)).expect("source removed");
+        }
+        assert_eq!(transferred_bytes, 51);
+        assert_eq!(sum_transferred_bytes(&items).await, 0);
+    }
+
     #[tokio::test]
     async fn directory_source_batch_declines_before_transfer() {
         let temp = tempfile::tempdir().expect("tempdir");
