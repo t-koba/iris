@@ -85,7 +85,11 @@ ALLOWED_ACTIONS = frozenset((
     "actions/upload-artifact@v4",
 ))
 UPLOAD_ACTION_PREFIX = "actions/upload-artifact@"
-USES_KEY_RE = re.compile(r"^\s*(?:-\s+)?['\"]?uses['\"]?\s*:\s*(.*?)\s*$")
+# Resolve action references syntactically, not by line position: block,
+# spaced, quoted and flow-mapping spellings all yield the same reference.
+ACTION_REF_RE = re.compile(r"['\"]?uses['\"]?\s*:\s*['\"]?([A-Za-z0-9_][A-Za-z0-9_./@-]*)")
+INLINE_PATH_RE = re.compile(r"['\"]?paths?['\"]?\s*:\s*['\"]?([^'\"},]+)")
+FLOW_STEP_RE = re.compile(r"^\s*-\s*\{", re.MULTILINE)
 
 FORBIDDEN_MARKERS = (
     "workflow_dispatch:",
@@ -138,41 +142,29 @@ def permissions_read_only(text):
     return True, ""
 
 
-def uses_action(line):
-    """Return the YAML `uses:` scalar on a mapping line, spelling-independent.
-
-    Extra separation whitespace and single/double quoted scalars are accepted
-    by GitHub Actions as the same action reference, so the guard must see them
-    too. Anything unparseable is returned verbatim and fails the allowlist.
-    """
-    m = USES_KEY_RE.match(line)
-    if not m:
-        return None
-    value = m.group(1).strip()
-    if value[:1] in ("'", '"'):
-        quote = value[0]
-        end = value.find(quote, 1)
-        if end < 0:
-            return value
-        return value[1:end]
-    return re.split(r"\s+#", value, maxsplit=1)[0].strip()
+def action_refs(line):
+    """Return every action reference on a line, independent of YAML spelling."""
+    return ACTION_REF_RE.findall(line)
 
 
 def upload_paths(text):
     """Return (step_count, paths) for every upload-artifact step, inline or block.
 
-    Every `uses:` mapping line is normalized to its action scalar before the
-    upload-artifact prefix is matched; inline `path: X` and `path: |` block
+    Action references are scanned across each line regardless of YAML
+    spelling; inline flow-mapping `path:` values and following `path: |` block
     scalars are both collected so no upload form can evade the guard.
     """
     lines = text.splitlines()
     paths = []
     steps = 0
     for i, line in enumerate(lines):
-        action = uses_action(line)
-        if action is None or not action.startswith(UPLOAD_ACTION_PREFIX):
+        uploads = [ref for ref in action_refs(line)
+                   if ref.startswith(UPLOAD_ACTION_PREFIX)]
+        if not uploads:
             continue
-        steps += 1
+        steps += len(uploads)
+        # A flow-style step carries its `with:` paths on the same line.
+        paths.extend(value.strip() for value in INLINE_PATH_RE.findall(line))
         base = len(line) - len(line.lstrip())
         block = []
         j = i + 1
@@ -214,6 +206,12 @@ def validate(text):
     checks["reusable_only"] = triggers == ["workflow_call"]
     require(checks["reusable_only"], "workflow must be workflow_call only")
 
+    # Flow-style step mappings are not used by this workflow. Rejecting them
+    # keeps every step in the block form the structural checks below can see.
+    checks["block_step_mappings_only"] = not FLOW_STEP_RE.search(text)
+    require(checks["block_step_mappings_only"],
+            "flow-style step mappings are not permitted by this workflow contract")
+
     for gate in OFFLINE_GATES:
         require(gate in text, f"offline gate missing from workflow: {gate}")
     checks["offline_gates"] = list(OFFLINE_GATES)
@@ -250,11 +248,9 @@ def validate(text):
     # including upload actions written with unusual but valid YAML spelling.
     seen_actions = []
     for line in code_lines:
-        action = uses_action(line)
-        if action is None:
-            continue
-        require(action in ALLOWED_ACTIONS, f"unrecognized action step: {action}")
-        seen_actions.append(action)
+        for action in action_refs(line):
+            require(action in ALLOWED_ACTIONS, f"unrecognized action step: {action}")
+            seen_actions.append(action)
     checks["actions"] = seen_actions
 
     ok, reason = permissions_read_only(text)
@@ -282,7 +278,7 @@ def main():
         print(json.dumps(dict(
             triggers=["workflow_call"], offline_gates=list(OFFLINE_GATES),
             required_markers=list(REQUIRED_MARKERS), forbidden_markers=list(FORBIDDEN_MARKERS),
-            allowed_actions=sorted(ALLOWED_ACTIONS),
+            allowed_actions=sorted(ALLOWED_ACTIONS), flow_steps_allowed=False,
         ), indent=2))
         return
     checks = validate(WORKFLOW.read_text())

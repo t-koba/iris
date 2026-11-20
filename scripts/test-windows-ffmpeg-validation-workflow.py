@@ -45,19 +45,28 @@ class WorkflowContracts(unittest.TestCase):
         for marker in self.mod.ATTESTATION_MARKERS:
             self.assertIn(marker, shape["required_markers"])
 
-    def test_uses_action_normalizes_yaml_spelling(self):
+    def test_action_refs_normalizes_yaml_spelling(self):
         mod = self.mod
-        self.assertEqual(mod.uses_action("        uses: actions/upload-artifact@v4"),
-                         "actions/upload-artifact@v4")
-        self.assertEqual(mod.uses_action("        uses:  actions/upload-artifact@v4"),
-                         "actions/upload-artifact@v4")
-        self.assertEqual(mod.uses_action('        uses: "actions/upload-artifact@v4"'),
-                         "actions/upload-artifact@v4")
-        self.assertEqual(mod.uses_action("        uses: 'actions/upload-artifact@v4'"),
-                         "actions/upload-artifact@v4")
-        self.assertEqual(mod.uses_action("      - uses: actions/checkout@v4 # pinned"),
-                         "actions/checkout@v4")
-        self.assertIsNone(mod.uses_action("        run: echo uses: actions/upload-artifact@v4"))
+        cases = (
+            ("        uses: actions/upload-artifact@v4", "actions/upload-artifact@v4"),
+            ("        uses:  actions/upload-artifact@v4", "actions/upload-artifact@v4"),
+            ('        uses: "actions/upload-artifact@v4"', "actions/upload-artifact@v4"),
+            ("        uses: 'actions/upload-artifact@v4'", "actions/upload-artifact@v4"),
+            ("      - uses: actions/checkout@v4 # pinned", "actions/checkout@v4"),
+            ("      - { name: X, uses: actions/upload-artifact@v4, "
+             "with: { path: target/debug/Iris.exe } }", "actions/upload-artifact@v4"),
+        )
+        for line, expected in cases:
+            with self.subTest(line=line):
+                self.assertEqual(mod.action_refs(line), [expected])
+
+    def test_contract_rejects_flow_style_steps(self):
+        import json, subprocess
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/windows-ffmpeg-validation-workflow.py"), "contract"],
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(json.loads(r.stdout)["flow_steps_allowed"])
 
 
 class FailClosedContracts(unittest.TestCase):
@@ -173,6 +182,23 @@ class FailClosedContracts(unittest.TestCase):
             "          name: native\n"
             "          path: target/debug/Iris.exe\n"
             "      - name: Retain bounded JSON evidence only\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_flow_style_binary_upload_second_step(self):
+        mutated = self.text.replace(
+            "      - name: Retain bounded JSON evidence only\n",
+            "      - { name: Ship native binary, uses: actions/upload-artifact@v4, "
+            "with: { name: native, path: target/debug/Iris.exe } }\n"
+            "      - name: Retain bounded JSON evidence only\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_unlisted_flow_style_action(self):
+        mutated = self.text.replace(
+            "      - name: Assemble bounded evidence manifest",
+            "      - { name: Extra, uses: unrelated/local-action@v1 }\n"
+            "      - name: Assemble bounded evidence manifest", 1)
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
