@@ -74,6 +74,7 @@ REQUIRED_MARKERS = (
     "if: always()",
     "rm -rf",
     "ev.mkdir(parents=True, exist_ok=True)",
+    '"status": "not_run"',
 ) + ATTESTATION_MARKERS
 
 # Only these actions may appear in the validation workflow. A closed allowlist

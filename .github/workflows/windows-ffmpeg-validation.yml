@@ -261,9 +261,18 @@ jobs:
           from pathlib import Path
           ev = Path(os.environ["IRIS_VALIDATION_EVIDENCE"])
           ev.mkdir(parents=True, exist_ok=True)
-          inputs = json.loads((ev / "validation-inputs.json").read_text()) if (ev / "validation-inputs.json").exists() else {}
-          pe = (ev / "pe-imports.txt").read_text() if (ev / "pe-imports.txt").exists() else ""
-          out = dict(validation_inputs=inputs, pe_imports=pe[-8000:],
+          def report(path, decode=None):
+              if not path.exists():
+                  return {"status": "not_run"}
+              try:
+                  text = path.read_text()
+                  return {"status": "recorded", "data": decode(text) if decode else text[-8000:]}
+              except (ValueError, OSError):
+                  return {"status": "invalid"}
+
+          inputs = report(ev / "validation-inputs.json", json.loads)
+          pe = report(ev / "pe-imports.txt")
+          out = dict(validation_inputs=inputs, pe_imports=pe,
                      release_promotion=False, native_runtime_retained=False)
           (ev / "windows-validation.json").write_text(json.dumps(out, indent=2) + "\n")
           PY

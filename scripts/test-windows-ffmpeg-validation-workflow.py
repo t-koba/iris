@@ -293,6 +293,15 @@ class FailClosedContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
+    def test_rejects_implicit_missing_input_states(self):
+        # A failed preflight must still yield an explicit not_run state rather
+        # than an empty stand-in that looks like successful evidence.
+        marker = '"status": "not_run"'
+        self.assertIn(marker, self.text)
+        mutated = self.text.replace(marker, '"status": "recorded"', 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
     def test_rejects_explicit_and_split_yaml_keys(self):
         # Explicit keys/values and key/value split over lines are not used by
         # this workflow; each spelling must fail closed instead of hiding a
