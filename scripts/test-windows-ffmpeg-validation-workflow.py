@@ -56,6 +56,9 @@ class WorkflowContracts(unittest.TestCase):
             ("      - uses: actions/checkout@v4 # pinned", "actions/checkout@v4"),
             ("      - { name: X, uses: actions/upload-artifact@v4, "
              "with: { path: target/debug/Iris.exe } }", "actions/upload-artifact@v4"),
+            ("      - uses: ./.github/actions/exfiltrate", "./.github/actions/exfiltrate"),
+            ("        uses: /abs/local/action", "/abs/local/action"),
+            ("        uses: docker://alpine:3.8", "docker://alpine:3.8"),
         )
         for line, expected in cases:
             with self.subTest(line=line):
@@ -250,6 +253,27 @@ class FailClosedContracts(unittest.TestCase):
             "      - name: Retain bounded JSON evidence only\n", 1)
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
+
+    def test_rejects_bare_uses_key_without_action_id(self):
+        # Nothing after `uses:` means no reference can be parsed; the line-level
+        # allowlist must still reject it rather than silently skipping the step.
+        mutated = self.text.replace(
+            "      - name: Assemble bounded evidence manifest",
+            "      - uses:\n          unrelated/local-action@v1\n"
+            "      - name: Assemble bounded evidence manifest", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_local_and_container_action_refs(self):
+        for ref in ("./.github/actions/exfiltrate", "./foo", "/abs/local/action",
+                    "docker://alpine:3.8"):
+            with self.subTest(ref=ref):
+                mutated = self.text.replace(
+                    "      - name: Assemble bounded evidence manifest",
+                    f"      - uses: {ref}\n"
+                    "      - name: Assemble bounded evidence manifest", 1)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(mutated)
 
     def test_rejects_unlisted_action(self):
         mutated = self.text.replace(

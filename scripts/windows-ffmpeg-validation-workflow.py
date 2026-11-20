@@ -87,7 +87,7 @@ ALLOWED_ACTIONS = frozenset((
 UPLOAD_ACTION_PREFIX = "actions/upload-artifact@"
 # Resolve action references syntactically, not by line position: block,
 # spaced, quoted and flow-mapping spellings all yield the same reference.
-ACTION_REF_RE = re.compile(r"['\"]?uses['\"]?\s*:\s*['\"]?([A-Za-z0-9_][A-Za-z0-9_./@-]*)")
+ACTION_REF_RE = re.compile(r"['\"]?uses['\"]?\s*:\s*['\"]?([^\s,'\"}#]+)")
 INLINE_PATH_RE = re.compile(r"['\"]?paths?['\"]?\s*:\s*['\"]?([^'\"},]+)")
 FLOW_STEP_RE = re.compile(r"^\s*-\s*\{", re.MULTILINE)
 
@@ -259,6 +259,12 @@ def validate(text):
         for action in action_refs(line):
             require(action in ALLOWED_ACTIONS, f"unrecognized action step: {action}")
             seen_actions.append(action)
+        # Independently of reference parsing, any line naming a `uses` key must
+        # contain an allowlisted action id. A future spelling that defeats the
+        # scanner therefore still fails closed.
+        if re.search(r"['\"]?uses['\"]?\s*:", line):
+            require(any(ref in line for ref in ALLOWED_ACTIONS),
+                    f"uses line without an allowlisted action: {line.strip()}")
     checks["actions"] = seen_actions
 
     ok, reason = permissions_read_only(text)
