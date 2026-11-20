@@ -63,6 +63,9 @@ jobs:
       - name: Windows FFmpeg validation config contract
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/test-windows-ffmpeg-validation-config.py
+      - name: Windows FFmpeg validation workflow contract
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-windows-ffmpeg-validation-workflow.py
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -543,6 +546,13 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/windows-ffmpeg-prototype.yml
+
+  windows-ffmpeg-validation:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      attestations: read
+    uses: ./.github/workflows/windows-ffmpeg-validation.yml
 
   windows-media-foundation-probe:
     if: github.event_name == 'workflow_dispatch'

@@ -13,6 +13,7 @@ linux = (root / ".github/workflows/linux-ffmpeg-validation.yml").read_text(encod
 
 macos = (root / ".github/workflows/macos-runtime-validation.yml").read_text(encoding="utf-8")
 media_probe = (root / ".github/workflows/windows-media-foundation-probe.yml").read_text(encoding="utf-8")
+win_validation = (root / ".github/workflows/windows-ffmpeg-validation.yml").read_text(encoding="utf-8")
 release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
 fuzz_long = (root / ".github/workflows/fuzz-long.yml").read_text(encoding="utf-8")
 macos_call = "uses: ./.github/workflows/macos-runtime-validation.yml"
@@ -413,6 +414,28 @@ permissions:
     "CI manual, pull-request, and scheduled triggers": all(
         trigger in ci for trigger in ("  workflow_dispatch:\n", "  pull_request:\n", "  schedule:\n")
     ),
+    "CI invokes Windows native validation only on manual dispatch": """  windows-ffmpeg-validation:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      attestations: read
+    uses: ./.github/workflows/windows-ffmpeg-validation.yml
+""" in ci,
+    "Windows native validation is workflow_call only": """on:
+  workflow_call:
+
+permissions:
+"""
+    in win_validation
+    and all(
+        trigger not in win_validation
+        for trigger in ("  workflow_dispatch:", "  pull_request:", "  push:")
+    ),
+    "Windows native validation checks out the caller's exact SHA": """      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+""" in win_validation,
 }
 failed = [name for name, passed in checks.items() if not passed]
 if failed:

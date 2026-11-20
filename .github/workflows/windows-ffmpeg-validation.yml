@@ -1,0 +1,253 @@
+name: Windows FFmpeg native validation
+
+# Reusable, report-only Windows default-preview validation. The registered CI
+# workflow calls this only on manual dispatch at the caller's exact SHA. It
+# acquires the signature-verified FFmpeg source, derives a local-source vcpkg
+# overlay, builds the product, inventories the PE import closure, stages the
+# attested PDFium runtime and smoke-tests installed previews. It never promotes
+# a release, changes the minimal packaging variant, or retains native bytes.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  attestations: read
+
+jobs:
+  validate:
+    runs-on: windows-2022
+    env:
+      CARGO_TERM_COLOR: always
+      IRIS_VALIDATION_VCPKG_ROOT: ${{ github.workspace }}/.vcpkg-validation
+      VCPKG_ROOT: ${{ github.workspace }}/.vcpkg-validation
+      VCPKG_INSTALLED_DIR: ${{ github.workspace }}/.vcpkg-validation/installed
+      VCPKG_TARGET_TRIPLET: x64-windows-iris-dynamic
+      VCPKG_DEFAULT_TRIPLET: x64-windows-iris-dynamic
+      VCPKGRS_TRIPLET: x64-windows-iris-dynamic
+      VCPKGRS_DYNAMIC: "1"
+      IRIS_VALIDATION_TRIPLET: x64-windows-iris-dynamic
+      IRIS_VALIDATION_SOURCE: ${{ github.workspace }}/build/validation/ffmpeg-src
+      IRIS_VALIDATION_OVERLAY: ${{ github.workspace }}/build/validation/overlay
+      IRIS_VALIDATION_EVIDENCE: ${{ github.workspace }}/build/validation/evidence
+      IRIS_PREVIEW_LATENCY_WARMUPS: "2"
+      IRIS_PREVIEW_LATENCY_SAMPLES: "21"
+      IRIS_PREVIEW_CORPUS_MAX_BYTES: "40000000"
+      IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS: "60"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      # Offline fail-closed gates run before any native work.
+      - name: Windows FFmpeg provenance contract
+        shell: bash
+        run: python3 scripts/test-windows-ffmpeg-provenance.py
+      - name: Windows FFmpeg source acquisition contract
+        shell: bash
+        run: python3 scripts/test-windows-ffmpeg-source.py
+      - name: Windows FFmpeg overlay derivation contract
+        shell: bash
+        run: python3 scripts/test-windows-ffmpeg-overlay.py
+      - name: Windows FFmpeg validation input gate
+        shell: bash
+        run: python3 scripts/windows-ffmpeg-validation-config.py build/validation/evidence/validation-inputs.json
+      - name: Windows FFmpeg validation config contract
+        shell: bash
+        run: python3 scripts/test-windows-ffmpeg-validation-config.py
+      - name: Windows FFmpeg validation workflow contract
+        shell: bash
+        run: python3 scripts/test-windows-ffmpeg-validation-workflow.py
+
+      # Pinned vcpkg source checkout; fail closed on HEAD drift before building.
+      - name: Checkout pinned vcpkg source
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          ref: b8dfe957ec8b5c0ef5c4b31eea594b8486af744f
+          path: .vcpkg-validation
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert pinned vcpkg HEAD and baseline port
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vcpkgRoot = $env:IRIS_VALIDATION_VCPKG_ROOT
+          $head = ((git -C $vcpkgRoot rev-parse HEAD) | Out-String).Trim()
+          Write-Host "vcpkg HEAD: $head"
+          if ($head -ne "b8dfe957ec8b5c0ef5c4b31eea594b8486af744f") {
+            throw "vcpkg HEAD $head != pinned baseline; refusing to build"
+          }
+          git -C $vcpkgRoot diff --exit-code $head -- ports/ffmpeg scripts/cmake/vcpkg_from_github.cmake
+          if ($LASTEXITCODE -ne 0) { throw "baseline FFmpeg port/helper has local changes" }
+
+      - name: Bootstrap pinned vcpkg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = $env:IRIS_VALIDATION_VCPKG_ROOT
+          & (Join-Path $root "bootstrap-vcpkg.bat")
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg bootstrap failed" }
+          & (Join-Path $root "vcpkg.exe") --version
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg --version failed" }
+
+      - name: Set up MSVC developer environment (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Restore isolated vcpkg root after MSVC setup
+        shell: pwsh
+        run: |
+          "VCPKG_ROOT=$env:IRIS_VALIDATION_VCPKG_ROOT" >> $env:GITHUB_ENV
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      # Acquire the signature-verified 8.1.3 source and stage it locally.
+      - name: Acquire and stage verified FFmpeg source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pin = python3 scripts/windows-ffmpeg-source.py plan | ConvertFrom-Json
+          if ($pin.version -ne "8.1.3") { throw "unapproved FFmpeg version" }
+          $dest = $env:IRIS_VALIDATION_SOURCE
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $archive = Join-Path $env:RUNNER_TEMP "ffmpeg-8.1.3.tar.xz"
+          $asc = Join-Path $env:RUNNER_TEMP "ffmpeg-8.1.3.tar.xz.asc"
+          Invoke-WebRequest -Uri $pin.url -OutFile $archive -UseBasicParsing
+          Invoke-WebRequest -Uri $pin.signature_url -OutFile $asc -UseBasicParsing
+          Invoke-WebRequest -Uri $pin.key_url -OutFile (Join-Path $env:RUNNER_TEMP "ffmpeg-key.asc") -UseBasicParsing
+          # gpg produces a machine-readable status file consumed by the shared verifier.
+          & gpg --batch --keyring (Join-Path $env:RUNNER_TEMP "ffmpeg-key.gpg") --no-default-keyring --import (Join-Path $env:RUNNER_TEMP "ffmpeg-key.asc")
+          $status = Join-Path $env:RUNNER_TEMP "ffmpeg-status.txt"
+          & gpg --batch --status-file $status --keyring (Join-Path $env:RUNNER_TEMP "ffmpeg-key.gpg") --no-default-keyring --verify $asc $archive
+          if ($LASTEXITCODE -ne 0) { throw "FFmpeg signature verification failed" }
+          python3 scripts/windows-ffmpeg-source.py stage $archive $status $dest
+          if ($LASTEXITCODE -ne 0) { throw "FFmpeg source staging failed" }
+
+      # Derive an overlay portfile that points vcpkg at the verified local source.
+      - name: Derive local-source vcpkg overlay
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $portfile = Join-Path $env:IRIS_VALIDATION_VCPKG_ROOT "ports/ffmpeg/portfile.cmake"
+          $overlay = $env:IRIS_VALIDATION_OVERLAY
+          New-Item -ItemType Directory -Force -Path $overlay | Out-Null
+          python3 scripts/windows-ffmpeg-overlay.py derive $portfile $env:IRIS_VALIDATION_SOURCE (Join-Path $overlay "portfile.cmake")
+          if ($LASTEXITCODE -ne 0) { throw "overlay derivation failed" }
+
+      - name: Install FFmpeg via pinned vcpkg with verified overlay
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $srcRoot = Join-Path $env:IRIS_VALIDATION_OVERLAY "src"
+          Copy-Item -Recurse -Force (Join-Path $env:IRIS_VALIDATION_VCPKG_ROOT "ports/ffmpeg") $srcRoot
+          Copy-Item -Force (Join-Path $env:IRIS_VALIDATION_OVERLAY "portfile.cmake") (Join-Path $srcRoot "portfile.cmake")
+          $env:VCPKG_OVERLAY_PORTS = $env:IRIS_VALIDATION_OVERLAY
+          & (Join-Path $env:IRIS_VALIDATION_VCPKG_ROOT "vcpkg.exe") install `
+            --x-manifest-root=packaging/windows/validation `
+            --x-install-root=(Join-Path $env:IRIS_VALIDATION_VCPKG_ROOT "installed") `
+            --triplet=x64-windows-iris-dynamic
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
+
+      - name: Build product with stock locked bindings
+        shell: bash
+        run: cargo build -p iris-ui-shell --locked
+
+      - name: Stage attested PDFium runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pin = python3 scripts/windows-ffmpeg-source.py pdfium | ConvertFrom-Json
+          if ($pin.release -ne "chromium/8138") { throw "unapproved PDFium release" }
+          if ($pin.attestation_required -ne $true) { throw "PDFium attestation not required" }
+          $asset = Join-Path $env:RUNNER_TEMP $pin.asset
+          Invoke-WebRequest -Uri $pin.url -OutFile "$asset.part" -UseBasicParsing
+          if ((Get-Item -LiteralPath "$asset.part").Length -ne $pin.bytes) { throw "PDFium size mismatch" }
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath "$asset.part").Hash.ToLowerInvariant() -ne $pin.sha256) { throw "PDFium sha256 mismatch" }
+          Move-Item -Force -LiteralPath "$asset.part" -Destination $asset
+          # Validate the complete member + licensing closure before extraction.
+          $members = @(tar -tzf $asset | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique)
+          if ($LASTEXITCODE -ne 0 -or $members.Count -eq 0) { throw "PDFium member listing failed" }
+          foreach ($m in $members) {
+            if ($m.StartsWith("/") -or $m -match "(^|/)\.\.(/|$)") { throw "unsafe PDFium member '$m'" }
+          }
+          $dllMembers = @($members | Where-Object { $_ -eq "bin/pdfium.dll" -or $_ -eq "pdfium.dll" })
+          if ($dllMembers.Count -eq 0) { throw "PDFium DLL member absent" }
+          foreach ($required in @("LICENSE", "VERSION", "args.gn", "licenses/")) {
+            if (!@($members | Where-Object { $_ -match $required }).Count) { throw "PDFium closure member missing: $required" }
+          }
+          $extract = Join-Path $env:RUNNER_TEMP "pdfium-extract"
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          tar -xzf $asset -C $extract
+          if ($LASTEXITCODE -ne 0) { throw "PDFium extraction failed" }
+          $runtime = Join-Path $env:RUNNER_TEMP "pdfium-runtime"
+          New-Item -ItemType Directory -Force -Path $runtime | Out-Null
+          foreach ($m in $dllMembers) {
+            Copy-Item -LiteralPath (Join-Path $extract ($m -replace "/", [IO.Path]::DirectorySeparatorChar)) -Destination (Join-Path $runtime "pdfium.dll") -Force
+          }
+          "$runtime" >> $env:GITHUB_PATH
+          Write-Host "verified and staged $($pin.asset): $($pin.bytes) bytes"
+
+      - name: Inventory PE import closure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bin = "target/debug/Iris.exe"
+          if (!(Test-Path -LiteralPath $bin)) { throw "built binary missing: $bin" }
+          $imports = (& dumpbin /DEPENDENTS $bin | Out-String)
+          Write-Host $imports
+          $closure = Join-Path $env:IRIS_VALIDATION_EVIDENCE "pe-imports.txt"
+          New-Item -ItemType Directory -Force -Path (Split-Path $closure) | Out-Null
+          $imports | Out-File -Encoding utf8 $closure
+
+      - name: Clean-installed preview smoke (video, PDF, RAW)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # The product's own corpus example exercises JPEG/CR3/video/PDF decode
+          # against the staged native runtime; PDFium is placed in the runtime
+          # search path by the staging step above.
+          $corpus = Join-Path $env:RUNNER_TEMP "iris-preview-corpus"
+          python3 scripts/fetch-preview-corpus.py --output $corpus
+          if ($LASTEXITCODE -ne 0) { throw "preview corpus fetch failed" }
+          & cargo run --release -p iris-thumb-preview --example preview_corpus_smoke --locked -- $corpus
+          if ($LASTEXITCODE -ne 0) { throw "installed preview smoke failed" }
+
+      - name: Assemble bounded evidence manifest
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          ev = Path(os.environ["IRIS_VALIDATION_EVIDENCE"])
+          inputs = json.loads((ev / "validation-inputs.json").read_text()) if (ev / "validation-inputs.json").exists() else {}
+          pe = (ev / "pe-imports.txt").read_text() if (ev / "pe-imports.txt").exists() else ""
+          out = dict(validation_inputs=inputs, pe_imports=pe[-8000:],
+                     release_promotion=False, native_runtime_retained=False)
+          (ev / "windows-validation.json").write_text(json.dumps(out, indent=2) + "\n")
+          PY
+
+      - name: Clean temporary native bytes even after interruption
+        if: always()
+        shell: bash
+        run: |
+          rm -rf build/validation/ffmpeg-src build/validation/overlay target/debug .vcpkg-validation/installed
+
+      - name: Retain bounded JSON evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-validation-evidence
+          if-no-files-found: error
+          path: |
+            build/validation/evidence/validation-inputs.json
+            build/validation/evidence/windows-validation.json
+          retention-days: 7
+          compression-level: 9
