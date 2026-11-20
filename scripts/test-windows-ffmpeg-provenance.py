@@ -10,7 +10,8 @@ locked crates.io bindings ffmpeg-next 9.0.0 / ffmpeg-sys-next 9.0.1, whose
 ffmpeg_8_1 ABI (62.28) matches that source.
 
 The approved production Windows runtime plan is packaging/windows/ffmpeg.json;
-this contract checks it resolves to the approved source and locked bindings.
+this contract checks it resolves to the approved source and locked bindings, and
+that the recorded binding ABI matches the approved source without a crate cache.
 This checks the dependency route and the boundary, not native execution: the
 native Windows build, DLL/PDFium closure, notices and clean-install preview
 smoke still require a Windows runner via exact-SHA CI before release.yml may
@@ -136,11 +137,25 @@ class WindowsFfmpegProvenance(unittest.TestCase):
         self.assertIn("--enable-shared", flags)
         self.assertIn("--disable-static", flags)
 
-    def test_locked_binding_supports_approved_abi(self):
+    def test_binding_abi_matches_approved_source(self):
+        # Cache-independent semantic guard: the ABI declared by the locked
+        # binding must equal the approved FFmpeg source's avcodec major/minor.
+        # This runs in CI, where no crate source is cached at this step.
+        plan = json.loads(read("packaging/windows/ffmpeg.json"))
+        approved = json.loads(read(plan["ffmpeg"]["source"]))
+        abi = plan["binding_abi"]
+        self.assertEqual(abi["ffmpeg_8_1"], approved["avcodec_version"][:2])
+        self.assertIn(bindings["ffmpeg-sys-next"][0], abi["declared_by"])
+
+    def test_cached_binding_source_agrees_with_recorded_abi(self):
+        # Supplementary byte-level check when the crate source is present;
+        # skipping here no longer removes the CI-effective guard above.
+        plan = json.loads(read("packaging/windows/ffmpeg.json"))
+        major, minor = plan["binding_abi"]["ffmpeg_8_1"]
         source = cached_sys_source()
         if source is None:
-            self.skipTest("ffmpeg-sys-next source not cached; Cargo enforces the lock checksum")
-        self.assertIn('("ffmpeg_8_1", 62, 28)', source)
+            self.skipTest("ffmpeg-sys-next source not cached; ABI asserted from checked-in data")
+        self.assertIn('("ffmpeg_8_1", %d, %d)' % (major, minor), source)
 
     def test_production_plan_matches_approved_pins(self):
         plan = json.loads(read("packaging/windows/ffmpeg.json"))
