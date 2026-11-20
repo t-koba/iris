@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline contracts for the production Windows validation build-input gate."""
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -27,6 +28,26 @@ class ManifestContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             mod.validate_manifest(m)
 
+    def test_manifest_rejects_version_constraints(self):
+        base = mod.read_json("packaging/windows/validation/vcpkg.json")
+        for key in ("version", "version>=", "version=", "port-version", "override"):
+            with self.subTest(key=key):
+                m = copy.deepcopy(base)
+                m["dependencies"][0][key] = "9.1.0"
+                with self.assertRaises(ValueError):
+                    mod.validate_manifest(m)
+
+    def test_manifest_rejects_top_level_overrides_and_constraints(self):
+        base = mod.read_json("packaging/windows/validation/vcpkg.json")
+        for key, value in (("overrides", [{"name": "ffmpeg", "version": "9.1.0"}]),
+                           ("constraints", {"ffmpeg": "9.1.0"}),
+                           ("default-registry", {})):
+            with self.subTest(key=key):
+                m = copy.deepcopy(base)
+                m[key] = value
+                with self.assertRaises(ValueError):
+                    mod.validate_manifest(m)
+
     def test_manifest_rejects_baseline_drift(self):
         m = mod.read_json("packaging/windows/validation/vcpkg.json")
         m["builtin-baseline"] = "deadbeef"
@@ -45,17 +66,26 @@ class ConfigurationContracts(unittest.TestCase):
         c = mod.read_json("packaging/windows/validation/vcpkg-configuration.json")
         self.assertTrue(mod.validate_configuration(c))
 
-    def test_registry_rejects_overrides(self):
-        c = mod.read_json("packaging/windows/validation/vcpkg-configuration.json")
-        c["overrides"] = [{"name": "ffmpeg", "version": "9.0.2"}]
-        with self.assertRaises(ValueError):
-            mod.validate_configuration(c)
-
-    def test_registry_rejects_overlay(self):
-        c = mod.read_json("packaging/windows/validation/vcpkg-configuration.json")
-        c["overlay-registries"] = []
-        with self.assertRaises(ValueError):
-            mod.validate_configuration(c)
+    def test_registry_rejects_real_vcpkg_provenance_fields(self):
+        base = mod.read_json("packaging/windows/validation/vcpkg-configuration.json")
+        injections = (
+            ("registries", [{"kind": "git", "repository": "https://example.invalid/ports",
+                             "reference": "unsigned", "packages": ["ffmpeg"]}]),
+            ("overlay-ports", ["../prototype/windows-ffmpeg/overlay-ports"]),
+            ("overlay-triplets", ["../prototype/windows-ffmpeg/triplets"]),
+            ("overrides", []),
+            ("overlay-registries", []),
+            ("default-registry-extra", None),
+        )
+        for key, value in injections:
+            if key == "default-registry-extra":
+                c = copy.deepcopy(base)
+                c["default-registry"]["tools"] = "git"
+            else:
+                c = copy.deepcopy(base)
+                c[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                mod.validate_configuration(c)
 
 
 class TripletContracts(unittest.TestCase):

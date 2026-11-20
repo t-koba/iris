@@ -45,23 +45,40 @@ def sha256_file(relative):
     return hashlib.sha256((ROOT / relative).read_bytes()).hexdigest()
 
 
+def _comment_keys(mapping):
+    return {key for key in mapping if key.startswith("$")}
+
+
 def validate_manifest(manifest):
+    # Allowlist every top-level key: any version control (version, version>=,
+    # port-version, overrides, constraints, builtin-baseline besides the pin)
+    # would let vcpkg resolve a different port while this gate stayed green.
+    allowed_top = {"name", "version", "builtin-baseline", "dependencies"} | _comment_keys(manifest)
+    require(set(manifest) <= allowed_top, "unexpected manifest top-level key")
     require(manifest["name"] == "iris-windows-native-validation", "unexpected validation manifest name")
+    require(manifest["version"] == "0.0.0", "unexpected manifest version")
     require(manifest["builtin-baseline"] == BASELINE, "manifest baseline drifted")
     deps = manifest["dependencies"]
     require(len(deps) == 1 and deps[0]["name"] == "ffmpeg", "manifest must declare only ffmpeg")
-    require(deps[0].get("default-features") is True, "LGPL default features must be enabled")
-    require("features" not in deps[0], "no extra vcpkg features may be selected")
+    dep = deps[0]
+    allowed_dep = {"name", "default-features"} | _comment_keys(dep)
+    require(set(dep) <= allowed_dep, "unexpected ffmpeg dependency key (version/override)")
+    require(dep.get("default-features") is True, "LGPL default features must be enabled")
     return True
 
 
 def validate_configuration(config):
+    # Allowlist the real vcpkg-configuration.json fields. registries,
+    # overlay-ports and overlay-triplets all change which portfile/triplet
+    # vcpkg builds and must not appear in the checked-in validation config.
+    allowed_top = {"default-registry"} | _comment_keys(config)
+    require(set(config) <= allowed_top, "unexpected configuration key (registries/overlay)")
     reg = config["default-registry"]
+    allowed_reg = {"kind", "repository", "baseline"} | _comment_keys(reg)
+    require(set(reg) <= allowed_reg, "unexpected default-registry key")
     require(reg["kind"] == "git", "registry kind drifted")
     require(reg["repository"] == "https://github.com/microsoft/vcpkg", "registry repository drifted")
     require(reg["baseline"] == BASELINE, "registry baseline drifted")
-    require("overlay-registries" not in config and "overrides" not in config,
-            "no overlays or overrides may be declared in the registry config")
     return True
 
 
