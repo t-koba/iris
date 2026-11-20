@@ -57,6 +57,12 @@ jobs:
       - name: Windows FFmpeg overlay derivation contract
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/test-windows-ffmpeg-overlay.py
+      - name: Windows FFmpeg validation input gate
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/windows-ffmpeg-validation-config.py
+      - name: Windows FFmpeg validation config contract
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-windows-ffmpeg-validation-config.py
 
       - uses: dtolnay/rust-toolchain@master
         with:

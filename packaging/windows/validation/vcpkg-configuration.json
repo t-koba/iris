@@ -1,0 +1,8 @@
+{
+  "$comment": "Production validation pins the default registry to the approved vcpkg baseline. No extra registries, overlays or overrides are declared here; the verified-source overlay is injected by the validation driver from the derived portfile.",
+  "default-registry": {
+    "kind": "git",
+    "repository": "https://github.com/microsoft/vcpkg",
+    "baseline": "b8dfe957ec8b5c0ef5c4b31eea594b8486af744f"
+  }
+}

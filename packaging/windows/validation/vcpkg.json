@@ -1,0 +1,9 @@
+{
+  "$comment": "Production Windows native-preview validation manifest. LGPL-only default library features; no gpl, version3, nonfree or ffmpeg executable feature. Pinned baseline. Non-publishing until exact Windows-runner evidence passes; release.yml stays minimal.",
+  "name": "iris-windows-native-validation",
+  "version": "0.0.0",
+  "builtin-baseline": "b8dfe957ec8b5c0ef5c4b31eea594b8486af744f",
+  "dependencies": [
+    { "name": "ffmpeg", "default-features": true }
+  ]
+}
