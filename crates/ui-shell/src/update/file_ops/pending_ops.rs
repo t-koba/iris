@@ -255,11 +255,14 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
 /// An undo or redo op is replayed as one pending item per op entry, so skipped indices
 /// refer to the same entries even when some of them were left untouched. When a conflict
 /// installed a numbered sibling, the opposite journal must record that path instead of the
-/// requested one.
-fn undo_op_after_replay(
+/// requested one: the destination of a redo replay, the source of an undo replay. A partial
+/// replay needs an authoritative installed path to tell a confirmed write from an unknown
+/// outcome; a settled replay uses every undoable item.
+fn replayed_op_after_replay(
     op: &UndoableOp,
     pending: &PendingFileOperation,
     rewrite_source: bool,
+    installed_only: bool,
 ) -> UndoableOp {
     let items = op
         .items
@@ -271,12 +274,15 @@ fn undo_op_after_replay(
             {
                 return None;
             }
-            let mut item = item.clone();
-            if let Some(installed) = pending
+            let installed = pending
                 .items
                 .get(index)
-                .and_then(|item| item.installed_path.as_deref())
-            {
+                .and_then(|item| item.installed_path.as_deref());
+            if installed_only && installed.is_none() {
+                return None;
+            }
+            let mut item = item.clone();
+            if let Some(installed) = installed {
                 if rewrite_source {
                     item.source_path = PathBuf::from(installed);
                 } else {
@@ -343,7 +349,7 @@ fn finish_pending_operation(state: &mut AppState) -> Task<Message> {
         }
         Some(PendingUndoAction::RecordOp(op)) => {
             // Redo installed the file at its (possibly numbered) destination.
-            let replayed = undo_op_after_replay(op, &pending, false);
+            let replayed = replayed_op_after_replay(op, &pending, false, false);
             if !replayed.items.is_empty() {
                 state.undo_journal.push_undo_from_redo(replayed);
             }
@@ -355,7 +361,7 @@ fn finish_pending_operation(state: &mut AppState) -> Task<Message> {
         }
         Some(PendingUndoAction::PushRedo(op)) => {
             // Undo moved the file to its (possibly numbered) destination.
-            let replayed = undo_op_after_replay(op, &pending, true);
+            let replayed = replayed_op_after_replay(op, &pending, true, false);
             if !replayed.items.is_empty() {
                 state.undo_journal.push_redo(replayed);
             }
@@ -446,38 +452,66 @@ pub fn dismiss_job_decisions(state: &mut AppState, job_id: &JobId) {
     });
 }
 
-/// Replay entries are popped from the journal before their transfer starts. An abort with every
-/// transfer outcome settled and no confirmed installation has not changed any destination, so the
-/// entry must remain retryable. An installation or a still-outstanding transfer means the replay
-/// was applied or may have been applied; its journal outcome cannot be reconstructed from the
-/// abort alone, so the stacks are left untouched.
+/// A replay entry is popped from its journal before the transfer starts. On a partial replay,
+/// confirmed installs move to the opposite journal so the applied part stays undoable, skipped
+/// items stay retryable in their original journal, and items with an unknown outcome are left
+/// out. Only a settled replay with no installed path and no other part is restored whole; an
+/// outstanding transfer leaves both stacks untouched.
 pub(crate) enum ReplayRestore {
     Undo(UndoableOp),
     Redo(UndoableOp),
 }
 
-pub(crate) fn replay_entry_to_restore(pending: &PendingFileOperation) -> Option<ReplayRestore> {
-    if pending.in_flight != 0
-        || pending
+pub(crate) fn replay_entry_to_restore(pending: &PendingFileOperation) -> Vec<ReplayRestore> {
+    // Redo replay popped the entry from the redo stack; undo replay popped it from undo.
+    let (op, redo_replay) = match &pending.undo_action {
+        Some(PendingUndoAction::RecordOp(op)) => (op, true),
+        Some(PendingUndoAction::PushRedo(op)) => (op, false),
+        _ => return Vec::new(),
+    };
+    let confirmed = replayed_op_after_replay(op, pending, !redo_replay, true);
+    let remaining = unreplayed_op(op, pending);
+
+    // Nothing settled and nothing written: the whole entry is still retryable.
+    if confirmed.items.is_empty()
+        && remaining.items.is_empty()
+        && pending.in_flight == 0
+        && pending
             .items
             .iter()
-            .any(|item| item.installed_path.is_some())
+            .all(|item| item.installed_path.is_none())
     {
-        return None;
+        return vec![if redo_replay {
+            ReplayRestore::Redo(op.clone())
+        } else {
+            ReplayRestore::Undo(op.clone())
+        }];
     }
-    match &pending.undo_action {
-        // Redo replay popped the entry from the redo stack.
-        Some(PendingUndoAction::RecordOp(op)) => Some(ReplayRestore::Redo(op.clone())),
-        // Undo replay popped the entry from the undo stack.
-        Some(PendingUndoAction::PushRedo(op)) => Some(ReplayRestore::Undo(op.clone())),
-        _ => None,
+
+    let mut restore = Vec::new();
+    if !confirmed.items.is_empty() {
+        restore.push(if redo_replay {
+            ReplayRestore::Undo(confirmed)
+        } else {
+            ReplayRestore::Redo(confirmed)
+        });
     }
+    if !remaining.items.is_empty() {
+        restore.push(if redo_replay {
+            ReplayRestore::Redo(remaining)
+        } else {
+            ReplayRestore::Undo(remaining)
+        });
+    }
+    restore
 }
 
-pub(crate) fn restore_replay_entry(state: &mut AppState, replay: ReplayRestore) {
-    match replay {
-        ReplayRestore::Undo(op) => state.undo_journal.push_undo_from_redo(op),
-        ReplayRestore::Redo(op) => state.undo_journal.push_redo(op),
+pub(crate) fn restore_replay_entry(state: &mut AppState, replay: Vec<ReplayRestore>) {
+    for entry in replay {
+        match entry {
+            ReplayRestore::Undo(op) => state.undo_journal.push_undo_from_redo(op),
+            ReplayRestore::Redo(op) => state.undo_journal.push_redo(op),
+        }
     }
 }
 
@@ -492,10 +526,9 @@ pub fn cancel_job_state(state: &mut AppState, job_id: &JobId) {
         .pending_operation
         .as_ref()
         .filter(|pending| pending.job_id == *job_id)
-        .and_then(replay_entry_to_restore);
-    if let Some(action) = replay {
-        restore_replay_entry(state, action);
-    }
+        .map(replay_entry_to_restore)
+        .unwrap_or_default();
+    restore_replay_entry(state, replay);
     if state
         .pending_operation
         .as_ref()

@@ -923,10 +923,9 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                             let replay = state
                                 .pending_operation
                                 .as_ref()
-                                .and_then(replay_entry_to_restore);
-                            if let Some(entry) = replay {
-                                restore_replay_entry(state, entry);
-                            }
+                                .map(replay_entry_to_restore)
+                                .unwrap_or_default();
+                            restore_replay_entry(state, replay);
                         }
                         state.pending_operation = None;
                     }
