@@ -73,6 +73,86 @@ def require(ok, message):
         raise ValueError(message)
 
 
+def permissions_read_only(text):
+    """Require contents:read and reject any non-read permission at any level."""
+    lines = text.splitlines()
+    seen_contents_read = False
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*permissions:\s*\S+", line):
+            return False, f"inline permissions are not allowed: {line.strip()}"
+        if not re.match(r"^\s*permissions:\s*$", line):
+            continue
+        base = len(line) - len(line.lstrip())
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j]
+            if not nxt.strip():
+                j += 1
+                continue
+            ind = len(nxt) - len(nxt.lstrip())
+            if ind <= base:
+                break
+            m = re.match(r"^\s*([a-z][a-z-]*):\s*(\S+)\s*$", nxt)
+            if not m:
+                return False, f"unparsed permission entry: {nxt.strip()}"
+            key, value = m.group(1), m.group(2)
+            if value not in ("read", "none"):
+                return False, f"permission {key}: {value} is not read-only"
+            if key == "contents" and value == "read":
+                seen_contents_read = True
+            j += 1
+    if not seen_contents_read:
+        return False, "workflow must declare contents: read"
+    return True, ""
+
+
+def upload_paths(text):
+    """Return (step_count, paths) for every upload-artifact step, inline or block.
+
+    Every `uses: actions/upload-artifact@` step is scanned; inline `path: X` and
+    `path: |` block scalars are both collected so no upload form can evade the
+    JSON-evidence guard.
+    """
+    lines = text.splitlines()
+    paths = []
+    steps = 0
+    for i, line in enumerate(lines):
+        if "uses: actions/upload-artifact@" not in line:
+            continue
+        steps += 1
+        base = len(line) - len(line.lstrip())
+        block = []
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j]
+            stripped = nxt.strip()
+            ind = len(nxt) - len(nxt.lstrip())
+            if stripped.startswith("- ") and ind <= base:
+                break
+            block.append(nxt)
+            j += 1
+        for k, bl in enumerate(block):
+            s = bl.strip()
+            if not s.startswith("path:"):
+                continue
+            value = s[len("path:"):].strip()
+            if value in ("|", "|-", "|+", ">", ">-"):
+                pi = len(bl) - len(bl.lstrip())
+                m = k + 1
+                while m < len(block):
+                    entry = block[m]
+                    if not entry.strip():
+                        m += 1
+                        continue
+                    if (len(entry) - len(entry.lstrip())) <= pi:
+                        break
+                    paths.append(entry.strip())
+                    m += 1
+            elif value:
+                paths.append(value.strip("\"'"))
+    return steps, paths
+
+
 def validate(text):
     """Return a dict of checks; raise ValueError on the first fail-closed violation."""
     checks = {}
@@ -97,32 +177,25 @@ def validate(text):
         require(marker not in code, f"forbidden marker present in workflow: {marker}")
     checks["forbidden_absent"] = list(FORBIDDEN_MARKERS)
 
-    # No publishing action or release promotion may be invoked.
-    for action in ("softprops/action-gh-release", "gh release create", "upload-release-asset"):
+    # No publishing action, gh release subcommand, or write permission may appear.
+    for action in ("softprops/action-gh-release", "upload-release-asset",
+                   "actions/upload-release-asset@"):
         require(action not in code, f"publishing action present: {action}")
-    checks["upload_count"] = len(re.findall(r"actions/upload-artifact@", text))
-    require(checks["upload_count"] <= 2, "at most two bounded artifact uploads")
-    # Only examine the `path: |` block inside an upload-artifact step.
-    upload_steps = re.findall(
-        r"uses: actions/upload-artifact@[\s\S]*?path: \|([\s\S]*?)(?=\n      - name:|\Z)",
-        text,
-    )
-    def _all_paths_json(block):
-        # Path entries are the lines before the upload-artifact option keys.
-        entries = []
-        for ln in block.splitlines():
-            s = ln.strip()
-            if not s:
-                continue
-            if s.split(":", 1)[0] in ("retention-days", "compression-level", "if-no-files-found", "name"):
-                break
-            entries.append(s)
-        return bool(entries) and all(ln.endswith(".json") for ln in entries)
+    require(not re.search(r"\bgh\s+release\b", code),
+            "gh release invocation present (all subcommands are forbidden)")
+    checks["no_publishing"] = True
 
-    checks["evidence_json_only"] = bool(upload_steps) and all(
-        _all_paths_json(block) for block in upload_steps
-    )
-    require(checks["evidence_json_only"], "uploaded artifacts must be JSON evidence only")
+    ok, reason = permissions_read_only(text)
+    require(ok, reason)
+    checks["read_only_permissions"] = True
+
+    # Exactly one bounded evidence upload; every path form must be JSON.
+    steps, paths = upload_paths(text)
+    checks["upload_count"] = steps
+    require(steps == 1, "workflow must have exactly one bounded evidence upload")
+    checks["evidence_json_only"] = bool(paths) and all(p.endswith(".json") for p in paths)
+    require(checks["evidence_json_only"],
+            "every uploaded artifact path must be JSON evidence only")
 
     # Native bytes must be cleaned before upload.
     require("rm -rf" in text and "if: always()" in text, "native bytes cleanup is not fail-closed")

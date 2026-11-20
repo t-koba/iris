@@ -114,6 +114,40 @@ class FailClosedContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
+    def test_rejects_gh_release_upload(self):
+        mutated = self.text.replace(
+            "      - name: Assemble bounded evidence manifest",
+            "      - name: Publish\n        run: gh release upload v9.9.9 target/debug/Iris.exe\n"
+            "      - name: Assemble bounded evidence manifest", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_write_permission_escalation(self):
+        mutated = self.text.replace("  contents: read\n", "  contents: write\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_inline_binary_upload_second_step(self):
+        mutated = self.text.replace(
+            "      - name: Retain bounded JSON evidence only\n",
+            "      - name: Ship native binary\n"
+            "        uses: actions/upload-artifact@v4\n"
+            "        with:\n"
+            "          name: native\n"
+            "          path: target/debug/Iris.exe\n"
+            "      - name: Retain bounded JSON evidence only\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_inline_binary_upload_in_sole_step(self):
+        mutated = self.text.replace(
+            "          path: |\n"
+            "            build/validation/evidence/validation-inputs.json\n"
+            "            build/validation/evidence/windows-validation.json\n",
+            "          path: target/debug/Iris.exe\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
 
 class WiringContracts(unittest.TestCase):
     def test_contract_wired_into_ci_and_workflow(self):
