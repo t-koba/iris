@@ -251,7 +251,8 @@ fn dispatch(state: &mut AppState, message: Message) -> Task<Message> {
 mod tests {
     use super::*;
     use crate::runtime::{
-        install_cancel_after_destination_write, TransferFailure, TransferWriteOutcome,
+        install_cancel_after_destination_write, install_post_resolution_pause, remove_pause_hook,
+        TransferFailure, TransferWriteOutcome,
     };
     use crate::test_support::local_entry;
 
@@ -1834,6 +1835,47 @@ mod tests {
         assert!(!state.undo_journal.can_undo());
     }
 
+    fn runtime_cancel_of_may_have_written_replay(op: UndoableOp, push_redo: bool) -> AppState {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 1, 1);
+        state.pending_operation.as_mut().unwrap().undo_action = Some(if push_redo {
+            PendingUndoAction::PushRedo(op)
+        } else {
+            PendingUndoAction::RecordOp(op)
+        });
+        let _ = process_pending_operation(&mut state);
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(
+                job_id,
+                0,
+                0,
+                Err(TransferFailure::Canceled(
+                    TransferWriteOutcome::MayHaveWritten,
+                )),
+            ),
+        );
+        state
+    }
+
+    #[test]
+    fn runtime_cancel_of_may_have_written_undo_replay_leaves_replay_stacks_empty() {
+        let state = runtime_cancel_of_may_have_written_replay(replay_op(), true);
+
+        assert!(state.pending_operation.is_none());
+        assert!(!state.undo_journal.can_undo());
+        assert!(!state.undo_journal.can_redo());
+    }
+
+    #[test]
+    fn runtime_cancel_of_may_have_written_redo_replay_leaves_replay_stacks_empty() {
+        let state = runtime_cancel_of_may_have_written_replay(replay_op(), false);
+
+        assert!(state.pending_operation.is_none());
+        assert!(!state.undo_journal.can_undo());
+        assert!(!state.undo_journal.can_redo());
+    }
+
     /// A replay item is popped before its transfer starts. Even if a real transfer installed
     /// the destination and its completion was only delivered after Abort, the journal entry
     /// must not be resurrected by the abort or by the late success.
@@ -1907,6 +1949,62 @@ mod tests {
 
         assert!(state.pending_operation.is_none());
         assert_eq!(state.jobs[1].state, JobState::Canceled);
+        assert!(!state.undo_journal.can_undo());
+        assert!(!state.undo_journal.can_redo());
+    }
+
+    /// Cancellation observed between destination resolution and installation is ambiguous:
+    /// the runtime must report MayHaveWritten, and no popped replay entry may be restored.
+    #[tokio::test]
+    async fn may_have_written_at_destination_resolution_clears_replay() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let source = temp.path().join("source.txt");
+        let destination = temp.path().join("destination.txt");
+        std::fs::write(&source, b"real payload").unwrap();
+
+        let mut state = AppState::default();
+        let _ = next_job(&mut state, 5_000_000);
+        let planned_job_id = file_ops::next_job_id(&state);
+        let hook = install_post_resolution_pause(&planned_job_id);
+
+        let ((job_id, completion), ()) = tokio::join!(
+            start_one_item_copy(
+                &mut state,
+                &source,
+                &destination,
+                false,
+                Some(PendingUndoAction::RecordOp(replay_op())),
+            ),
+            async {
+                tokio::time::timeout(std::time::Duration::from_secs(10), hook.entered.notified())
+                    .await
+                    .expect("post-resolution hook was reached");
+                crate::runtime::app_runtime().cancel_job(&planned_job_id);
+                hook.release.notify_one();
+            }
+        );
+        remove_pause_hook(&planned_job_id);
+
+        assert_eq!(job_id, planned_job_id);
+        assert!(!destination.exists());
+        match &completion {
+            Message::PendingItemCompleted(_, _, _, Err(TransferFailure::Canceled(outcome))) => {
+                assert_eq!(*outcome, TransferWriteOutcome::MayHaveWritten);
+            }
+            other => panic!("unexpected completion: {other:?}"),
+        }
+
+        // Mirror the UI job-state transition carried by the Cancel message, which cannot be
+        // dispatched while `start_one_item_copy` holds the state borrow.
+        state
+            .jobs
+            .iter_mut()
+            .find(|job| job.id == job_id)
+            .expect("canceled job")
+            .state = JobState::Canceled;
+        let _ = update(&mut state, completion);
+
+        assert!(state.pending_operation.is_none());
         assert!(!state.undo_journal.can_undo());
         assert!(!state.undo_journal.can_redo());
     }

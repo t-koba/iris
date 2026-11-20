@@ -551,6 +551,8 @@ impl AppRuntime {
             // Past this point an installed symlink, directory, child or file may write to the
             // destination. A cancellation from here on is never proof of a no-write replay.
             evidence.may_have_written();
+            #[cfg(test)]
+            tests::pause_admission(job_id, tests::AdmissionStage::AfterDestinationResolution).await;
 
             match self
                 .transfer_local_symlink(source, &final_dst, is_move, &resolution)
@@ -1217,12 +1219,13 @@ pub(crate) mod tests {
     pub(super) enum AdmissionStage {
         BeforeRegistration,
         Preflight,
+        AfterDestinationResolution,
     }
 
-    struct AdmissionHook {
+    pub(crate) struct AdmissionHook {
         stage: AdmissionStage,
-        entered: tokio::sync::Notify,
-        release: tokio::sync::Notify,
+        pub(crate) entered: tokio::sync::Notify,
+        pub(crate) release: tokio::sync::Notify,
     }
 
     static ADMISSION_HOOKS: OnceLock<Mutex<HashMap<u64, Arc<AdmissionHook>>>> = OnceLock::new();
@@ -1241,6 +1244,20 @@ pub(crate) mod tests {
                 .insert(job_id.0, Arc::clone(&hook));
             hook
         }
+    }
+
+    /// Pauses a transfer after destination resolution and write-evidence recording, before
+    /// anything is installed. The caller waits for `entered`, cancels, then notifies `release`.
+    pub(crate) fn install_post_resolution_pause(job_id: &JobId) -> Arc<AdmissionHook> {
+        AdmissionHook::install(job_id, AdmissionStage::AfterDestinationResolution)
+    }
+
+    pub(crate) fn remove_pause_hook(job_id: &JobId) {
+        ADMISSION_HOOKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .remove(&job_id.0);
     }
 
     pub(super) async fn pause_admission(job_id: &JobId, stage: AdmissionStage) {

@@ -14,7 +14,9 @@ mod transfer_verify;
 pub(crate) use fileops_dispatch::local_list_entry;
 pub use thumbnail_bridge::ThumbnailGenerationError;
 #[cfg(test)]
-pub(crate) use transfer_driver::tests::install_cancel_after_destination_write;
+pub(crate) use transfer_driver::tests::{
+    install_cancel_after_destination_write, install_post_resolution_pause, remove_pause_hook,
+};
 
 use crate::input::dnd::DndOperation;
 use crate::state::{CacheEncryptionPolicy, PendingFileItem};
