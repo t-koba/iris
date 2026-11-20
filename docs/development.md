@@ -256,14 +256,17 @@ MIT を選べますが、GPL 単独や `MIT AND GPL-3.0-only` は不可です。
 未知 ID・未対応 exception・旧 slash 表記・欠落 metadata は OR で隠せません。
 build/proc-macro 専用 package の license は runtime 互換性の判定対象外です。
 
-LGPL の legal-review approval は既定で空です。追加する場合は `lgpl_legal_approvals` に
-`domain` (`cargo` / `ffmpeg` / `native`)、`subject`（完全 Cargo package ID、exact library の
-`<path>#sha256=<digest>`、または native component の
+LGPL は、動的リンク/dlopen の native shared library に限り、external attestation なしで受理します。
+必須なのは schema 2 の完全な native closure、source/notice/relinking の全 evidence、
+hash と結び付いた既知の license 名、禁止 FFmpeg flags の不在です。外部の法的承認は要求されず、提供もされません。
+`lgpl_legal_approvals` は既定で空で、Cargo の LGPL crate と static/embedded の native LGPL を
+scope 付きで止めるために残しています（現行 gate が参照する `domain` は `cargo` / `native`）。
+追加する場合は `lgpl_legal_approvals` に `subject`（完全 Cargo package ID または native component の
 `<artifact-path>#sha256=<digest>#component=<id>`）、`license`（review 対象 ID）、`review`（法的 review の参照）を指定します。
 これは明示的な legal-review approval とその参照を記録する欄であり、このツールが法的承認を与えるものではありません。
 FFmpeg は exact library の hash と probe の path を結び付け、全 license/configuration pair を検査します。
 product の Cargo flags、必要な native component と許可 license 名は JSON で定義し、GPL/version3/nonfree flags、
-未知・欠落の native evidence、未 review の LGPL は公開を阻止します。
+未知・欠落の native evidence、動的リンクが明確でない LGPL（static/embedded）は公開を阻止します。
 `ffmpeg-next` の license や別の `ffmpeg` executable では代用できません。
 Linux PDFium は `provenance-check.attestation_verified == true` が必須です。
 この値は staged `PROVENANCE.json` の archive pin、attestation bundle digest/size、signer/source identity、
@@ -328,8 +331,10 @@ policy validator は path-only 入力を受理せず、report 内の hash と si
   source/revision・変更状況、license と各 obligation の根拠は引き続き hash-bound inventoried evidence で必要です。
   例外は evidence の真実性・法的十分性の承認ではありません。
   GPL 単独、別の exception、他 component/platform/mode、Cargo license にはこの許可は適用しません。
-  それ以外の GPL/AGPL・nonfree・未知 license は通りません。LGPL は artifact digest と component id に scope した
-  `native` review が必要で、`cargo` や `ffmpeg` review では代用できません。FFmpeg の従来の exact-library review/probe も別途必要です。
+  それ以外の GPL/AGPL・nonfree・未知 license は通りません。LGPL は dynamic/dlopen の native component なら
+  artifact digest と component id に結び付いた source/notice/relinking evidence と完全な closure で受理され、
+  外部 review は不要です。static/embedded の native LGPL と Cargo LGPL は scope 付き `native` / `cargo` review が
+  必要で、相互に代用できません。FFmpeg の exact-library/probe 検査も別途必要です。
 - `obligations` は `notice`, `source`, `relinking` の全三項目で、それぞれ `{status, evidence}`。
   status は `provided` または `not-applicable` のみ。非該当にも review 済みの根拠文書が必要です。
   `native_required_obligations` の既定 policy は allowed に notice、review に notice/source/relinking の

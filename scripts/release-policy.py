@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Offline policy check only; never legal/compliance approval or a package builder."""
+"""Offline policy check only; never legal/compliance approval or a package builder.
+
+LGPL is accepted without an external attestation only for dynamically linked or
+dlopen native shared libraries, with a complete schema-2 closure, source/notice/
+relinking evidence and no forbidden FFmpeg flags. Static/embedded native LGPL and
+Cargo LGPL still require a scoped review entry; no external legal attestation is
+required or available for the accepted case.
+"""
 import argparse
 import json
 import os
@@ -209,6 +216,13 @@ def cargo_graph(graph, policy, workspace):
 
 
 def native(records, policy):
+    """Bind FFmpeg probes to inventoried bytes; no LGPL attestation is required.
+
+    Acceptance rests on the exact library/hash binding, a mapped license name and
+    no forbidden flags here, plus the complete schema-2 closure enforced by
+    validate(), which checks dynamic/dlopen mode and the notice/source/relinking
+    obligations. Cargo LGPL remains gated by its scoped review entry in spdx().
+    """
     errors = []
     files = {row.get("path"): row for row in records if row["kind"] == "file"}
     probes = {}
@@ -234,10 +248,8 @@ def native(records, policy):
                 require(text(configuration) and text(license_name), "absent native license/configuration evidence")
                 flags = {token.split("=", 1)[0] for token in shlex.split(configuration)}
                 require(not flags.intersection(policy["forbidden_ffmpeg_flags"]), "forbidden FFmpeg GPL/version3/nonfree flags")
-                license_id = policy["ffmpeg_license_names"].get(license_name)
-                require(license_id is not None, "unknown/blocked native FFmpeg license")
-                subject = path + "#sha256=" + files[path]["sha256"]
-                require(reviewed(policy, "ffmpeg", subject, license_id), "FFmpeg LGPL legal review pending")
+                require(policy["ffmpeg_license_names"].get(license_name) is not None,
+                        "unknown/blocked native FFmpeg license")
         except (ValueError, TypeError) as error:
             errors.append("FFmpeg: " + str(error))
     expected = {path for path in files if isinstance(path, str) and re.search(
@@ -326,9 +338,16 @@ def validate(report, policy, workspace):
                     re.escape(row["system_package"]) + r"(?::[a-z0-9][a-z0-9-]*)?", system_owners[0]["owner"])), None)
             require(license_id in policy[group] or exception is not None,
                     "blocked/unknown native license or mismatched disposition")
-            subject = artifact["path"] + "#sha256=" + artifact["sha256"] + "#component=" + component["id"]
-            require(disposition != "review" or reviewed(policy, "native", subject, license_id),
-                    "native LGPL legal review pending")
+            # LGPL is accepted without an external attestation only when contamination
+            # is plainly absent (dynamic/dlopen); the closure and obligations checked
+            # here and in validate_closure() supply the acceptance evidence. Static or
+            # embedded LGPL still needs a scoped native review entry, which itself is
+            # never an attestation produced by this tool.
+            if disposition == "review" and component["mode"] not in ("dynamic", "dlopen"):
+                subject = (artifact["path"] + "#sha256=" + artifact["sha256"]
+                           + "#component=" + component["id"])
+                require(reviewed(policy, "native", subject, license_id),
+                        "native LGPL legal review pending for static/embedded linkage")
             required = (exception["required_obligations"] if exception is not None
                         else policy["native_required_obligations"][disposition])
             require(all(component["obligations"][key]["status"] == "provided" for key in required),

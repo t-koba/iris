@@ -59,12 +59,31 @@ def graph(value):
     return next(row for row in value["records"] if row["kind"] == "cargo-graph")
 
 
-def legal_reviews(value, policy):
-    for row in value["records"]:
-        if row["kind"] == "file":
-            policy["lgpl_legal_approvals"].append(dict(
-                domain="ffmpeg", subject=row["path"] + "#sha256=" + row["sha256"],
-                license="LGPL-2.1-or-later", review="synthetic test review; NOT production approval"))
+def component_by_id(value, cid):
+    return next(c for c in value["records"][-1]["evidence"]["components"] if c["id"] == cid)
+
+
+def set_component_mode(value, cid, mode):
+    """Move a synthetic component between closure coverage modes."""
+    component = component_by_id(value, cid)
+    coverage = next(a["coverage"] for a in value["records"][-1]["evidence"]["artifacts"]
+                    if a["file"] == component["artifact"])
+    coverage[component["mode"]]["components"].remove(cid)
+    component["mode"] = mode
+    coverage[mode]["components"].append(cid)
+    return component
+
+
+def scoped_native_review(value, policy, cid):
+    """Synthetic scoped entry for static/embedded LGPL; production policy has none."""
+    component = component_by_id(value, cid)
+    ref = component["artifact"]
+    review = dict(domain="native",
+                  subject=ref["path"] + "#sha256=" + ref["sha256"] + "#component=" + cid,
+                  license=component["license"]["id"],
+                  review="synthetic test review; NOT production approval")
+    policy["lgpl_legal_approvals"].append(review)
+    return review
 
 
 def complete_report(platform="linux"):
@@ -122,16 +141,6 @@ def gcc_runtime(value, mode="dynamic"):
     return component
 
 
-def complete_reviews(value, policy):
-    legal_reviews(value, policy)
-    for row in value["records"][-1]["evidence"]["components"]:
-        if row["license"]["disposition"] == "review":
-            ref = row["artifact"]
-            policy["lgpl_legal_approvals"].append(dict(domain="native",
-                subject=ref["path"] + "#sha256=" + ref["sha256"] + "#component=" + row["id"],
-                license=row["license"]["id"], review="synthetic test review; NOT production approval"))
-
-
 class Policy(unittest.TestCase):
     def test_spdx_precedence_alternatives_and_full_parse(self):
         for expression, expected in (
@@ -158,6 +167,10 @@ class Policy(unittest.TestCase):
         self.assertTrue(module.spdx("LGPL-2.1-or-later", policy, "third"))
         self.assertFalse(module.spdx("LGPL-2.1-or-later", policy, "other"))
         self.assertFalse(module.spdx("GPL-3.0-only", policy, "third"))
+        # Cargo LGPL has no evidence of absent contamination: no entry, no release.
+        self.assertFalse(module.spdx("LGPL-2.1-or-later", POLICY, "third"))
+        value = report(license_id="LGPL-2.1-or-later")
+        self.assertIn("LGPL legal review pending", " ".join(module.cargo_graph(graph(value), POLICY, WORKSPACE)))
 
     def test_runtime_build_macro_and_workspace(self):
         value = report()
@@ -204,11 +217,10 @@ class Policy(unittest.TestCase):
             with self.subTest(mutation=mutate), self.assertRaises(ValueError):
                 module.validate(value, POLICY, WORKSPACE)
 
-    def test_native_reviews_flags_unknown_and_exact_probe_binding(self):
+    def test_native_flags_unknown_and_exact_probe_binding(self):
         value, policy = report(), copy.deepcopy(POLICY)
-        self.assertIn("LGPL legal review pending", " ".join(module.native(value["records"], policy)))
-        legal_reviews(value, policy)
-        # Even reviewed FFmpeg leaves the unrepresented complete native closure blocked.
+        # FFmpeg LGPL needs no attestation; the missing schema-2 closure still blocks.
+        self.assertEqual(module.native(value["records"], policy), [])
         errors = module.validate(value, policy, WORKSPACE)
         self.assertEqual(len(errors), 1)
         self.assertIn("schema 1 cannot establish complete native license closure", errors[0])
@@ -244,6 +256,39 @@ class Policy(unittest.TestCase):
         value["records"] = [row for row in value["records"] if row["kind"] != "command"]
         self.assertIn("absent exact-library", " ".join(module.native(value["records"], policy)))
 
+    def test_lgpl_acceptance_requires_dynamic_linkage_and_complete_evidence(self):
+        """No attestation is available: only absent contamination plus evidence passes."""
+        policy = copy.deepcopy(POLICY)
+        self.assertEqual(policy["lgpl_legal_approvals"], [])
+        for mode in ("dynamic", "dlopen"):
+            value = complete_report()
+            if mode != "dynamic":
+                set_component_mode(value, "0-dynamic", mode)
+            with self.subTest(mode=mode):
+                self.assertEqual(module.validate(value, policy, WORKSPACE), [])
+        for mode in ("static", "embedded"):
+            value = complete_report()
+            set_component_mode(value, "0-dynamic", mode)
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "review pending"):
+                module.validate(value, policy, WORKSPACE)
+            # Static/embedded linkage is still the scoped-review domain, not an
+            # attestation produced by this checker.
+            scoped = copy.deepcopy(policy)
+            scoped_native_review(value, scoped, "0-dynamic")
+            self.assertEqual(module.validate(value, scoped, WORKSPACE), [])
+        for obligation in POLICY["native_required_obligations"]["review"]:
+            value = complete_report()
+            component_by_id(value, "0-dynamic")["obligations"][obligation]["status"] = "not-applicable"
+            with self.subTest(obligation=obligation), self.assertRaisesRegex(ValueError, "evidence absent"):
+                module.validate(value, policy, WORKSPACE)
+        # The remaining FFmpeg checks still block an otherwise complete report.
+        value = complete_report()
+        probe = next(row for row in value["records"] if row["kind"] == "command")
+        data = json.loads(probe["text"])
+        data["avcodec_configuration"] = "--enable-gpl"
+        probe["text"] = json.dumps(data)
+        self.assertIn("forbidden", " ".join(module.validate(value, policy, WORKSPACE)))
+
     def test_pdfium_and_windows_minimal(self):
         for verified in (False, None, "true", 1):
             value = report()
@@ -259,7 +304,7 @@ class Policy(unittest.TestCase):
 
     def test_complete_native_report_and_cli_pass_without_disabling_policy(self):
         policy = copy.deepcopy(POLICY)
-        complete_reviews(complete_report(), policy)
+        self.assertEqual(policy["lgpl_legal_approvals"], [])
         with tempfile.TemporaryDirectory() as directory:
             paths = []
             for platform in POLICY["required_variants"]:
@@ -279,7 +324,6 @@ class Policy(unittest.TestCase):
 
     def test_identical_inventory_observations_preserved_and_conflicts_rejected(self):
         baseline, policy = complete_report("macos"), copy.deepcopy(POLICY)
-        complete_reviews(baseline, policy)
         for kind in ("file", "native-file", "staged-file"):
             value = copy.deepcopy(baseline)
             original = next(row for row in value["records"] if row["kind"] == kind)
@@ -361,7 +405,6 @@ class Policy(unittest.TestCase):
                 template["records"] = [row for row in template["records"] if row["kind"] not in (
                     "file", "staged-file", "native-file", "native-closure", "system-dependency")] + collected.records
                 policy = copy.deepcopy(POLICY)
-                complete_reviews(template, policy)
                 # A serialized retained report, not the manifest, is the policy input.
                 retained = json.loads(json.dumps(template))
                 self.assertNotIn(directory, json.dumps(retained))
@@ -394,7 +437,6 @@ class Policy(unittest.TestCase):
         for mode in ("dynamic", "dlopen"):
             baseline, policy = complete_report(), copy.deepcopy(POLICY)
             component = gcc_runtime(baseline, mode)
-            complete_reviews(baseline, policy)
             self.assertEqual(module.validate(baseline, policy, WORKSPACE), [])
             for license_id in (
                 "GPL-3.0-or-later", "GPL-3.0-only", "AGPL-3.0-or-later",
@@ -481,7 +523,6 @@ class Policy(unittest.TestCase):
                                ("linux", "static"), ("linux", "embedded")):
             value, policy = complete_report(platform), copy.deepcopy(POLICY)
             gcc_runtime(value, mode)
-            complete_reviews(value, policy)
             with self.subTest(platform=platform, mode=mode), self.assertRaisesRegex(ValueError, "native license"):
                 module.validate(value, policy, WORKSPACE)
         # The native-only allowance cannot change Cargo's SPDX or FFmpeg policies.
@@ -509,7 +550,6 @@ class Policy(unittest.TestCase):
 
     def test_native_closure_tamper_omission_and_unsupported_evidence(self):
         baseline, policy = complete_report(), copy.deepcopy(POLICY)
-        complete_reviews(baseline, policy)
         mutations = [
             lambda e: e.update(schema=True), lambda e: e.update(schema=2),
             lambda e: e.update(complete=True), lambda e: e.pop("components"),
@@ -556,12 +596,14 @@ class Policy(unittest.TestCase):
             mutate(value)
             with self.subTest(mutation=mutate), self.assertRaises(ValueError):
                 module.validate(value, policy, WORKSPACE)
-        # An LGPL review must bind component identity AND artifact digest; FFmpeg review is not enough.
+        # A static LGPL review must bind component identity AND artifact digest.
         for changes in ({"domain": "ffmpeg"}, {"subject": "different"}, {"license": "LGPL-3.0-only"}):
+            value = copy.deepcopy(baseline)
+            set_component_mode(value, "0-dynamic", "static")
             scoped = copy.deepcopy(policy)
-            next(r for r in scoped["lgpl_legal_approvals"] if r["domain"] == "native").update(changes)
+            scoped_native_review(value, scoped, "0-dynamic").update(changes)
             with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "review pending"):
-                module.validate(baseline, scoped, WORKSPACE)
+                module.validate(value, scoped, WORKSPACE)
         for key in ("notice", "source", "relinking"):
             value = copy.deepcopy(baseline)
             component = next(c for c in value["records"][-1]["evidence"]["components"] if c["license"]["disposition"] == "review")
@@ -580,7 +622,7 @@ class Policy(unittest.TestCase):
             result = subprocess.run(command + paths, capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 1)
             self.assertIn("policy check only", result.stdout)
-            self.assertIn("LGPL legal review pending", result.stdout)
+            self.assertNotIn("FFmpeg LGPL legal review", result.stdout)
             self.assertIn("schema 1 cannot establish", result.stdout)
             result = subprocess.run(command + ["--max-report-bytes", "128"] + paths,
                                     capture_output=True, text=True, timeout=10)
@@ -593,7 +635,6 @@ class Policy(unittest.TestCase):
             # Test-only policy isolates the represented checks; production keeps the closure hold.
             policy = copy.deepcopy(POLICY)
             policy["require_complete_native_license_closure"] = False
-            legal_reviews(report(), policy)
             policy_path = Path(directory) / "test-policy.json"
             policy_path.write_text(json.dumps(policy))
             test_command = command + ["--policy", str(policy_path)]
