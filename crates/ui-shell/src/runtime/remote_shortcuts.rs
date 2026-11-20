@@ -803,6 +803,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn numbered_replay_reaches_native_sftp_batch_dispatch() {
+        async fn assert_numbered_replay_dispatch(
+            job_id: u64,
+            transport: crate::remote_transport::RemoteTransportKind,
+        ) {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let source = temp.path().join("photo.jpg");
+            std::fs::write(&source, b"jpeg").expect("source file");
+            let destination_dir = temp.path().join("out");
+            std::fs::create_dir(&destination_dir).expect("destination directory");
+            // A sibling named like the source stands in for the already installed file.
+            // A fallback to rsync would overwrite it instead of the numbered name.
+            let sibling = destination_dir.join("photo.jpg");
+            std::fs::write(&sibling, b"untouched").expect("sibling");
+            let numbered = destination_dir.join("photo (1).jpg");
+            let items = vec![PendingFileItem {
+                source: object_ref(&source),
+                destination_path: numbered.to_string_lossy().into_owned(),
+                installed_path: None,
+                undoable: true,
+            }];
+
+            let runtime = runtime_with_mapping(&destination_dir, transport);
+            let job_id = JobId(job_id);
+            runtime.track_running_job_for_test(job_id.clone(), items.len() as u64);
+            let generation = runtime.cancel_generation(&job_id);
+            let hook = install_batch_hook(&job_id, true);
+            let batch_runtime = Arc::clone(&runtime);
+            let batch_job_id = job_id.clone();
+            let batch_items = items.clone();
+            let batch = tokio::spawn(async move {
+                batch_runtime
+                    .try_rsync_batch_admitted(
+                        &batch_job_id,
+                        generation,
+                        &batch_items,
+                        false,
+                        &ConflictResolution::Overwrite,
+                    )
+                    .await
+            });
+
+            // A valid source passes validation, so entering the hook proves the numbered
+            // batch reached run_sftp_batch rather than being declined after preflight.
+            tokio::time::timeout(Duration::from_secs(5), hook.entered.notified())
+                .await
+                .expect("numbered replay reached the SFTP mutation boundary");
+            hook.release.notify_one();
+            let result = tokio::time::timeout(Duration::from_secs(5), batch)
+                .await
+                .expect("batch settles")
+                .expect("batch task joins");
+            assert_eq!(result.expect("numbered replay dispatched"), Some(4));
+            assert_eq!(
+                std::fs::read(&numbered).expect("numbered destination written"),
+                b"jpeg"
+            );
+            assert_eq!(
+                std::fs::read(&sibling).expect("sibling intact"),
+                b"untouched"
+            );
+            remove_batch_hook(&job_id);
+        }
+
+        assert_numbered_replay_dispatch(
+            9_800_400,
+            crate::remote_transport::RemoteTransportKind::Sftp,
+        )
+        .await;
+        assert_numbered_replay_dispatch(
+            9_800_500,
+            crate::remote_transport::RemoteTransportKind::Auto,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn transferred_bytes_are_captured_before_move_removes_sources() {
         let temp = tempfile::tempdir().expect("tempdir");
         let items: Vec<_> = [("first.bin", 17usize), ("second.bin", 34)]
