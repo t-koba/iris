@@ -609,9 +609,26 @@ mod tests {
             crate::remote_transport::RemoteTransportKind::Sftp,
         );
         let error = sftp
-            .try_rsync_batch(&[item(source_ref)], false, &ConflictResolution::Overwrite)
+            .try_rsync_batch(
+                &[item(source_ref.clone())],
+                false,
+                &ConflictResolution::Overwrite,
+            )
             .await
             .expect_err("renamed batch reaches SFTP preflight");
+        assert!(error.contains("losslessly"), "{error}");
+        assert!(!renamed.exists());
+
+        // Auto tries native SFTP first. Its rewritten arm must also validate before
+        // handing anything to a backend instead of declining the numbered replay early.
+        let auto = runtime_with_mapping(
+            &destination_dir,
+            crate::remote_transport::RemoteTransportKind::Auto,
+        );
+        let error = auto
+            .try_rsync_batch(&[item(source_ref)], false, &ConflictResolution::Overwrite)
+            .await
+            .expect_err("renamed batch reaches Auto preflight");
         assert!(error.contains("losslessly"), "{error}");
         assert!(!renamed.exists());
     }
