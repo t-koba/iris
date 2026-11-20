@@ -95,6 +95,11 @@ FLOW_STEP_RE = re.compile(r"^\s*-\s*\{", re.MULTILINE)
 # split key/value spellings can hide a `uses` key from the scanners above, so
 # the whole syntax class is refused on executable lines.
 EXPLICIT_KEY_RE = re.compile(r"^\s*(?:-\s*)?[?:](?:\s|$)")
+# An anchor or alias in key position can resolve to `uses` even though the
+# line has no literal `uses` token. This workflow uses neither in mappings.
+ANCHOR_KEY_RE = re.compile(r"^\s*(?:-\s*)?[&*][\w-]")
+# YAML tags on a key are another way to spell a key without a literal token.
+TAG_KEY_RE = re.compile(r"^\s*(?:-\s*)?!")
 # YAML double-quoted scalars resolve numeric escapes before GitHub reads a
 # mapping key, so decode them before any action reference is scanned.
 YAML_ESCAPE_RE = re.compile(r"\\(?:u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|x[0-9a-fA-F]{2})")
@@ -241,7 +246,11 @@ def validate(text):
     for line in code_lines:
         require(not EXPLICIT_KEY_RE.match(line),
                 f"explicit YAML key/value syntax is not permitted: {line.strip()}")
-    checks["no_explicit_keys"] = True
+        require(not ANCHOR_KEY_RE.match(line),
+                f"YAML anchor/alias in key position is not permitted: {line.strip()}")
+        require(not TAG_KEY_RE.match(line),
+                f"YAML tag in key position is not permitted: {line.strip()}")
+    checks["no_special_keys"] = True
     code = "\n".join(code_lines)
     for marker in ATTESTATION_MARKERS:
         require(marker in code,

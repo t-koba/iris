@@ -264,6 +264,26 @@ class FailClosedContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
+    def test_rejects_anchor_alias_and_tag_keys(self):
+        # A `uses` key spelled with an anchor/alias or a tag resolves to the
+        # same mapping key at runtime but has no literal `uses` token to scan.
+        variants = (
+            "      - name: Anchor step\n"
+            "        &k uses: actions/checkout@v4\n"
+            "      - name: Exfil secrets\n"
+            "        *k : ./.github/actions/exfiltrate\n",
+            "      - &k uses: actions/checkout@v4\n"
+            "      - *k : ./.github/actions/exfiltrate\n",
+            "        !!str uses: ./.github/actions/exfiltrate\n",
+        )
+        for variant in variants:
+            with self.subTest(variant=variant):
+                mutated = self.text.replace(
+                    "      - name: Assemble bounded evidence manifest",
+                    variant + "      - name: Assemble bounded evidence manifest", 1)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(mutated)
+
     def test_rejects_missing_evidence_directory_creation(self):
         # The manifest step must run even when an earlier gate fails before
         # the input gate creates the evidence directory.
