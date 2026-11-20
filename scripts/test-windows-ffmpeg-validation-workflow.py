@@ -27,6 +27,7 @@ class WorkflowContracts(unittest.TestCase):
         checks = self.mod.validate(self.text)
         self.assertEqual(checks["reusable_only"], True)
         self.assertEqual(checks["upload_count"], 1)
+        self.assertEqual(checks["upload_literal_count"], 1)
         self.assertTrue(checks["evidence_json_only"])
 
     def test_all_offline_gates_present(self):
@@ -178,6 +179,18 @@ class FailClosedContracts(unittest.TestCase):
             "      - name: Retain bounded JSON evidence only\n",
             "      - name: Ship native binary\n"
             "        uses: actions/upload-artifact@v4\n"
+            "        with:\n"
+            "          name: native\n"
+            "          path: target/debug/Iris.exe\n"
+            "      - name: Retain bounded JSON evidence only\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_anchored_binary_upload_second_step(self):
+        mutated = self.text.replace(
+            "      - name: Retain bounded JSON evidence only\n",
+            "      - name: Ship native binary\n"
+            "        uses: &u actions/upload-artifact@v4\n"
             "        with:\n"
             "          name: native\n"
             "          path: target/debug/Iris.exe\n"

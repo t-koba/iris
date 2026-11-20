@@ -244,6 +244,14 @@ def validate(text):
             "gh release invocation present (all subcommands are forbidden)")
     checks["no_publishing"] = True
 
+    # The action id itself is syntax-invariant. Counting it on executable
+    # lines catches aliases, anchors and any future YAML spelling that the
+    # structural scans above might not recognise.
+    literal_uploads = sum(line.count(UPLOAD_ACTION_PREFIX) for line in code_lines)
+    checks["upload_literal_count"] = literal_uploads
+    require(literal_uploads == 1,
+            "workflow must name exactly one upload-artifact action")
+
     # Every action step must be known. This catches new or renamed actions,
     # including upload actions written with unusual but valid YAML spelling.
     seen_actions = []
