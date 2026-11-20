@@ -55,6 +55,18 @@ REQUIRED_MARKERS = (
     "rm -rf",
 )
 
+# Only these actions may appear in the validation workflow. A closed allowlist
+# fails closed on any new or renamed action (including a differently spelled
+# upload action) instead of trying to enumerate every upload syntax.
+ALLOWED_ACTIONS = frozenset((
+    "actions/checkout@v4",
+    "ilammy/msvc-dev-cmd@v1",
+    "dtolnay/rust-toolchain@master",
+    "actions/upload-artifact@v4",
+))
+UPLOAD_ACTION_PREFIX = "actions/upload-artifact@"
+USES_KEY_RE = re.compile(r"^\s*(?:-\s+)?['\"]?uses['\"]?\s*:\s*(.*?)\s*$")
+
 FORBIDDEN_MARKERS = (
     "workflow_dispatch:",
     "  pull_request:",
@@ -106,18 +118,39 @@ def permissions_read_only(text):
     return True, ""
 
 
+def uses_action(line):
+    """Return the YAML `uses:` scalar on a mapping line, spelling-independent.
+
+    Extra separation whitespace and single/double quoted scalars are accepted
+    by GitHub Actions as the same action reference, so the guard must see them
+    too. Anything unparseable is returned verbatim and fails the allowlist.
+    """
+    m = USES_KEY_RE.match(line)
+    if not m:
+        return None
+    value = m.group(1).strip()
+    if value[:1] in ("'", '"'):
+        quote = value[0]
+        end = value.find(quote, 1)
+        if end < 0:
+            return value
+        return value[1:end]
+    return re.split(r"\s+#", value, maxsplit=1)[0].strip()
+
+
 def upload_paths(text):
     """Return (step_count, paths) for every upload-artifact step, inline or block.
 
-    Every `uses: actions/upload-artifact@` step is scanned; inline `path: X` and
-    `path: |` block scalars are both collected so no upload form can evade the
-    JSON-evidence guard.
+    Every `uses:` mapping line is normalized to its action scalar before the
+    upload-artifact prefix is matched; inline `path: X` and `path: |` block
+    scalars are both collected so no upload form can evade the guard.
     """
     lines = text.splitlines()
     paths = []
     steps = 0
     for i, line in enumerate(lines):
-        if "uses: actions/upload-artifact@" not in line:
+        action = uses_action(line)
+        if action is None or not action.startswith(UPLOAD_ACTION_PREFIX):
             continue
         steps += 1
         base = len(line) - len(line.lstrip())
@@ -185,6 +218,17 @@ def validate(text):
             "gh release invocation present (all subcommands are forbidden)")
     checks["no_publishing"] = True
 
+    # Every action step must be known. This catches new or renamed actions,
+    # including upload actions written with unusual but valid YAML spelling.
+    seen_actions = []
+    for line in code_lines:
+        action = uses_action(line)
+        if action is None:
+            continue
+        require(action in ALLOWED_ACTIONS, f"unrecognized action step: {action}")
+        seen_actions.append(action)
+    checks["actions"] = seen_actions
+
     ok, reason = permissions_read_only(text)
     require(ok, reason)
     checks["read_only_permissions"] = True
@@ -210,6 +254,7 @@ def main():
         print(json.dumps(dict(
             triggers=["workflow_call"], offline_gates=list(OFFLINE_GATES),
             required_markers=list(REQUIRED_MARKERS), forbidden_markers=list(FORBIDDEN_MARKERS),
+            allowed_actions=sorted(ALLOWED_ACTIONS),
         ), indent=2))
         return
     checks = validate(WORKFLOW.read_text())

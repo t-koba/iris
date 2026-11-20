@@ -41,6 +41,21 @@ class WorkflowContracts(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         shape = json.loads(r.stdout)
         self.assertEqual(shape["triggers"], ["workflow_call"])
+        self.assertIn("actions/upload-artifact@v4", shape["allowed_actions"])
+
+    def test_uses_action_normalizes_yaml_spelling(self):
+        mod = self.mod
+        self.assertEqual(mod.uses_action("        uses: actions/upload-artifact@v4"),
+                         "actions/upload-artifact@v4")
+        self.assertEqual(mod.uses_action("        uses:  actions/upload-artifact@v4"),
+                         "actions/upload-artifact@v4")
+        self.assertEqual(mod.uses_action('        uses: "actions/upload-artifact@v4"'),
+                         "actions/upload-artifact@v4")
+        self.assertEqual(mod.uses_action("        uses: 'actions/upload-artifact@v4'"),
+                         "actions/upload-artifact@v4")
+        self.assertEqual(mod.uses_action("      - uses: actions/checkout@v4 # pinned"),
+                         "actions/checkout@v4")
+        self.assertIsNone(mod.uses_action("        run: echo uses: actions/upload-artifact@v4"))
 
 
 class FailClosedContracts(unittest.TestCase):
@@ -136,6 +151,50 @@ class FailClosedContracts(unittest.TestCase):
             "          name: native\n"
             "          path: target/debug/Iris.exe\n"
             "      - name: Retain bounded JSON evidence only\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_spaced_binary_upload_second_step(self):
+        mutated = self.text.replace(
+            "      - name: Retain bounded JSON evidence only\n",
+            "      - name: Ship native binary\n"
+            "        uses:  actions/upload-artifact@v4\n"
+            "        with:\n"
+            "          name: native\n"
+            "          path: target/debug/Iris.exe\n"
+            "      - name: Retain bounded JSON evidence only\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_double_quoted_binary_upload_second_step(self):
+        mutated = self.text.replace(
+            "      - name: Retain bounded JSON evidence only\n",
+            '      - name: Ship native binary\n'
+            '        uses: "actions/upload-artifact@v4"\n'
+            '        with:\n'
+            '          name: native\n'
+            '          path: target/debug/Iris.exe\n'
+            '      - name: Retain bounded JSON evidence only\n', 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_single_quoted_binary_upload_second_step(self):
+        mutated = self.text.replace(
+            "      - name: Retain bounded JSON evidence only\n",
+            "      - name: Ship native binary\n"
+            "        uses: 'actions/upload-artifact@v4'\n"
+            "        with:\n"
+            "          name: native\n"
+            "          path: target/debug/Iris.exe\n"
+            "      - name: Retain bounded JSON evidence only\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_unlisted_action(self):
+        mutated = self.text.replace(
+            "      - name: Assemble bounded evidence manifest",
+            "      - uses: unrelated/local-action@v1\n"
+            "      - name: Assemble bounded evidence manifest", 1)
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
