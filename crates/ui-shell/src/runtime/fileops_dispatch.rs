@@ -619,7 +619,7 @@ mod tests {
                     )
                     .await
                     .unwrap_err();
-                assert!(error.contains(expected));
+                assert!(error.message().contains(expected));
             }
             let id = JobId(9_900_001);
             assert!(runtime

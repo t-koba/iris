@@ -250,6 +250,9 @@ fn dispatch(state: &mut AppState, message: Message) -> Task<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::{
+        install_cancel_after_destination_write, TransferFailure, TransferWriteOutcome,
+    };
     use crate::test_support::local_entry;
 
     use iris_core_domain::types::transfer::{JobId, TaskState};
@@ -611,7 +614,7 @@ mod tests {
         job_id
     }
 
-    fn item_done() -> Result<crate::messages::PendingItemResult, String> {
+    fn item_done() -> Result<crate::messages::PendingItemResult, TransferFailure> {
         Ok(crate::messages::PendingItemResult {
             bytes_completed: 10,
             files_completed: 1,
@@ -651,7 +654,7 @@ mod tests {
                 job_id.clone(),
                 0,
                 0,
-                Err(crate::runtime::STALE_TRANSFER_DISPATCH.to_string()),
+                Err(crate::runtime::STALE_TRANSFER_DISPATCH.into()),
             ),
         );
 
@@ -663,7 +666,12 @@ mod tests {
 
         let _ = update(
             &mut state,
-            Message::PendingItemCompleted(job_id, 0, 0, Err("transfer canceled".to_string())),
+            Message::PendingItemCompleted(
+                job_id,
+                0,
+                0,
+                Err(TransferFailure::Canceled(TransferWriteOutcome::NoWrite)),
+            ),
         );
 
         assert_eq!(state.jobs[0].state, JobState::Canceled);
@@ -671,7 +679,7 @@ mod tests {
     }
 
     fn assert_completion_ignored_after_resume(
-        result: Result<crate::messages::PendingItemResult, String>,
+        result: Result<crate::messages::PendingItemResult, TransferFailure>,
     ) {
         let mut state = AppState::default();
         let job_id = running_transfer(&mut state, 2, 1);
@@ -703,7 +711,9 @@ mod tests {
 
     #[test]
     fn queued_cancellation_does_not_cancel_the_resumed_job() {
-        assert_completion_ignored_after_resume(Err("transfer canceled".to_string()));
+        assert_completion_ignored_after_resume(Err(TransferFailure::Canceled(
+            TransferWriteOutcome::NoWrite,
+        )));
     }
 
     #[test]
@@ -719,7 +729,7 @@ mod tests {
 
         let _ = update(
             &mut state,
-            Message::PendingItemCompleted(job_id.clone(), 0, 0, Err("disk full".to_string())),
+            Message::PendingItemCompleted(job_id.clone(), 0, 0, Err("disk full".into())),
         );
         // The other file in flight finishes, but nothing new starts while a decision is pending.
         let _ = update(
@@ -751,7 +761,7 @@ mod tests {
         let _ = process_pending_operation(&mut state);
         let _ = update(
             &mut state,
-            Message::PendingItemCompleted(job_id.clone(), 0, 0, Err("timeout".to_string())),
+            Message::PendingItemCompleted(job_id.clone(), 0, 0, Err("timeout".into())),
         );
 
         let _ = update(
@@ -1743,7 +1753,12 @@ mod tests {
         let _ = process_pending_operation(&mut state);
         let _ = update(
             &mut state,
-            Message::PendingItemCompleted(job_id, 0, 0, Err("transfer canceled".into())),
+            Message::PendingItemCompleted(
+                job_id,
+                0,
+                0,
+                Err(TransferFailure::Canceled(TransferWriteOutcome::NoWrite)),
+            ),
         );
         state
     }
@@ -1786,7 +1801,12 @@ mod tests {
 
         let _ = update(
             &mut state,
-            Message::PendingItemCompleted(job_id, 0, 0, Err("transfer canceled".into())),
+            Message::PendingItemCompleted(
+                job_id,
+                0,
+                0,
+                Err(TransferFailure::Canceled(TransferWriteOutcome::NoWrite)),
+            ),
         );
 
         assert!(state.pending_operation.is_none());
@@ -1812,6 +1832,107 @@ mod tests {
         assert!(state.pending_operation.is_none());
         assert_eq!(state.undo_journal.pop_redo(), Some(op));
         assert!(!state.undo_journal.can_undo());
+    }
+
+    /// A replay item is popped before its transfer starts. Even if a real transfer installed
+    /// the destination and its completion was only delivered after Abort, the journal entry
+    /// must not be resurrected by the abort or by the late success.
+    #[tokio::test]
+    async fn applied_transfer_completion_withheld_until_abort_leaves_replay_stacks_empty() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let source = temp.path().join("source.txt");
+        let destination = temp.path().join("destination.txt");
+        std::fs::write(&source, b"real payload").unwrap();
+
+        let mut state = AppState::default();
+        let _ = next_job(&mut state, 3_000_000);
+        let (job_id, completion) = start_one_item_copy(
+            &mut state,
+            &source,
+            &destination,
+            false,
+            Some(PendingUndoAction::PushRedo(replay_op())),
+        )
+        .await;
+        assert_eq!(std::fs::read(&destination).unwrap(), b"real payload");
+        assert!(matches!(completion, Message::PendingItemCompleted(..)));
+
+        let _ = update(&mut state, Message::AbortJob(job_id));
+        let _ = update(&mut state, completion);
+
+        assert!(state.pending_operation.is_none());
+        assert!(!state.undo_journal.can_undo());
+        assert!(!state.undo_journal.can_redo());
+    }
+
+    /// The runtime observes cancellation only after the real destination write. The completion
+    /// carries that evidence, so settling the item must not restore the popped replay entry.
+    #[tokio::test]
+    async fn cancellation_after_destination_write_does_not_restore_replay() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let source = temp.path().join("source.txt");
+        let destination = temp.path().join("destination.txt");
+        std::fs::write(&source, b"real payload").unwrap();
+
+        let mut state = AppState::default();
+        let _ = next_job(&mut state, 4_000_000);
+        let planned_job_id = file_ops::next_job_id(&state);
+        install_cancel_after_destination_write(&planned_job_id);
+        let (job_id, completion) = start_one_item_copy(
+            &mut state,
+            &source,
+            &destination,
+            false,
+            Some(PendingUndoAction::RecordOp(replay_op())),
+        )
+        .await;
+        assert_eq!(job_id, planned_job_id);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"real payload");
+        assert!(
+            matches!(
+                &completion,
+                Message::PendingItemCompleted(
+                    _,
+                    _,
+                    _,
+                    Err(TransferFailure::Canceled(
+                        TransferWriteOutcome::Applied { .. }
+                    ))
+                )
+            ),
+            "the runtime must report the write it made: {completion:?}"
+        );
+
+        let _ = update(&mut state, completion);
+
+        assert!(state.pending_operation.is_none());
+        assert_eq!(state.jobs[1].state, JobState::Canceled);
+        assert!(!state.undo_journal.can_undo());
+        assert!(!state.undo_journal.can_redo());
+    }
+
+    /// A cancellation settlement without an explicit no-write proof is not a no-write proof.
+    #[test]
+    fn cancellation_settlement_without_write_proof_does_not_restore_replay() {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 1, 1);
+        state.pending_operation.as_mut().unwrap().undo_action =
+            Some(PendingUndoAction::PushRedo(replay_op()));
+        let _ = process_pending_operation(&mut state);
+
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(
+                job_id,
+                0,
+                0,
+                Err(TransferFailure::Error("transfer canceled".into())),
+            ),
+        );
+
+        assert!(state.pending_operation.is_none());
+        assert!(!state.undo_journal.can_undo());
+        assert!(!state.undo_journal.can_redo());
     }
 
     #[test]
@@ -3300,6 +3421,7 @@ mod tests {
         source: &std::path::Path,
         destination: &std::path::Path,
         expect_conflict: bool,
+        undo_action: Option<PendingUndoAction>,
     ) -> (JobId, Message) {
         let start = start_pending_file_operation_with_undo_action(
             state,
@@ -3310,7 +3432,7 @@ mod tests {
                 undoable: true,
             }],
             false,
-            Some(PendingUndoAction::RecordTransfer),
+            undo_action,
         );
         let job_id = state
             .pending_operation
@@ -3355,8 +3477,14 @@ mod tests {
         destination: &std::path::Path,
         expect_conflict: bool,
     ) -> JobId {
-        let (job_id, completion) =
-            start_one_item_copy(state, source, destination, expect_conflict).await;
+        let (job_id, completion) = start_one_item_copy(
+            state,
+            source,
+            destination,
+            expect_conflict,
+            Some(PendingUndoAction::RecordTransfer),
+        )
+        .await;
         drain_completion_tasks(update(state, completion), state).await;
         job_id
     }
@@ -3446,7 +3574,14 @@ mod tests {
 
         let mut state = AppState::default();
         let _ = next_job(&mut state, 2_000_000);
-        let (job_id, completion) = start_one_item_copy(&mut state, &source, &merged, true).await;
+        let (job_id, completion) = start_one_item_copy(
+            &mut state,
+            &source,
+            &merged,
+            true,
+            Some(PendingUndoAction::RecordTransfer),
+        )
+        .await;
         // Leave the completion undispatched: the next session restores from the job store.
         assert!(matches!(completion, Message::PendingItemCompleted(..)));
         assert_eq!(

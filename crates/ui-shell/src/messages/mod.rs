@@ -4,7 +4,7 @@ pub use pane::{EntryMetadataUpdate, PaneMessage};
 
 use crate::config::{LayoutConfig, LocaleChoice, ThemeChoice};
 use crate::input::dnd::DndTarget;
-use crate::runtime::ConflictMetadata;
+use crate::runtime::{ConflictMetadata, TransferFailure};
 use crate::state::{
     BatchRenameMode, CacheEncryptionPolicy, CloudProvider, NetworkProtocol, PreviewData,
     PreviewPosition, ResizeTarget, SettingsSection, SidebarItem, ThumbnailCacheKey,
@@ -393,7 +393,12 @@ pub enum Message {
     OpenObjectCompleted(Result<(), String>),
     ConflictCheckCompleted(JobId, usize, Result<Option<ConflictMetadata>, String>),
     /// Job, item index, cancellation generation at dispatch, outcome.
-    PendingItemCompleted(JobId, usize, u64, Result<PendingItemResult, String>),
+    PendingItemCompleted(
+        JobId,
+        usize,
+        u64,
+        Result<PendingItemResult, TransferFailure>,
+    ),
 
     ToggleHiddenFiles,
     PruneExpiredNotifications,

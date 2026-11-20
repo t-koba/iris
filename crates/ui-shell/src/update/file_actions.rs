@@ -4,7 +4,7 @@ use super::undo_ops::*;
 use super::update;
 use crate::i18n::{tr, tr_args};
 use crate::messages::{Message, PaneMessage, SidebarMessage};
-use crate::runtime::{app_runtime, STALE_TRANSFER_DISPATCH};
+use crate::runtime::{app_runtime, TransferFailure, TransferWriteOutcome, STALE_TRANSFER_DISPATCH};
 use crate::state::{
     AppState, BatchRenameDialogState, BatchRenameEntry, BatchRenameMode, BatchRenamePreviewItem,
     ClipboardContent, ContextMenuKind, ContextMenuState, DialogState, NotificationAction,
@@ -902,7 +902,7 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                     }
                     return process_pending_operation(state);
                 }
-                Err(error) if error == "transfer canceled" => {
+                Err(failure) if failure.is_cancellation() => {
                     if let Some(job) = state.jobs.iter_mut().find(|j| j.id == job_id) {
                         job.state = JobState::Canceled;
                         reset_job_speed(job);
@@ -913,22 +913,30 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                         if let Some(pending) = &mut state.pending_operation {
                             pending.in_flight = pending.in_flight.saturating_sub(1);
                         }
-                        let replay = state
-                            .pending_operation
-                            .as_ref()
-                            .and_then(replay_entry_to_restore);
-                        if let Some(entry) = replay {
-                            restore_replay_entry(state, entry);
+                        // Settling a cancelled item says nothing about its destination. Only an
+                        // explicit no-write proof may restore a popped replay entry; a write or
+                        // an ambiguous destination leaves the journal untouched.
+                        if matches!(
+                            &failure,
+                            TransferFailure::Canceled(TransferWriteOutcome::NoWrite)
+                        ) {
+                            let replay = state
+                                .pending_operation
+                                .as_ref()
+                                .and_then(replay_entry_to_restore);
+                            if let Some(entry) = replay {
+                                restore_replay_entry(state, entry);
+                            }
                         }
                         state.pending_operation = None;
                     }
                     return Task::none();
                 }
-                Err(error) if error == STALE_TRANSFER_DISPATCH => {
+                Err(failure) if failure.message() == STALE_TRANSFER_DISPATCH => {
                     // This dispatch was never admitted to the resumed operation.
                     return Task::none();
                 }
-                Err(error) => {
+                Err(failure) => {
                     if !is_current_job {
                         return Task::none();
                     }
@@ -940,7 +948,7 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                     // Transfers already running finish; nothing new starts until the user
                     // decides. One notification covers every failure of the job.
                     if first_failure {
-                        fail_pending_job(state, &job_id, &error);
+                        fail_pending_job(state, &job_id, failure.message());
                     }
                 }
             }

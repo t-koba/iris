@@ -42,6 +42,46 @@ struct TransferExecutionContext<'a> {
     record_chunk_state: bool,
     progress_tx: &'a watch::Sender<ProgressInfo>,
     control: &'a TransferControl,
+    evidence: &'a DestinationWriteEvidence,
+}
+
+/// Tracks the strongest destination-write knowledge reached by one item. The state only
+/// advances, so a cancellation can never downgrade a write that may already have happened.
+#[derive(Clone, Default)]
+struct DestinationWriteEvidence(Arc<Mutex<TransferWriteOutcome>>);
+
+impl DestinationWriteEvidence {
+    fn may_have_written(&self) {
+        let mut evidence = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        if *evidence == TransferWriteOutcome::NoWrite {
+            *evidence = TransferWriteOutcome::MayHaveWritten;
+        }
+    }
+
+    fn applied(&self, installed_path: Option<String>) {
+        let mut evidence = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        if !matches!(
+            &*evidence,
+            TransferWriteOutcome::Applied {
+                installed_path: Some(_)
+            }
+        ) {
+            *evidence = TransferWriteOutcome::Applied { installed_path };
+        }
+    }
+
+    fn failure(&self, error: String) -> TransferFailure {
+        if error == "transfer canceled" {
+            TransferFailure::Canceled(
+                self.0
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone(),
+            )
+        } else {
+            TransferFailure::Error(error)
+        }
+    }
 }
 
 struct TransferPathRequest<'a> {
@@ -297,7 +337,7 @@ impl AppRuntime {
         is_move: bool,
         resolution: ConflictResolution,
         base_bytes_completed: u64,
-    ) -> impl std::future::Future<Output = Result<TransferItemOutcome, String>> + Send + 'static
+    ) -> impl std::future::Future<Output = Result<TransferItemOutcome, TransferFailure>> + Send + 'static
     {
         let dispatch_generation = self.job_manager.cancel_generation(&job_id);
         async move {
@@ -315,12 +355,11 @@ impl AppRuntime {
                 .await;
             // An admitted dispatch keeps its canceled control even after the job resumes.
             match result {
-                Err(error)
-                    if error.as_str() == "transfer canceled"
-                        && self.job_manager.cancel_generation(&job_id) != dispatch_generation
+                Err(TransferFailure::Canceled(_))
+                    if self.job_manager.cancel_generation(&job_id) != dispatch_generation
                         && self.job_manager.get_state(&job_id) != Some(JobState::Canceled) =>
                 {
-                    Err(STALE_TRANSFER_DISPATCH.into())
+                    Err(TransferFailure::Error(STALE_TRANSFER_DISPATCH.to_string()))
                 }
                 result => result,
             }
@@ -340,11 +379,14 @@ impl AppRuntime {
         resolution: ConflictResolution,
         base_bytes_completed: u64,
         dispatch_generation: u64,
-    ) -> Result<TransferItemOutcome, String> {
+    ) -> Result<TransferItemOutcome, TransferFailure> {
         #[cfg(test)]
         tests::pause_admission(&job_id, tests::AdmissionStage::BeforeRegistration).await;
 
-        let admission = self.admit_transfer_for(&job_id, dispatch_generation)?;
+        let evidence = DestinationWriteEvidence::default();
+        let admission = self
+            .admit_transfer_for(&job_id, dispatch_generation)
+            .map_err(|error| evidence.failure(error))?;
         let control = admission.control();
         #[cfg(test)]
         tests::pause_admission(&job_id, tests::AdmissionStage::Preflight).await;
@@ -357,9 +399,9 @@ impl AppRuntime {
         if control.cancel_token().is_cancelled()
             || self.job_manager.get_state(&job_id) == Some(JobState::Canceled)
         {
-            return Err("transfer canceled".into());
+            return Err(evidence.failure("transfer canceled".to_string()));
         }
-        preflight?;
+        preflight.map_err(|error| evidence.failure(error))?;
         let task_id = persisted_task_id(&job_id, task_index);
 
         let (progress_tx, mut progress_rx) =
@@ -394,6 +436,7 @@ impl AppRuntime {
             record_chunk_state: true,
             progress_tx: &progress_tx,
             control,
+            evidence: &evidence,
         };
         let transfer_result = self
             .transfer_path(
@@ -444,7 +487,7 @@ impl AppRuntime {
             }
             Err(error) => {
                 self.update_task_state(&job_id, task_index, TaskState::Failed, Some(&error));
-                Err(error)
+                Err(evidence.failure(error))
             }
         }
     }
@@ -460,6 +503,7 @@ impl AppRuntime {
             let job_id = context.job_id;
             let task_index = context.task_index;
             let control = context.control;
+            let evidence = context.evidence;
             let TransferPathRequest {
                 source,
                 destination,
@@ -504,12 +548,16 @@ impl AppRuntime {
             // Record the exact installed path, including when it equals the requested
             // destination: a completion without this proof cannot support Undo later.
             let installed_path = Some(final_dst.to_string_lossy().into_owned());
+            // Past this point an installed symlink, directory, child or file may write to the
+            // destination. A cancellation from here on is never proof of a no-write replay.
+            evidence.may_have_written();
 
             match self
                 .transfer_local_symlink(source, &final_dst, is_move, &resolution)
                 .await?
             {
                 SymlinkTransfer::Recreated => {
+                    evidence.applied(installed_path.clone());
                     return Ok(TransferItemOutcome {
                         bytes_completed: 0,
                         applied: true,
@@ -543,20 +591,26 @@ impl AppRuntime {
                     .await
                     .map(|mut outcome| {
                         if outcome.applied {
+                            evidence.applied(installed_path.clone());
                             outcome.installed_path = installed_path;
                         }
                         outcome
                     });
             }
 
-            self.transfer_file(context, source, &final_dst, is_move, resolution)
+            let installed = self
+                .transfer_file(context, source, &final_dst, is_move, resolution)
                 .await
-                .map(|result| TransferItemOutcome {
-                    bytes_completed: result.bytes_transferred,
-                    applied: true,
-                    installed_path,
-                    undoable: true,
-                })
+                .inspect(|_| evidence.applied(installed_path.clone()));
+            // Test-only: inject a cancellation observed after the real destination write.
+            #[cfg(test)]
+            let installed = tests::cancel_after_destination_write(job_id, installed);
+            installed.map(|result| TransferItemOutcome {
+                bytes_completed: result.bytes_transferred,
+                applied: true,
+                installed_path,
+                undoable: true,
+            })
         })
     }
 
@@ -575,6 +629,7 @@ impl AppRuntime {
                 record_chunk_state: false,
                 progress_tx: context.progress_tx,
                 control,
+                evidence: context.evidence,
             };
             let TransferDirectoryRequest {
                 source,
@@ -1126,8 +1181,37 @@ async fn remove_symlink(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    static CANCEL_ON_WRITE: OnceLock<Mutex<HashSet<u64>>> = OnceLock::new();
+
+    /// Marks a job whose next completed destination write must be reported as canceled. The
+    /// write itself is performed by the real transfer; only the observed cancellation is
+    /// injected, so completion and journal handling are exercised unchanged.
+    pub(crate) fn cancel_after_destination_write(
+        job_id: &JobId,
+        result: Result<TransferResult, String>,
+    ) -> Result<TransferResult, String> {
+        let cancel = CANCEL_ON_WRITE
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .remove(&job_id.0);
+        if cancel && result.is_ok() {
+            Err("transfer canceled".to_string())
+        } else {
+            result
+        }
+    }
+
+    pub(crate) fn install_cancel_after_destination_write(job_id: &JobId) {
+        CANCEL_ON_WRITE
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(job_id.0);
+    }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub(super) enum AdmissionStage {
@@ -1232,7 +1316,10 @@ mod tests {
                     .unwrap()
                     .unwrap()
                     .expect_err("canceled admission must not transfer");
-                assert_eq!(error, "transfer canceled");
+                assert_eq!(
+                    error,
+                    TransferFailure::Canceled(TransferWriteOutcome::NoWrite)
+                );
                 assert_eq!(
                     runtime.job_manager.get_state(&job_id),
                     Some(JobState::Canceled)
@@ -1320,13 +1407,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            result.expect_err("stale dispatch must not transfer"),
+            result
+                .expect_err("stale dispatch must not transfer")
+                .message(),
             STALE_TRANSFER_DISPATCH
         );
         assert_eq!(
             unpolled
                 .await
-                .expect_err("queued dispatch must not transfer"),
+                .expect_err("queued dispatch must not transfer")
+                .message(),
             STALE_TRANSFER_DISPATCH
         );
         assert_eq!(std::fs::read(&source).unwrap(), b"source content");
@@ -1378,7 +1468,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .expect_err("stale admission must not transfer");
-        assert_eq!(error, STALE_TRANSFER_DISPATCH);
+        assert_eq!(error.message(), STALE_TRANSFER_DISPATCH);
         assert_eq!(std::fs::read(&source).unwrap(), b"source content");
         assert!(!destination.exists());
         runtime.cancel_job(&job_id);
@@ -1446,7 +1536,9 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(error.contains("into itself or one of its descendants"));
+        assert!(error
+            .message()
+            .contains("into itself or one of its descendants"));
         assert!(!has_active_transfer(&job_id));
     }
 
@@ -1487,7 +1579,9 @@ mod tests {
                     .await
                     .expect_err("recursive directory transfer must be rejected");
                 assert!(
-                    error.contains("into itself or one of its descendants"),
+                    error
+                        .message()
+                        .contains("into itself or one of its descendants"),
                     "{error}"
                 );
                 assert_eq!(std::fs::read_dir(source).unwrap().count(), 0);
@@ -1769,7 +1863,10 @@ mod tests {
                 )
                 .await;
             if matches!(resolution, ConflictResolution::Fail) {
-                assert!(result.unwrap_err().contains("destination already exists"));
+                assert!(result
+                    .unwrap_err()
+                    .message()
+                    .contains("destination already exists"));
             } else {
                 result.unwrap();
             }

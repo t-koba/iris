@@ -13,6 +13,8 @@ mod transfer_verify;
 
 pub(crate) use fileops_dispatch::local_list_entry;
 pub use thumbnail_bridge::ThumbnailGenerationError;
+#[cfg(test)]
+pub(crate) use transfer_driver::tests::install_cancel_after_destination_write;
 
 use crate::input::dnd::DndOperation;
 use crate::state::{CacheEncryptionPolicy, PendingFileItem};
@@ -100,6 +102,58 @@ pub struct TransferItemOutcome {
     /// Whether Iris owns the installed item well enough to put it in the Undo journal. A
     /// folder merged into a pre-existing destination is applied but not owned as a whole.
     pub undoable: bool,
+}
+
+/// Authoritative destination-write knowledge carried by a canceled transfer. Only `NoWrite`
+/// licenses replaying a journal entry: every other state leaves the journal outcome unknown.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum TransferWriteOutcome {
+    /// No destination write was possible before the cancellation was observed.
+    #[default]
+    NoWrite,
+    /// A write may have happened; the destination and journal outcome are ambiguous.
+    MayHaveWritten,
+    /// A destination was installed, with its authoritative path when one is known.
+    Applied { installed_path: Option<String> },
+}
+
+/// Failure of one pending item. Cancellation is a settlement of that item, not proof that
+/// nothing was written, so it carries the write evidence gathered by the runtime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TransferFailure {
+    Error(String),
+    Canceled(TransferWriteOutcome),
+}
+
+impl TransferFailure {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Error(error) => error,
+            Self::Canceled(_) => "transfer canceled",
+        }
+    }
+
+    pub fn is_cancellation(&self) -> bool {
+        matches!(self, Self::Canceled(_)) || self.message() == "transfer canceled"
+    }
+}
+
+impl std::fmt::Display for TransferFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl From<String> for TransferFailure {
+    fn from(error: String) -> Self {
+        Self::Error(error)
+    }
+}
+
+impl From<&str> for TransferFailure {
+    fn from(error: &str) -> Self {
+        Self::Error(error.to_string())
+    }
 }
 
 /// Owns an in-progress directory snapshot generation. Dropping it before completion
