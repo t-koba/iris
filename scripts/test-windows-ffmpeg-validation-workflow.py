@@ -273,6 +273,8 @@ class FailClosedContracts(unittest.TestCase):
             "      - ? uses\n        : ./.github/actions/exfiltrate\n",
             "        uses\n        : ./.github/actions/exfiltrate\n",
             "        uses: ./.github/actions/exfiltrate\n",
+            '        "\\u0075ses": ./.github/actions/exfiltrate\n',
+            '        "\\u0075ses": actions/upload-artifact@v4\n',
         )
         for variant in variants:
             with self.subTest(variant=variant):

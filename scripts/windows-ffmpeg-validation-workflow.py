@@ -94,6 +94,9 @@ FLOW_STEP_RE = re.compile(r"^\s*-\s*\{", re.MULTILINE)
 # split key/value spellings can hide a `uses` key from the scanners above, so
 # the whole syntax class is refused on executable lines.
 EXPLICIT_KEY_RE = re.compile(r"^\s*(?:-\s*)?[?:](?:\s|$)")
+# YAML double-quoted scalars resolve numeric escapes before GitHub reads a
+# mapping key, so decode them before any action reference is scanned.
+YAML_ESCAPE_RE = re.compile(r"\\(?:u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|x[0-9a-fA-F]{2})")
 
 FORBIDDEN_MARKERS = (
     "workflow_dispatch:",
@@ -146,9 +149,16 @@ def permissions_read_only(text):
     return True, ""
 
 
+def decode_yaml_escapes(line):
+    r"""Resolve numeric escapes in quoted keys so `\uXXXX` cannot hide a key."""
+    def repl(match):
+        return chr(int(match.group(0)[2:], 16))
+    return YAML_ESCAPE_RE.sub(repl, line)
+
+
 def action_refs(line):
     """Return every action reference on a line, independent of YAML spelling."""
-    return ACTION_REF_RE.findall(line)
+    return ACTION_REF_RE.findall(decode_yaml_escapes(line))
 
 
 def upload_paths(text):
@@ -158,7 +168,7 @@ def upload_paths(text):
     spelling; inline flow-mapping `path:` values and following `path: |` block
     scalars are both collected so no upload form can evade the guard.
     """
-    lines = text.splitlines()
+    lines = [decode_yaml_escapes(line) for line in text.splitlines()]
     paths = []
     steps = 0
     for i, line in enumerate(lines):
@@ -255,7 +265,8 @@ def validate(text):
     # The action id itself is syntax-invariant. Counting it on executable
     # lines catches aliases, anchors and any future YAML spelling that the
     # structural scans above might not recognise.
-    literal_uploads = sum(line.count(UPLOAD_ACTION_PREFIX) for line in code_lines)
+    literal_uploads = sum(decode_yaml_escapes(line).count(UPLOAD_ACTION_PREFIX)
+                          for line in code_lines)
     checks["upload_literal_count"] = literal_uploads
     require(literal_uploads == 1,
             "workflow must name exactly one upload-artifact action")
