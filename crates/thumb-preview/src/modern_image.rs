@@ -384,13 +384,26 @@ fn decode_heic(data: &[u8]) -> Option<DynamicImage> {
     Some(DynamicImage::ImageRgba8(rgba))
 }
 
+// jxrlib computes intermediate buffers with 32-bit arithmetic and truncates
+// dimensions to 16 bits. Cap the declared image before its decode path sees it.
+const JXR_MAX_DIMENSION: u32 = 65_535;
+const JXR_MAX_PIXELS: u64 = 128_000_000;
+
+fn jxr_dimensions_supported(width: u32, height: u32) -> bool {
+    width != 0
+        && height != 0
+        && width <= JXR_MAX_DIMENSION
+        && height <= JXR_MAX_DIMENSION
+        && u64::from(width) * u64::from(height) <= JXR_MAX_PIXELS
+}
+
 fn decode_jpeg_xr(data: &[u8]) -> Option<DynamicImage> {
     use jpegxr::{BitDepthBits, ColorFormat, ImageDecode, PixelFormat, PixelInfo};
 
     let mut decoder = ImageDecode::with_reader(Cursor::new(data)).ok()?;
     let (width, height) = decoder.get_size().ok()?;
     let (width, height) = (u32::try_from(width).ok()?, u32::try_from(height).ok()?);
-    if width == 0 || height == 0 {
+    if !jxr_dimensions_supported(width, height) {
         return None;
     }
 
@@ -983,6 +996,25 @@ mod tests {
             released_after - released_before,
             "decoder allocated during failed initialization was not released"
         );
+    }
+
+    #[test]
+    fn jxr_sample_still_decodes_under_the_cap() {
+        let sample = include_bytes!("../../../vendor/jpegxr/samples/panel-hdr.jxr");
+        assert!(decode_bytes(sample).is_some());
+    }
+
+    #[test]
+    fn jxr_dimension_cap_rejects_oversized_declarations() {
+        assert!(jxr_dimensions_supported(1, 1));
+        assert!(jxr_dimensions_supported(JXR_MAX_DIMENSION, 1));
+        assert!(jxr_dimensions_supported(12_000, 10_000)); // exactly 120M pixels
+        assert!(!jxr_dimensions_supported(0, 1));
+        assert!(!jxr_dimensions_supported(1, 0));
+        assert!(!jxr_dimensions_supported(JXR_MAX_DIMENSION + 1, 1));
+        assert!(!jxr_dimensions_supported(1, JXR_MAX_DIMENSION + 1));
+        assert!(!jxr_dimensions_supported(u32::MAX, u32::MAX));
+        assert!(!jxr_dimensions_supported(12_000, 11_000)); // 132M pixels
     }
 
     #[test]
