@@ -264,6 +264,26 @@ class FailClosedContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
+    def test_rejects_explicit_and_split_yaml_keys(self):
+        # Explicit keys/values and key/value split over lines are not used by
+        # this workflow; each spelling must fail closed instead of hiding a
+        # `uses` step from the line-level scanners.
+        variants = (
+            "        ? uses\n        : ./.github/actions/exfiltrate\n",
+            "      - ? uses\n        : ./.github/actions/exfiltrate\n",
+            "        uses\n        : ./.github/actions/exfiltrate\n",
+            "        uses: ./.github/actions/exfiltrate\n",
+        )
+        for variant in variants:
+            with self.subTest(variant=variant):
+                mutated = self.text.replace(
+                    "      - name: Assemble bounded evidence manifest",
+                    "      - name: Exfiltrate secrets\n" + variant
+                    + "        with:\n          token: ${{ github.token }}\n"
+                    + "      - name: Assemble bounded evidence manifest", 1)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(mutated)
+
     def test_rejects_local_and_container_action_refs(self):
         for ref in ("./.github/actions/exfiltrate", "./foo", "/abs/local/action",
                     "docker://alpine:3.8"):

@@ -90,6 +90,10 @@ UPLOAD_ACTION_PREFIX = "actions/upload-artifact@"
 ACTION_REF_RE = re.compile(r"['\"]?uses['\"]?\s*:\s*['\"]?([^\s,'\"}#]+)")
 INLINE_PATH_RE = re.compile(r"['\"]?paths?['\"]?\s*:\s*['\"]?([^'\"},]+)")
 FLOW_STEP_RE = re.compile(r"^\s*-\s*\{", re.MULTILINE)
+# The workflow uses only simple block mappings. Explicit YAML keys/values and
+# split key/value spellings can hide a `uses` key from the scanners above, so
+# the whole syntax class is refused on executable lines.
+EXPLICIT_KEY_RE = re.compile(r"^\s*(?:-\s*)?[?:](?:\s|$)")
 
 FORBIDDEN_MARKERS = (
     "workflow_dispatch:",
@@ -223,6 +227,10 @@ def validate(text):
     # Scan executable (non-comment) lines only; explanatory comments may name
     # the things the workflow refuses to do.
     code_lines = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+    for line in code_lines:
+        require(not EXPLICIT_KEY_RE.match(line),
+                f"explicit YAML key/value syntax is not permitted: {line.strip()}")
+    checks["no_explicit_keys"] = True
     code = "\n".join(code_lines)
     for marker in ATTESTATION_MARKERS:
         require(marker in code,
