@@ -72,8 +72,18 @@ fn trash_files_with_receipts_impl(paths: &[PathBuf]) -> Result<Vec<TrashReceipt>
     let after = trash::os_limited::list().map_err(|e| PlatformError::Trash {
         message: format!("Deleted selection, but cannot enumerate Trash for undo: {e}"),
     })?;
-    let mut receipts = exact_items::bind_receipts(paths, &normalized_paths, before, after)?;
-    stamp_deletion_instances(&mut receipts)?;
+    let receipts = exact_items::bind_receipts(paths, &normalized_paths, before, after)?;
+    #[cfg(all(
+        unix,
+        not(target_os = "macos"),
+        not(target_os = "ios"),
+        not(target_os = "android")
+    ))]
+    let receipts = {
+        let mut stamped = receipts;
+        stamp_deletion_instances(&mut stamped)?;
+        stamped
+    };
     Ok(receipts)
 }
 
