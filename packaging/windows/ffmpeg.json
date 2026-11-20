@@ -31,6 +31,14 @@
     "sha256": "8d48973e3eb472dda0f5f2435e595ac043f9f2219dd71883392f549445afa8a5",
     "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8138/pdfium-win-x64.tgz",
     "attestation_required": true,
+    "attestation_asset": "pdfium-attestation.json",
+    "attestation_bytes": 18267,
+    "attestation_sha256": "7526f4b934ab498d6206ac7f3d78dd4ce8e0f7d3175227ab3f4ecc255d950ad7",
+    "repo": "bblanchon/pdfium-binaries",
+    "signer_workflow": "github.com/bblanchon/pdfium-binaries/.github/workflows/build-all.yml",
+    "signer_digest": "0eb94b28c2252d2baae3dfe15dc6b237131d8cd8",
+    "source_digest": "0eb94b28c2252d2baae3dfe15dc6b237131d8cd8",
+    "source_ref": "refs/heads/master",
     "note": "Same approved chromium/8138 bblanchon release family as the Linux PDFium pin. Windows production staging must verify size, sha256 and release attestation, mirroring the Linux contract, before the runtime may ship."
   }
 }

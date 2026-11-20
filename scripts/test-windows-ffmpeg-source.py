@@ -12,6 +12,8 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -64,6 +66,48 @@ class SourcePinContracts(unittest.TestCase):
         self.assertEqual(pin["bytes"], 4031929)
         self.assertEqual(pin["sha256"], "8d48973e3eb472dda0f5f2435e595ac043f9f2219dd71883392f549445afa8a5")
         self.assertTrue(pin["attestation_required"])
+
+    def test_pdfium_command_emits_linux_contract_attestation_pin(self):
+        pin = module.pdfium_pin()
+        expected = dict(module.linux_attestation_pin())
+        self.assertEqual(expected, dict(
+            attestation_asset="pdfium-attestation.json",
+            attestation_bytes=18267,
+            attestation_sha256="7526f4b934ab498d6206ac7f3d78dd4ce8e0f7d3175227ab3f4ecc255d950ad7",
+            repo="bblanchon/pdfium-binaries",
+            signer_workflow="github.com/bblanchon/pdfium-binaries/.github/workflows/build-all.yml",
+            signer_digest="0eb94b28c2252d2baae3dfe15dc6b237131d8cd8",
+            source_digest="0eb94b28c2252d2baae3dfe15dc6b237131d8cd8",
+            source_ref="refs/heads/master",
+        ))
+        for field, value in expected.items():
+            self.assertEqual(pin[field], value, f"pdfium pin missing {field}")
+        output = subprocess.check_output(
+            [sys.executable, str(ROOT / "scripts/windows-ffmpeg-source.py"), "pdfium"],
+            text=True)
+        self.assertEqual(json.loads(output), pin)
+
+    def test_pdfium_attestation_drift_fails_closed(self):
+        original = module.PLAN
+        try:
+            bad_values = dict(module.linux_attestation_pin())
+            bad_values.update(attestation_asset="other.json", attestation_bytes=1,
+                              attestation_sha256="0" * 64, repo="example/other",
+                              signer_workflow="https://example.invalid/build.yml",
+                              signer_digest="0" * 40, source_digest="0" * 40,
+                              source_ref="refs/heads/other")
+            for field, value in bad_values.items():
+                plan = json.loads(json.dumps(original))
+                plan["pdfium"][field] = value
+                module.PLAN = plan
+                with self.subTest(field=field), self.assertRaises(ValueError):
+                    module.pdfium_pin()
+            module.PLAN = json.loads(json.dumps(original))
+            del module.PLAN["pdfium"]["attestation_sha256"]
+            with self.assertRaises(ValueError):
+                module.pdfium_pin()
+        finally:
+            module.PLAN = original
 
 
 class VerificationContracts(unittest.TestCase):

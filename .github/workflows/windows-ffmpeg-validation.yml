@@ -178,6 +178,8 @@ jobs:
 
       - name: Stage attested PDFium runtime
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
           $pin = python3 scripts/windows-ffmpeg-source.py pdfium | ConvertFrom-Json
@@ -188,6 +190,20 @@ jobs:
           if ((Get-Item -LiteralPath "$asset.part").Length -ne $pin.bytes) { throw "PDFium size mismatch" }
           if ((Get-FileHash -Algorithm SHA256 -LiteralPath "$asset.part").Hash.ToLowerInvariant() -ne $pin.sha256) { throw "PDFium sha256 mismatch" }
           Move-Item -Force -LiteralPath "$asset.part" -Destination $asset
+          # Bind the exact asset to the pinned GitHub release attestation before
+          # any native bytes are listed or extracted. The bundle pin is shared
+          # with the Linux PDFium contract (scripts/fetch-pdfium-runtime.sh).
+          if ($pin.attestation_asset -ne "pdfium-attestation.json") { throw "unapproved PDFium attestation bundle" }
+          if ($pin.attestation_bytes -ne 18267) { throw "unapproved PDFium attestation bundle size" }
+          if ($pin.attestation_sha256 -ne "7526f4b934ab498d6206ac7f3d78dd4ce8e0f7d3175227ab3f4ecc255d950ad7") { throw "unapproved PDFium attestation bundle sha256" }
+          $bundle = Join-Path $env:RUNNER_TEMP $pin.attestation_asset
+          $bundleUrl = "https://github.com/$($pin.repo)/releases/download/$($pin.release)/$($pin.attestation_asset)"
+          Invoke-WebRequest -Uri $bundleUrl -OutFile "$bundle.part" -UseBasicParsing
+          if ((Get-Item -LiteralPath "$bundle.part").Length -ne $pin.attestation_bytes) { throw "PDFium attestation bundle size mismatch" }
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath "$bundle.part").Hash.ToLowerInvariant() -ne $pin.attestation_sha256) { throw "PDFium attestation bundle sha256 mismatch" }
+          Move-Item -Force -LiteralPath "$bundle.part" -Destination $bundle
+          gh attestation verify $asset --repo $pin.repo --bundle $bundle --signer-workflow $pin.signer_workflow --signer-digest $pin.signer_digest --source-digest $pin.source_digest --source-ref $pin.source_ref
+          if ($LASTEXITCODE -ne 0) { throw "PDFium release attestation verification failed" }
           # Validate the complete member + licensing closure before extraction.
           $members = @(tar -tzf $asset | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique)
           if ($LASTEXITCODE -ne 0 -or $members.Count -eq 0) { throw "PDFium member listing failed" }

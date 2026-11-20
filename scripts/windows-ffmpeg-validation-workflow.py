@@ -32,6 +32,26 @@ OFFLINE_GATES = (
     "python3 scripts/test-windows-ffmpeg-validation-workflow.py",
 )
 
+# The PDFium attestation step must verify the exact asset against the pinned
+# bundle, identity and source before extraction. Check these on executable
+# lines, so a comment describing verification cannot stand in for the command.
+ATTESTATION_MARKERS = (
+    '"pdfium-attestation.json"',
+    "18267",
+    "7526f4b934ab498d6206ac7f3d78dd4ce8e0f7d3175227ab3f4ecc255d950ad7",
+    '$pin.attestation_bytes',
+    '$pin.attestation_sha256',
+    'Get-FileHash -Algorithm SHA256 -LiteralPath "$bundle.part"',
+    "attestations: read",
+    "GH_TOKEN: ${{ github.token }}",
+    "gh attestation verify $asset --repo $pin.repo --bundle $bundle",
+    "--signer-workflow $pin.signer_workflow",
+    "--signer-digest $pin.signer_digest",
+    "--source-digest $pin.source_digest",
+    "--source-ref $pin.source_ref",
+    "PDFium release attestation verification failed",
+)
+
 REQUIRED_MARKERS = (
     "workflow_call:",
     "ref: ${{ github.sha }}",
@@ -53,7 +73,7 @@ REQUIRED_MARKERS = (
     "actions/upload-artifact@",
     "if: always()",
     "rm -rf",
-)
+) + ATTESTATION_MARKERS
 
 # Only these actions may appear in the validation workflow. A closed allowlist
 # fails closed on any new or renamed action (including a differently spelled
@@ -206,6 +226,14 @@ def validate(text):
     # the things the workflow refuses to do.
     code_lines = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
     code = "\n".join(code_lines)
+    for marker in ATTESTATION_MARKERS:
+        require(marker in code,
+                f"attestation verification missing from executable workflow lines: {marker}")
+    checks["attestation_verification"] = True
+    require(code.index("PDFium sha256 mismatch")
+            < code.index("gh attestation verify $asset --repo $pin.repo --bundle $bundle")
+            < code.index("tar -xzf $asset"),
+            "attestation verification must follow the asset hash check and precede extraction")
     for marker in FORBIDDEN_MARKERS:
         require(marker not in code, f"forbidden marker present in workflow: {marker}")
     checks["forbidden_absent"] = list(FORBIDDEN_MARKERS)

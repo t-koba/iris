@@ -42,6 +42,8 @@ class WorkflowContracts(unittest.TestCase):
         shape = json.loads(r.stdout)
         self.assertEqual(shape["triggers"], ["workflow_call"])
         self.assertIn("actions/upload-artifact@v4", shape["allowed_actions"])
+        for marker in self.mod.ATTESTATION_MARKERS:
+            self.assertIn(marker, shape["required_markers"])
 
     def test_uses_action_normalizes_yaml_spelling(self):
         mod = self.mod
@@ -62,6 +64,26 @@ class FailClosedContracts(unittest.TestCase):
     def setUp(self):
         self.mod = load()
         self.text = (ROOT / ".github/workflows/windows-ffmpeg-validation.yml").read_text()
+
+    def test_rejects_weakened_attestation_verification(self):
+        # Every marker must be executable: removing or weakening any one of
+        # them must make the workflow contract fail closed.
+        for marker in self.mod.ATTESTATION_MARKERS:
+            self.assertIn(marker, self.text)
+            with self.subTest(marker=marker):
+                mutated = self.text.replace(marker, "<removed>")
+                with self.assertRaises(ValueError):
+                    self.mod.validate(mutated)
+
+    def test_rejects_attestation_after_extraction(self):
+        verify = next(line for line in self.text.splitlines()
+                      if "gh attestation verify" in line)
+        extract = "          tar -xzf $asset -C $extract\n"
+        self.assertEqual(self.text.count(verify + "\n"), 1)
+        mutated = self.text.replace(verify + "\n", "", 1).replace(
+            extract, extract + verify + "\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
 
     def test_rejects_dispatch_trigger(self):
         mutated = self.text.replace("on:\n  workflow_call:\n", "on:\n  workflow_dispatch:\n", 1)

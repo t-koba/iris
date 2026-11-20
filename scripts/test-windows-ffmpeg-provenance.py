@@ -196,6 +196,48 @@ class WindowsFfmpegProvenance(unittest.TestCase):
         self.assertGreater(plan["pdfium"]["bytes"], 0)
         self.assertTrue(plan["pdfium"]["attestation_required"])
 
+    def test_windows_attestation_pin_matches_linux_contract(self):
+        # The Linux staging script is authoritative: the Windows plan must pin
+        # the same bundle, identity and source, with no silent drift or removal.
+        fetch = read("scripts/fetch-pdfium-runtime.sh")
+        commit = self.linux_pin("pdfium_commit")
+        contract = dict(
+            attestation_asset="pdfium-attestation.json",
+            attestation_bytes=int(self.linux_pin("pdfium_attestation_bytes")),
+            attestation_sha256=self.linux_pin("pdfium_attestation_sha256"),
+            repo=self.linux_pin("pdfium_repo"),
+            signer_workflow=self.linux_pin("pdfium_signer_workflow"),
+            signer_digest=commit,
+            source_digest=commit,
+            source_ref=self.linux_pin("pdfium_source_ref"),
+        )
+        self.assertIn('pdfium-attestation.json', fetch)
+        self.assertIn('attestation verify "$tarball"', fetch)
+        self.assertIn('--signer-workflow "$pdfium_signer_workflow"', fetch)
+        self.assertIn('--source-digest "$pdfium_commit"', fetch)
+        literals = dict(contract, attestation_bytes=18267)
+        literals.update(
+            attestation_sha256="7526f4b934ab498d6206ac7f3d78dd4ce8e0f7d3175227ab3f4ecc255d950ad7",
+            repo="bblanchon/pdfium-binaries",
+            signer_workflow="github.com/bblanchon/pdfium-binaries/.github/workflows/build-all.yml",
+            signer_digest="0eb94b28c2252d2baae3dfe15dc6b237131d8cd8",
+            source_digest="0eb94b28c2252d2baae3dfe15dc6b237131d8cd8",
+            source_ref="refs/heads/master",
+        )
+        for field, value in literals.items():
+            self.assertEqual(contract[field], value, f"Linux contract {field} drifted")
+        plan = json.loads(read("packaging/windows/ffmpeg.json"))["pdfium"]
+        for field, value in contract.items():
+            self.assertEqual(plan.get(field), value,
+                             f"Windows PDFium {field} differs from the Linux contract")
+
+    def linux_pin(self, name):
+        fetch = read("scripts/fetch-pdfium-runtime.sh")
+        match = re.search(rf'^{re.escape(name)}=(?:"([^"]+)"|([^\s#]+))$',
+                          fetch, re.MULTILINE)
+        self.assertIsNotNone(match, f"Linux contract pin {name} missing")
+        return match.group(1) or match.group(2)
+
     def test_windows_release_hold_is_explicit(self):
         release = read(".github/workflows/release.yml")
         self.assertIn("IRIS_BUILD_VARIANT: minimal", release)

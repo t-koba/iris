@@ -17,6 +17,7 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
+import re
 import sys
 import tarfile
 
@@ -50,6 +51,31 @@ def source_pin():
     return pin
 
 
+def linux_attestation_pin():
+    """Read the authoritative attestation pin from the Linux staging contract."""
+    text = (ROOT / "scripts/fetch-pdfium-runtime.sh").read_text()
+
+    def shell_pin(name):
+        match = re.search(rf'^{re.escape(name)}=(?:"([^"]+)"|([^\s#]+))$',
+                          text, re.MULTILINE)
+        require(match is not None, f"missing Linux PDFium pin {name}")
+        return match.group(1) or match.group(2)
+
+    bundle_bytes = shell_pin("pdfium_attestation_bytes")
+    require(bundle_bytes.isdigit(), "malformed Linux attestation size pin")
+    commit = shell_pin("pdfium_commit")
+    return dict(
+        attestation_asset="pdfium-attestation.json",
+        attestation_bytes=int(bundle_bytes),
+        attestation_sha256=shell_pin("pdfium_attestation_sha256"),
+        repo=shell_pin("pdfium_repo"),
+        signer_workflow=shell_pin("pdfium_signer_workflow"),
+        signer_digest=commit,
+        source_digest=commit,
+        source_ref=shell_pin("pdfium_source_ref"),
+    )
+
+
 def pdfium_pin():
     """Resolve and validate the pinned Windows PDFium asset from the plan."""
     pdfium = PLAN["pdfium"]
@@ -63,6 +89,11 @@ def pdfium_pin():
             "malformed PDFium sha256")
     require(isinstance(pdfium["bytes"], int) and pdfium["bytes"] > 0, "malformed PDFium size")
     require(pdfium["attestation_required"] is True, "PDFium attestation must be required")
+    # The bundle pin is shared with the Linux contract; emit it only when it is
+    # identical, so a Windows-only drift cannot produce a truthful-looking plan.
+    for field, expected in linux_attestation_pin().items():
+        require(pdfium.get(field) == expected,
+                f"PDFium attestation {field} differs from the Linux contract")
     return pdfium
 
 
