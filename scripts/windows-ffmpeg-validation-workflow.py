@@ -74,6 +74,7 @@ REQUIRED_MARKERS = (
     "if: always()",
     "rm -rf",
     "ev.mkdir(parents=True, exist_ok=True)",
+    "$tmp = $env:RUNNER_TEMP.Replace('\\', '/')",
     '"status": "not_run"',
 ) + ATTESTATION_MARKERS
 

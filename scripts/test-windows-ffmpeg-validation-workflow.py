@@ -297,6 +297,15 @@ class FailClosedContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
+    def test_requires_forward_slash_gpg_paths(self):
+        # GnuPG on Windows interprets backslashes as escapes in keyring and
+        # status-file paths; the temp directory must be normalized first.
+        marker = "$tmp = $env:RUNNER_TEMP.Replace('\\', '/')"
+        self.assertIn(marker, self.text)
+        mutated = self.text.replace(marker, "$tmp = $env:RUNNER_TEMP", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
     def test_rejects_implicit_missing_input_states(self):
         # A failed preflight must still yield an explicit not_run state rather
         # than an empty stand-in that looks like successful evidence.
