@@ -89,6 +89,31 @@ class FailClosedContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
+    def test_rejects_wrong_source_path_layout(self):
+        mutated = self.text.replace(
+            'Join-Path $env:IRIS_VALIDATION_SOURCE "ffmpeg-8.1.3"',
+            "$env:IRIS_VALIDATION_SOURCE", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_wrong_overlay_port_layout(self):
+        mutated = self.text.replace('Join-Path $overlay "ffmpeg"',
+                                    'Join-Path $overlay "src"', 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_missing_triplet_registration(self):
+        mutated = self.text.replace("VCPKG_OVERLAY_TRIPLETS", "VCPKG_UNUSED_TRIPLETS", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_missing_dll_runtime_path(self):
+        mutated = self.text.replace(
+            'Join-Path $env:VCPKG_INSTALLED_DIR "x64-windows-iris-dynamic/bin"',
+            'Join-Path $env:VCPKG_INSTALLED_DIR "missing"', 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
 
 class WiringContracts(unittest.TestCase):
     def test_contract_wired_into_ci_and_workflow(self):
