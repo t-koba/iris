@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -66,7 +68,10 @@ struct KnownHostsHandler {
 struct SftpHandlerError(String);
 
 struct ConnectedSftp {
+    #[cfg(not(test))]
     _handle: SshHandle,
+    #[cfg(test)]
+    _handle: Option<SshHandle>,
     session: SftpSession,
     transfer_session: Arc<SftpTransferSession>,
 }
@@ -307,7 +312,10 @@ pub async fn execute_sftp_plan(plan: &SftpTransferPlan) -> Result<(), String> {
         "sftp.execute_plan"
     );
 
-    let mut lease = SftpConnectionLease::checkout(&plan.mapping).await?;
+    let mut lease = match test_lease(&plan.mapping, false) {
+        Some(lease) => lease?,
+        None => SftpConnectionLease::checkout(&plan.mapping).await?,
+    };
     let pipeline_depth = normalize_pipeline_depth(plan.pipeline_depth);
     let mut progress = SftpPlanProgress::default();
     let mut result = execute_sftp_entries(
@@ -323,7 +331,10 @@ pub async fn execute_sftp_plan(plan: &SftpTransferPlan) -> Result<(), String> {
         .is_err_and(|error| progress.can_retry(lease.reused, error))
     {
         lease.close().await;
-        lease = SftpConnectionLease::fresh(&plan.mapping).await?;
+        lease = match test_lease(&plan.mapping, true) {
+            Some(lease) => lease?,
+            None => SftpConnectionLease::fresh(&plan.mapping).await?,
+        };
         result = execute_sftp_entries(
             plan,
             lease.session(),
@@ -427,7 +438,10 @@ async fn connect_sftp(mapping: &RemoteTransportMapping) -> Result<ConnectedSftp,
         "sftp.connect_complete"
     );
     Ok(ConnectedSftp {
+        #[cfg(not(test))]
         _handle: handle,
+        #[cfg(test)]
+        _handle: Some(handle),
         session,
         transfer_session,
     })
@@ -522,6 +536,58 @@ impl SftpConnectionLease {
             let _ = connected.transfer_session.close_session();
         }
     }
+}
+
+// Test-only lease provisioning: execute_sftp_plan keeps its own retry
+// orchestration; tests replace only the network checkout with memory sessions.
+#[cfg(test)]
+type TestLeaseFactory =
+    Box<dyn Fn(&RemoteTransportMapping, bool) -> Result<SftpConnectionLease, String>>;
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_LEASE_FACTORY: RefCell<Option<TestLeaseFactory>> = RefCell::new(None);
+}
+
+#[cfg(not(test))]
+fn test_lease(
+    _mapping: &RemoteTransportMapping,
+    _fresh: bool,
+) -> Option<Result<SftpConnectionLease, String>> {
+    None
+}
+
+#[cfg(test)]
+fn test_lease(
+    mapping: &RemoteTransportMapping,
+    fresh: bool,
+) -> Option<Result<SftpConnectionLease, String>> {
+    TEST_LEASE_FACTORY.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|factory| factory(mapping, fresh))
+    })
+}
+
+#[cfg(test)]
+struct TestLeaseFactoryGuard;
+
+#[cfg(test)]
+impl Drop for TestLeaseFactoryGuard {
+    fn drop(&mut self) {
+        TEST_LEASE_FACTORY.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+fn install_test_lease_factory(
+    factory: impl Fn(&RemoteTransportMapping, bool) -> Result<SftpConnectionLease, String> + 'static,
+) -> TestLeaseFactoryGuard {
+    TEST_LEASE_FACTORY.with(|slot| {
+        assert!(slot.borrow().is_none(), "lease factory already installed");
+        *slot.borrow_mut() = Some(Box::new(factory));
+    });
+    TestLeaseFactoryGuard
 }
 
 impl SftpPool {
@@ -2143,11 +2209,13 @@ mod tests {
 
     #[tokio::test]
     async fn pooled_move_never_replays_committed_entries() {
-        // Exercise the same progress/reused-lease gate as execute_sftp_plan with
-        // in-memory SFTP sessions, including a replacement session on safe retry.
+        // Drive execute_sftp_plan itself: only lease provisioning is injected,
+        // so the reused-lease retry gate and the resume point stay production code.
         for ambiguous in [false, true] {
             let (transfer, server) = memory_sftp_session().await;
             let control = memory_control_session(&server).await;
+            let (retry_transfer, _) = memory_sftp_with_server(server.clone()).await;
+            let retry_control = memory_control_session(&server).await;
             let temp = tempfile::tempdir().expect("tempdir");
             let entries = ["first", "second"].map(|name| SftpTransferEntry {
                 local_path: temp.path().join(name),
@@ -2175,53 +2243,62 @@ mod tests {
                 pipeline_depth: DEFAULT_SFTP_PIPELINE_DEPTH,
                 entries: entries.to_vec(),
             };
-            let mut progress = SftpPlanProgress::default();
-            let error = execute_sftp_entries(
-                &plan,
-                &control,
-                Arc::clone(&transfer),
-                plan.pipeline_depth,
-                &mut progress,
-            )
-            .await
-            .expect_err("injected connection failure");
-            assert!(sftp_error_is_connection_failure(&error), "{error}");
-            assert_eq!(progress.completed, 1);
-            assert!(!entries[0].local_path.exists(), "first move source removed");
-            assert!(entries[1].local_path.exists(), "uncertain source retained");
-            assert_eq!(progress.can_retry(true, &error), !ambiguous);
-            assert!(
-                !progress.can_retry(false, &error),
-                "fresh leases are not retried"
-            );
-            if progress.can_retry(true, &error) {
-                control.close().await.expect("close stale control");
-                transfer.close_session().expect("close stale transfer");
-                let control = memory_control_session(&server).await;
-                let (client, stream) = tokio::io::duplex(4 * 1024 * 1024);
-                russh_sftp::server::run(stream, server.clone()).await;
-                let transfer = SftpTransferSession::init(RawSftpSession::new(client))
-                    .await
-                    .expect("replacement transfer session");
-                execute_sftp_entries(
-                    &plan,
-                    &control,
-                    Arc::clone(&transfer),
-                    plan.pipeline_depth,
-                    &mut progress,
-                )
-                .await
-                .expect("retry remaining entry");
-                assert_eq!(progress.completed, 2);
-                assert!(!entries[1].local_path.exists());
-                control.close().await.expect("close replacement control");
-                transfer
-                    .close_session()
-                    .expect("close replacement transfer");
+            let key = sftp_pool_key(&plan.mapping).expect("pool key");
+            let leases = Arc::new(Mutex::new(VecDeque::from([
+                SftpConnectionLease {
+                    key: key.clone(),
+                    connected: Some(ConnectedSftp {
+                        _handle: None,
+                        session: control,
+                        transfer_session: transfer,
+                    }),
+                    reused: true,
+                },
+                SftpConnectionLease {
+                    key,
+                    connected: Some(ConnectedSftp {
+                        _handle: None,
+                        session: retry_control,
+                        transfer_session: retry_transfer,
+                    }),
+                    reused: false,
+                },
+            ])));
+            let fresh_calls = Arc::new(Mutex::new(Vec::new()));
+            let calls = Arc::clone(&fresh_calls);
+            let _factory_guard = install_test_lease_factory(move |_mapping, fresh| {
+                calls.lock().unwrap().push(fresh);
+                leases
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or_else(|| "unexpected extra lease checkout".to_string())
+            });
+            let result = execute_sftp_plan(&plan).await;
+            if ambiguous {
+                let error = result.expect_err("ambiguous failure must surface");
+                assert!(sftp_error_is_connection_failure(&error), "{error}");
+                assert!(entries[1].local_path.exists(), "uncertain source retained");
+                assert_eq!(
+                    *fresh_calls.lock().unwrap(),
+                    vec![false],
+                    "ambiguous failure is not retried"
+                );
             } else {
-                control.close().await.expect("close failed control");
-                transfer.close_session().expect("close failed transfer");
+                // The injected connection failure is consumed by the plan's
+                // retry gate; a successful fresh retry makes the plan succeed.
+                result.expect("fresh-lease retry completes remaining entry");
+                assert!(
+                    !entries[1].local_path.exists(),
+                    "retry removed second source"
+                );
+                assert_eq!(
+                    *fresh_calls.lock().unwrap(),
+                    vec![false, true],
+                    "safe failure gets one fresh lease"
+                );
             }
+            assert!(!entries[0].local_path.exists(), "first move source removed");
             assert_eq!(server.files.lock().await.get("/first").unwrap(), b"/first");
             assert_eq!(
                 server.files.lock().await.get("/second").unwrap(),
@@ -2229,6 +2306,15 @@ mod tests {
             );
             let faults = server.faults.lock().unwrap();
             assert_eq!(faults.published, ["/first", "/second"]);
+            assert_eq!(
+                faults
+                    .published
+                    .iter()
+                    .filter(|path| path.as_str() == "/first")
+                    .count(),
+                1,
+                "committed entry must never be replayed"
+            );
             assert_eq!(faults.opened.len(), 2);
             assert!(faults
                 .opened
