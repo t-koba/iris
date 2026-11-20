@@ -234,6 +234,18 @@ GitHub Actions 外でも workspace root と home は `$WORKSPACE`/`$HOME` に置
 Iris 自体のライセンス、静的リンクされた全 native code、未解決・dlopen-only 依存、vendor の
 patch 適用状況やライセンス互換性をこのレポートだけで保証するものではありません。
 
+### Windows ネイティブプレビュー検証（非公開）
+
+`CI` の手動 dispatch で `windows-ffmpeg-validation / validate` を呼ぶと、
+`workflow_call` 専用の `Windows FFmpeg native validation` が `windows-2022` runner で
+呼び出し元と同じ commit（exact SHA）だけを checkout して実行します。
+署名検証済み FFmpeg 8.1.3 source と pinned vcpkg overlay から product をビルドし、
+PE import closure、PDFium の固定 pin/`gh attestation verify` と staging、
+インストール済み preview の video/PDF/RAW smoke を検査して JSON evidence に残します。
+permission は read-only で、upload する成果物は JSON 一つだけです。
+native binary や署名付き archive は upload せず、Release、`minimal` packaging、
+product feature flag も変更しません。検証が成功してもリリース保留は解除されません。
+
 ### Release policy gate（法的承認ではない）
 
 `scripts/release-policy.json` は監査の収集機構とは別の保守的な公開ポリシーです。
