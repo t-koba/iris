@@ -2033,6 +2033,39 @@ mod tests {
         assert!(!state.undo_journal.can_redo());
     }
 
+    /// Aborting after a Skip and an unwritten failure must keep the whole replay entry: no
+    /// destination was written, so every item stays retryable, skipped or failed alike.
+    #[test]
+    fn abort_after_skip_and_failure_without_writes_keeps_whole_replay() {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 2, 1);
+        state.pending_operation.as_mut().unwrap().undo_action =
+            Some(PendingUndoAction::PushRedo(two_item_replay_op()));
+        let _ = process_pending_operation(&mut state);
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(job_id.clone(), 0, 0, Err("disk full".into())),
+        );
+        let _ = update(&mut state, Message::SkipError(job_id.clone()));
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(job_id.clone(), 1, 0, Err("disk full".into())),
+        );
+        let _ = update(&mut state, Message::AbortJob(job_id));
+
+        assert!(state.pending_operation.is_none());
+        let restored = state
+            .undo_journal
+            .pop_undo()
+            .expect("whole replay restored");
+        assert_eq!(
+            restored.items.len(),
+            2,
+            "the skipped and failed items both stay retryable"
+        );
+        assert!(!state.undo_journal.can_redo());
+    }
+
     /// A half-finished undo replay keeps its confirmed install redoable; the sibling whose
     /// outcome is unknown is not guessed into either journal.
     #[test]

@@ -472,10 +472,10 @@ pub(crate) fn replay_entry_to_restore(pending: &PendingFileOperation) -> Vec<Rep
     let confirmed = replayed_op_after_replay(op, pending, !redo_replay, true);
     let remaining = unreplayed_op(op, pending);
 
-    // Nothing settled and nothing written: the whole entry is still retryable.
-    if confirmed.items.is_empty()
-        && remaining.items.is_empty()
-        && pending.in_flight == 0
+    // No destination was written and no transfer is still outstanding: every item, skipped or
+    // failed, stays retryable, so the whole entry returns to its original journal. Whether a
+    // sibling was skipped does not change this; only write evidence decides the whole restore.
+    if pending.in_flight == 0
         && pending
             .items
             .iter()
