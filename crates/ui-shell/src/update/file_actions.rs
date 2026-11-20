@@ -810,7 +810,11 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
             }
             return update(state, Message::Refresh);
         }
-        Message::RsyncBatchCompleted(job_id, item_count, result) => {
+        Message::RsyncBatchCompleted(job_id, item_count, dispatch_generation, result) => {
+            // A batch task dispatched before cancellation must not update the resumed job.
+            if app_runtime().cancel_generation(&job_id) != dispatch_generation {
+                return Task::none();
+            }
             match result {
                 Ok(item_result) if item_result.files_completed > 0 => {
                     // rsync transferred everything.

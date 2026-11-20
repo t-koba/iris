@@ -2726,10 +2726,17 @@ mod tests {
 
         let task = process_pending_operation(&mut state);
         let messages = collect_task_messages(task).await;
-        let [Message::RsyncBatchCompleted(batch_job, 2, Ok(result))] = messages.as_slice() else {
+        let [Message::RsyncBatchCompleted(batch_job, 2, generation, Ok(result))] =
+            messages.as_slice()
+        else {
             panic!("expected one declined batch completion: {messages:?}");
         };
         assert_eq!(batch_job, &job_id);
+        assert_eq!(
+            *generation,
+            app_runtime().cancel_generation(&job_id),
+            "the batch captures the dispatch generation"
+        );
         assert_eq!(result.files_completed, 0, "no aggregate batch ownership");
         assert_eq!(std::fs::read_dir(&destination_dir).unwrap().count(), 0);
 
@@ -2740,6 +2747,80 @@ mod tests {
         assert!(pending.rsync_failed);
         assert_eq!((pending.in_flight, pending.current_index), (2, 2));
         drop(task);
+    }
+
+    /// A batch task dispatched before cancellation must not update the resumed job, just as a
+    /// single-item transfer with an older cancel generation is ignored.
+    #[tokio::test]
+    async fn stale_rsync_batch_completion_does_not_credit_a_resumed_job() {
+        static NEXT_TEST_JOB: AtomicU64 = AtomicU64::new(9_620_000);
+        let mut state = AppState::default();
+        let job_id = JobId(NEXT_TEST_JOB.fetch_add(1, Ordering::Relaxed));
+        state.jobs.push(JobDisplayInfo {
+            id: job_id.clone(),
+            description: String::new(),
+            state: JobState::Running,
+            progress: ProgressInfo {
+                bytes_completed: 0,
+                bytes_total: None,
+                files_completed: 0,
+                files_total: Some(2),
+            },
+            speed_samples: std::collections::VecDeque::new(),
+            speed_bps: None,
+        });
+
+        let temp = tempfile::tempdir().expect("temp directory");
+        let source_dir = temp.path().join("src");
+        let destination_dir = temp.path().join("dst");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::create_dir_all(&destination_dir).unwrap();
+        let items = ["first.txt", "second.txt"]
+            .into_iter()
+            .map(|name| {
+                let source = source_dir.join(name);
+                std::fs::write(&source, name.as_bytes()).unwrap();
+                PendingFileItem {
+                    source: local_entry(source.to_str().unwrap(), false).object_ref,
+                    destination_path: destination_dir.join(name).to_str().unwrap().to_owned(),
+                    installed_path: None,
+                    undoable: true,
+                }
+            })
+            .collect();
+        let mut pending = PendingFileOperation::new(job_id.clone(), items, false, None, 2);
+        pending.persisted = true;
+        pending.remember_resolution = Some(ConflictResolution::Overwrite);
+        state.pending_operation = Some(pending);
+
+        let runtime = app_runtime();
+        runtime.track_running_job_for_test(job_id.clone(), 2);
+        let dispatch_generation = runtime.cancel_generation(&job_id);
+        let task = process_pending_operation(&mut state);
+        let messages = collect_task_messages(task).await;
+        let [Message::RsyncBatchCompleted(batch_job, 2, captured_generation, Ok(_))] =
+            messages.as_slice()
+        else {
+            panic!("expected one batch completion: {messages:?}");
+        };
+        assert_eq!(batch_job, &job_id);
+        assert_eq!(*captured_generation, dispatch_generation);
+        assert_eq!(state.pending_operation.as_ref().unwrap().current_index, 2);
+
+        runtime.cancel_job(&job_id);
+        runtime.resume_job(&job_id);
+        assert_ne!(runtime.cancel_generation(&job_id), dispatch_generation);
+
+        let task = update(&mut state, messages.into_iter().next().unwrap());
+        assert_eq!(task.units(), 0, "a stale batch completion starts no work");
+        assert_eq!(state.jobs[0].progress.files_completed, 0);
+        assert_eq!(state.jobs[0].progress.bytes_completed, 0);
+        let pending = state.pending_operation.as_ref().expect("pending operation");
+        assert_eq!(pending.current_index, 2, "the batch was not rewound");
+        assert_eq!(
+            pending.in_flight, 1,
+            "the resumed dispatch still owns the batch"
+        );
     }
 
     /// A successful batch installs every item at the path it requested: its branch never
@@ -2811,11 +2892,13 @@ mod tests {
 
         // The aggregate completion has no per-item path and is not itself undoable; the
         // handler must recover ownership from the batch's pending state.
+        let dispatch_generation = app_runtime().cancel_generation(&job_id);
         let task = update(
             &mut state,
             Message::RsyncBatchCompleted(
                 job_id,
                 2,
+                dispatch_generation,
                 Ok(crate::messages::PendingItemResult {
                     bytes_completed: 22,
                     files_completed: 2,

@@ -187,6 +187,7 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
         let job_id = pending.job_id.clone();
         let is_move = pending.is_move;
         let item_count = items.len();
+        let dispatch_generation = app_runtime().cancel_generation(&job_id);
         // Advance current_index past every file; the single rsync task is the one in flight.
         if let Some(pending) = &mut state.pending_operation {
             pending.current_index = pending.items.len();
@@ -216,7 +217,14 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
                     }),
                 }
             },
-            move |result| Message::RsyncBatchCompleted(job_id.clone(), item_count, result),
+            move |result| {
+                Message::RsyncBatchCompleted(
+                    job_id.clone(),
+                    item_count,
+                    dispatch_generation,
+                    result,
+                )
+            },
         );
     }
 

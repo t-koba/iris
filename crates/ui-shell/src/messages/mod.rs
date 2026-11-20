@@ -281,8 +281,8 @@ pub enum Message {
     Dialog(DialogMessage),
     Conflict(ConflictMessage),
 
-    /// (job_id, item_count, result)
-    RsyncBatchCompleted(JobId, usize, Result<PendingItemResult, String>),
+    /// (job_id, item_count, dispatch_generation, result)
+    RsyncBatchCompleted(JobId, usize, u64, Result<PendingItemResult, String>),
 
     Job(JobMessage),
 
