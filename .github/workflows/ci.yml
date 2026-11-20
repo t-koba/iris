@@ -54,6 +54,9 @@ jobs:
       - name: Windows FFmpeg source acquisition contract
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/test-windows-ffmpeg-source.py
+      - name: Windows FFmpeg overlay derivation contract
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-windows-ffmpeg-overlay.py
 
       - uses: dtolnay/rust-toolchain@master
         with:
