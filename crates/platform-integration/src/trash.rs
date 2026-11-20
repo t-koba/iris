@@ -10,6 +10,9 @@ pub struct TrashReceipt {
     pub trash_id: Option<OsString>,
     /// Backend original path captured before deletion; never recomputed during restore.
     pub normalized_path: Option<PathBuf>,
+    /// Random per-deletion nonce recorded in the system Trash info file. Binds the
+    /// receipt to one deletion instance even when a Trash ID is later reused.
+    pub deletion_instance: Option<String>,
 }
 
 /// Moves a file to the trash / Recycle Bin.
@@ -69,7 +72,45 @@ fn trash_files_with_receipts_impl(paths: &[PathBuf]) -> Result<Vec<TrashReceipt>
     let after = trash::os_limited::list().map_err(|e| PlatformError::Trash {
         message: format!("Deleted selection, but cannot enumerate Trash for undo: {e}"),
     })?;
-    exact_items::bind_receipts(paths, &normalized_paths, before, after)
+    let mut receipts = exact_items::bind_receipts(paths, &normalized_paths, before, after)?;
+    stamp_deletion_instances(&mut receipts)?;
+    Ok(receipts)
+}
+
+/// Write a random instance nonce into each new `.trashinfo` file after deletion.
+/// A failure leaves no receipt: the deletion happened, but it cannot be undone
+/// safely if this receipt could outlive its Trash slot.
+#[cfg(all(
+    unix,
+    not(target_os = "macos"),
+    not(target_os = "ios"),
+    not(target_os = "android")
+))]
+fn stamp_deletion_instances(receipts: &mut [TrashReceipt]) -> Result<(), PlatformError> {
+    use std::io::Write as _;
+
+    for receipt in receipts.iter_mut() {
+        let Some(info_path) = receipt.trash_id.as_ref().map(PathBuf::from) else {
+            continue;
+        };
+        let error = || PlatformError::Trash {
+            message: format!(
+                "Deleted {}, but cannot bind a deletion instance for undo",
+                receipt.original_path.display()
+            ),
+        };
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).map_err(|_| error())?;
+        let nonce: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let mut info = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&info_path)
+            .map_err(|_| error())?;
+        info.write_all(format!("X-Iris-Instance={nonce}\n").as_bytes())
+            .map_err(|_| error())?;
+        receipt.deletion_instance = Some(nonce);
+    }
+    Ok(())
 }
 
 #[cfg(not(any(
@@ -102,6 +143,7 @@ fn trash_file_with_receipt_impl(path: &Path) -> Result<TrashReceipt, PlatformErr
         trashed_path: None,
         trash_id: None,
         normalized_path: None,
+        deletion_instance: None,
     })
 }
 
@@ -127,6 +169,7 @@ fn trash_file_with_receipt_impl(path: &Path) -> Result<TrashReceipt, PlatformErr
         trashed_path,
         trash_id: None,
         normalized_path: None,
+        deletion_instance: None,
     })
 }
 
@@ -145,9 +188,48 @@ pub fn restore_files_with_receipts(receipts: &[TrashReceipt]) -> Result<(), Plat
     })?;
     // Validate the entire selection before asking the backend to restore anything.
     let restore_items = exact_items::select_restore_items(items, receipts)?;
+    #[cfg(all(
+        unix,
+        not(target_os = "macos"),
+        not(target_os = "ios"),
+        not(target_os = "android")
+    ))]
+    verify_deletion_instances(receipts, &restore_items)?;
     trash::os_limited::restore_all(restore_items).map_err(|e| PlatformError::Trash {
         message: e.to_string(),
     })
+}
+
+/// Every receipt must still match the nonce in its own Trash info file before
+/// any item is restored. Without this, a stale receipt can restore unrelated
+/// content that later occupied the same Trash ID.
+#[cfg(all(
+    unix,
+    not(target_os = "macos"),
+    not(target_os = "ios"),
+    not(target_os = "android")
+))]
+fn verify_deletion_instances(
+    receipts: &[TrashReceipt],
+    items: &[trash::TrashItem],
+) -> Result<(), PlatformError> {
+    for (receipt, item) in receipts.iter().zip(items) {
+        let failure = || PlatformError::Trash {
+            message: format!(
+                "{} has no valid Trash deletion instance for undo",
+                receipt.original_path.display()
+            ),
+        };
+        let Some(nonce) = receipt.deletion_instance.as_deref() else {
+            return Err(failure());
+        };
+        let info = std::fs::read_to_string(&item.id).map_err(|_| failure())?;
+        let expected = format!("X-Iris-Instance={nonce}");
+        if !info.lines().any(|line| line.trim() == expected) {
+            return Err(failure());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(any(
@@ -275,6 +357,7 @@ mod exact_items {
                     trashed_path: None,
                     trash_id: Some(id),
                     normalized_path: Some(normalized_path.clone()),
+                    deletion_instance: None,
                 })
             })
             .collect()
@@ -613,6 +696,68 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    // A Freedesktop Trash name is freed and reused when its item is purged.
+    // Without a per-deletion nonce, the old undo receipt would restore whatever
+    // content later occupied the same `.trashinfo` slot.
+    #[cfg(all(
+        unix,
+        not(target_os = "macos"),
+        not(target_os = "ios"),
+        not(target_os = "android")
+    ))]
+    #[test]
+    fn reused_trash_slot_does_not_restore_stale_receipt() {
+        static XDG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        struct RestoreXdg(Option<std::ffi::OsString>);
+        impl Drop for RestoreXdg {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+                    None => std::env::remove_var("XDG_DATA_HOME"),
+                }
+            }
+        }
+
+        let _guard = XDG_ENV_LOCK.lock().unwrap();
+        let data_home = TempDir::new().unwrap();
+        let previous = std::env::var_os("XDG_DATA_HOME");
+        std::env::set_var("XDG_DATA_HOME", data_home.path());
+        let _restore_env = RestoreXdg(previous);
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("undo-target.txt");
+        fs::write(&path, "original").unwrap();
+        let first = trash_file_with_receipt(&path).unwrap();
+        assert!(first.deletion_instance.is_some());
+        assert!(!path.exists());
+
+        let item = trash::os_limited::list()
+            .unwrap()
+            .into_iter()
+            .find(|item| first.trash_id.as_ref() == Some(&item.id))
+            .expect("first deletion must be in Trash");
+        trash::os_limited::purge_all(std::iter::once(item)).unwrap();
+
+        // Same name, different deletion: Freedesktop reuses the freed info filename.
+        fs::write(&path, "replacement").unwrap();
+        let second = trash_file_with_receipt(&path).unwrap();
+        assert_eq!(first.trash_id, second.trash_id);
+        assert_ne!(first.deletion_instance, second.deletion_instance);
+        assert!(!path.exists());
+
+        let error = restore_files_with_receipts(std::slice::from_ref(&first)).unwrap_err();
+        assert!(matches!(error, PlatformError::Trash { .. }));
+        assert!(!path.exists());
+        assert!(trash::os_limited::list()
+            .unwrap()
+            .iter()
+            .any(|item| second.trash_id.as_ref() == Some(&item.id)));
+
+        restore_files_with_receipts(std::slice::from_ref(&second)).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "replacement");
+    }
 
     #[test]
     #[ignore] // Requires Finder process; may timeout in CI

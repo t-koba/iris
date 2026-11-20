@@ -9,6 +9,7 @@ publish = false
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+getrandom = { workspace = true }
 tokio = { workspace = true }
 trash = { workspace = true }
 notify = { workspace = true }

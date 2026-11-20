@@ -23,6 +23,8 @@ pub struct UndoItem {
     pub trash_id: Option<std::ffi::OsString>,
     /// Backend path for exact Trash identity checks, separate from the UI path.
     pub normalized_path: Option<PathBuf>,
+    /// Nonce binding the undo entry to one specific system Trash deletion.
+    pub deletion_instance: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,6 +172,7 @@ mod tests {
                 trashed_path: None,
                 trash_id: None,
                 normalized_path: None,
+                deletion_instance: None,
             }],
             performed_at: SystemTime::UNIX_EPOCH,
         }

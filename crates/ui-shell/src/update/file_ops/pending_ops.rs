@@ -342,6 +342,7 @@ fn finish_pending_operation(state: &mut AppState) -> Task<Message> {
                         trashed_path: None,
                         trash_id: None,
                         normalized_path: None,
+                        deletion_instance: None,
                     })
                 })
                 .collect();

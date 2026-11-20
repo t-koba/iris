@@ -476,6 +476,7 @@ fn trash_receipts_for_undo(
             trashed_path: item.trashed_path.clone(),
             trash_id: item.trash_id.clone(),
             normalized_path: item.normalized_path.clone(),
+            deletion_instance: item.deletion_instance.clone(),
         })
         .collect()
 }
@@ -517,6 +518,7 @@ pub(crate) async fn trash_paths_for_undo(paths: Vec<PathBuf>) -> Result<Vec<Undo
             trashed_path: receipt.trashed_path,
             trash_id: receipt.trash_id,
             normalized_path: receipt.normalized_path,
+            deletion_instance: receipt.deletion_instance,
         })
         .collect();
     Ok(items)
@@ -564,6 +566,7 @@ mod tests {
             trashed_path: None,
             trash_id: None,
             normalized_path: None,
+            deletion_instance: None,
         }
     }
 
@@ -580,6 +583,7 @@ mod tests {
                 trashed_path: Some(PathBuf::from("trash").join(name)),
                 trash_id: Some(name.into()),
                 normalized_path: Some(PathBuf::from("backend").join(name)),
+                deletion_instance: Some(format!("instance-{name}")),
             })
             .collect();
         let op = UndoableOp {
@@ -599,7 +603,9 @@ mod tests {
                 let name = format!("{}.2", item.source_path.display());
                 item.trashed_path = Some(PathBuf::from("trash").join(&name));
                 item.normalized_path = Some(PathBuf::from("backend-after-redo").join(&name));
+                let instance = format!("instance-{name}");
                 item.trash_id = Some(name.into());
+                item.deletion_instance = Some(instance);
                 item
             })
             .collect();
@@ -631,6 +637,7 @@ mod tests {
             );
             assert_eq!(receipt.trash_id, item.trash_id);
             assert_eq!(receipt.trashed_path, item.trashed_path);
+            assert_eq!(receipt.deletion_instance, item.deletion_instance);
         }
         assert_eq!(next_undo.kind, op.kind);
         assert_eq!(next_undo.performed_at, op.performed_at);
@@ -665,6 +672,7 @@ mod tests {
                 trashed_path: None,
                 trash_id: None,
                 normalized_path: None,
+                deletion_instance: None,
             }],
         )
         .await;
