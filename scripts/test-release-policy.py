@@ -289,6 +289,50 @@ class Policy(unittest.TestCase):
         probe["text"] = json.dumps(data)
         self.assertIn("forbidden", " ".join(module.validate(value, policy, WORKSPACE)))
 
+    def test_probed_and_shipped_native_libraries_require_closure_components(self):
+        """A relaxed LGPL gate must not pass when FFmpeg components are omitted.
+
+        Every probed FFmpeg library and every shipped native file must be bound to
+        a closure component whose acceptance basis the policy validates. Dropping
+        the components while leaving the probes (or shipping an unlisted library)
+        previously passed, defeating the redistribution-evidence requirement.
+        """
+        # Drop every dynamic LGPL component but keep the library probes and files.
+        value = complete_report()
+        closure = next(row for row in value["records"] if row["kind"] == "native-closure")["evidence"]
+        for artifact in closure["artifacts"]:
+            for coverage in artifact["coverage"].values():
+                coverage["components"] = [cid for cid in coverage["components"] if not cid.endswith("-dynamic")]
+        closure["components"] = [c for c in closure["components"] if c["mode"] != "dynamic"]
+        # Depending on which artifact is visited first, either the structural or the
+        # LGPL-match binding may fire; both prove the dropped component cannot pass.
+        with self.assertRaisesRegex(ValueError, "probed FFmpeg library"):
+            module.validate(value, POLICY, WORKSPACE)
+
+        # Ship a native file with an empty-coverage artifact and no component.
+        value = complete_report()
+        closure = next(row for row in value["records"] if row["kind"] == "native-closure")["evidence"]
+        ref = dict(path="/native/libSHIPPED.so", sha256="e" * 64)
+        proof = dict(path="/stage/SYNTHETIC-EVIDENCE.txt", sha256="b" * 64)
+        value["records"].extend([dict(kind="file", bytes=12, **ref), dict(kind="native-file", bytes=12, **ref)])
+        closure["artifacts"].append(dict(file=ref, coverage={
+            mode: dict(components=[], evidence=[proof]) for mode in ("static", "embedded", "dynamic", "dlopen")}))
+        with self.assertRaisesRegex(ValueError, "shipped native file absent from license closure"):
+            module.validate(value, POLICY, WORKSPACE)
+
+        # Relabel the LGPL component of a probed library as an allowed license to
+        # skip source/relinking; the probe still asserts LGPL so this must not pass.
+        value = complete_report()
+        closure = next(row for row in value["records"] if row["kind"] == "native-closure")["evidence"]
+        for component in closure["components"]:
+            if component["mode"] == "dynamic" and component["license"]["disposition"] == "review":
+                component["license"]["id"] = "MIT"
+                component["license"]["disposition"] = "allowed"
+                component["obligations"]["source"]["status"] = "not-applicable"
+                component["obligations"]["relinking"]["status"] = "not-applicable"
+        with self.assertRaisesRegex(ValueError, "lacks a matching LGPL closure component"):
+            module.validate(value, POLICY, WORKSPACE)
+
     def test_pdfium_and_windows_minimal(self):
         for verified in (False, None, "true", 1):
             value = report()

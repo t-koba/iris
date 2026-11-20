@@ -215,6 +215,23 @@ def cargo_graph(graph, policy, workspace):
     return errors
 
 
+def probe_paths(records):
+    """FFmpeg library paths named by a structurally well-formed probe command.
+
+    native() performs the full exact-binding, license-name and forbidden-flag
+    validation of every probe; this only enumerates probe targets so validate()
+    can bind them to closure components. It cannot create a false pass: any probe
+    that fails native()'s checks is already reported as an error.
+    """
+    paths = set()
+    for row in records:
+        argv = row.get("argv")
+        if (row["kind"] == "command" and isinstance(argv, list) and len(argv) == 4
+                and argv[2] == "probe-library" and isinstance(argv[3], str)):
+            paths.add(argv[3])
+    return paths
+
+
 def native(records, policy):
     """Bind FFmpeg probes to inventoried bytes; no LGPL attestation is required.
 
@@ -352,6 +369,23 @@ def validate(report, policy, workspace):
                         else policy["native_required_obligations"][disposition])
             require(all(component["obligations"][key]["status"] == "provided" for key in required),
                     "required native notice/source/relinking evidence absent")
+        # Bind the relaxation's acceptance basis to actual closure evidence: every
+        # probed FFmpeg library and every shipped native file must be represented by
+        # a component, whose mode/disposition/obligations the loop above already
+        # validates. Without this binding, a report could probe LGPL FFmpeg yet drop
+        # its components, relabel them as an allowed license to skip source/relinking
+        # obligations, or ship an entirely unlisted native file and still pass.
+        covered = {component["artifact"]["path"] for component in components}
+        for path in probe_paths(records):
+            require(path in covered, "probed FFmpeg library absent from license closure")
+            # A probed library is asserted LGPL by native(); its covering closure
+            # component must carry a review license and review disposition so the
+            # full notice/source/relinking obligations (or a scoped static review)
+            # are enforced by the per-component loop above.
+            require(any(c["artifact"]["path"] == path and c["license"]["disposition"] == "review"
+                        and c["license"]["id"] in policy["review_licenses"] for c in components),
+                    "probed FFmpeg library lacks a matching LGPL closure component")
+        require(set(native_files) <= covered, "shipped native file absent from license closure")
     return errors
 
 

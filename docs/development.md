@@ -265,6 +265,10 @@ scope 付きで止めるために残しています（現行 gate が参照す�
 `<artifact-path>#sha256=<digest>#component=<id>`）、`license`（review 対象 ID）、`review`（法的 review の参照）を指定します。
 これは明示的な legal-review approval とその参照を記録する欄であり、このツールが法的承認を与えるものではありません。
 FFmpeg は exact library の hash と probe の path を結び付け、全 license/configuration pair を検査します。
+さらに probe された library と出荷される全 `native-file` は closure の component に結び付いていなければならず、
+probe された LGPL library は review license/disposition の component に結び付き、完全な source/notice/relinking
+obligation が検証されます。component を落としたり、allowed license に付け替えたり、未掲載の native file を
+追加した report は受理されません。
 product の Cargo flags、必要な native component と許可 license 名は JSON で定義し、GPL/version3/nonfree flags、
 未知・欠落の native evidence、動的リンクが明確でない LGPL（static/embedded）は公開を阻止します。
 `ffmpeg-next` の license や別の `ffmpeg` executable では代用できません。
