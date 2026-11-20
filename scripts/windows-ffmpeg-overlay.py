@@ -109,7 +109,6 @@ def derive(portfile, source_dir):
     text from the pinned vcpkg checkout; this function never reads it from an
     unpinned location.
     """
-    digest = hashlib.sha256(BASELINE_FETCH.encode()).hexdigest()
     require(baseline_patches(), "baseline fetch has no patches")
     matches = FETCH_RE.findall(portfile)
     require(len(matches) == 1, "expected exactly one baseline source fetch")
@@ -140,7 +139,9 @@ def derive(portfile, source_dir):
         baseline_ffmpeg_version="9.0.2",
         production_ffmpeg_version="8.1.3",
         source_path=str(source),
-        source_path_sha256=digest,
+        # Identity of the path string, NOT the source tree content. Content
+        # attestation is the acquisition manifest source_sha256 (FFmpeg 8.1.3).
+        source_path_sha256=hashlib.sha256(str(source).encode()).hexdigest(),
         baseline_patches_not_applied=baseline_patches(),
         forbidden_features=list(FORBIDDEN_FEATURES),
         patch_note="Baseline patches target FFmpeg 9.0.2 and are unvalidated for 8.1.3; "

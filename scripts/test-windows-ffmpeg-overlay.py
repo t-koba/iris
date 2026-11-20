@@ -60,6 +60,15 @@ class DerivationContracts(unittest.TestCase):
         self.assertIn("unvalidated for 8.1.3", evidence["patch_note"])
         self.assertIn("exact-SHA Windows CI", evidence["patch_note"])
 
+    def test_source_path_sha256_is_path_digest_not_fetch_digest(self):
+        _, evidence = mod.derive(portfile(), GOOD_SRC)
+        self.assertEqual(
+            evidence["source_path_sha256"],
+            hashlib.sha256(GOOD_SRC.encode()).hexdigest(),
+        )
+        self.assertNotEqual(evidence["source_path_sha256"],
+                            evidence["baseline_fetch_sha256"])
+
     def test_portfile_digest_recorded(self):
         text = portfile()
         _, evidence = mod.derive(text, GOOD_SRC)
