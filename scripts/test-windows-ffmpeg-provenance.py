@@ -9,6 +9,8 @@ signature-verified FFmpeg 8.1.3 source (packaging/linux/ffmpeg.json) and the
 locked crates.io bindings ffmpeg-next 9.0.0 / ffmpeg-sys-next 9.0.1, whose
 ffmpeg_8_1 ABI (62.28) matches that source.
 
+The approved production Windows runtime plan is packaging/windows/ffmpeg.json;
+this contract checks it resolves to the approved source and locked bindings.
 This checks the dependency route and the boundary, not native execution: the
 native Windows build, DLL/PDFium closure, notices and clean-install preview
 smoke still require a Windows runner via exact-SHA CI before release.yml may
@@ -18,6 +20,7 @@ claim that a release artifact was built or that a codec is safe.
 """
 
 from pathlib import Path
+import json
 import os
 import re
 import unittest
@@ -49,6 +52,7 @@ production_files = (
     "scripts/release-policy.json",
     "Cargo.toml",
     "Cargo.lock",
+    "packaging/windows/ffmpeg.json",
 )
 
 
@@ -121,8 +125,6 @@ class WindowsFfmpegProvenance(unittest.TestCase):
                 )
 
     def test_approved_ffmpeg_target_is_signature_verified(self):
-        import json
-
         policy = json.loads(read("packaging/linux/ffmpeg.json"))
         self.assertEqual(policy["version"], "8.1.3")
         self.assertEqual(policy["avcodec_version"], [62, 28, 103])
@@ -140,11 +142,48 @@ class WindowsFfmpegProvenance(unittest.TestCase):
             self.skipTest("ffmpeg-sys-next source not cached; Cargo enforces the lock checksum")
         self.assertIn('("ffmpeg_8_1", 62, 28)', source)
 
+    def test_production_plan_matches_approved_pins(self):
+        plan = json.loads(read("packaging/windows/ffmpeg.json"))
+
+        # The FFmpeg source is referenced, not duplicated: it must resolve to
+        # the approved signature-verified 8.1.3 pin.
+        self.assertEqual(plan["ffmpeg"]["source"], "packaging/linux/ffmpeg.json")
+        approved = json.loads(read(plan["ffmpeg"]["source"]))
+        self.assertEqual(approved["version"], "8.1.3")
+        self.assertEqual(approved["avcodec_version"], [62, 28, 103])
+        for field in ("url", "sha256", "signature_url", "key_url", "fingerprint"):
+            self.assertTrue(approved.get(field))
+
+        # Bindings must be the exact locked registry crates the plan claims.
+        self.assertEqual(plan["bindings"]["ffmpeg-next"], bindings["ffmpeg-next"][0])
+        self.assertEqual(plan["bindings"]["ffmpeg-sys-next"], bindings["ffmpeg-sys-next"][0])
+
+        # The vcpkg baseline's port builds 9.0.2; the plan must record that
+        # verified mismatch so a build knows it has to override to the 8.1.3
+        # tarball rather than promoting an unsigned git commit.
+        self.assertRegex(plan["vcpkg"]["baseline"], r"^[0-9a-f]{40}$")
+        self.assertEqual(plan["vcpkg"]["ffmpeg_port_version"], "9.0.2")
+        self.assertEqual(plan["vcpkg"]["ffmpeg_port_revision"], 6)
+        self.assertNotEqual(plan["vcpkg"]["ffmpeg_port_version"], approved["version"])
+        self.assertIn("8.1.3", plan["vcpkg"]["constraint"])
+
+        # PDFium must match the production chromium/8138 release and require
+        # attestation; the Windows asset identity is pinned, not computed.
+        fetch = read("scripts/fetch-pdfium-runtime.sh")
+        self.assertIn(
+            'pdfium_release="' + plan["pdfium"]["release"] + '"', fetch
+        )
+        self.assertIn(
+            'pdfium_version="' + plan["pdfium"]["version"] + '"', fetch
+        )
+        self.assertEqual(plan["pdfium"]["asset"], "pdfium-win-x64.tgz")
+        self.assertRegex(plan["pdfium"]["sha256"], r"^[0-9a-f]{64}$")
+        self.assertGreater(plan["pdfium"]["bytes"], 0)
+        self.assertTrue(plan["pdfium"]["attestation_required"])
+
     def test_windows_release_hold_is_explicit(self):
         release = read(".github/workflows/release.yml")
         self.assertIn("IRIS_BUILD_VARIANT: minimal", release)
-        import json
-
         policy = json.loads(read("scripts/release-policy.json"))
         self.assertEqual(policy["required_variants"]["windows"], "product")
         self.assertIn("python scripts/release-policy.py", release)

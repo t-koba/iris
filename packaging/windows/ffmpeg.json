@@ -1,0 +1,28 @@
+{
+  "$comment": "Approved production Windows native-preview runtime plan. This is a contract and single source of truth for a future Windows build, not a release payload. A Windows-runner build must realize this plan and pass exact-SHA CI before release.yml may ship a product Windows build; until then the release variant stays minimal.",
+  "ffmpeg": {
+    "source": "packaging/linux/ffmpeg.json",
+    "note": "Reuse the signature-verified FFmpeg 8.1.3 source pin defined there (url, sha256, signature_url, key_url, fingerprint, avcodec_version 62.28.103, required_decoders). The pin is deliberately not duplicated here; the offline contract checks the reference resolves to the approved release."
+  },
+  "vcpkg": {
+    "baseline": "b8dfe957ec8b5c0ef5c4b31eea594b8486af744f",
+    "ffmpeg_port_version": "9.0.2",
+    "ffmpeg_port_revision": 6,
+    "constraint": "This baseline's ffmpeg port builds 9.0.2, not the approved 8.1.3. A production build must override the port source to the approved signature-verified 8.1.3 tarball and adapt only patches justified from exact pinned-source contexts. It must not use an unsigned git commit or an unsigned Rust binding override."
+  },
+  "bindings": {
+    "ffmpeg-next": "9.0.0",
+    "ffmpeg-sys-next": "9.0.1",
+    "note": "Stock crates.io versions from Cargo.lock, whose ffmpeg-sys-next 9.0.1 declares the ffmpeg_8_1 (62.28) ABI matching 8.1.3. No git or path override."
+  },
+  "pdfium": {
+    "release": "chromium/8138",
+    "version": "159.0.8138.0",
+    "asset": "pdfium-win-x64.tgz",
+    "bytes": 4031929,
+    "sha256": "8d48973e3eb472dda0f5f2435e595ac043f9f2219dd71883392f549445afa8a5",
+    "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8138/pdfium-win-x64.tgz",
+    "attestation_required": true,
+    "note": "Same approved chromium/8138 bblanchon release family as the Linux PDFium pin. Windows production staging must verify size, sha256 and release attestation, mirroring the Linux contract, before the runtime may ship."
+  }
+}
