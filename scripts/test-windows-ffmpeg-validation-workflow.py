@@ -274,6 +274,10 @@ class FailClosedContracts(unittest.TestCase):
             "        *k : ./.github/actions/exfiltrate\n",
             "      - &k uses: actions/checkout@v4\n"
             "      - *k : ./.github/actions/exfiltrate\n",
+            "      - &$k uses: actions/checkout@v4\n"
+            "      - *$k : ./.github/actions/exfiltrate\n",
+            "        &/k uses: actions/checkout@v4\n"
+            "        */k : ./.github/actions/exfiltrate\n",
             "        !!str uses: ./.github/actions/exfiltrate\n",
         )
         for variant in variants:

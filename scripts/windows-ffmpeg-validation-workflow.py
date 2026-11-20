@@ -98,7 +98,7 @@ FLOW_STEP_RE = re.compile(r"^\s*-\s*\{", re.MULTILINE)
 EXPLICIT_KEY_RE = re.compile(r"^\s*(?:-\s*)?[?:](?:\s|$)")
 # An anchor or alias in key position can resolve to `uses` even though the
 # line has no literal `uses` token. This workflow uses neither in mappings.
-ANCHOR_KEY_RE = re.compile(r"^\s*(?:-\s*)?[&*][\w-]")
+ANCHOR_KEY_RE = re.compile(r"^\s*(?:-\s*)?[&*]\S")
 # YAML tags on a key are another way to spell a key without a literal token.
 TAG_KEY_RE = re.compile(r"^\s*(?:-\s*)?!")
 # YAML double-quoted scalars resolve numeric escapes before GitHub reads a
