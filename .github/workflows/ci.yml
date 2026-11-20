@@ -48,6 +48,9 @@ jobs:
       - name: Release policy gate regression
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/test-release-policy.py
+      - name: Windows FFmpeg provenance contract
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-windows-ffmpeg-provenance.py
 
       - uses: dtolnay/rust-toolchain@master
         with:
