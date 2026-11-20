@@ -8,10 +8,19 @@ struct RsyncBatchRequest<'a> {
     resolution: &'a ConflictResolution,
     src_mapping: Option<&'a crate::remote_transport::RemoteTransportMapping>,
     dst_mapping: Option<&'a crate::remote_transport::RemoteTransportMapping>,
+    cancellation: BatchCancellation<'a>,
 }
 
 struct SftpBatchPlan {
     transfer: crate::remote_transport::SftpTransferPlan,
+}
+
+/// The job identity a batch is admitted under, carried to each mutation boundary so a
+/// cancellation after admission can still veto the write.
+#[derive(Clone, Copy)]
+struct BatchCancellation<'a> {
+    control: Option<&'a TransferControl>,
+    job_id: Option<&'a JobId>,
 }
 
 fn batch_source_is_directory(item: &PendingFileItem) -> bool {
@@ -31,6 +40,25 @@ fn rsync_batch_preserves_names(items: &[PendingFileItem]) -> bool {
     })
 }
 
+fn canceled(control: Option<&TransferControl>) -> bool {
+    control.is_some_and(|control| control.cancel_token().is_cancelled())
+}
+
+fn ensure_not_canceled(
+    runtime: &AppRuntime,
+    cancellation: &BatchCancellation<'_>,
+) -> Result<(), String> {
+    if canceled(cancellation.control)
+        || cancellation
+            .job_id
+            .is_some_and(|job_id| runtime.job_manager.get_state(job_id) == Some(JobState::Canceled))
+    {
+        Err("transfer canceled".into())
+    } else {
+        Ok(())
+    }
+}
+
 impl AppRuntime {
     pub async fn try_rsync_batch(
         &self,
@@ -38,7 +66,40 @@ impl AppRuntime {
         is_move: bool,
         resolution: &ConflictResolution,
     ) -> Result<Option<u64>, String> {
+        self.try_rsync_batch_inner(None, items, is_move, resolution, None)
+            .await
+    }
+
+    /// Registers the dispatch with Cancel on first poll and keeps the control for the
+    /// whole batch, so a Cancel between dispatch and execution cannot write anything.
+    pub(crate) async fn try_rsync_batch_admitted(
+        self: &Arc<Self>,
+        job_id: &JobId,
+        dispatch_generation: u64,
+        items: &[PendingFileItem],
+        is_move: bool,
+        resolution: &ConflictResolution,
+    ) -> Result<Option<u64>, String> {
+        let admission = self.admit_transfer_for(job_id, dispatch_generation)?;
+        let control = admission.control();
+        let result = self
+            .try_rsync_batch_inner(Some(job_id), items, is_move, resolution, Some(control))
+            .await;
+        drop(admission);
+        result
+    }
+
+    async fn try_rsync_batch_inner(
+        &self,
+        job_id: Option<&JobId>,
+        items: &[PendingFileItem],
+        is_move: bool,
+        resolution: &ConflictResolution,
+        control: Option<&TransferControl>,
+    ) -> Result<Option<u64>, String> {
         use crate::remote_transport::RemoteTransportKind;
+
+        let cancellation = BatchCancellation { control, job_id };
 
         if items.is_empty() {
             return Ok(None);
@@ -87,12 +148,30 @@ impl AppRuntime {
         let Some(primary_mapping) = dst_mapping.as_ref().or(src_mapping.as_ref()) else {
             return Ok(None);
         };
-        let mut validated = false;
         let resolved_transport = match primary_mapping.transport {
             RemoteTransportKind::Disabled => return Ok(None),
-            RemoteTransportKind::Auto => {
+            RemoteTransportKind::RsyncSsh => {
+                // Native SFTP uses the explicit destination in its plan. Only rsync loses the
+                // requested per-item name, so decline a wrong-sibling batch before validation
+                // and before any destination mutation.
+                if !rsync_batch_preserves_names(items) {
+                    return Ok(None);
+                }
                 self.validate_batch(items).await?;
-                validated = true;
+                ensure_not_canceled(self, &cancellation)?;
+                RemoteTransportKind::RsyncSsh
+            }
+            RemoteTransportKind::Sftp | RemoteTransportKind::Auto => {
+                self.validate_batch(items).await?;
+                ensure_not_canceled(self, &cancellation)?;
+                primary_mapping.transport
+            }
+        };
+
+        let strategy = match resolved_transport {
+            RemoteTransportKind::RsyncSsh => RsyncStrategy::Ssh,
+            RemoteTransportKind::Sftp | RemoteTransportKind::Auto => {
+                ensure_not_canceled(self, &cancellation)?;
                 if let Some(bytes) = self
                     .run_sftp_batch(
                         items,
@@ -100,42 +179,29 @@ impl AppRuntime {
                         resolution,
                         src_mapping.as_ref(),
                         dst_mapping.as_ref(),
+                        cancellation,
                     )
                     .await?
                 {
                     return Ok(Some(bytes));
                 }
-                RemoteTransportKind::RsyncSsh
+                // Direct SFTP does not fall back to rsync; only Auto does.
+                if resolved_transport == RemoteTransportKind::Sftp {
+                    return Ok(None);
+                }
+                // Native SFTP declined the batch; check before switching transports.
+                ensure_not_canceled(self, &cancellation)?;
+                // As for a direct rsync batch, never let the fallback write a different
+                // basename than the one recorded for the item.
+                if !rsync_batch_preserves_names(items) {
+                    return Ok(None);
+                }
+                RsyncStrategy::Ssh
             }
-            RemoteTransportKind::Sftp => {
-                self.validate_batch(items).await?;
-                return self
-                    .run_sftp_batch(
-                        items,
-                        is_move,
-                        resolution,
-                        src_mapping.as_ref(),
-                        dst_mapping.as_ref(),
-                    )
-                    .await;
-            }
-            other => other,
+            RemoteTransportKind::Disabled => return Ok(None),
         };
 
-        let strategy = match resolved_transport {
-            RemoteTransportKind::RsyncSsh => RsyncStrategy::Ssh,
-            _ => return Ok(None),
-        };
-        // Native SFTP uses the explicit destination in its plan. Only rsync loses the
-        // requested per-item name, so decline a wrong-sibling batch before validation
-        // and before any destination mutation.
-        if !rsync_batch_preserves_names(items) {
-            return Ok(None);
-        }
-        if !validated {
-            self.validate_batch(items).await?;
-        }
-
+        ensure_not_canceled(self, &cancellation)?;
         self.run_rsync_batch(RsyncBatchRequest {
             strategy,
             items,
@@ -144,6 +210,7 @@ impl AppRuntime {
             resolution,
             src_mapping: src_mapping.as_ref(),
             dst_mapping: dst_mapping.as_ref(),
+            cancellation,
         })
         .await
     }
@@ -185,6 +252,7 @@ impl AppRuntime {
             resolution,
             src_mapping,
             dst_mapping,
+            cancellation,
         } = request;
         if !rsync_binary_available().await {
             return Ok(None);
@@ -193,8 +261,19 @@ impl AppRuntime {
         // A Move batch passes --remove-source-files, so source sizes must be captured
         // before rsync runs; the aggregate completion reports these bytes to job progress.
         let transferred_bytes = sum_transferred_bytes(items).await;
+        #[cfg(test)]
+        let simulated_effect = tests::await_batch_hook(cancellation.job_id).await;
+        // Cancel may have arrived while a test barrier waited: recheck before any write.
+        ensure_not_canceled(self, &cancellation)?;
+        #[cfg(test)]
+        if simulated_effect {
+            return tests::simulate_batch_effect(items, is_move).await;
+        }
 
         let mut cmd = tokio::process::Command::new("rsync");
+        // If the task is dropped mid-execution, kill the child instead of leaving rsync
+        // to finish a write or a source removal after Cancel.
+        cmd.kill_on_drop(true);
         cmd.arg("-a").arg("--protect-args").arg("--info=progress2");
 
         if matches!(strategy, RsyncStrategy::Ssh) {
@@ -257,6 +336,7 @@ impl AppRuntime {
         resolution: &ConflictResolution,
         src_mapping: Option<&crate::remote_transport::RemoteTransportMapping>,
         dst_mapping: Option<&crate::remote_transport::RemoteTransportMapping>,
+        cancellation: BatchCancellation<'_>,
     ) -> Result<Option<u64>, String> {
         let Some(plan) =
             build_sftp_batch_plan(items, is_move, resolution, src_mapping, dst_mapping)
@@ -271,6 +351,14 @@ impl AppRuntime {
             "executing native SFTP batch"
         );
         let transferred_bytes = sum_transferred_bytes(items).await;
+        #[cfg(test)]
+        let simulated_effect = tests::await_batch_hook(cancellation.job_id).await;
+        // Cancel may have arrived while a test barrier waited: recheck before any write.
+        ensure_not_canceled(self, &cancellation)?;
+        #[cfg(test)]
+        if simulated_effect {
+            return tests::simulate_batch_effect(items, is_move).await;
+        }
         let started = std::time::Instant::now();
         if let Err(error) = crate::remote_transport::execute_sftp_plan(&plan.transfer).await {
             iris_transfer::method_selector::observe_backend_sample("sftp", started.elapsed(), 0);
@@ -357,6 +445,87 @@ fn build_sftp_batch_plan(
 mod tests {
     use super::*;
     use iris_core_domain::types::object::{BackendId, ObjectKey, StableId};
+
+    /// Pauses an admitted batch after read-only validation, at the boundary where a
+    /// transport would start mutating destinations or sources.
+    pub(crate) struct BatchHook {
+        pub(crate) entered: Arc<tokio::sync::Notify>,
+        pub(crate) release: Arc<tokio::sync::Notify>,
+        did_enter: Arc<std::sync::atomic::AtomicBool>,
+        simulate_effect: bool,
+    }
+
+    static BATCH_HOOKS: OnceLock<Mutex<HashMap<u64, Arc<BatchHook>>>> = OnceLock::new();
+
+    pub(crate) fn install_batch_hook(job_id: &JobId, simulate_effect: bool) -> Arc<BatchHook> {
+        let hook = Arc::new(BatchHook {
+            entered: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+            did_enter: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            simulate_effect,
+        });
+        BATCH_HOOKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(job_id.0, Arc::clone(&hook));
+        hook
+    }
+
+    pub(crate) fn remove_batch_hook(job_id: &JobId) {
+        BATCH_HOOKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .remove(&job_id.0);
+    }
+
+    pub(crate) async fn await_batch_hook(job_id: Option<&JobId>) -> bool {
+        let Some(job_id) = job_id else {
+            return false;
+        };
+        let hook = BATCH_HOOKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .get(&job_id.0)
+            .cloned();
+        let Some(hook) = hook else {
+            return false;
+        };
+        hook.did_enter
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        hook.entered.notify_one();
+        hook.release.notified().await;
+        let mut hooks = BATCH_HOOKS.get_or_init(Default::default).lock().unwrap();
+        if hooks
+            .get(&job_id.0)
+            .is_some_and(|installed| Arc::ptr_eq(installed, &hook))
+        {
+            hooks.remove(&job_id.0);
+        }
+        drop(hooks);
+        hook.simulate_effect
+    }
+
+    pub(crate) async fn simulate_batch_effect(
+        items: &[PendingFileItem],
+        is_move: bool,
+    ) -> Result<Option<u64>, String> {
+        let total_bytes = sum_transferred_bytes(items).await;
+        for item in items {
+            let source = Path::new(&item.source.display_path);
+            let destination = Path::new(&item.destination_path);
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            std::fs::copy(source, destination).map_err(|error| error.to_string())?;
+            if is_move {
+                std::fs::remove_file(source).map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(Some(total_bytes))
+    }
 
     fn object_ref(display_path: &Path) -> ObjectRef {
         ObjectRef {
@@ -686,5 +855,208 @@ mod tests {
             .expect("fresh directory batch declined before validation");
         assert!(declined.is_none());
         assert!(!directory.join("nested").exists());
+    }
+
+    struct BatchFixture {
+        _temp: tempfile::TempDir,
+        runtime: Arc<AppRuntime>,
+        job_id: JobId,
+        generation: u64,
+        items: Vec<PendingFileItem>,
+        sources: Vec<PathBuf>,
+        destinations: Vec<PathBuf>,
+        contents: Vec<Vec<u8>>,
+        is_move: bool,
+    }
+
+    fn batch_fixture(job_id: u64, is_move: bool) -> BatchFixture {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_dir = temp.path().join("src");
+        let dest_dir = temp.path().join("dst");
+        std::fs::create_dir_all(&source_dir).expect("source directory");
+        std::fs::create_dir_all(&dest_dir).expect("destination directory");
+
+        let contents: Vec<Vec<u8>> = vec![b"first payload".to_vec(), b"second payload".to_vec()];
+        let mut items = Vec::new();
+        let mut sources = Vec::new();
+        let mut destinations = Vec::new();
+        for (index, content) in contents.iter().enumerate() {
+            let name = format!("file-{index}.bin");
+            let source = source_dir.join(&name);
+            let destination = dest_dir.join(&name);
+            std::fs::write(&source, content).expect("source file");
+            items.push(PendingFileItem {
+                source: object_ref(&source),
+                destination_path: destination.to_string_lossy().into_owned(),
+                installed_path: None,
+                undoable: true,
+            });
+            sources.push(source);
+            destinations.push(destination);
+        }
+
+        let runtime = runtime_with_mapping(
+            &dest_dir,
+            crate::remote_transport::RemoteTransportKind::Sftp,
+        );
+        let job_id = JobId(job_id);
+        runtime.track_running_job_for_test(job_id.clone(), items.len() as u64);
+        let generation = runtime.cancel_generation(&job_id);
+        BatchFixture {
+            _temp: temp,
+            runtime,
+            job_id,
+            generation,
+            items,
+            sources,
+            destinations,
+            contents,
+            is_move,
+        }
+    }
+
+    fn assert_no_batch_effect(fixture: &BatchFixture) {
+        for (source, content) in fixture.sources.iter().zip(&fixture.contents) {
+            assert_eq!(
+                std::fs::read(source).expect("source intact").as_slice(),
+                content.as_slice()
+            );
+        }
+        for destination in &fixture.destinations {
+            assert!(
+                !destination.exists(),
+                "unexpected write to {}",
+                destination.display()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_batch_dispatch_does_not_write_after_cancel_and_resume() {
+        let fixture = batch_fixture(9_800_100, true);
+        let hook = install_batch_hook(&fixture.job_id, true);
+        let runtime = Arc::clone(&fixture.runtime);
+        let job_id = fixture.job_id.clone();
+        let items = fixture.items.clone();
+        let generation = fixture.generation;
+        let is_move = fixture.is_move;
+        // The generation was captured before this future existed; admission must happen
+        // on first poll, not when the dispatch was built.
+        let dispatch = async move {
+            runtime
+                .try_rsync_batch_admitted(
+                    &job_id,
+                    generation,
+                    &items,
+                    is_move,
+                    &ConflictResolution::Overwrite,
+                )
+                .await
+        };
+
+        fixture.runtime.cancel_job(&fixture.job_id);
+        fixture.runtime.resume_job(&fixture.job_id);
+        let result = tokio::time::timeout(Duration::from_secs(5), dispatch)
+            .await
+            .expect("stale dispatch settles")
+            .expect_err("stale dispatch is rejected");
+        assert_eq!(result, STALE_TRANSFER_DISPATCH);
+        assert!(!hook.did_enter.load(std::sync::atomic::Ordering::SeqCst));
+        assert_no_batch_effect(&fixture);
+        assert!(!fixture.runtime.has_active_transfer(&fixture.job_id));
+        remove_batch_hook(&fixture.job_id);
+    }
+
+    #[tokio::test]
+    async fn cancel_after_batch_admission_prevents_writes_and_source_removal() {
+        let fixture = batch_fixture(9_800_200, true);
+        let hook = install_batch_hook(&fixture.job_id, true);
+        let runtime = Arc::clone(&fixture.runtime);
+        let job_id = fixture.job_id.clone();
+        let items = fixture.items.clone();
+        let generation = fixture.generation;
+        let is_move = fixture.is_move;
+        let batch = tokio::spawn(async move {
+            runtime
+                .try_rsync_batch_admitted(
+                    &job_id,
+                    generation,
+                    &items,
+                    is_move,
+                    &ConflictResolution::Overwrite,
+                )
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), hook.entered.notified())
+            .await
+            .expect("batch reached the mutation boundary");
+        assert!(fixture.runtime.has_active_transfer(&fixture.job_id));
+        fixture.runtime.cancel_job(&fixture.job_id);
+        hook.release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(5), batch)
+            .await
+            .expect("batch settles")
+            .expect("batch task joins");
+        assert_eq!(
+            result.expect_err("canceled batch fails"),
+            "transfer canceled"
+        );
+        assert_no_batch_effect(&fixture);
+        assert!(!fixture.runtime.has_active_transfer(&fixture.job_id));
+        remove_batch_hook(&fixture.job_id);
+    }
+
+    #[tokio::test]
+    async fn uncanceled_admitted_batch_performs_effect() {
+        let fixture = batch_fixture(9_800_300, true);
+        let hook = install_batch_hook(&fixture.job_id, true);
+        let runtime = Arc::clone(&fixture.runtime);
+        let job_id = fixture.job_id.clone();
+        let items = fixture.items.clone();
+        let generation = fixture.generation;
+        let is_move = fixture.is_move;
+        let batch = tokio::spawn(async move {
+            runtime
+                .try_rsync_batch_admitted(
+                    &job_id,
+                    generation,
+                    &items,
+                    is_move,
+                    &ConflictResolution::Overwrite,
+                )
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), hook.entered.notified())
+            .await
+            .expect("batch reached the mutation boundary");
+        hook.release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(5), batch)
+            .await
+            .expect("batch settles")
+            .expect("batch task joins");
+        let total_bytes: u64 = fixture
+            .contents
+            .iter()
+            .map(|content| content.len() as u64)
+            .sum();
+        assert_eq!(result.expect("batch effect succeeds"), Some(total_bytes));
+        for (source, destination, content) in fixture
+            .sources
+            .iter()
+            .zip(&fixture.destinations)
+            .zip(&fixture.contents)
+            .map(|((source, destination), content)| (source, destination, content))
+        {
+            assert!(!source.exists(), "move removed source {}", source.display());
+            assert_eq!(
+                std::fs::read(destination)
+                    .expect("destination written")
+                    .as_slice(),
+                content.as_slice()
+            );
+        }
+        assert!(!fixture.runtime.has_active_transfer(&fixture.job_id));
     }
 }

@@ -2,14 +2,14 @@ use super::*;
 
 /// Keeps a job's control reachable by Cancel for the entire admission and transfer.
 /// The last item releases the registration, including on preflight failure or task abort.
-struct TransferAdmission<'a> {
+pub(crate) struct TransferAdmission<'a> {
     runtime: &'a AppRuntime,
     job_id: u64,
     control: Option<Arc<TransferControl>>,
 }
 
 impl TransferAdmission<'_> {
-    fn control(&self) -> &TransferControl {
+    pub(crate) fn control(&self) -> &TransferControl {
         self.control.as_deref().expect("admission owns a control")
     }
 }
@@ -291,7 +291,15 @@ impl AppRuntime {
         self.admit_transfer_for(job_id, self.job_manager.cancel_generation(job_id))
     }
 
-    fn admit_transfer_for(
+    #[cfg(test)]
+    pub(crate) fn has_active_transfer(&self, job_id: &JobId) -> bool {
+        self.active_transfers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(&job_id.0)
+    }
+
+    pub(crate) fn admit_transfer_for(
         &self,
         job_id: &JobId,
         dispatch_generation: u64,

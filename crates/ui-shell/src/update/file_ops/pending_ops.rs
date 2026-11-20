@@ -186,6 +186,7 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
     {
         let items = pending.items[pending.current_index..].to_vec();
         let job_id = pending.job_id.clone();
+        let batch_job_id = job_id.clone();
         let is_move = pending.is_move;
         let item_count = items.len();
         let dispatch_generation = app_runtime().cancel_generation(&job_id);
@@ -197,7 +198,16 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
         return Task::perform(
             async move {
                 let runtime = app_runtime();
-                match runtime.try_rsync_batch(&items, is_move, &resolution).await {
+                match runtime
+                    .try_rsync_batch_admitted(
+                        &batch_job_id,
+                        dispatch_generation,
+                        &items,
+                        is_move,
+                        &resolution,
+                    )
+                    .await
+                {
                     Ok(Some(total_bytes)) => Ok(PendingItemResult {
                         bytes_completed: total_bytes,
                         files_completed: item_count as u64,
