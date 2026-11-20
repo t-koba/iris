@@ -129,6 +129,10 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
         return Task::none();
     }
 
+    if pending.conflict_check_pending {
+        return Task::none();
+    }
+
     if pending.all_started() {
         return if pending.in_flight == 0 {
             finish_pending_operation(state)
@@ -139,16 +143,13 @@ pub fn process_pending_operation(state: &mut AppState) -> Task<Message> {
 
     // No conflict policy yet: check conflicts one file at a time.
     if pending.remember_resolution.is_none() {
-        if pending.in_flight > 0 {
-            return Task::none();
-        }
         let Some(index) = pending.next_index() else {
             return Task::none();
         };
         let item = pending.items[index].clone();
         let job_id = pending.job_id.clone();
         if let Some(pending) = &mut state.pending_operation {
-            pending.in_flight = 1;
+            pending.conflict_check_pending = true;
         }
         return Task::perform(
             async move {
@@ -396,7 +397,8 @@ pub fn apply_conflict_resolution(
     let Some(index) = pending.take_next_index() else {
         return Task::none();
     };
-    pending.in_flight = 1;
+    pending.conflict_check_pending = false;
+    pending.in_flight += 1;
     spawn_apply_one_item(
         &pending.job_id,
         index,
@@ -444,20 +446,22 @@ pub fn dismiss_job_decisions(state: &mut AppState, job_id: &JobId) {
     });
 }
 
-/// Replay entries are popped from the journal before their transfer starts. An abort with no
-/// confirmed installation has not changed any destination, so the entry must remain retryable.
-/// A confirmed installation means the replay was partly applied; its journal outcome cannot be
-/// reconstructed from the abort alone, so the stacks are left untouched.
+/// Replay entries are popped from the journal before their transfer starts. An abort with every
+/// transfer outcome settled and no confirmed installation has not changed any destination, so the
+/// entry must remain retryable. An installation or a still-outstanding transfer means the replay
+/// was applied or may have been applied; its journal outcome cannot be reconstructed from the
+/// abort alone, so the stacks are left untouched.
 pub(crate) enum ReplayRestore {
     Undo(UndoableOp),
     Redo(UndoableOp),
 }
 
 pub(crate) fn replay_entry_to_restore(pending: &PendingFileOperation) -> Option<ReplayRestore> {
-    if pending
-        .items
-        .iter()
-        .any(|item| item.installed_path.is_some())
+    if pending.in_flight != 0
+        || pending
+            .items
+            .iter()
+            .any(|item| item.installed_path.is_some())
     {
         return None;
     }

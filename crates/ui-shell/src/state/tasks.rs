@@ -194,7 +194,10 @@ pub struct PendingFileOperation {
     pub is_move: bool,
     pub remember_resolution: Option<ConflictResolution>,
     pub job_id: JobId,
+    /// Transfer tasks whose destination outcome has not been settled yet. Conflict metadata
+    /// checks are tracked separately because they never write to a destination.
     pub in_flight: usize,
+    pub conflict_check_pending: bool,
     pub rsync_failed: bool,
     pub undo_action: Option<PendingUndoAction>,
     /// Items that failed and wait for Retry, Skip or Abort; nothing new starts meanwhile.
@@ -225,6 +228,7 @@ impl PendingFileOperation {
             remember_resolution: None,
             job_id,
             in_flight: 0,
+            conflict_check_pending: false,
             rsync_failed: false,
             undo_action,
             failed: Vec::new(),

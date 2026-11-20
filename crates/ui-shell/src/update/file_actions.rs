@@ -825,7 +825,7 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                     }
                     if let Some(pending) = &mut state.pending_operation {
                         if pending.job_id == job_id {
-                            pending.in_flight = 0;
+                            pending.in_flight = pending.in_flight.saturating_sub(1);
                             // The batch branch of `process_pending_operation` excludes Rename
                             // and Skip for undoable jobs, so every item it sent is installed
                             // at exactly its requested destination. Per-item results and
@@ -849,7 +849,7 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                     if let Some(pending) = &mut state.pending_operation {
                         if pending.job_id == job_id {
                             pending.current_index -= item_count;
-                            pending.in_flight = 0;
+                            pending.in_flight = pending.in_flight.saturating_sub(1);
                             pending.rsync_failed = true; // do not retry rsync
                         }
                     }
@@ -909,7 +909,10 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                     }
                     if is_current_job {
                         // A cancellation reported by the runtime bypasses cancel_job_state.
-                        // Restore an unwritten replay entry before dropping the operation.
+                        // This item's outcome is settled; siblings may still be outstanding.
+                        if let Some(pending) = &mut state.pending_operation {
+                            pending.in_flight = pending.in_flight.saturating_sub(1);
+                        }
                         let replay = state
                             .pending_operation
                             .as_ref()
@@ -954,7 +957,7 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                 // again and Skip moves past it.
                 let _ = pending.take_next_index();
                 pending.failed.push(task_index);
-                pending.in_flight = 0;
+                pending.conflict_check_pending = false;
             }
             match result {
                 Ok(Some(conflict)) => {

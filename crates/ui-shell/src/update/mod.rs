@@ -825,7 +825,8 @@ mod tests {
         // The next conflict check is for file 1, not file 0 again.
         let pending = state.pending_operation.as_ref().expect("pending");
         assert_eq!(pending.next_index(), Some(1));
-        assert_eq!(pending.in_flight, 1);
+        assert_eq!(pending.in_flight, 0);
+        assert!(pending.conflict_check_pending);
     }
 
     #[test]
@@ -1745,6 +1746,52 @@ mod tests {
             Message::PendingItemCompleted(job_id, 0, 0, Err("transfer canceled".into())),
         );
         state
+    }
+
+    fn two_item_replay_op() -> UndoableOp {
+        let mut op = replay_op();
+        let first = op.items[0].clone();
+        op.items.push(UndoItem {
+            source_path: PathBuf::from("/src/1"),
+            destination_path: PathBuf::from("/dst/1"),
+            ..first
+        });
+        op
+    }
+
+    #[test]
+    fn abort_keeps_replay_while_a_transfer_outcome_is_unknown() {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 2, 2);
+        state.pending_operation.as_mut().unwrap().undo_action =
+            Some(PendingUndoAction::PushRedo(two_item_replay_op()));
+        let _ = process_pending_operation(&mut state);
+        assert_eq!(state.pending_operation.as_ref().unwrap().in_flight, 2);
+
+        let _ = update(&mut state, Message::AbortJob(job_id));
+
+        assert!(state.pending_operation.is_none());
+        assert!(!state.undo_journal.can_undo());
+        assert!(!state.undo_journal.can_redo());
+    }
+
+    #[test]
+    fn runtime_cancel_keeps_replay_while_a_sibling_outcome_is_unknown() {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 2, 2);
+        state.pending_operation.as_mut().unwrap().undo_action =
+            Some(PendingUndoAction::PushRedo(two_item_replay_op()));
+        let _ = process_pending_operation(&mut state);
+        assert_eq!(state.pending_operation.as_ref().unwrap().in_flight, 2);
+
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(job_id, 0, 0, Err("transfer canceled".into())),
+        );
+
+        assert!(state.pending_operation.is_none());
+        assert!(!state.undo_journal.can_undo());
+        assert!(!state.undo_journal.can_redo());
     }
 
     #[test]
