@@ -21,8 +21,9 @@ fn batch_source_is_directory(item: &PendingFileItem) -> bool {
 /// rsync places every source under its own basename in the destination directory and
 /// never receives the per-item requested basename. A batch whose requested name differs
 /// would be recorded as installed at a path rsync did not write, which Undo and Redo
-/// later treat as their own. Declining the whole aggregate batch sends these items
-/// through the per-item path, where SFTP transfers keep their explicit per-item names.
+/// later treat as their own. Native SFTP receives an explicit destination per item, so
+/// this restriction belongs to rsync only and must not suppress a replay batch that
+/// SFTP could execute safely.
 fn rsync_batch_preserves_names(items: &[PendingFileItem]) -> bool {
     items.iter().all(|item| {
         let source_name = Path::new(&item.source.display_path).file_name();
@@ -49,16 +50,6 @@ impl AppRuntime {
         // path, which records creation as the condition for journaling them.
         if items.iter().any(batch_source_is_directory) {
             return Ok(None);
-        }
-
-        if !rsync_batch_preserves_names(items) {
-            return Ok(None);
-        }
-
-        // Validate the entire batch before any external tool can mutate a destination.
-        for item in items {
-            self.ensure_safe_transfer_destination(&item.source, Path::new(&item.destination_path))
-                .await?;
         }
 
         for item in items {
@@ -96,9 +87,12 @@ impl AppRuntime {
         let Some(primary_mapping) = dst_mapping.as_ref().or(src_mapping.as_ref()) else {
             return Ok(None);
         };
+        let mut validated = false;
         let resolved_transport = match primary_mapping.transport {
             RemoteTransportKind::Disabled => return Ok(None),
             RemoteTransportKind::Auto => {
+                self.validate_batch(items).await?;
+                validated = true;
                 if let Some(bytes) = self
                     .run_sftp_batch(
                         items,
@@ -114,6 +108,7 @@ impl AppRuntime {
                 RemoteTransportKind::RsyncSsh
             }
             RemoteTransportKind::Sftp => {
+                self.validate_batch(items).await?;
                 return self
                     .run_sftp_batch(
                         items,
@@ -131,6 +126,15 @@ impl AppRuntime {
             RemoteTransportKind::RsyncSsh => RsyncStrategy::Ssh,
             _ => return Ok(None),
         };
+        // Native SFTP uses the explicit destination in its plan. Only rsync loses the
+        // requested per-item name, so decline a wrong-sibling batch before validation
+        // and before any destination mutation.
+        if !rsync_batch_preserves_names(items) {
+            return Ok(None);
+        }
+        if !validated {
+            self.validate_batch(items).await?;
+        }
 
         self.run_rsync_batch(RsyncBatchRequest {
             strategy,
@@ -142,6 +146,15 @@ impl AppRuntime {
             dst_mapping: dst_mapping.as_ref(),
         })
         .await
+    }
+
+    /// Validate the entire batch before any external tool can mutate a destination.
+    async fn validate_batch(&self, items: &[PendingFileItem]) -> Result<(), String> {
+        for item in items {
+            self.ensure_safe_transfer_destination(&item.source, Path::new(&item.destination_path))
+                .await?;
+        }
+        Ok(())
     }
 
     fn lookup_transport_mappings(
@@ -496,8 +509,57 @@ mod tests {
             .iter()
             .any(batch_source_is_directory));
     }
+    fn runtime_with_mapping(
+        root: &Path,
+        transport: crate::remote_transport::RemoteTransportKind,
+    ) -> Arc<AppRuntime> {
+        let runtime = AppRuntime::initialize();
+        let mut map = mapping(root);
+        map.transport = transport;
+        runtime.set_remote_transport_mappings(vec![map]);
+        runtime
+    }
+
+    #[test]
+    fn sftp_batch_plan_keeps_numbered_replay_destination() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mount_root = temp.path().join("mount");
+        let source_root = temp.path().join("local");
+        std::fs::create_dir_all(&mount_root).expect("mount root");
+        std::fs::create_dir_all(&source_root).expect("source root");
+        let source = source_root.join("photo.jpg");
+        std::fs::write(&source, b"jpeg").expect("source file");
+        let destination = mount_root.join("album").join("photo (1).jpg");
+        std::fs::create_dir_all(destination.parent().expect("destination parent"))
+            .expect("destination parent");
+        let items = [PendingFileItem {
+            source: object_ref(&source),
+            destination_path: destination.to_string_lossy().into_owned(),
+            installed_path: None,
+            undoable: true,
+        }];
+
+        let plan = build_sftp_batch_plan(
+            &items,
+            false,
+            &ConflictResolution::Overwrite,
+            None,
+            Some(&mapping(&mount_root)),
+        )
+        .expect("numbered SFTP batch plan");
+
+        assert_eq!(
+            plan.transfer.entries,
+            vec![crate::remote_transport::SftpTransferEntry {
+                local_path: source,
+                remote_path: "/volume1/data/album/photo (1).jpg".into(),
+                is_dir: false,
+            }]
+        );
+    }
+
     #[tokio::test]
-    async fn renamed_replay_batch_declines_before_validation_without_writes() {
+    async fn renamed_replay_batch_declines_rsync_but_reaches_sftp_validation() {
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("photo.jpg");
         std::fs::write(&source, b"jpeg").expect("source file");
@@ -505,45 +567,53 @@ mod tests {
         std::fs::create_dir(&destination_dir).expect("destination directory");
         let sentinel = destination_dir.join("photo.jpg");
         std::fs::write(&sentinel, b"untouched").expect("sentinel");
-
-        // A lossy source would fail preflight with an error if the batch were not
-        // declined first. The numbered destination mirrors a replay after Keep Both;
-        // rsync would have written the sentinel's name instead.
-        let mut source_ref = object_ref(&source);
-        source_ref.local_path_is_lossy = true;
-        let items = [PendingFileItem {
-            source: source_ref.clone(),
-            destination_path: destination_dir
-                .join("photo (1).jpg")
-                .to_string_lossy()
-                .into_owned(),
+        let renamed = destination_dir.join("photo (1).jpg");
+        let item = |source_ref| PendingFileItem {
+            source: source_ref,
+            destination_path: renamed.to_string_lossy().into_owned(),
             installed_path: None,
             undoable: true,
-        }];
+        };
 
-        let declined = app_runtime()
-            .try_rsync_batch(&items, false, &ConflictResolution::Overwrite)
+        // rsync would write the sentinel's name rather than the numbered replay name.
+        // A lossy source would fail preflight, so returning None proves the rsync-only
+        // name guard ran before validation and before any destination mutation.
+        let mut rsync_source_ref = object_ref(&source);
+        rsync_source_ref.local_path_is_lossy = true;
+        let rsync = runtime_with_mapping(
+            &destination_dir,
+            crate::remote_transport::RemoteTransportKind::RsyncSsh,
+        );
+        let declined = rsync
+            .try_rsync_batch(
+                &[item(rsync_source_ref)],
+                false,
+                &ConflictResolution::Overwrite,
+            )
             .await
-            .expect("renamed batch declined before validation");
+            .expect("renamed batch declined for rsync");
         assert!(declined.is_none());
         assert_eq!(
             std::fs::read(&sentinel).expect("sentinel intact"),
             b"untouched"
         );
-        assert!(!destination_dir.join("photo (1).jpg").exists());
+        assert!(!renamed.exists());
 
-        // The same source with its original name still reaches preflight validation.
-        let matching = [PendingFileItem {
-            source: source_ref,
-            destination_path: sentinel.to_string_lossy().into_owned(),
-            installed_path: None,
-            undoable: true,
-        }];
-        let error = app_runtime()
-            .try_rsync_batch(&matching, false, &ConflictResolution::Overwrite)
+        // Native SFTP receives explicit per-item destinations, so a renamed replay must
+        // no longer be declined before validation. A lossy source makes the reached
+        // preflight deterministic without contacting a remote host.
+        let mut source_ref = object_ref(&source);
+        source_ref.local_path_is_lossy = true;
+        let sftp = runtime_with_mapping(
+            &destination_dir,
+            crate::remote_transport::RemoteTransportKind::Sftp,
+        );
+        let error = sftp
+            .try_rsync_batch(&[item(source_ref)], false, &ConflictResolution::Overwrite)
             .await
-            .expect_err("matching names keep the batch fast path");
+            .expect_err("renamed batch reaches SFTP preflight");
         assert!(error.contains("losslessly"), "{error}");
+        assert!(!renamed.exists());
     }
 
     #[tokio::test]

@@ -1581,6 +1581,28 @@ mod tests {
         assert_eq!(std::fs::read_dir(&source).unwrap().count(), 0);
     }
 
+    fn runtime_with_rsync_mapping(root: &Path) -> Arc<AppRuntime> {
+        let runtime = AppRuntime::initialize();
+        runtime.set_remote_transport_mappings(vec![
+            crate::remote_transport::RemoteTransportMapping {
+                id: "test-rsync".into(),
+                local_mount_path: root.to_string_lossy().into_owned(),
+                host: "nas.local".into(),
+                ssh_port: 22,
+                ssh_username: "admin".into(),
+                remote_base_path: "/volume1/data".into(),
+                transport: crate::remote_transport::RemoteTransportKind::RsyncSsh,
+                auth: crate::remote_transport::SshAuthKind::Agent,
+                ssh_identity_file: String::new(),
+                ssh_password: String::new(),
+                enabled: true,
+                auto_detected: false,
+                notes: String::new(),
+            },
+        ]);
+        runtime
+    }
+
     #[tokio::test]
     async fn file_source_batch_still_reaches_preflight_validation() {
         let temp = tempfile::tempdir().unwrap();
@@ -1596,7 +1618,7 @@ mod tests {
             undoable: true,
         }];
 
-        let error = app_runtime()
+        let error = runtime_with_rsync_mapping(destination.parent().expect("destination parent"))
             .try_rsync_batch(&items, false, &ConflictResolution::Overwrite)
             .await
             .expect_err("regular files keep the batch fast path");
