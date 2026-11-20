@@ -94,7 +94,9 @@ def validate_source_dir(path):
             "verified source path must be absolute")
     require(" " not in text and "\t" not in text, "vcpkg cannot build with spaces in the source path")
     require(not re.search(r"[;&|`$\"']", text), "unsafe characters in verified source path")
-    return Path(text)
+    # Preserve the caller's spelling: pathlib rewrites POSIX roots to host
+    # separators, which would change the portfile and its path digest.
+    return text
 
 
 def validate_features(features):
