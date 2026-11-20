@@ -88,7 +88,10 @@ def baseline_patches():
 def validate_source_dir(path):
     """A vcpkg SOURCE_PATH must be absolute, space-free and shell-safe."""
     text = str(path)
-    require(Path(text).is_absolute(), "verified source path must be absolute")
+    # POSIX-rooted paths are absolute in the vcpkg portfile even when the
+    # validation host is Windows, where pathlib requires a drive letter.
+    require(text.startswith("/") or Path(text).is_absolute(),
+            "verified source path must be absolute")
     require(" " not in text and "\t" not in text, "vcpkg cannot build with spaces in the source path")
     require(not re.search(r"[;&|`$\"']", text), "unsafe characters in verified source path")
     return Path(text)

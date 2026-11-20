@@ -43,6 +43,15 @@ class BaselineContracts(unittest.TestCase):
         self.assertTrue(all(name.endswith(".patch") for name in patches))
 
 
+class SourcePathContracts(unittest.TestCase):
+    def test_accepts_posix_rooted_source_on_every_host(self):
+        self.assertEqual(str(mod.validate_source_dir(GOOD_SRC)), GOOD_SRC)
+
+    def test_rejects_relative_source(self):
+        with self.assertRaises(ValueError):
+            mod.validate_source_dir("build/staged/ffmpeg-8.1.3-src")
+
+
 class DerivationContracts(unittest.TestCase):
     def test_derivation_replaces_fetch_with_verified_local_source(self):
         rewritten, evidence = mod.derive(portfile(), GOOD_SRC)
