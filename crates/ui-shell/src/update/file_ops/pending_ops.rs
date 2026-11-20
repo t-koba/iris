@@ -440,12 +440,12 @@ pub fn dismiss_job_decisions(state: &mut AppState, job_id: &JobId) {
 /// confirmed installation has not changed any destination, so the entry must remain retryable.
 /// A confirmed installation means the replay was partly applied; its journal outcome cannot be
 /// reconstructed from the abort alone, so the stacks are left untouched.
-enum ReplayRestore {
+pub(crate) enum ReplayRestore {
     Undo(UndoableOp),
     Redo(UndoableOp),
 }
 
-fn replay_entry_to_restore(pending: &PendingFileOperation) -> Option<ReplayRestore> {
+pub(crate) fn replay_entry_to_restore(pending: &PendingFileOperation) -> Option<ReplayRestore> {
     if pending
         .items
         .iter()
@@ -462,7 +462,7 @@ fn replay_entry_to_restore(pending: &PendingFileOperation) -> Option<ReplayResto
     }
 }
 
-fn restore_replay_entry(state: &mut AppState, replay: ReplayRestore) {
+pub(crate) fn restore_replay_entry(state: &mut AppState, replay: ReplayRestore) {
     match replay {
         ReplayRestore::Undo(op) => state.undo_journal.push_undo_from_redo(op),
         ReplayRestore::Redo(op) => state.undo_journal.push_redo(op),

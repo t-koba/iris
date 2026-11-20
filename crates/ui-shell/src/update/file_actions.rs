@@ -904,6 +904,15 @@ pub(super) fn handle(state: &mut AppState, message: Message) -> Task<Message> {
                         reset_job_speed(job);
                     }
                     if is_current_job {
+                        // A cancellation reported by the runtime bypasses cancel_job_state.
+                        // Restore an unwritten replay entry before dropping the operation.
+                        let replay = state
+                            .pending_operation
+                            .as_ref()
+                            .and_then(replay_entry_to_restore);
+                        if let Some(entry) = replay {
+                            restore_replay_entry(state, entry);
+                        }
                         state.pending_operation = None;
                     }
                     return Task::none();

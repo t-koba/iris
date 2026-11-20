@@ -19,11 +19,13 @@ mod dnd_ops;
 mod pending_ops;
 
 pub use dnd_ops::{current_dnd_operation, perform_dnd_drop, perform_external_drop};
-pub(crate) use pending_ops::max_concurrent_transfers_for_items;
 pub use pending_ops::{
     apply_conflict_resolution, cancel_job_state, dismiss_job_decisions, fail_pending_job,
     process_pending_operation, resolve_failed_items, start_pending_file_operation,
     start_pending_file_operation_with_undo_action,
+};
+pub(crate) use pending_ops::{
+    max_concurrent_transfers_for_items, replay_entry_to_restore, restore_replay_entry,
 };
 
 const JOB_SPEED_SMOOTHING_WINDOW: Duration = Duration::from_secs(3);

@@ -1731,6 +1731,42 @@ mod tests {
         assert_eq!(state.undo_journal.pop_undo(), Some(op));
     }
 
+    fn runtime_cancel_of_unwritten_replay(op: UndoableOp, push_redo: bool) -> AppState {
+        let mut state = AppState::default();
+        let job_id = running_transfer(&mut state, 1, 1);
+        state.pending_operation.as_mut().unwrap().undo_action = Some(if push_redo {
+            PendingUndoAction::PushRedo(op)
+        } else {
+            PendingUndoAction::RecordOp(op)
+        });
+        let _ = process_pending_operation(&mut state);
+        let _ = update(
+            &mut state,
+            Message::PendingItemCompleted(job_id, 0, 0, Err("transfer canceled".into())),
+        );
+        state
+    }
+
+    #[test]
+    fn runtime_cancel_of_unwritten_undo_replay_keeps_it_undoable() {
+        let op = replay_op();
+        let mut state = runtime_cancel_of_unwritten_replay(op.clone(), true);
+
+        assert!(state.pending_operation.is_none());
+        assert_eq!(state.undo_journal.pop_undo(), Some(op));
+        assert!(!state.undo_journal.can_redo());
+    }
+
+    #[test]
+    fn runtime_cancel_of_unwritten_redo_replay_keeps_it_redoable() {
+        let op = replay_op();
+        let mut state = runtime_cancel_of_unwritten_replay(op.clone(), false);
+
+        assert!(state.pending_operation.is_none());
+        assert_eq!(state.undo_journal.pop_redo(), Some(op));
+        assert!(!state.undo_journal.can_undo());
+    }
+
     #[test]
     fn aborting_partly_applied_replay_does_not_guess_the_journal() {
         let mut state = AppState::default();
