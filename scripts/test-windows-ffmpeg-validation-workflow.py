@@ -264,6 +264,15 @@ class FailClosedContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
+    def test_rejects_missing_evidence_directory_creation(self):
+        # The manifest step must run even when an earlier gate fails before
+        # the input gate creates the evidence directory.
+        marker = "ev.mkdir(parents=True, exist_ok=True)"
+        self.assertIn(marker, self.text)
+        mutated = self.text.replace(marker, "<removed>", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
     def test_rejects_explicit_and_split_yaml_keys(self):
         # Explicit keys/values and key/value split over lines are not used by
         # this workflow; each spelling must fail closed instead of hiding a

@@ -73,6 +73,7 @@ REQUIRED_MARKERS = (
     "actions/upload-artifact@",
     "if: always()",
     "rm -rf",
+    "ev.mkdir(parents=True, exist_ok=True)",
 ) + ATTESTATION_MARKERS
 
 # Only these actions may appear in the validation workflow. A closed allowlist

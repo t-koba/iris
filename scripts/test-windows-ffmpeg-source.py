@@ -164,6 +164,8 @@ class StageContracts(unittest.TestCase):
         record = json.loads((dest / "acquisition.json").read_text())
         self.assertEqual(record, manifest)
         self.assertIn("ffmpeg-8.1.3/configure", record["files"])
+        self.assertTrue(all("\\" not in key for key in record["files"]),
+                        "manifest keys must use POSIX separators on every host")
 
     def test_stage_fails_closed_before_extraction_on_bad_input(self):
         dest = self.dir / "rejected"

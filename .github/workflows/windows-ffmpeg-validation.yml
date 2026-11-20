@@ -260,6 +260,7 @@ jobs:
           import json, os
           from pathlib import Path
           ev = Path(os.environ["IRIS_VALIDATION_EVIDENCE"])
+          ev.mkdir(parents=True, exist_ok=True)
           inputs = json.loads((ev / "validation-inputs.json").read_text()) if (ev / "validation-inputs.json").exists() else {}
           pe = (ev / "pe-imports.txt").read_text() if (ev / "pe-imports.txt").exists() else ""
           out = dict(validation_inputs=inputs, pe_imports=pe[-8000:],

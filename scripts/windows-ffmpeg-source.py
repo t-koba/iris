@@ -140,7 +140,7 @@ def stage(archive, status_text, destination, pin=None):
         policy=pin,
         signature_verified=True,
         source_sha256=pin["sha256"],
-        files={str(p.relative_to(destination)): digest(p)
+        files={p.relative_to(destination).as_posix(): digest(p)
                for p in sorted(destination.rglob("*")) if p.is_file()},
     )
     (destination / "acquisition.json").write_text(json.dumps(manifest, indent=2) + "\n")
