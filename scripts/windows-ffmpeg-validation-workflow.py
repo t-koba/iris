@@ -74,7 +74,8 @@ REQUIRED_MARKERS = (
     "if: always()",
     "rm -rf",
     "ev.mkdir(parents=True, exist_ok=True)",
-    "$tmp = $env:RUNNER_TEMP.Replace('\\', '/')",
+    "$gpgDir = \"build/validation/gpg\"",
+    "& gpg --homedir $home --batch --import $key",
     '"status": "not_run"',
 ) + ATTESTATION_MARKERS
 
