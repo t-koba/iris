@@ -144,6 +144,19 @@ PRODUCT_PACKAGE_MARKERS = (
     'if ($LASTEXITCODE -ne 0) { throw "product package rehearsal failed" }',
 )
 
+# The third-party notice must be staged with the shippable files and copied
+# into the clean ZIP stage by the assembling step, not merely exist in the
+# checkout. Both copies come from the same checked-in, verified source bytes.
+PRODUCT_NOTICE_MARKERS = (
+    '$noticeSource = Join-Path $env:GITHUB_WORKSPACE "packaging/windows/ffmpeg-README.md"',
+    'if (!(Test-Path -LiteralPath $noticeSource -PathType Leaf)) { throw "FFmpeg notice missing: $noticeSource" }',
+    'if ((Get-Item -LiteralPath $noticeSource).Length -le 0) { throw "FFmpeg notice empty: $noticeSource" }',
+    'Copy-Item -LiteralPath $noticeSource -Destination (Join-Path $stage "FFMPEG-NOTICE.md") -Force',
+    '$productNames += "FFMPEG-NOTICE.md"',
+    'Copy-Item -LiteralPath $noticeSource -Destination (Join-Path $clean "FFMPEG-NOTICE.md") -Force',
+)
+
+
 # The ZIP is read in place: entry names, SHA-256 digests and byte counts must
 # match the inventory exactly. No preview is run from the ZIP.
 PRODUCT_ZIP_MARKERS = (
@@ -153,6 +166,7 @@ PRODUCT_ZIP_MARKERS = (
     "foreach ($entry in $archive.Entries) {",
     'if (!$expected.ContainsKey($key)) { throw "unexpected zip entry: $name" }',
     'if ($hash -ne $expected[$key].sha256) { throw "zip entry hash mismatch: $name" }',
+    'if (!$expected.ContainsKey("ffmpeg-notice.md")) { throw "FFmpeg notice missing from product inventory" }',
     'if (!$equal) { throw "product zip entry inventory mismatch" }',
     '"product-package-rehearsal.json"',
 )
@@ -206,9 +220,9 @@ REQUIRED_MARKERS = (
     '"status": "not_run"',
 ) + ATTESTATION_MARKERS + STAGE_MARKERS + PE_IMPORT_MARKERS + EVIDENCE_MARKERS + (
     CLEANUP_MARKER, PATH_MARKER,
-) + PRODUCT_INVENTORY_MARKERS + PRODUCT_PACKAGE_MARKERS + PRODUCT_ZIP_MARKERS + (
+) + PRODUCT_INVENTORY_MARKERS + PRODUCT_PACKAGE_MARKERS + PRODUCT_NOTICE_MARKERS + (
     PRODUCT_EVIDENCE_MARKERS + PRODUCT_CLEANUP_MARKERS
-)
+) + PRODUCT_ZIP_MARKERS
 
 # Only these actions may appear in the validation workflow. A closed allowlist
 # fails closed on any new or renamed action (including a differently spelled
@@ -554,8 +568,8 @@ def validate(text):
     # stage. Every new behaviour must be executable, ordered after the smoke,
     # and joined to the single JSON evidence upload.
     for group in (PRODUCT_INVENTORY_MARKERS, PRODUCT_PACKAGE_MARKERS,
-                  PRODUCT_ZIP_MARKERS, PRODUCT_EVIDENCE_MARKERS,
-                  PRODUCT_CLEANUP_MARKERS):
+                  PRODUCT_NOTICE_MARKERS, PRODUCT_ZIP_MARKERS,
+                  PRODUCT_EVIDENCE_MARKERS, PRODUCT_CLEANUP_MARKERS):
         for marker in group:
             require(marker in code,
                     f"product rehearsal marker missing from executable workflow lines: {marker}")
@@ -587,6 +601,36 @@ def validate(text):
         binding_pos = code.index(binding)
         require(clean_pos < binding_pos < script_pos,
                 "product package env must be bound in the assembling step before the script runs")
+    # The notice is copied once into the inventoried runtime stage before the
+    # inventory is written and once into the clean ZIP stage by the assembling
+    # step itself, after the inventory copy loop and before the ZIP path.
+    notice_bind, notice_exists, notice_nonempty = PRODUCT_NOTICE_MARKERS[:3]
+    stage_notice_copy, notice_inventory, clean_notice_copy = PRODUCT_NOTICE_MARKERS[3:]
+    require(code.count(notice_bind) == 2,
+            "FFmpeg notice source must be bound in both staging and assembling steps")
+    inventory_create = '$inventory = @{ roots = @($stage); files = @($productFiles) }'
+    stage_start = code.index('$stage = Join-Path $env:RUNNER_TEMP "iris-runtime-stage"')
+    stage_block = code[stage_start:code.index(inventory_create)]
+    for marker in PRODUCT_NOTICE_MARKERS[:5]:
+        require(marker in stage_block,
+                f"FFmpeg notice staging marker missing from the runtime stage: {marker}")
+    require(stage_block.index(notice_bind) < stage_block.index(notice_exists)
+            < stage_block.index(notice_nonempty) < stage_block.index(stage_notice_copy)
+            < stage_block.index(notice_inventory),
+            "runtime stage must verify and stage the FFmpeg notice before inventorying it")
+    assemble_start = code.index("- name: Assemble clean product ZIP payload")
+    assemble_block = code[assemble_start:script_pos]
+    zip_def = '$zipPath = Join-Path $env:RUNNER_TEMP "iris-product-rehearsal.zip"'
+    inventory_copy = 'Copy-Item -LiteralPath $source -Destination (Join-Path $clean $name) -Force'
+    for marker in (notice_bind, notice_exists, notice_nonempty, clean_notice_copy):
+        require(marker in assemble_block,
+                f"FFmpeg notice staging marker missing from the assembling step: {marker}")
+    require(assemble_block.index(inventory_copy) < assemble_block.index(notice_bind)
+            < assemble_block.index(notice_exists) < assemble_block.index(notice_nonempty)
+            < assemble_block.index(clean_notice_copy) < assemble_block.index(zip_def),
+            "assembling step must verify and stage the FFmpeg notice after the inventory loop and before the ZIP path")
+    checks["ffmpeg_notice_staged"] = True
+
     require("Expand-Archive" not in code and "ZipFile.ExtractToDirectory" not in code,
             "the product ZIP must be verified in place, never extracted")
     require(code.count("& $smokeExe $corpus") == 1,

@@ -666,6 +666,7 @@ class ProductRehearsalContracts(unittest.TestCase):
         self.groups = (
             self.mod.PRODUCT_INVENTORY_MARKERS,
             self.mod.PRODUCT_PACKAGE_MARKERS,
+            self.mod.PRODUCT_NOTICE_MARKERS,
             self.mod.PRODUCT_ZIP_MARKERS,
             self.mod.PRODUCT_EVIDENCE_MARKERS,
             self.mod.PRODUCT_CLEANUP_MARKERS,
@@ -693,6 +694,48 @@ class ProductRehearsalContracts(unittest.TestCase):
                     self.assertNotEqual(mutated, self.text)
                     with self.assertRaises(ValueError):
                         self.mod.validate(mutated)
+
+    def test_rejects_missing_ffmpeg_notice_staging(self):
+        zip_notice = 'if (!$expected.ContainsKey("ffmpeg-notice.md")) { throw "FFmpeg notice missing from product inventory" }'
+        for marker in self.mod.PRODUCT_NOTICE_MARKERS + (zip_notice,):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.text)
+                mutated = self.text.replace(marker, "<removed>")
+                self.assertNotEqual(mutated, self.text)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(mutated)
+
+    def test_rejects_relocated_ffmpeg_notice_staging(self):
+        # Moving the whole assembling-step notice block into the earlier
+        # staging step keeps every marker and both source bindings, but the
+        # clean ZIP stage is no longer bound in the step that builds it.
+        step = "- name: Assemble clean product ZIP payload"
+        prefix, assemble = self.text.split(step, 1)
+        notice_lines = [line + "\n" for line in assemble.splitlines()
+                        if line.strip().startswith((
+                            "$noticeSource =",
+                            "if (!(Test-Path -LiteralPath $noticeSource",
+                            "if ((Get-Item -LiteralPath $noticeSource)",
+                            'Copy-Item -LiteralPath $noticeSource -Destination (Join-Path $clean'))]
+        self.assertEqual(len(notice_lines), 4)
+        for line in notice_lines:
+            self.assertEqual(assemble.count(line), 1)
+            assemble = assemble.replace(line, "", 1)
+        mutated = prefix + step + assemble
+        pdfium_copy = '          Copy-Item -LiteralPath $pdfium -Destination (Join-Path $stage "pdfium.dll") -Force\n'
+        self.assertIn(pdfium_copy, mutated)
+        mutated = mutated.replace(pdfium_copy, pdfium_copy + "\n" + "".join(notice_lines), 1)
+        with self.assertRaisesRegex(ValueError, "assembling step"):
+            self.mod.validate(mutated)
+
+    def test_rejects_ffmpeg_notice_after_inventory_generation(self):
+        append = '          $productNames += "FFMPEG-NOTICE.md"\n'
+        create = '          $inventory = @{ roots = @($stage); files = @($productFiles) }\n'
+        self.assertIn(append, self.text)
+        self.assertIn(create, self.text)
+        mutated = self.text.replace(append, "", 1).replace(create, create + append, 1)
+        with self.assertRaisesRegex(ValueError, "runtime stage"):
+            self.mod.validate(mutated)
 
     def test_rejects_helper_in_product_inventory(self):
         old = '$productNames = @("Iris.exe") + @($dlls | ForEach-Object { $_.Name }) + @("pdfium.dll")'

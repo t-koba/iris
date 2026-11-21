@@ -278,6 +278,13 @@ jobs:
           if ($dlls.Count -lt 2) { throw "vcpkg DLL closure missing in $dllDir" }
           foreach ($dll in $dlls) { Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $stage $dll.Name) -Force }
           Copy-Item -LiteralPath $pdfium -Destination (Join-Path $stage "pdfium.dll") -Force
+
+          # The FFmpeg notice is inventoried with the shippable files so the
+          # clean ZIP stage and its exact-SHA entry check cover it too.
+          $noticeSource = Join-Path $env:GITHUB_WORKSPACE "packaging/windows/ffmpeg-README.md"
+          if (!(Test-Path -LiteralPath $noticeSource -PathType Leaf)) { throw "FFmpeg notice missing: $noticeSource" }
+          if ((Get-Item -LiteralPath $noticeSource).Length -le 0) { throw "FFmpeg notice empty: $noticeSource" }
+          Copy-Item -LiteralPath $noticeSource -Destination (Join-Path $stage "FFMPEG-NOTICE.md") -Force
           # The example's own identity probe calls `rustc --version`; stage the
           # real compiler and its DLLs too, so the smoke needs no toolchain on
           # PATH. The sysroot is read before PATH is narrowed for the smoke.
@@ -298,6 +305,7 @@ jobs:
           # Only shippable files are inventoried: the preview helper, the
           # compiler and its DLLs stay in the runtime stage for the smoke only.
           $productNames = @("Iris.exe") + @($dlls | ForEach-Object { $_.Name }) + @("pdfium.dll")
+          $productNames += "FFMPEG-NOTICE.md"
           $productNames = @($productNames | Sort-Object -Unique)
           if ($productNames.Count -lt 3) { throw "product inventory empty" }
           foreach ($helper in @("rustc.exe", "preview_corpus_smoke.exe")) {
@@ -470,6 +478,13 @@ jobs:
             if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "staged product file missing: $name" }
             Copy-Item -LiteralPath $source -Destination (Join-Path $clean $name) -Force
           }
+
+          # Re-bind the notice to the checked-in source in this step so the
+          # clean stage carries exactly the inventoried bytes.
+          $noticeSource = Join-Path $env:GITHUB_WORKSPACE "packaging/windows/ffmpeg-README.md"
+          if (!(Test-Path -LiteralPath $noticeSource -PathType Leaf)) { throw "FFmpeg notice missing: $noticeSource" }
+          if ((Get-Item -LiteralPath $noticeSource).Length -le 0) { throw "FFmpeg notice empty: $noticeSource" }
+          Copy-Item -LiteralPath $noticeSource -Destination (Join-Path $clean "FFMPEG-NOTICE.md") -Force
           $zipPath = Join-Path $env:RUNNER_TEMP "iris-product-rehearsal.zip"
           if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
           "IRIS_PRODUCT_STAGE=$clean" >> $env:GITHUB_ENV
@@ -496,6 +511,7 @@ jobs:
             $expected[$name.ToLowerInvariant()] = @{ sha256 = ([string]$item.sha256).ToLowerInvariant(); bytes = [long]$item.bytes }
           }
           if ($expected.Count -eq 0 -or $expected.Count -gt 256) { throw "product inventory bounds exceeded" }
+          if (!$expected.ContainsKey("ffmpeg-notice.md")) { throw "FFmpeg notice missing from product inventory" }
           $seen = @{}
           $archive = [IO.Compression.ZipFile]::OpenRead($env:IRIS_PRODUCT_ZIP)
           try {
