@@ -72,7 +72,7 @@ fn main() {
     ];
     bindgen::Builder::default()
         .header("jxrlib/jxrgluelib/JXRGlue.h")
-        .allowlist_function("^(WMP|PK|PixelFormatLookup|GetPixelFormatFromHash|GetImageEncodeIID|GetImageDecodeIID|FreeDescMetadata).*")
+        .allowlist_function("^(WMP|PK|PixelFormatLookup|GetPixelFormatFromHash|GetImageEncodeIID|GetImageDecodeIID|FreeDescMetadata|PKIris).*")
         .allowlist_var("^(WMP|PK|LOOKUP|GUID_PK|IID).*")
         .allowlist_type("^(WMP|PK|ERR|BITDEPTH|BD_|BITDEPTH_BITS|COLORFORMAT).*")
         .clang_args(clang_args)

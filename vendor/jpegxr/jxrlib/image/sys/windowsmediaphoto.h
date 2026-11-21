@@ -311,6 +311,7 @@ struct WMPStream
 
     ERR (*SetPos)(struct WMPStream* me, size_t offPos);
     ERR (*GetPos)(struct WMPStream* me, size_t* poffPos);
+    ERR (*GetSize)(struct WMPStream* me, size_t* pcbSize);
 };
 
 EXTERN_C ERR CreateWS_File(struct WMPStream** ppWS, const char* szFilename, const char* szMode);

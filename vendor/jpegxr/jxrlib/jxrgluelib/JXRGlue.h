@@ -631,6 +631,7 @@ ERR PKFormatConverter_EnumConversions(const PKPixelFormatGUID *pguidSourcePF,
 ERR PKCodecFactory_CreateFormatConverter(PKFormatConverter** ppFConverter);
 
 //----------------------------------------------------------------
+ERR PKIrisJxrMetadataCountGuardProbe(U32 uCount, size_t cbStream);
 ERR PKAlloc(void** ppv, size_t cb);
 ERR PKFree(void** ppv);
 ERR PKAllocAligned(void** ppv, size_t cb, size_t iAlign);

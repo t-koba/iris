@@ -13,8 +13,20 @@ differ from bindgen's). Older bindgen can generate an opaque
 `tagPKImageDecode` with newer libclang on Ubuntu, hiding the decoder's function
 pointers. The Rust wrapper also guards the C decoder during construction so
 failed creation or initialization releases any allocated handle, with an
-in-memory invalid-input regression. The Rust API, build script and C codec
-sources are unchanged. Remove the patch when upstream includes both fixes.
+in-memory invalid-input regression. Remove the patch when upstream includes
+both fixes.
+
+Local hardening (no upstream code imported, license unchanged): the vendored
+jxrlib 1.1 metadata reader allocates a file-controlled count plus two bytes in
+U32 arithmetic. A count near `U32::MAX` can wrap that allocation size. The
+count is now rejected before allocation, and `WMPStream` gained a size query
+implemented for its file, memory, list and Rust-reader implementations so that
+inline metadata must fit in the input stream. `JXRMeta.c` carries the guard,
+`strcodec.c`/`strcodec.h` and `windowsmediaphoto.h` carry the stream query, and
+`build.rs`/`src/lib.rs` expose the Rust stream size callback. A test-only C
+probe exercises the production guard with boundary counts without adding any
+crafted JPEG-XR bytes. This is a local source fix, not a claim of end-to-end
+Iris exploitability or a replacement of the vendored decoder.
 
 The registry cache markers, duplicate manifest/license metadata, JS/Wasm tooling
 and binary documentation are omitted. The 8.7 MiB upstream screenshot is replaced

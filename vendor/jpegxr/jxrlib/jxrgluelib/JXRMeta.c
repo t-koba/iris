@@ -27,6 +27,7 @@
 //*@@@---@@@@******************************************************************
 #include "JXRMeta.h"
 #include "JXRGlue.h"
+#include "strcodec.h"
 
 
 
@@ -674,6 +675,11 @@ ERR ReadBinaryData(__in_ecount(1) struct WMPStream* pWS,
     ERR err = WMP_errSuccess;
     U8 *pbData = NULL;
 
+    // uCount is file-controlled. The allocation below adds two bytes in U32
+    // arithmetic, so reject counts that could wrap before allocating. This is
+    // an intrinsic limit of that allocation, not a policy cap on metadata.
+    FailIf(uCount > (U32) -3, WMP_errInvalidArgument);
+
     Call(PKAlloc((void **) &pbData, uCount + 2)); // Allocate buffer to store data with space for an added ascii or unicode null
     if (uCount <= 4)
     {
@@ -684,6 +690,14 @@ ERR ReadBinaryData(__in_ecount(1) struct WMPStream* pWS,
     else
     {
         size_t offPosPrev;
+        size_t cbStream = 0;
+
+        // Bound the inline data to bytes actually present in the input stream;
+        // a damaged file must not trigger a huge allocation or a short read.
+        FailIf(pWS->GetSize == NULL, WMP_errInvalidArgument);
+        Call(pWS->GetSize(pWS, &cbStream));
+        FailIf((size_t) uValue > cbStream || (size_t) uCount > cbStream - (size_t) uValue,
+               WMP_errInvalidArgument);
 
         Call(pWS->GetPos(pWS, &offPosPrev));
         Call(pWS->SetPos(pWS, uValue));
@@ -903,3 +917,27 @@ Cleanup:
     return err;
 }
 
+// Local hardening probe: exercises the production count guard without any
+// crafted JPEG-XR bytes. Kept out of normal decoding paths.
+ERR PKIrisJxrMetadataCountGuardProbe(U32 uCount, size_t cbStream)
+{
+    ERR err = WMP_errSuccess;
+    U8 *pbData = NULL;
+    struct WMPStream stream;
+
+    memset(&stream, 0, sizeof(stream));
+    stream.state.buf.cbBuf = cbStream;
+    stream.fMem = 1;
+    stream.Close = NULL;
+    stream.EOS = EOSWS_Memory;
+    stream.Read = ReadWS_Memory;
+    stream.Write = WriteWS_Memory;
+    stream.SetPos = SetPosWS_Memory;
+    stream.GetPos = GetPosWS_Memory;
+    stream.GetSize = GetSizeWS_Memory;
+
+    err = ReadBinaryData(&stream, uCount, 0, &pbData);
+    if (pbData)
+        PKFree((void **) &pbData);
+    return err;
+}

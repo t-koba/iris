@@ -280,6 +280,7 @@ ERR CreateWS_File(struct WMPStream** ppWS, const char* szFilename, const char* s
 
     pWS->SetPos = SetPosWS_File;
     pWS->GetPos = GetPosWS_File;
+    pWS->GetSize = GetSizeWS_File;
 
 #ifdef _WIN32
     FailIf(0 != fopen_s(&pWS->state.file.pFile, szFilename, szMode), WMP_errFileIO);
@@ -351,6 +352,23 @@ Cleanup:
     return err;
 }
 
+ERR GetSizeWS_File(struct WMPStream* pWS, size_t* pcbSize)
+{
+    ERR err = WMP_errSuccess;
+    long lOff = 0;
+    long lSize = 0;
+
+    FailIf(-1 == (lOff = ftell(pWS->state.file.pFile)), WMP_errFileIO);
+    FailIf(0 != fseek(pWS->state.file.pFile, 0, SEEK_END), WMP_errFileIO);
+    FailIf(-1 == (lSize = ftell(pWS->state.file.pFile)), WMP_errFileIO);
+    FailIf(0 != fseek(pWS->state.file.pFile, lOff, SEEK_SET), WMP_errFileIO);
+    FailIf(lSize < 0, WMP_errFileIO);
+    *pcbSize = (size_t)lSize;
+
+Cleanup:
+    return err;
+}
+
 //----------------------------------------------------------------
 ERR CreateWS_Memory(struct WMPStream** ppWS, void* pv, size_t cb)
 {
@@ -372,6 +390,7 @@ ERR CreateWS_Memory(struct WMPStream** ppWS, void* pv, size_t cb)
 
     pWS->SetPos = SetPosWS_Memory;
     pWS->GetPos = GetPosWS_Memory;
+    pWS->GetSize = GetSizeWS_Memory;
 
 Cleanup:    
     return err;
@@ -447,6 +466,13 @@ ERR GetPosWS_Memory(struct WMPStream* pWS, size_t* poffPos)
     return WMP_errSuccess;
 }
 
+ERR GetSizeWS_Memory(struct WMPStream* pWS, size_t* pcbSize)
+{
+    *pcbSize = pWS->state.buf.cbBuf;
+
+    return WMP_errSuccess;
+}
+
 //=================================================================
 // Linked list based WMPStream
 // - for indefinite size, multiple stream out
@@ -475,6 +501,7 @@ ERR CreateWS_List(struct WMPStream** ppWS)
 
     pWS->SetPos = SetPosWS_List;
     pWS->GetPos = GetPosWS_List;
+    pWS->GetSize = GetSizeWS_List;
 
     //printf ("create buffer %d: %x\n", pWS->state.buf.cbBufCount, pWS->state.buf.pbBuf);
 
@@ -597,6 +624,13 @@ Cleanup:
 ERR GetPosWS_List(struct WMPStream* pWS, size_t* poffPos)
 {
     *poffPos = pWS->state.buf.cbCur + PACKETLENGTH * pWS->state.buf.cbBufCount;
+
+    return WMP_errSuccess;
+}
+
+ERR GetSizeWS_List(struct WMPStream* pWS, size_t* pcbSize)
+{
+    *pcbSize = pWS->state.buf.cbBuf;
 
     return WMP_errSuccess;
 }

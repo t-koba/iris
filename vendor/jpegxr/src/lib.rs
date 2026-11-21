@@ -587,7 +587,8 @@ impl<R> InputStream<R> where R: Read + Seek {
                 Read: Some(Self::input_stream_read),
                 Write: Some(Self::input_stream_write),
                 SetPos: Some(Self::input_stream_set_pos),
-                GetPos: Some(Self::input_stream_get_pos)
+                GetPos: Some(Self::input_stream_get_pos),
+                GetSize: Some(Self::input_stream_get_size)
             }),
             reader: Some(boxed_reader)
         };
@@ -628,6 +629,26 @@ impl<R> InputStream<R> where R: Read + Seek {
         match (*reader).seek(SeekFrom::Start(off_pos as u64)) {
             Ok(_) => WMP_errSuccess as ERR,
             Err(_) => WMP_errFileIO as ERR
+        }
+    }
+
+    unsafe extern "C" fn input_stream_get_size(me: *mut WMPStream, size: *mut usize) -> ERR {
+        let reader = Self::get_reader(me);
+        let original = match (*reader).stream_position() {
+            Ok(pos) => pos,
+            Err(_) => return WMP_errFileIO as ERR,
+        };
+        let length = match (*reader).seek(SeekFrom::End(0)) {
+            Ok(pos) => pos,
+            Err(_) => return WMP_errFileIO as ERR,
+        };
+        let restored = (*reader).seek(SeekFrom::Start(original)).is_ok();
+        match (usize::try_from(length), restored) {
+            (Ok(out), true) => {
+                *size = out;
+                WMP_errSuccess as ERR
+            },
+            _ => WMP_errFileIO as ERR,
         }
     }
 
@@ -860,6 +881,20 @@ impl<R> Drop for ImageDecode<R> where R: Read + Seek {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn metadata_count_guard_rejects_wrap_and_stream_overrun() {
+        use crate::{ERR, PKIrisJxrMetadataCountGuardProbe, WMP_errSuccess};
+        unsafe {
+            // The two counts from CVE-2026-129857 would wrap uCount + 2.
+            assert_ne!(PKIrisJxrMetadataCountGuardProbe(u32::MAX, 1024), WMP_errSuccess as ERR);
+            assert_ne!(PKIrisJxrMetadataCountGuardProbe(u32::MAX - 1, 1024), WMP_errSuccess as ERR);
+            // A representable count that extends past the input is also refused.
+            assert_ne!(PKIrisJxrMetadataCountGuardProbe(1024, 16), WMP_errSuccess as ERR);
+            // Inline counts (<= 4) do not read from the stream and still decode.
+            assert_eq!(PKIrisJxrMetadataCountGuardProbe(4, 16), WMP_errSuccess as ERR);
+        }
+    }
+
     use std::fs::{File};
     use crate::ImageDecode;
     use crate::PixelFormat::*;

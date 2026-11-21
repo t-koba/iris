@@ -580,6 +580,7 @@ EXTERN_C ERR WriteWS_File(struct WMPStream* pWS, const void* pv, size_t cb);
 
 EXTERN_C ERR SetPosWS_File(struct WMPStream* pWS, size_t offPos);
 EXTERN_C ERR GetPosWS_File(struct WMPStream* pWS, size_t* poffPos);
+EXTERN_C ERR GetSizeWS_File(struct WMPStream* pWS, size_t* pcbSize);
 
 //----------------------------------------------------------------
 EXTERN_C Bool EOSWS_Memory(struct WMPStream* pWS);
@@ -590,6 +591,7 @@ EXTERN_C ERR WriteWS_Memory(struct WMPStream* pWS, const void* pv, size_t cb);
 
 EXTERN_C ERR SetPosWS_Memory(struct WMPStream* pWS, size_t offPos);
 EXTERN_C ERR GetPosWS_Memory(struct WMPStream* pWS, size_t* poffPos);
+EXTERN_C ERR GetSizeWS_Memory(struct WMPStream* pWS, size_t* pcbSize);
 
 //EXTERN_C ERR GetPtrWS_Memory(struct WMPStream* pWS, size_t align, U8** ppb);
 //----------------------------------------------------------------
@@ -600,6 +602,7 @@ EXTERN_C ERR WriteWS_List(struct WMPStream* pWS, const void* pv, size_t cb);
 
 EXTERN_C ERR SetPosWS_List(struct WMPStream* pWS, size_t offPos);
 EXTERN_C ERR GetPosWS_List(struct WMPStream* pWS, size_t* poffPos);
+EXTERN_C ERR GetSizeWS_List(struct WMPStream* pWS, size_t* pcbSize);
 
 EXTERN_C ERR CreateWS_List(struct WMPStream** ppWS);
 EXTERN_C ERR CloseWS_List(struct WMPStream** ppWS);
