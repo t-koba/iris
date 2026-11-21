@@ -717,6 +717,18 @@ class ProductRehearsalContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "never extracted"):
             self.mod.validate(mutated)
 
+    def test_rejects_product_env_bound_after_script(self):
+        binding = '          $env:IRIS_PRODUCT_STAGE = $clean\n'
+        call = '          pwsh scripts/windows-product-package.ps1\n'
+        self.assertIn(binding, self.text)
+        self.assertIn(call, self.text)
+        # Removing the same-step binding from before the call and appending it
+        # afterwards leaves every marker present but breaks the required order.
+        mutated = self.text.replace(binding, "", 1).replace(call, call + binding, 1)
+        self.assertNotEqual(mutated, self.text)
+        with self.assertRaisesRegex(ValueError, "bound in the same step before"):
+            self.mod.validate(mutated)
+
     def test_rejects_smoke_from_assembled_zip(self):
         anchor = '          if (!$equal) { throw "product zip entry inventory mismatch" }\n'
         self.assertIn(anchor, self.text)

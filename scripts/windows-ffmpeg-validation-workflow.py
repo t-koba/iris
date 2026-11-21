@@ -137,6 +137,9 @@ PRODUCT_PACKAGE_MARKERS = (
     '"IRIS_PRODUCT_STAGE=$clean" >> $env:GITHUB_ENV',
     '"IRIS_PRODUCT_INVENTORY=$inventoryPath" >> $env:GITHUB_ENV',
     '"IRIS_PRODUCT_ZIP=$zipPath" >> $env:GITHUB_ENV',
+    '$env:IRIS_PRODUCT_STAGE = $clean',
+    '$env:IRIS_PRODUCT_INVENTORY = $inventoryPath',
+    '$env:IRIS_PRODUCT_ZIP = $zipPath',
     "pwsh scripts/windows-product-package.ps1",
     'if ($LASTEXITCODE -ne 0) { throw "product package rehearsal failed" }',
 )
@@ -571,6 +574,12 @@ def validate(text):
             "product rehearsal must bind the stage before the smoke and packaging")
     require(code.count("pwsh scripts/windows-product-package.ps1") == 1,
             "product package script must be invoked exactly once")
+    script_pos = code.index("pwsh scripts/windows-product-package.ps1")
+    for binding in ("$env:IRIS_PRODUCT_STAGE = $clean",
+                    "$env:IRIS_PRODUCT_INVENTORY = $inventoryPath",
+                    "$env:IRIS_PRODUCT_ZIP = $zipPath"):
+        require(code.index(binding) < script_pos,
+                "product package env must be bound in the same step before the script runs")
     require("Expand-Archive" not in code and "ZipFile.ExtractToDirectory" not in code,
             "the product ZIP must be verified in place, never extracted")
     require(code.count("& $smokeExe $corpus") == 1,

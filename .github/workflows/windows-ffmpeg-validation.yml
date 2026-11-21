@@ -475,6 +475,11 @@ jobs:
           "IRIS_PRODUCT_STAGE=$clean" >> $env:GITHUB_ENV
           "IRIS_PRODUCT_INVENTORY=$inventoryPath" >> $env:GITHUB_ENV
           "IRIS_PRODUCT_ZIP=$zipPath" >> $env:GITHUB_ENV
+          # GITHUB_ENV only reaches later steps; the child pwsh below runs in
+          # this step, so bind the same values in the current process too.
+          $env:IRIS_PRODUCT_STAGE = $clean
+          $env:IRIS_PRODUCT_INVENTORY = $inventoryPath
+          $env:IRIS_PRODUCT_ZIP = $zipPath
           pwsh scripts/windows-product-package.ps1
           if ($LASTEXITCODE -ne 0) { throw "product package rehearsal failed" }
 
