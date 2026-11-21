@@ -309,10 +309,15 @@ class FailClosedContracts(unittest.TestCase):
         self.assertNotIn("--keyring", self.text)
         # PowerShell variable names are case-insensitive: assigning to $home
         # would overwrite the read-only automatic $HOME variable.
-        self.assertNotRegex(self.text, r"\$(?:\{(?i:home)\}|(?i:home)\b)")
+        self.assertNotRegex(self.text, r"\$\{?\s*(?:[A-Za-z_][\w-]*:)?\s*home\b")
         for mutation in ('$home = "x"', '$HOME = "x"',
                          '${HOME} = "x"', '$HOME += "x"',
-                         'Set-Variable -Name HOME -Value x'):
+                         'Set-Variable -Name HOME -Value x',
+                         'Set-Variable HOME x',
+                         'Set-Variable -Name:HOME -Value x',
+                         'sv HOME x',
+                         '$global:HOME = "x"', '${global:HOME} = "x"',
+                         '$script:HOME = "x"'):
             mutated = self.text.replace(
                 '$gpgHome = "$gpgDir/home"',
                 '$gpgHome = "$gpgDir/home"\n          ' + mutation, 1)
