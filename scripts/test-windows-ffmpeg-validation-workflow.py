@@ -331,6 +331,17 @@ class FailClosedContracts(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"read-only PowerShell \$HOME"):
                 self.mod.validate(mutated)
 
+    def test_rejects_bare_where_collection_coercion(self):
+        # One empty path yields a one-element Collection[psobject], which
+        # coerces to the empty element ($false). The explicit count is required.
+        marker = '          if (@($manifestRoot, $installRoot, $tripletDir, $env:IRIS_VALIDATION_OVERLAY).Where({ [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) { throw "empty vcpkg path" }\n'
+        self.assertIn(marker, self.text)
+        mutated = self.text.replace(
+            marker,
+            marker + '          if (@($manifestRoot).Where({ [string]::IsNullOrWhiteSpace($_) })) { throw "empty vcpkg path" }\n', 1)
+        with self.assertRaisesRegex(ValueError, r"match count"):
+            self.mod.validate(mutated)
+
     def test_rejects_inline_vcpkg_install_root(self):
         # An inline parenthesized option value reached vcpkg as an empty path
         # and failed before any native build. The explicit variable form is

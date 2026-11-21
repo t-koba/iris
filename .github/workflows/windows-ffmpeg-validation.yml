@@ -170,7 +170,7 @@ jobs:
           $manifestRoot = Join-Path $env:GITHUB_WORKSPACE "packaging/windows/validation"
           $installRoot = Join-Path $env:IRIS_VALIDATION_VCPKG_ROOT "installed"
           $tripletDir = Join-Path $env:GITHUB_WORKSPACE "packaging/windows/validation/triplets"
-          if (@($manifestRoot, $installRoot, $tripletDir, $env:IRIS_VALIDATION_OVERLAY).Where({ [string]::IsNullOrWhiteSpace($_) })) { throw "empty vcpkg path" }
+          if (@($manifestRoot, $installRoot, $tripletDir, $env:IRIS_VALIDATION_OVERLAY).Where({ [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) { throw "empty vcpkg path" }
           Write-Host "manifest root: $manifestRoot"
           Write-Host "install root: $installRoot"
           Write-Host "overlay triplets: $tripletDir"

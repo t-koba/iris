@@ -82,6 +82,7 @@ REQUIRED_MARKERS = (
     '"--x-manifest-root=$manifestRoot"',
     '"--x-install-root=$installRoot"',
     'empty vcpkg path',
+    '.Where({ [string]::IsNullOrWhiteSpace($_) }).Count -gt 0',
     '"status": "not_run"',
 ) + ATTESTATION_MARKERS
 
@@ -281,6 +282,8 @@ def validate(text):
     code = "\n".join(code_lines)
     require("--x-install-root=(" not in code,
             "vcpkg install root must be an explicit path variable, not an inline expression")
+    require(".Where({ [string]::IsNullOrWhiteSpace($_) })) { throw" not in code,
+            "empty-path guard must test the match count, not coerce a single-element collection")
     for marker in ATTESTATION_MARKERS:
         require(marker in code,
                 f"attestation verification missing from executable workflow lines: {marker}")
