@@ -64,8 +64,9 @@ set to the derived overlay and `VCPKG_OVERLAY_TRIPLETS` to
 `x64-windows-iris-dynamic`. Build Iris with
 `cargo build --release -p iris-ui-shell --locked` and stage the installed DLLs
 beside `Iris.exe`. `.github/workflows/windows-ffmpeg-validation.yml` performs
-these steps with stock locked bindings and emits bounded JSON evidence; it
-builds and publishes nothing by itself.
+these steps with stock locked bindings, builds locally for validation and
+emits bounded JSON evidence. It promotes no release and publishes no release
+artifact; the rehearsal ZIP stays an uploaded validation artifact only.
 
 These are replaceable shared DLLs, not statically linked into Iris. Under LGPL
 section 6(b), users may modify and rebuild FFmpeg, swap the versioned DLL set
