@@ -331,6 +331,17 @@ class FailClosedContracts(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"read-only PowerShell \$HOME"):
                 self.mod.validate(mutated)
 
+    def test_rejects_inline_vcpkg_install_root(self):
+        # An inline parenthesized option value reached vcpkg as an empty path
+        # and failed before any native build. The explicit variable form is
+        # mandatory and an additional inline spelling must fail closed.
+        mutated = self.text.replace(
+            '"--x-install-root=$installRoot"',
+            '"--x-install-root=$installRoot"\n'
+            '            --x-install-root=(Join-Path $env:IRIS_VALIDATION_VCPKG_ROOT "installed")', 1)
+        with self.assertRaisesRegex(ValueError, r"explicit path variable"):
+            self.mod.validate(mutated)
+
     def test_rejects_implicit_missing_input_states(self):
         # A failed preflight must still yield an explicit not_run state rather
         # than an empty stand-in that looks like successful evidence.

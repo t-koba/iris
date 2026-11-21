@@ -77,6 +77,11 @@ REQUIRED_MARKERS = (
     "$gpgDir = \"build/validation/gpg\"",
     "& gpg --homedir $gpgHome --batch --import $key",
     "$gpgHome = \"$gpgDir/home\"",
+    '$manifestRoot = Join-Path $env:GITHUB_WORKSPACE "packaging/windows/validation"',
+    '$installRoot = Join-Path $env:IRIS_VALIDATION_VCPKG_ROOT "installed"',
+    '"--x-manifest-root=$manifestRoot"',
+    '"--x-install-root=$installRoot"',
+    'empty vcpkg path',
     '"status": "not_run"',
 ) + ATTESTATION_MARKERS
 
@@ -274,6 +279,8 @@ def validate(text):
                 f"reference to read-only PowerShell $HOME is not permitted: {line.strip()}")
     checks["no_home_reference"] = True
     code = "\n".join(code_lines)
+    require("--x-install-root=(" not in code,
+            "vcpkg install root must be an explicit path variable, not an inline expression")
     for marker in ATTESTATION_MARKERS:
         require(marker in code,
                 f"attestation verification missing from executable workflow lines: {marker}")

@@ -167,11 +167,18 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $manifestRoot = Join-Path $env:GITHUB_WORKSPACE "packaging/windows/validation"
+          $installRoot = Join-Path $env:IRIS_VALIDATION_VCPKG_ROOT "installed"
+          $tripletDir = Join-Path $env:GITHUB_WORKSPACE "packaging/windows/validation/triplets"
+          if (@($manifestRoot, $installRoot, $tripletDir, $env:IRIS_VALIDATION_OVERLAY).Where({ [string]::IsNullOrWhiteSpace($_) })) { throw "empty vcpkg path" }
+          Write-Host "manifest root: $manifestRoot"
+          Write-Host "install root: $installRoot"
+          Write-Host "overlay triplets: $tripletDir"
           $env:VCPKG_OVERLAY_PORTS = $env:IRIS_VALIDATION_OVERLAY
-          $env:VCPKG_OVERLAY_TRIPLETS = Join-Path $env:GITHUB_WORKSPACE "packaging/windows/validation/triplets"
+          $env:VCPKG_OVERLAY_TRIPLETS = $tripletDir
           & (Join-Path $env:IRIS_VALIDATION_VCPKG_ROOT "vcpkg.exe") install `
-            --x-manifest-root=packaging/windows/validation `
-            --x-install-root=(Join-Path $env:IRIS_VALIDATION_VCPKG_ROOT "installed") `
+            "--x-manifest-root=$manifestRoot" `
+            "--x-install-root=$installRoot" `
             --triplet=x64-windows-iris-dynamic
           if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
           # Rust does not copy vcpkg DLLs beside the binary; expose the installed
