@@ -317,8 +317,10 @@ jobs:
           $roots = @(
             (Join-Path $env:IRIS_VALIDATION_STAGE "Iris.exe"),
             (Join-Path $env:IRIS_VALIDATION_STAGE "preview_corpus_smoke.exe"),
-            (Join-Path $env:IRIS_VALIDATION_STAGE "rustc.exe")
+            (Join-Path $env:IRIS_VALIDATION_STAGE "rustc.exe"),
+            (Join-Path $env:IRIS_VALIDATION_STAGE "pdfium.dll")
           )
+          $rootNames = @($roots | ForEach-Object { [IO.Path]::GetFileName($_) })
           $queue = New-Object System.Collections.Generic.Queue[string]
           foreach ($root in $roots) {
             if (!(Test-Path -LiteralPath $root -PathType Leaf)) { throw "staged binary missing: $root" }
@@ -362,10 +364,11 @@ jobs:
             }
           }
           if ($imports.Count -eq 0) { throw "no PE imports parsed; dumpbin output shape drifted" }
+          if (!$visited.ContainsKey("pdfium.dll")) { throw "staged pdfium.dll missing from PE inventory" }
           $evidenceDir = $env:IRIS_VALIDATION_EVIDENCE
           New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
           $closure = @{
-            roots = @("Iris.exe", "preview_corpus_smoke.exe", "rustc.exe")
+            roots = @($rootNames)
             binaries = @($visited.Keys | Sort-Object)
             imports = @($imports)
             unresolved = @($unresolved)

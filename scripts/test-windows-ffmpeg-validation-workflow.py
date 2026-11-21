@@ -32,6 +32,8 @@ class WorkflowContracts(unittest.TestCase):
         self.assertTrue(checks["pe_import_closure"])
         self.assertTrue(checks["staged_only_path"])
         self.assertTrue(checks["stage_binding"])
+        self.assertTrue(checks["system_dirs_token_scoped"])
+        self.assertTrue(checks["vcpkg_empty_path_guard"])
 
     def test_all_offline_gates_present(self):
         for gate in self.mod.OFFLINE_GATES:
@@ -348,6 +350,14 @@ class FailClosedContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"match count"):
             self.mod.validate(mutated)
 
+    def test_rejects_commented_out_empty_path_guard(self):
+        guard = '          ' + self.mod.VCPKG_EMPTY_PATH_GUARD + '\n'
+        self.assertIn(guard, self.text)
+        mutated = self.text.replace(
+            guard, '          # ' + self.mod.VCPKG_EMPTY_PATH_GUARD + '\n', 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
     def test_rejects_inline_vcpkg_install_root(self):
         # An inline parenthesized option value reached vcpkg as an empty path
         # and failed before any native build. The explicit variable form is
@@ -426,6 +436,30 @@ class StagedRuntimeContracts(unittest.TestCase):
         self.mod = load()
         self.text = (ROOT / ".github/workflows/windows-ffmpeg-validation.yml").read_text()
 
+    def test_rejects_uninventoried_staged_pdfium_root(self):
+        marker = '            (Join-Path $env:IRIS_VALIDATION_STAGE "pdfium.dll")\n'
+        self.assertIn(marker, self.text)
+        mutated = self.text.replace(marker, '', 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_hardcoded_pe_inventory_roots(self):
+        old = '            roots = @($rootNames)\n'
+        self.assertIn(old, self.text)
+        mutated = self.text.replace(
+            old, '            roots = @("Iris.exe", "preview_corpus_smoke.exe", "rustc.exe")\n', 1)
+        self.assertNotEqual(mutated, self.text)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_missing_pdfium_inventory_assertion(self):
+        marker = ('          if (!$visited.ContainsKey("pdfium.dll")) { throw '
+                  '"staged pdfium.dll missing from PE inventory" }\n')
+        self.assertIn(marker, self.text)
+        mutated = self.text.replace(marker, '', 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
     def test_rejects_missing_dumpbin_exit_check(self):
         marker = '          if ($LASTEXITCODE -ne 0) { throw "dumpbin /DEPENDENTS failed for $name" }\n'
         self.assertIn(marker, self.text)
@@ -483,6 +517,10 @@ class StagedRuntimeContracts(unittest.TestCase):
         for injected in (
             '          $systemDirs += (Join-Path $env:VCPKG_INSTALLED_DIR "installed/bin")\n',
             '          $systemDirs = @("C:\\Windows")\n',
+            r'          $systemDirs[2] = (Join-Path $env:VCPKG_INSTALLED_DIR "bin")' + '\n',
+            r'          $systemDirs[2] += (Join-Path $env:VCPKG_INSTALLED_DIR "bin")' + '\n',
+            '          $systemDirs.SetValue((Join-Path $env:VCPKG_INSTALLED_DIR "bin"), 2)\n',
+            r'          Set-Variable -Name systemDirs -Value @("C:\Windows")' + '\n',
         ):
             with self.subTest(injected=injected):
                 mutated = self.text.replace(anchor, injected + anchor, 1)

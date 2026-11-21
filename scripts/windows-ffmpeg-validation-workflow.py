@@ -58,6 +58,10 @@ PE_IMPORT_MARKERS = (
     '$systemDirs = @(',
     '(Join-Path $env:SystemRoot "System32")',
     'foreach ($sysDir in $systemDirs) {',
+    '(Join-Path $env:IRIS_VALIDATION_STAGE "pdfium.dll")',
+    '$rootNames = @($roots | ForEach-Object { [IO.Path]::GetFileName($_) })',
+    'roots = @($rootNames)',
+    'if (!$visited.ContainsKey("pdfium.dll")) { throw "staged pdfium.dll missing from PE inventory" }',
     'if (Test-Path -LiteralPath (Join-Path $sysDir $import) -PathType Leaf) { $isSystem = $true; break }',
     '$isSystem = $import.StartsWith("api-ms-win-") -or $import.StartsWith("ext-ms-win-")',
     "$candidate = Join-Path $stage $import",
@@ -83,6 +87,10 @@ CLEANUP_MARKER = (
     "target/debug target/release .vcpkg-validation/installed"
 )
 PATH_MARKER = "$env:PATH = (@($stage) + $systemPath) -join [IO.Path]::PathSeparator"
+VCPKG_EMPTY_PATH_GUARD = (
+    'if (@($manifestRoot, $installRoot, $tripletDir, $env:IRIS_VALIDATION_OVERLAY)'
+    '.Where({ [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) { throw "empty vcpkg path" }'
+)
 
 # The PDFium attestation step must verify the exact asset against the pinned
 # bundle, identity and source before extraction. Check these on executable
@@ -338,6 +346,13 @@ def validate(text):
             "vcpkg install root must be an explicit path variable, not an inline expression")
     require(".Where({ [string]::IsNullOrWhiteSpace($_) })) { throw" not in code,
             "empty-path guard must test the match count, not coerce a single-element collection")
+    require(VCPKG_EMPTY_PATH_GUARD in code,
+            "empty-path guard must be executable in the vcpkg install step")
+    install_call = '& (Join-Path $env:IRIS_VALIDATION_VCPKG_ROOT "vcpkg.exe") install'
+    require(install_call in code, "vcpkg install invocation missing from executable lines")
+    require(code.index(VCPKG_EMPTY_PATH_GUARD) < code.index(install_call),
+            "empty-path guard must run before vcpkg install")
+    checks["vcpkg_empty_path_guard"] = True
     for marker in ATTESTATION_MARKERS:
         require(marker in code,
                 f"attestation verification missing from executable workflow lines: {marker}")
@@ -345,6 +360,8 @@ def validate(text):
     for marker in PE_IMPORT_MARKERS:
         require(marker in code,
                 f"staged PE import guard missing from executable workflow lines: {marker}")
+    require('roots = @("Iris.exe", "preview_corpus_smoke.exe", "rustc.exe")' not in code,
+            "PE inventory roots must be derived from the scanned staged list, not hardcoded")
     # System DLL classification must be fail-closed and robust: forwarders by
     # name, other system DLLs by physical presence in a Windows system dir,
     # never a brittle hardcoded allowlist and never the build tree. The
@@ -374,9 +391,18 @@ def validate(text):
     ))
     require(entries == allowed,
             f"system dirs must be exactly the Windows system roots, got: {entries}")
-    assignments = [line.strip() for line in code_lines if re.search(r"\$systemDirs\s*(\+?=)", line)]
-    require(assignments == ['$systemDirs = @('],
-            f"system dirs must be declared exactly once and never appended: {assignments}")
+    # Variable names are case-insensitive and the array can be mutated by
+    # index, method or cmdlet, so pin every executable line naming the token.
+    system_dirs_lines = sorted(line.strip() for line in code_lines
+                               if "systemdirs" in line.lower())
+    allowed_lines = sorted((
+        '$systemDirs = @(',
+        'foreach ($sysDir in $systemDirs) {',
+    ))
+    require(system_dirs_lines == allowed_lines,
+            f"system dirs token must only appear in the pinned declaration and probe: "
+            f"{system_dirs_lines}")
+    checks["system_dirs_token_scoped"] = True
     checks["system_dirs_pinned"] = True
     checks["system_dll_resolution"] = True
     checks["pe_import_closure"] = True
