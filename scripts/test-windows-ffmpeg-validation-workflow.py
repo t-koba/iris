@@ -306,6 +306,9 @@ class FailClosedContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
         self.assertIn('$gpgDir = "build/validation/gpg"', self.text)
+        self.assertIn(
+            'New-Item -ItemType Directory -Force -Path $gpgHome | Out-Null',
+            self.text)
         self.assertNotIn("--keyring", self.text)
         # PowerShell variable names are case-insensitive: assigning to $home
         # would overwrite the read-only automatic $HOME variable.

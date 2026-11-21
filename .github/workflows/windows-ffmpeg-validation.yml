@@ -127,6 +127,7 @@ jobs:
           $gpgAsc = "$gpgDir/ffmpeg-8.1.3.tar.xz.asc"
           $key = "$gpgDir/ffmpeg-key.asc"
           $gpgHome = "$gpgDir/home"
+          New-Item -ItemType Directory -Force -Path $gpgHome | Out-Null
           Invoke-WebRequest -Uri $pin.url -OutFile $archive -UseBasicParsing
           Invoke-WebRequest -Uri $pin.signature_url -OutFile $asc -UseBasicParsing
           Invoke-WebRequest -Uri $pin.key_url -OutFile $key -UseBasicParsing
