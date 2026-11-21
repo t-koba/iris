@@ -55,8 +55,11 @@ STAGE_MARKERS = (
 # resolved in the stage and then queued for its own inventory.
 PE_IMPORT_MARKERS = (
     "dumpbin /DEPENDENTS $binary",
-    '"api-ms-win-*.dll", "ext-ms-win-*.dll"',
-    "$isSystem = @($system | Where-Object { $import -like $_ }).Count -gt 0",
+    '$systemDirs = @(',
+    '(Join-Path $env:SystemRoot "System32")',
+    'foreach ($sysDir in $systemDirs) {',
+    'if (Test-Path -LiteralPath (Join-Path $sysDir $import) -PathType Leaf) { $isSystem = $true; break }',
+    '$isSystem = $import.StartsWith("api-ms-win-") -or $import.StartsWith("ext-ms-win-")',
     "$candidate = Join-Path $stage $import",
     'if (!(Test-Path -LiteralPath $candidate -PathType Leaf)) {',
     'if ($LASTEXITCODE -ne 0) { throw "dumpbin /DEPENDENTS failed for $name" }',
@@ -342,8 +345,19 @@ def validate(text):
     for marker in PE_IMPORT_MARKERS:
         require(marker in code,
                 f"staged PE import guard missing from executable workflow lines: {marker}")
-    require('$isForwarder' not in code,
-            "no forwarder variable may be evaluated outside the import loop")
+    # System DLL classification must be fail-closed and robust: forwarders by
+    # name, other system DLLs by physical presence in a Windows system dir,
+    # never a brittle hardcoded allowlist and never the build tree. The
+    # forwarder check must read $import only after it is bound in the loop.
+    require('$system = @(' not in code and '-like $_' not in code,
+            "system DLL classification must not use a hardcoded allowlist")
+    import_binding = '$import = $m.Groups[1].Value.ToLowerInvariant()'
+    forwarder = '$isSystem = $import.StartsWith("api-ms-win-") -or $import.StartsWith("ext-ms-win-")'
+    require(import_binding in code and forwarder in code,
+            "forwarder classification must read the bound import")
+    require(code.index(import_binding) < code.index(forwarder),
+            "forwarder classification must run after $import is bound inside the loop")
+    checks["system_dll_resolution"] = True
     checks["pe_import_closure"] = True
 
     # Git bash prepends its own link.exe ahead of MSVC's; cargo builds must run

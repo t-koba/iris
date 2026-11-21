@@ -302,29 +302,17 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:IRIS_VALIDATION_STAGE)) { throw "runtime stage not bound" }
           $stage = $env:IRIS_VALIDATION_STAGE
           if (!(Test-Path -LiteralPath $stage -PathType Container)) { throw "runtime stage missing: $stage" }
-          # Windows-provided libraries (including API sets) are the only imports
-          # allowed to resolve outside the stage. Every other name must resolve
-          # to a file in the stage and is then inventoried in turn.
-          $system = @(
-            "ntdll.dll", "kernel32.dll", "kernelbase.dll", "user32.dll", "gdi32.dll",
-            "advapi32.dll", "shell32.dll", "shlwapi.dll", "ole32.dll", "oleaut32.dll",
-            "ws2_32.dll", "iphlpapi.dll", "crypt32.dll", "bcrypt.dll", "secur32.dll",
-            "sspicli.dll", "userenv.dll", "version.dll", "winmm.dll", "msvcrt.dll",
-            "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll",
-            "msvcp140_2.dll", "concrt140.dll", "ucrtbase.dll", "api-ms-win-*", "ext-ms-win-*",
-            "dwmapi.dll", "dxgi.dll", "d3d11.dll", "d3d12.dll", "mfplat.dll", "mf.dll",
-            "propsys.dll", "setupapi.dll", "cfgmgr32.dll", "psapi.dll", "mpr.dll",
-            "dnsapi.dll", "netapi32.dll", "wintrust.dll", "comdlg32.dll", "imm32.dll",
-            "winhttp.dll", "wininet.dll", "urlmon.dll", "dxva2.dll", "evr.dll", "evrcore.dll",
-            "ncrypt.dll", "authz.dll", "comctl32.dll", "msimg32.dll", "uxtheme.dll",
-            "wtsapi32.dll", "profapi.dll", "powrprof.dll", "devobj.dll", "cryptui.dll",
-            "msasn1.dll", "srvcli.dll", "wkssvc.dll", "wldap32.dll", "oleacc.dll",
-            "tdh.dll", "wer.dll", "gdiplus.dll", "mscms.dll", "d2d1.dll", "dwrite.dll",
-            "windowscodecs.dll", "shcore.dll", "rpcrt4.dll", "sechost.dll", "normaliz.dll",
-            "cryptsp.dll", "apphelp.dll", "ucrtbase.dll", "msvcp140.dll",
-            "vcruntime140.dll", "msvcp140_atomic_wait.dll", "vcruntime140_threads.dll",
-            # API sets and extension DLLs are Windows-provided forwarders.
-            "api-ms-win-*.dll", "ext-ms-win-*.dll"
+          # Windows-provided DLLs are the only imports allowed to resolve
+          # outside the stage. API sets and extension DLLs are virtual
+          # forwarders with no on-disk file; every other system DLL must
+          # physically exist in a Windows system directory. Anything else must
+          # resolve to a file in the stage and is then inventoried in turn.
+          # This is fail-closed: a missing non-system DLL is found neither in a
+          # system directory nor in the stage, so it fails.
+          $systemDirs = @(
+            (Join-Path $env:SystemRoot "System32"),
+            (Join-Path $env:SystemRoot "SysWOW64"),
+            $env:SystemRoot
           )
           $roots = @(
             (Join-Path $env:IRIS_VALIDATION_STAGE "Iris.exe"),
@@ -352,7 +340,12 @@ jobs:
             foreach ($m in $importMatches) {
               $import = $m.Groups[1].Value.ToLowerInvariant()
               if ($imports.Count -ge 4096) { throw "PE import evidence exceeds bound" }
-              $isSystem = @($system | Where-Object { $import -like $_ }).Count -gt 0
+              $isSystem = $import.StartsWith("api-ms-win-") -or $import.StartsWith("ext-ms-win-")
+              if (!$isSystem) {
+                foreach ($sysDir in $systemDirs) {
+                  if (Test-Path -LiteralPath (Join-Path $sysDir $import) -PathType Leaf) { $isSystem = $true; break }
+                }
+              }
               $resolution = "stage"
               if ($isSystem) {
                 $resolution = "system"

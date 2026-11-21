@@ -450,9 +450,24 @@ class StagedRuntimeContracts(unittest.TestCase):
             self.mod.validate(mutated)
 
     def test_rejects_weakened_system_classification(self):
-        marker = "          $isSystem = @($system | Where-Object { $import -like $_ }).Count -gt 0\n"
+        marker = '          $isSystem = $import.StartsWith("api-ms-win-") -or $import.StartsWith("ext-ms-win-")\n'
         self.assertIn(marker, self.text)
         mutated = self.text.replace(marker, "          $isSystem = $true\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_hardcoded_system_allowlist(self):
+        mutated = self.text.replace(
+            '          $systemDirs = @(\n',
+            '          $system = @("kernel32.dll")\n          $systemDirs = @(\n', 1)
+        self.assertNotEqual(mutated, self.text)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_missing_system_directory_probe(self):
+        marker = '                  if (Test-Path -LiteralPath (Join-Path $sysDir $import) -PathType Leaf) { $isSystem = $true; break }\n'
+        self.assertIn(marker, self.text)
+        mutated = self.text.replace(marker, '', 1)
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
@@ -465,12 +480,11 @@ class StagedRuntimeContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
-    def test_rejects_forwarder_variable_before_import_binding(self):
+    def test_rejects_forwarder_classification_before_import_binding(self):
         anchor = '          $roots = @(\n'
         self.assertIn(anchor, self.text)
-        mutated = self.text.replace(
-            anchor,
-            '          $isForwarder = $import.StartsWith("api-ms-win-")\n' + anchor, 1)
+        forwarder = '          $isSystem = $import.StartsWith("api-ms-win-") -or $import.StartsWith("ext-ms-win-")\n'
+        mutated = self.text.replace(anchor, forwarder + anchor, 1)
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
