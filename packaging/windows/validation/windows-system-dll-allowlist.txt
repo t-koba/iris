@@ -1,0 +1,40 @@
+# Production Windows OS DLL allowlist for the staged PE import closure.
+# Matched case-insensitively, with `*` as a wildcard for versioned OS contract
+# sets. Only genuine Windows OS components belong here. Every name must also
+# physically exist in System32, SysWOW64 or the Windows directory to resolve
+# as "os"; a runner-installed Visual C++ runtime is never an OS component.
+# CRT/VC redistributable names belong in windows-vc-redist-allowlist.txt.
+# Staged Iris, FFmpeg and PDFium DLLs belong in neither allowlist and are
+# resolved from the runtime stage first.
+# This is a bounded documented set; additions need measured Windows evidence.
+kernel32.dll          # process, memory, files
+ntdll.dll             # NT syscalls
+user32.dll            # windowing (Rust std / winit)
+userenv.dll           # user profile environment APIs
+gdi32.dll             # GDI (software rendering fallback)
+imm32.dll             # Input Method Manager APIs
+advapi32.dll          # registry, crypto APIs
+avicap32.dll          # Video for Windows capture APIs
+ole32.dll             # COM
+combase.dll           # COM base APIs
+oleaut32.dll          # COM automation
+shell32.dll           # shell APIs
+shlwapi.dll           # Shell lightweight utility APIs
+comdlg32.dll          # common dialogs (file picker)
+winmm.dll             # multimedia timer
+version.dll           # version resources
+uxtheme.dll           # Windows theme APIs
+ws2_32.dll            # Winsock (Rust std networking)
+mswsock.dll           # Winsock extensions
+opengl32.dll          # Windows OpenGL implementation
+bcrypt.dll            # CNG (Rust crypto)
+bcryptprimitives.dll  # Windows CNG primitives
+crypt32.dll           # certificate store
+secur32.dll           # SSPI
+ncrypt.dll            # CNG router
+api-ms-win-core-*.dll # Windows core contracts (CRT contracts are VC-redist)
+d3d11.dll             # Direct3D 11 (FFmpeg hardware acceleration)
+dwmapi.dll            # Desktop Window Manager APIs
+dxgi.dll              # DXGI (FFmpeg hardware acceleration)
+mfplat.dll            # Media Foundation platform
+propsys.dll           # property system

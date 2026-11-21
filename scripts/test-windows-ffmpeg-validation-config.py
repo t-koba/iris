@@ -118,6 +118,59 @@ class TripletContracts(unittest.TestCase):
             mod.validate_triplet(text)
 
 
+
+class ImportAllowlistContracts(unittest.TestCase):
+    """CRT and OS import allowlists stay separate, bounded and checkout-bound."""
+
+    def setUp(self):
+        self.os_entries = mod.read_dll_allowlist(mod.OS_IMPORT_ALLOWLIST)
+        self.vc_entries = mod.read_dll_allowlist(mod.VC_IMPORT_ALLOWLIST)
+
+    def test_production_allowlists_are_separate_and_bounded(self):
+        self.assertTrue(mod.validate_import_allowlists(self.os_entries, self.vc_entries))
+        for entries in (self.os_entries, self.vc_entries):
+            self.assertTrue(entries)
+            self.assertLessEqual(len(entries), mod.ALLOWLIST_LIMIT)
+        self.assertFalse(set(self.os_entries) & set(self.vc_entries))
+
+    def test_rejects_crt_in_os_allowlist(self):
+        for name in mod.VC_SELF_TEST_DLLS + ("vcruntime140d.dll", "api-ms-win-crt-math-l1-1-0.dll"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                mod.validate_import_allowlists(self.os_entries + [name], self.vc_entries)
+
+    def test_rejects_missing_vc_entry(self):
+        for name in mod.VC_SELF_TEST_DLLS:
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                mod.validate_import_allowlists(
+                    self.os_entries, [entry for entry in self.vc_entries if entry != name])
+
+    def test_rejects_staged_names_in_either_allowlist(self):
+        for name in ("iris.exe", "pdfium.dll", "avcodec-62.dll"):
+            for os_entries, vc_entries in ((self.os_entries + [name], self.vc_entries),
+                                           (self.os_entries, self.vc_entries + [name])):
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    mod.validate_import_allowlists(os_entries, vc_entries)
+
+    def test_rejects_unbounded_or_unsafe_entry(self):
+        for relative in (mod.OS_IMPORT_ALLOWLIST, mod.VC_IMPORT_ALLOWLIST):
+            with self.subTest(relative=relative):
+                entries = mod.read_dll_allowlist(relative)
+                with self.assertRaises(ValueError):
+                    mod.validate_import_allowlists(entries * (mod.ALLOWLIST_LIMIT + 1),
+                                                   self.vc_entries)
+        with self.assertRaises(OSError):
+            mod.read_dll_allowlist(mod.VC_IMPORT_ALLOWLIST.replace(
+                "windows-vc-redist-allowlist.txt", "missing-vc-allowlist.txt"))
+
+    def test_build_records_allowlist_inputs(self):
+        evidence = mod.build()
+        for key in ("os_allowlist_sha256", "vc_allowlist_sha256"):
+            self.assertEqual(len(evidence[key]), 64)
+            self.assertTrue(all(c in "0123456789abcdef" for c in evidence[key]))
+        self.assertEqual(evidence["os_allowlist_entries"], len(self.os_entries))
+        self.assertEqual(evidence["vc_allowlist_entries"], len(self.vc_entries))
+
+
 class CompositionContracts(unittest.TestCase):
     def test_build_composes_all_pins(self):
         e = mod.build()

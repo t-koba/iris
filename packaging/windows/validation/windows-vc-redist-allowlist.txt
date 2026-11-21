@@ -1,0 +1,17 @@
+# Production Visual C++ redistributable allowlist for the staged PE import
+# closure. Matched case-insensitively, with `*` for the UCRT contract sets.
+# Only documented VC/UCRT redistributable DLLs belong here. These imports
+# resolve as "vc-redist" and are recorded; presence in a runner's system
+# directory is never treated as proof that a fresh Windows install provides
+# them. Unknown CRT names are recognised separately and still never resolve
+# as OS. Iris, FFmpeg and PDFium DLLs belong in neither allowlist.
+# This is a bounded documented set; additions need measured provisioning
+# evidence (VC prerequisite or app-local DLL decision).
+msvcrt.dll            # legacy CRT name; classified as CRT, never as OS
+vcruntime140.dll      # VS redistributable CRT
+vcruntime140_1.dll    # VS redistributable CRT (x64 exception handling)
+msvcp140.dll          # VS redistributable C++ standard library
+concrt140.dll         # VS concurrency runtime
+vcomp140.dll          # VS OpenMP runtime
+ucrtbase.dll          # Universal CRT
+api-ms-win-crt-*.dll  # Universal CRT contracts

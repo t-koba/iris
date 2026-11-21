@@ -645,6 +645,104 @@ class StagedRuntimeContracts(unittest.TestCase):
                     self.mod.validate(mutated)
 
 
+
+class VcImportContracts(unittest.TestCase):
+    """Runner-installed VC runtimes are classified separately from OS DLLs."""
+
+    def setUp(self):
+        self.mod = load()
+        self.text = (ROOT / ".github/workflows/windows-ffmpeg-validation.yml").read_text()
+
+    def test_vc_markers_are_required_and_removal_fails_closed(self):
+        for marker in self.mod.VC_IMPORT_MARKERS:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.text)
+                self.assertIn(marker, self.mod.REQUIRED_MARKERS)
+                self.assertIn(marker, self.mod.validate(self.text)["required_markers"])
+                with self.assertRaises(ValueError):
+                    self.mod.validate(self.text.replace(marker, "<removed>"))
+
+    def test_vc_markers_cannot_be_commented_out(self):
+        for marker in self.mod.VC_IMPORT_MARKERS:
+            if "\n" in marker or self.text.count(marker) != 1:
+                continue
+            with self.subTest(marker=marker):
+                line = next(line for line in self.text.splitlines() if marker in line)
+                indent = " " * (len(line) - len(line.lstrip()))
+                mutated = self.text.replace(line, indent + "# " + line.strip(), 1)
+                self.assertNotEqual(mutated, self.text)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(mutated)
+
+    def test_rejects_relocated_negative_self_test(self):
+        # Keep every assertion but run it after the closure instead of before
+        # it: the runner-present CRT check must precede the main import loop.
+        begin = "          $vcSelfTest = @()\n"
+        roots = "          $roots = @(\n"
+        loop_end = ('          if ($imports.Count -eq 0) { throw '
+                    '"no PE imports parsed; dumpbin output shape drifted" }\n')
+        self.assertIn(begin, self.text)
+        self.assertIn(roots, self.text)
+        self.assertIn(loop_end, self.text)
+        block = self.text[self.text.index(begin):self.text.index(roots)]
+        self.assertEqual(block.count("vcruntime140.dll"), 1)
+        mutated = self.text.replace(block, "", 1).replace(loop_end, loop_end + block, 1)
+        self.assertNotEqual(mutated, self.text)
+        with self.assertRaisesRegex(ValueError, "negative self-test"):
+            self.mod.validate(mutated)
+
+    def test_rejects_dropped_vc_allowlist(self):
+        binding = ('          $vcAllowPath = Join-Path $env:GITHUB_WORKSPACE '
+                   '"packaging/windows/validation/windows-vc-redist-allowlist.txt"\n')
+        self.assertIn(binding, self.text)
+        for replacement in ("", '          $vcAllowPath = $osAllowPath\n'):
+            with self.subTest(replacement=replacement):
+                mutated = self.text.replace(binding, replacement, 1)
+                self.assertNotEqual(mutated, self.text)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(mutated)
+
+    def test_rejects_crt_classified_as_os(self):
+        cases = (
+            ('            if ((Test-AllowedVcRedist $Import) -or (Test-LooksLikeCrt $Import)) '
+             '{ return "vc-redist" }\n',
+             '            if ((Test-AllowedVcRedist $Import) -or (Test-LooksLikeCrt $Import)) '
+             '{ return "os" }\n'),
+            ('            if ($inSystemDir -and (Test-AllowedOSDll $Import)) { return "os" }\n',
+             '            if ($inSystemDir) { return "os" }\n'),
+            ('            if ($Import.StartsWith("api-ms-win-") -or '
+             '$Import.StartsWith("ext-ms-win-")) { return "system" }\n',
+             '            if ($Import.StartsWith("api-ms-win-") -or '
+             '$Import.StartsWith("ext-ms-win-")) { return "os" }\n'),
+        )
+        for old, new in cases:
+            with self.subTest(old=old.strip()):
+                self.assertIn(old, self.text)
+                mutated = self.text.replace(old, new, 1)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(mutated)
+
+    def test_rejects_missing_vc_evidence(self):
+        for marker in ('            vc_imports = @($vcImports | Sort-Object -Unique)\n',
+                       '            vc_self_test = @{ status = "pass"; dlls = @($vcSelfTest) }\n',
+                       '            resolution_values = @("system", "stage", "vc-redist", '
+                       '"os", "unresolved")\n'):
+            with self.subTest(marker=marker.strip()):
+                self.assertIn(marker, self.text)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(self.text.replace(marker, "", 1))
+
+    def test_self_test_records_presence_without_runner_hash(self):
+        begin = "          $vcSelfTest = @()\n"
+        roots = "          $roots = @(\n"
+        block = self.text[self.text.index(begin):self.text.index(roots)]
+        self.assertIn("runner_present = $runnerPresent", block)
+        self.assertIn("-inSystemDir $true", block)
+        self.assertNotIn("Hash", block)
+        self.assertNotIn("hash", block)
+        self.assertNotIn("System32\\", block)
+
+
 class WiringContracts(unittest.TestCase):
     def test_contract_wired_into_ci_and_workflow(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()

@@ -74,6 +74,54 @@ PE_IMPORT_MARKERS = (
     '"pe-import-closure.json"',
 )
 
+
+# VC redistributable imports are a separate resolution from Windows OS DLLs.
+# The checked-in allowlists, the ordered classifier, the runner-negative
+# self-test and the JSON evidence fields are all fail-closed markers.
+OS_IMPORT_ALLOWLIST = "packaging/windows/validation/windows-system-dll-allowlist.txt"
+VC_IMPORT_ALLOWLIST = "packaging/windows/validation/windows-vc-redist-allowlist.txt"
+
+RUNNER_PROBE_DIRS = (
+    'foreach ($dir in @(\n'
+    '              (Join-Path $env:SystemRoot "System32"),\n'
+    '              (Join-Path $env:SystemRoot "SysWOW64"),\n'
+    '              $env:SystemRoot\n'
+    '            )) {'
+)
+
+VC_IMPORT_MARKERS = (
+    OS_IMPORT_ALLOWLIST,
+    RUNNER_PROBE_DIRS,
+    VC_IMPORT_ALLOWLIST,
+    '$osAllowPath = Join-Path $env:GITHUB_WORKSPACE "' + OS_IMPORT_ALLOWLIST + '"',
+    '$vcAllowPath = Join-Path $env:GITHUB_WORKSPACE "' + VC_IMPORT_ALLOWLIST + '"',
+    "function Read-ImportAllowlist",
+    "function Test-AllowedPattern",
+    "function Test-AllowedOSDll",
+    "function Test-AllowedVcRedist",
+    "function Test-LooksLikeCrt",
+    "function Resolve-ImportResolution",
+    'if ($Import.StartsWith("api-ms-win-") -or $Import.StartsWith("ext-ms-win-")) { return "system" }',
+    'if (Test-Path -LiteralPath $candidate -PathType Leaf) { return "stage" }',
+    'if ((Test-AllowedVcRedist $Import) -or (Test-LooksLikeCrt $Import)) { return "vc-redist" }',
+    'if ($inSystemDir -and (Test-AllowedOSDll $Import)) { return "os" }',
+    'return "unresolved"',
+    '$probeStage = Join-Path $env:RUNNER_TEMP "iris-vc-classifier-probe"',
+    '$vcSelfTest = @(',
+    'foreach ($name in @("vcruntime140.dll", "vcruntime140_1.dll")) {',
+    'if (!(Test-AllowedVcRedist $name)) { throw "VC self-test missing from VC allowlist: $name" }',
+    'if (Test-AllowedOSDll $name) { throw "VC self-test wrongly in OS allowlist: $name" }',
+    '$forcedVc = Resolve-ImportResolution -Import $name -Stage $probeStage -inSystemDir $true',
+    '$observed = Resolve-ImportResolution -Import $name -Stage $probeStage -inSystemDir $runnerPresent',
+    'if ($forcedVc -ne "vc-redist" -or $observed -ne "vc-redist") {',
+    'runner_present = $runnerPresent',
+    '$resolution = Resolve-ImportResolution -Import $import -Stage $stage -inSystemDir $isSystem',
+    '} elseif ($resolution -eq "vc-redist") {',
+    'resolution_values = @("system", "stage", "vc-redist", "os", "unresolved")',
+    'vc_imports = @($vcImports | Sort-Object -Unique)',
+    'vc_self_test = @{ status = "pass"; dlls = @($vcSelfTest) }',
+)
+
 # Both staged-runtime results must be read into the single JSON manifest.
 EVIDENCE_MARKERS = (
     'report(ev / "pe-import-closure.json", json.loads)',
@@ -218,7 +266,7 @@ REQUIRED_MARKERS = (
     'empty vcpkg path',
     '.Where({ [string]::IsNullOrWhiteSpace($_) }).Count -gt 0',
     '"status": "not_run"',
-) + ATTESTATION_MARKERS + STAGE_MARKERS + PE_IMPORT_MARKERS + EVIDENCE_MARKERS + (
+) + ATTESTATION_MARKERS + STAGE_MARKERS + PE_IMPORT_MARKERS + EVIDENCE_MARKERS + VC_IMPORT_MARKERS + (
     CLEANUP_MARKER, PATH_MARKER,
 ) + PRODUCT_INVENTORY_MARKERS + PRODUCT_PACKAGE_MARKERS + PRODUCT_NOTICE_MARKERS + (
     PRODUCT_EVIDENCE_MARKERS + PRODUCT_CLEANUP_MARKERS
@@ -439,9 +487,9 @@ def validate(text):
     require('roots = @("Iris.exe", "preview_corpus_smoke.exe", "rustc.exe")' not in code,
             "PE inventory roots must be derived from the scanned staged list, not hardcoded")
     # System DLL classification must be fail-closed and robust: forwarders by
-    # name, other system DLLs by physical presence in a Windows system dir,
-    # never a brittle hardcoded allowlist and never the build tree. The
-    # forwarder check must read $import only after it is bound in the loop.
+    # name, other system DLLs by physical presence in a pinned Windows system
+    # dir and a checked-in allowlist, never an inline hardcoded array or the
+    # build tree. The forwarder check must read $import only after it is bound.
     require('$system = @(' not in code and '-like $_' not in code,
             "system DLL classification must not use a hardcoded allowlist")
     import_binding = '$import = $m.Groups[1].Value.ToLowerInvariant()'
@@ -478,6 +526,32 @@ def validate(text):
     require(system_dirs_lines == allowed_lines,
             f"system dirs token must only appear in the pinned declaration and probe: "
             f"{system_dirs_lines}")
+    for marker in VC_IMPORT_MARKERS:
+        require(marker in code,
+                f"VC import classification marker missing from executable workflow lines: {marker}")
+    # The allowlists must be bound, the classifier defined and the negative
+    # self-test completed before the import loop; the VC summary is evidence
+    # written after it. Moving the self-test past the loop keeps every marker
+    # but defeats the pre-flight negative check, so fail closed on order too.
+    classification_order = (
+        '$vcAllowPath = Join-Path $env:GITHUB_WORKSPACE "' + VC_IMPORT_ALLOWLIST + '"',
+        "function Resolve-ImportResolution(",
+        "$vcSelfTest = @(",
+        "while ($queue.Count -gt 0) {",
+        "vc_imports = @($vcImports | Sort-Object -Unique)",
+    )
+    positions = [code.index(marker) for marker in classification_order]
+    require(positions == sorted(positions),
+            "VC allowlists, classifier, negative self-test, import loop and evidence must be ordered")
+    import_step = "- name: Inventory staged PE import closure"
+    import_block = text.split(import_step, 1)[1].split("\n      - name:", 1)[0]
+    for marker in ("function Resolve-ImportResolution(", "$vcSelfTest = @(",
+                   'vc_imports = @($vcImports | Sort-Object -Unique)'):
+        require(marker in import_block,
+                f"VC import classification marker escaped the PE import step: {marker}")
+    checks["vc_import_classification"] = True
+    checks["vc_negative_self_test"] = True
+
     checks["system_dirs_token_scoped"] = True
     checks["system_dirs_pinned"] = True
     checks["system_dll_resolution"] = True

@@ -76,9 +76,16 @@ build but does not restrict local replacement.
 
 ## Scope and unresolved items
 
-`vcruntime140.dll` and `vcruntime140_1.dll` currently resolve from the Windows
-system in the rehearsal's PE import closure; no app-local VC runtime copies are
-staged. The app-local VC runtime redistribution question is unresolved, and
-this notice makes no app-local redistribution claim. This is runtime, source
-and notice evidence only: not legal approval, parity evidence, latency parity,
-audit approval or release readiness.
+The rehearsal's PE import closure classifies file-backed VC/UCRT
+redistributable imports, including `vcruntime140.dll` and
+`vcruntime140_1.dll`, separately as `vc-redist`, never as Windows OS DLLs. A
+runner-installed copy in System32 is recorded but is not proof that a fresh
+Windows install provides it. Virtual `api-ms-win-*` and `ext-ms-win-*` API sets
+resolve as `system` forwarders; genuine OS DLL imports resolve as `os` only
+when allowlisted and physically present in a Windows system directory, staged
+DLLs resolve as `stage`, and anything else is `unresolved`. Whether those VC
+imports are satisfied by a documented VC redistributable prerequisite or by
+app-local DLLs is still unresolved; no app-local VC runtime copies are staged. This notice makes no provisioning or
+app-local redistribution claim. This is runtime, source and notice evidence
+only: not legal approval, parity evidence, latency parity, audit approval or
+release readiness.

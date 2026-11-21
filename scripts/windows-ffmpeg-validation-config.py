@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import sys
 
 sys.dont_write_bytecode = True
@@ -34,6 +35,14 @@ def require(ok, message):
 
 BASELINE = "b8dfe957ec8b5c0ef5c4b31eea594b8486af744f"
 TRIPLET = "x64-windows-iris-dynamic"
+OS_IMPORT_ALLOWLIST = "packaging/windows/validation/windows-system-dll-allowlist.txt"
+VC_IMPORT_ALLOWLIST = "packaging/windows/validation/windows-vc-redist-allowlist.txt"
+ALLOWLIST_LIMIT = 128
+VC_SELF_TEST_DLLS = ("vcruntime140.dll", "vcruntime140_1.dll")
+CRT_PREFIXES = ("vcruntime", "msvcp", "msvcr", "ucrt", "concrt", "vcomp",
+                "api-ms-win-crt-")
+STAGED_PREFIXES = ("iris.exe", "pdfium.dll", "avcodec", "avformat", "avfilter",
+                   "avdevice", "avutil", "swresample", "swscale", "postproc")
 FORBIDDEN_FEATURES = ("gpl", "version3", "nonfree")
 
 
@@ -90,6 +99,42 @@ def validate_triplet(text):
     return True
 
 
+def read_dll_allowlist(relative):
+    entries = []
+    for line in (ROOT / relative).read_text().splitlines():
+        value = line.split("#", 1)[0].strip().lower()
+        if not value:
+            continue
+        require(len(entries) < ALLOWLIST_LIMIT,
+                f"import allowlist exceeds bound: {relative}")
+        require(re.fullmatch(r"[a-z0-9_*.-]+\.dll", value) is not None,
+                f"unsafe import allowlist entry in {relative}: {value}")
+        entries.append(value)
+    require(entries, f"import allowlist is empty: {relative}")
+    return entries
+
+
+def validate_import_allowlists(os_entries, vc_entries):
+    # CRT names are never OS names, even though a runner may install them in a
+    # system directory. Staged product DLLs are resolved from the stage only.
+    for entries in (os_entries, vc_entries):
+        require(entries and len(entries) <= ALLOWLIST_LIMIT,
+                "import allowlist entries exceed bound or are empty")
+    for name in VC_SELF_TEST_DLLS:
+        require(name in vc_entries, f"VC self-test DLL missing from VC allowlist: {name}")
+        require(name not in os_entries, f"VC self-test DLL present in OS allowlist: {name}")
+    for prefix in CRT_PREFIXES:
+        require(any(entry.startswith(prefix) for entry in vc_entries),
+                f"CRT family missing from VC allowlist: {prefix}")
+        require(not any(entry.startswith(prefix) for entry in os_entries),
+                f"CRT family present in OS allowlist: {prefix}")
+    for prefix in STAGED_PREFIXES:
+        for entries in (os_entries, vc_entries):
+            require(not any(entry.startswith(prefix) for entry in entries),
+                    f"staged product DLL present in import allowlist: {prefix}")
+    return True
+
+
 def validate_release_hold(release_yml, package_ps1, release_audit, release_policy, ci_yml):
     require("IRIS_BUILD_VARIANT: minimal" in release_yml,
             "release.yml must keep the minimal Windows build variant")
@@ -116,6 +161,10 @@ def build():
     validate_configuration(configuration)
     validate_triplet(triplet)
 
+    os_entries = read_dll_allowlist(OS_IMPORT_ALLOWLIST)
+    vc_entries = read_dll_allowlist(VC_IMPORT_ALLOWLIST)
+    validate_import_allowlists(os_entries, vc_entries)
+
     pin = source.source_pin()
     pdfium = source.pdfium_pin()
     features = overlay.validate_features(["avcodec", "avformat", "avfilter", "avdevice",
@@ -137,6 +186,10 @@ def build():
         manifest_sha256=sha256_file("packaging/windows/validation/vcpkg.json"),
         configuration_sha256=sha256_file("packaging/windows/validation/vcpkg-configuration.json"),
         triplet_sha256=sha256_file(triplet_path),
+        os_allowlist_sha256=sha256_file(OS_IMPORT_ALLOWLIST),
+        vc_allowlist_sha256=sha256_file(VC_IMPORT_ALLOWLIST),
+        os_allowlist_entries=len(os_entries),
+        vc_allowlist_entries=len(vc_entries),
         source_version=pin["version"],
         source_sha256=pin["sha256"],
         source_url=pin["url"],

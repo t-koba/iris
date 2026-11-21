@@ -336,18 +336,81 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:IRIS_VALIDATION_STAGE)) { throw "runtime stage not bound" }
           $stage = $env:IRIS_VALIDATION_STAGE
           if (!(Test-Path -LiteralPath $stage -PathType Container)) { throw "runtime stage missing: $stage" }
-          # Windows-provided DLLs are the only imports allowed to resolve
-          # outside the stage. API sets and extension DLLs are virtual
-          # forwarders with no on-disk file; every other system DLL must
-          # physically exist in a Windows system directory. Anything else must
-          # resolve to a file in the stage and is then inventoried in turn.
-          # This is fail-closed: a missing non-system DLL is found neither in a
-          # system directory nor in the stage, so it fails.
+          # Windows-provided DLLs and VC redistributables are the only imports
+          # allowed to resolve outside the stage. API sets and extension DLLs
+          # are virtual forwarders with no file; every other Windows DLL must
+          # be in the OS allowlist AND physically present in a system dir.
+          # A VC/CRT import is never an OS import: a runner-installed copy in
+          # System32 says nothing about a fresh Windows installation.
           $systemDirs = @(
             (Join-Path $env:SystemRoot "System32"),
             (Join-Path $env:SystemRoot "SysWOW64"),
             $env:SystemRoot
           )
+          $osAllowPath = Join-Path $env:GITHUB_WORKSPACE "packaging/windows/validation/windows-system-dll-allowlist.txt"
+          $vcAllowPath = Join-Path $env:GITHUB_WORKSPACE "packaging/windows/validation/windows-vc-redist-allowlist.txt"
+          foreach ($allowPath in @($osAllowPath, $vcAllowPath)) {
+            if (!(Test-Path -LiteralPath $allowPath -PathType Leaf)) { throw "import allowlist missing: $allowPath" }
+          }
+          function Read-ImportAllowlist($path) {
+            return @(Get-Content -LiteralPath $path | ForEach-Object {
+              ($_ -split '#', 2)[0].Trim().ToLowerInvariant()
+            } | Where-Object { $_ -ne "" })
+          }
+          $osAllow = Read-ImportAllowlist $osAllowPath
+          $vcAllow = Read-ImportAllowlist $vcAllowPath
+          if ($osAllow.Count -eq 0 -or $osAllow.Count -gt 128) { throw "OS allowlist bounds exceeded" }
+          if ($vcAllow.Count -eq 0 -or $vcAllow.Count -gt 128) { throw "VC allowlist bounds exceeded" }
+          function Test-AllowedPattern($lower, $patterns) {
+            foreach ($pattern in $patterns) {
+              if ($pattern -eq $lower) { return $true }
+              if ($pattern.Contains("*") -and ($lower -like $pattern)) { return $true }
+            }
+            return $false
+          }
+          function Test-AllowedOSDll($lower) { return (Test-AllowedPattern $lower $osAllow) }
+          function Test-AllowedVcRedist($lower) { return (Test-AllowedPattern $lower $vcAllow) }
+          function Test-LooksLikeCrt($lower) {
+            return ($lower -like "msvc*.dll" -or $lower -like "vcruntime*.dll" -or $lower -like "msvcp*.dll" -or $lower -like "ucrt*.dll" -or $lower -like "api-ms-win-crt-*.dll" -or $lower -like "concrt*.dll" -or $lower -like "vcomp*.dll")
+          }
+          # Fixed order: virtual forwarders, staged file, VC/CRT, OS allowlist
+          # plus physical presence, unresolved. $inSystemDir is consulted only
+          # after the VC/CRT screen, so a runner-installed CRT cannot be os.
+          function Resolve-ImportResolution([string]$Import, [string]$Stage, [bool]$inSystemDir) {
+            if ($Import.StartsWith("api-ms-win-") -or $Import.StartsWith("ext-ms-win-")) { return "system" }
+            $candidate = Join-Path $Stage $Import
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { return "stage" }
+            if ((Test-AllowedVcRedist $Import) -or (Test-LooksLikeCrt $Import)) { return "vc-redist" }
+            if ($inSystemDir -and (Test-AllowedOSDll $Import)) { return "os" }
+            return "unresolved"
+          }
+          # Bounded negative self-test before any import is inventoried: the
+          # two runner-installed CRTs must be VC-classified even when forced
+          # to look present in a system directory. The probe stage is never
+          # created, so staging contents cannot mask the branch under test;
+          # no runner hash is recorded.
+          $probeStage = Join-Path $env:RUNNER_TEMP "iris-vc-classifier-probe"
+          $vcSelfTest = @()
+          foreach ($name in @("vcruntime140.dll", "vcruntime140_1.dll")) {
+            if (!(Test-AllowedVcRedist $name)) { throw "VC self-test missing from VC allowlist: $name" }
+            if (Test-AllowedOSDll $name) { throw "VC self-test wrongly in OS allowlist: $name" }
+            if (!(Test-LooksLikeCrt $name)) { throw "VC self-test CRT recognizer failed: $name" }
+            $runnerPresent = $false
+            foreach ($dir in @(
+              (Join-Path $env:SystemRoot "System32"),
+              (Join-Path $env:SystemRoot "SysWOW64"),
+              $env:SystemRoot
+            )) {
+              if (Test-Path -LiteralPath (Join-Path $dir $name) -PathType Leaf) { $runnerPresent = $true; break }
+            }
+            $forcedVc = Resolve-ImportResolution -Import $name -Stage $probeStage -inSystemDir $true
+            $observed = Resolve-ImportResolution -Import $name -Stage $probeStage -inSystemDir $runnerPresent
+            if ($forcedVc -ne "vc-redist" -or $observed -ne "vc-redist") {
+              throw "VC self-test classified $name as $forcedVc / $observed"
+            }
+            $vcSelfTest += @{ dll = $name; runner_present = $runnerPresent; resolution = $observed }
+          }
+          if ($vcSelfTest.Count -ne 2) { throw "VC self-test incomplete" }
           $roots = @(
             (Join-Path $env:IRIS_VALIDATION_STAGE "Iris.exe"),
             (Join-Path $env:IRIS_VALIDATION_STAGE "preview_corpus_smoke.exe"),
@@ -362,6 +425,7 @@ jobs:
           }
           $visited = @{}
           $imports = @()
+          $vcImports = @()
           $unresolved = @()
           while ($queue.Count -gt 0) {
             $binary = $queue.Dequeue()
@@ -382,17 +446,15 @@ jobs:
                   if (Test-Path -LiteralPath (Join-Path $sysDir $import) -PathType Leaf) { $isSystem = $true; break }
                 }
               }
-              $resolution = "stage"
-              if ($isSystem) {
-                $resolution = "system"
-              } else {
+              $resolution = Resolve-ImportResolution -Import $import -Stage $stage -inSystemDir $isSystem
+              if ($resolution -eq "stage") {
                 $candidate = Join-Path $stage $import
-                if (!(Test-Path -LiteralPath $candidate -PathType Leaf)) {
-                  $resolution = "unresolved"
-                  $unresolved += "$name -> $import"
-                } else {
-                  $queue.Enqueue($candidate)
-                }
+                if (!(Test-Path -LiteralPath $candidate -PathType Leaf)) { throw "stage resolution without staged file: $name -> $import" }
+                $queue.Enqueue($candidate)
+              } elseif ($resolution -eq "vc-redist") {
+                $vcImports += $import
+              } elseif ($resolution -eq "unresolved") {
+                $unresolved += "$name -> $import"
               }
               $imports += @{ from = $name; import = $import; resolution = $resolution }
             }
@@ -406,6 +468,9 @@ jobs:
             binaries = @($visited.Keys | Sort-Object)
             imports = @($imports)
             unresolved = @($unresolved)
+            resolution_values = @("system", "stage", "vc-redist", "os", "unresolved")
+            vc_imports = @($vcImports | Sort-Object -Unique)
+            vc_self_test = @{ status = "pass"; dlls = @($vcSelfTest) }
           }
           Set-Content -LiteralPath (Join-Path $evidenceDir "pe-import-closure.json") -Value ($closure | ConvertTo-Json -Depth 6 -Compress) -Encoding utf8
           if ($unresolved.Count -gt 0) { throw ("unresolved staged PE imports: " + ($unresolved -join ", ")) }
