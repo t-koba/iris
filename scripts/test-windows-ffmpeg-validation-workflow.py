@@ -717,6 +717,23 @@ class ProductRehearsalContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "never extracted"):
             self.mod.validate(mutated)
 
+    def test_rejects_product_env_bound_in_earlier_step(self):
+        bindings = ('$env:IRIS_PRODUCT_STAGE = $clean',
+                    '$env:IRIS_PRODUCT_INVENTORY = $inventoryPath',
+                    '$env:IRIS_PRODUCT_ZIP = $zipPath')
+        anchor = '          "IRIS_VALIDATION_STAGE=$stage" >> $env:GITHUB_ENV\n'
+        self.assertIn(anchor, self.text)
+        mutated = self.text
+        for binding in bindings:
+            line = '          ' + binding + '\n'
+            self.assertIn(line, mutated)
+            mutated = mutated.replace(line, '', 1).replace(anchor, anchor + line, 1)
+        self.assertNotEqual(mutated, self.text)
+        # Every marker stays present and each binding is still before the call,
+        # but moving them into an earlier step reintroduces the empty-env bug.
+        with self.assertRaisesRegex(ValueError, "bound in the assembling step"):
+            self.mod.validate(mutated)
+
     def test_rejects_product_env_bound_after_script(self):
         binding = '          $env:IRIS_PRODUCT_STAGE = $clean\n'
         call = '          pwsh scripts/windows-product-package.ps1\n'
@@ -726,7 +743,7 @@ class ProductRehearsalContracts(unittest.TestCase):
         # afterwards leaves every marker present but breaks the required order.
         mutated = self.text.replace(binding, "", 1).replace(call, call + binding, 1)
         self.assertNotEqual(mutated, self.text)
-        with self.assertRaisesRegex(ValueError, "bound in the same step before"):
+        with self.assertRaisesRegex(ValueError, "bound in the assembling step before"):
             self.mod.validate(mutated)
 
     def test_rejects_smoke_from_assembled_zip(self):

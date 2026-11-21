@@ -575,11 +575,18 @@ def validate(text):
     require(code.count("pwsh scripts/windows-product-package.ps1") == 1,
             "product package script must be invoked exactly once")
     script_pos = code.index("pwsh scripts/windows-product-package.ps1")
+    # $clean/$inventoryPath/$zipPath are step-local PowerShell variables defined
+    # only in the Assemble step; requiring each binding to follow the $clean
+    # definition (and precede the call) pins it to that step. A binding moved
+    # into an earlier step would expand to empty and reintroduce the bug.
+    clean_def = '$clean = Join-Path $env:RUNNER_TEMP "iris-product-clean"'
+    clean_pos = code.index(clean_def)
     for binding in ("$env:IRIS_PRODUCT_STAGE = $clean",
                     "$env:IRIS_PRODUCT_INVENTORY = $inventoryPath",
                     "$env:IRIS_PRODUCT_ZIP = $zipPath"):
-        require(code.index(binding) < script_pos,
-                "product package env must be bound in the same step before the script runs")
+        binding_pos = code.index(binding)
+        require(clean_pos < binding_pos < script_pos,
+                "product package env must be bound in the assembling step before the script runs")
     require("Expand-Archive" not in code and "ZipFile.ExtractToDirectory" not in code,
             "the product ZIP must be verified in place, never extracted")
     require(code.count("& $smokeExe $corpus") == 1,
