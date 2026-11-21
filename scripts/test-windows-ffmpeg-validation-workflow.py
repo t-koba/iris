@@ -450,7 +450,7 @@ class StagedRuntimeContracts(unittest.TestCase):
             self.mod.validate(mutated)
 
     def test_rejects_weakened_system_classification(self):
-        marker = "          $isSystem = $isForwarder -or @($system | Where-Object { $import -like $_ }).Count -gt 0\n"
+        marker = "          $isSystem = @($system | Where-Object { $import -like $_ }).Count -gt 0\n"
         self.assertIn(marker, self.text)
         mutated = self.text.replace(marker, "          $isSystem = $true\n", 1)
         with self.assertRaises(ValueError):
@@ -462,6 +462,15 @@ class StagedRuntimeContracts(unittest.TestCase):
         mutated = self.text.replace(
             marker,
             "          $candidate = Join-Path $env:VCPKG_INSTALLED_DIR $import\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_forwarder_variable_before_import_binding(self):
+        anchor = '          $roots = @(\n'
+        self.assertIn(anchor, self.text)
+        mutated = self.text.replace(
+            anchor,
+            '          $isForwarder = $import.StartsWith("api-ms-win-")\n' + anchor, 1)
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 

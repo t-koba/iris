@@ -55,8 +55,8 @@ STAGE_MARKERS = (
 # resolved in the stage and then queued for its own inventory.
 PE_IMPORT_MARKERS = (
     "dumpbin /DEPENDENTS $binary",
-    '$isForwarder = $import.StartsWith("api-ms-win-")',
-    "$isSystem = $isForwarder -or @($system | Where-Object { $import -like $_ }).Count -gt 0",
+    '"api-ms-win-*.dll", "ext-ms-win-*.dll"',
+    "$isSystem = @($system | Where-Object { $import -like $_ }).Count -gt 0",
     "$candidate = Join-Path $stage $import",
     'if (!(Test-Path -LiteralPath $candidate -PathType Leaf)) {',
     'if ($LASTEXITCODE -ne 0) { throw "dumpbin /DEPENDENTS failed for $name" }',
@@ -342,6 +342,8 @@ def validate(text):
     for marker in PE_IMPORT_MARKERS:
         require(marker in code,
                 f"staged PE import guard missing from executable workflow lines: {marker}")
+    require('$isForwarder' not in code,
+            "no forwarder variable may be evaluated outside the import loop")
     checks["pe_import_closure"] = True
 
     # Git bash prepends its own link.exe ahead of MSVC's; cargo builds must run

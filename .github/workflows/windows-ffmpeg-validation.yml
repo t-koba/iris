@@ -322,10 +322,10 @@ jobs:
             "tdh.dll", "wer.dll", "gdiplus.dll", "mscms.dll", "d2d1.dll", "dwrite.dll",
             "windowscodecs.dll", "shcore.dll", "rpcrt4.dll", "sechost.dll", "normaliz.dll",
             "cryptsp.dll", "apphelp.dll", "ucrtbase.dll", "msvcp140.dll",
-            "vcruntime140.dll", "msvcp140_atomic_wait.dll", "vcruntime140_threads.dll"
+            "vcruntime140.dll", "msvcp140_atomic_wait.dll", "vcruntime140_threads.dll",
+            # API sets and extension DLLs are Windows-provided forwarders.
+            "api-ms-win-*.dll", "ext-ms-win-*.dll"
           )
-          # API sets and extension DLLs are Windows-provided forwarders.
-          $isForwarder = $import.StartsWith("api-ms-win-") -or $import.StartsWith("ext-ms-win-")
           $roots = @(
             (Join-Path $env:IRIS_VALIDATION_STAGE "Iris.exe"),
             (Join-Path $env:IRIS_VALIDATION_STAGE "preview_corpus_smoke.exe"),
@@ -352,7 +352,7 @@ jobs:
             foreach ($m in $importMatches) {
               $import = $m.Groups[1].Value.ToLowerInvariant()
               if ($imports.Count -ge 4096) { throw "PE import evidence exceeds bound" }
-              $isSystem = $isForwarder -or @($system | Where-Object { $import -like $_ }).Count -gt 0
+              $isSystem = @($system | Where-Object { $import -like $_ }).Count -gt 0
               $resolution = "stage"
               if ($isSystem) {
                 $resolution = "system"
