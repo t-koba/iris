@@ -19,8 +19,11 @@ both fixes.
 Local hardening (no upstream code imported, license unchanged): the vendored
 jxrlib 1.1 metadata reader allocates a file-controlled count plus two bytes in
 U32 arithmetic. A count near `U32::MAX` can wrap that allocation size. The
-count is now rejected before allocation, and `WMPStream` gained a size query
-implemented for its file, memory, list and Rust-reader implementations so that
+count is now rejected before allocation: the stream bounds are validated
+before the buffer is allocated, and a test observes the metadata allocation
+count to prove that a stream overrun allocates zero buffers. `WMPStream`
+gained a size query implemented for its file, memory, list and Rust-reader
+implementations so that
 inline metadata must fit in the input stream. `JXRMeta.c` carries the guard,
 `strcodec.c`/`strcodec.h` and `windowsmediaphoto.h` carry the stream query, and
 `build.rs`/`src/lib.rs` expose the Rust stream size callback. A test-only C

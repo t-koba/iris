@@ -882,6 +882,20 @@ impl<R> Drop for ImageDecode<R> where R: Read + Seek {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn metadata_stream_overrun_rejected_before_allocation() {
+        use crate::{ERR, PKIrisJxrMetaAllocCalls, PKIrisJxrMetaObserveAllocs,
+                    PKIrisJxrMetadataCountGuardProbe, WMP_errSuccess};
+        unsafe {
+            PKIrisJxrMetaObserveAllocs();
+            assert_ne!(PKIrisJxrMetadataCountGuardProbe(1024, 16), WMP_errSuccess as ERR);
+            assert_eq!(PKIrisJxrMetaAllocCalls(), 0, "stream overrun allocated before bounds check");
+            PKIrisJxrMetaObserveAllocs();
+            assert_eq!(PKIrisJxrMetadataCountGuardProbe(4, 16), WMP_errSuccess as ERR);
+            assert_eq!(PKIrisJxrMetaAllocCalls(), 1, "inline metadata must allocate once");
+        }
+    }
+
+    #[test]
     fn metadata_count_guard_rejects_wrap_and_stream_overrun() {
         use crate::{ERR, PKIrisJxrMetadataCountGuardProbe, WMP_errSuccess};
         unsafe {

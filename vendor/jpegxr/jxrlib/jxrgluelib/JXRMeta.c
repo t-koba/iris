@@ -667,6 +667,37 @@ Cleanup:
 }
 
 
+#if defined(_MSC_VER)
+#define IRIS_JXR_THREAD_LOCAL __declspec(thread)
+#else
+#define IRIS_JXR_THREAD_LOCAL __thread
+#endif
+
+// Test-only allocation observation. Thread-local so another test decoding an
+// image at the same time cannot be counted as a metadata allocation here.
+static IRIS_JXR_THREAD_LOCAL int s_irisJxrObserveAlloc = 0;
+static IRIS_JXR_THREAD_LOCAL size_t s_irisJxrMetaAllocCalls = 0;
+
+// Check that the stream-backed bytes requested by a metadata directory entry
+// are actually present. Counts <= 4 are inline in uValue and need no stream.
+static ERR IrisJxrMetadataStreamBounds(U32 uCount, U32 uValue, struct WMPStream *pWS)
+{
+    size_t cbStream = 0;
+    ERR err = WMP_errSuccess;
+
+    if (uCount <= 4)
+        return WMP_errSuccess;
+    if (pWS->GetSize == NULL)
+        return WMP_errInvalidArgument;
+    Call(pWS->GetSize(pWS, &cbStream));
+    if ((size_t) uValue > cbStream || (size_t) uCount > cbStream - (size_t) uValue)
+        return WMP_errInvalidArgument;
+    return WMP_errSuccess;
+
+Cleanup:
+    return err;
+}
+
 ERR ReadBinaryData(__in_ecount(1) struct WMPStream* pWS,
                    const __in_win U32 uCount,
                    const __in_win U32 uValue,
@@ -680,6 +711,12 @@ ERR ReadBinaryData(__in_ecount(1) struct WMPStream* pWS,
     // an intrinsic limit of that allocation, not a policy cap on metadata.
     FailIf(uCount > (U32) -3, WMP_errInvalidArgument);
 
+    // A damaged file must not reach the allocation with an out-of-range
+    // stream offset or count. This is an intrinsic bounds check, not a
+    // policy cap on metadata size.
+    Call(IrisJxrMetadataStreamBounds(uCount, uValue, pWS));
+
+    if (s_irisJxrObserveAlloc) ++s_irisJxrMetaAllocCalls;
     Call(PKAlloc((void **) &pbData, uCount + 2)); // Allocate buffer to store data with space for an added ascii or unicode null
     if (uCount <= 4)
     {
@@ -690,14 +727,6 @@ ERR ReadBinaryData(__in_ecount(1) struct WMPStream* pWS,
     else
     {
         size_t offPosPrev;
-        size_t cbStream = 0;
-
-        // Bound the inline data to bytes actually present in the input stream;
-        // a damaged file must not trigger a huge allocation or a short read.
-        FailIf(pWS->GetSize == NULL, WMP_errInvalidArgument);
-        Call(pWS->GetSize(pWS, &cbStream));
-        FailIf((size_t) uValue > cbStream || (size_t) uCount > cbStream - (size_t) uValue,
-               WMP_errInvalidArgument);
 
         Call(pWS->GetPos(pWS, &offPosPrev));
         Call(pWS->SetPos(pWS, uValue));
@@ -919,6 +948,9 @@ Cleanup:
 
 // Local hardening probe: exercises the production count guard without any
 // crafted JPEG-XR bytes. Kept out of normal decoding paths.
+void PKIrisJxrMetaObserveAllocs(void) { s_irisJxrObserveAlloc = 1; s_irisJxrMetaAllocCalls = 0; }
+size_t PKIrisJxrMetaAllocCalls(void) { s_irisJxrObserveAlloc = 0; return s_irisJxrMetaAllocCalls; }
+
 ERR PKIrisJxrMetadataCountGuardProbe(U32 uCount, size_t cbStream)
 {
     ERR err = WMP_errSuccess;
