@@ -30,7 +30,7 @@ WizardStyle=modern
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; Flags: unchecked
 
 [Files]
-#include "{#InstallerFiles}"
+#include InstallerFiles
 
 [Icons]
 Name: "{userprograms}\Iris"; Filename: "{app}\Iris.exe"

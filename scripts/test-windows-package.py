@@ -153,9 +153,14 @@ class InstallerScriptContracts(unittest.TestCase):
     def test_include_is_inside_files_section(self):
         files = self.text.index("[Files]")
         icons = self.text.index("[Icons]")
-        include = self.text.index('#include "{#InstallerFiles}"')
+        include = self.text.index("#include InstallerFiles")
         self.assertLess(files, include)
         self.assertLess(include, icons)
+
+    def test_include_uses_bare_variable_not_literal_placeholder(self):
+        # {#...} substitution applies to script lines, not preprocessor
+        # directive arguments; a quoted placeholder is opened as a filename.
+        self.assertNotIn("{#InstallerFiles}", self.text)
 
     def test_no_hardcoded_iris_exe_source(self):
         self.assertNotIn('Source: "{#SourceDir}\\Iris.exe"', self.text)
