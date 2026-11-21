@@ -126,7 +126,7 @@ jobs:
           $gpgArchive = "$gpgDir/ffmpeg-8.1.3.tar.xz"
           $gpgAsc = "$gpgDir/ffmpeg-8.1.3.tar.xz.asc"
           $key = "$gpgDir/ffmpeg-key.asc"
-          $home = "$gpgDir/home"
+          $gpgHome = "$gpgDir/home"
           Invoke-WebRequest -Uri $pin.url -OutFile $archive -UseBasicParsing
           Invoke-WebRequest -Uri $pin.signature_url -OutFile $asc -UseBasicParsing
           Invoke-WebRequest -Uri $pin.key_url -OutFile $key -UseBasicParsing
@@ -134,9 +134,9 @@ jobs:
           Copy-Item -LiteralPath $asc -Destination $gpgAsc -Force
           # gpg produces a machine-readable status file consumed by the shared verifier.
           $status = "$gpgDir/status.txt"
-          & gpg --homedir $home --batch --import $key
+          & gpg --homedir $gpgHome --batch --import $key
           if ($LASTEXITCODE -ne 0) { throw "FFmpeg signing key import failed" }
-          & gpg --homedir $home --batch --status-file $status --verify $gpgAsc $gpgArchive
+          & gpg --homedir $gpgHome --batch --status-file $status --verify $gpgAsc $gpgArchive
           if ($LASTEXITCODE -ne 0) { throw "FFmpeg signature verification failed" }
           python3 scripts/windows-ffmpeg-source.py stage $archive $status $dest
           if ($LASTEXITCODE -ne 0) { throw "FFmpeg source staging failed" }

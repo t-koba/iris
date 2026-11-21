@@ -75,7 +75,8 @@ REQUIRED_MARKERS = (
     "rm -rf",
     "ev.mkdir(parents=True, exist_ok=True)",
     "$gpgDir = \"build/validation/gpg\"",
-    "& gpg --homedir $home --batch --import $key",
+    "& gpg --homedir $gpgHome --batch --import $key",
+    "$gpgHome = \"$gpgDir/home\"",
     '"status": "not_run"',
 ) + ATTESTATION_MARKERS
 
@@ -103,6 +104,8 @@ EXPLICIT_KEY_RE = re.compile(r"^\s*(?:-\s*)?[?:](?:\s|$)")
 ANCHOR_KEY_RE = re.compile(r"^\s*(?:-\s*)?[&*]\S")
 # YAML tags on a key are another way to spell a key without a literal token.
 TAG_KEY_RE = re.compile(r"^\s*(?:-\s*)?!")
+# PowerShell variable names are case-insensitive; $HOME is read-only.
+HOME_ASSIGNMENT_RE = re.compile(r"\$(?i:home)\s*=")
 # YAML double-quoted scalars resolve numeric escapes before GitHub reads a
 # mapping key, so decode them before any action reference is scanned.
 YAML_ESCAPE_RE = re.compile(r"\\(?:u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|x[0-9a-fA-F]{2})")
@@ -254,6 +257,10 @@ def validate(text):
         require(not TAG_KEY_RE.match(line),
                 f"YAML tag in key position is not permitted: {line.strip()}")
     checks["no_special_keys"] = True
+    for line in code_lines:
+        require(not HOME_ASSIGNMENT_RE.search(line),
+                f"assignment to read-only PowerShell $HOME is not permitted: {line.strip()}")
+    checks["no_home_assignment"] = True
     code = "\n".join(code_lines)
     for marker in ATTESTATION_MARKERS:
         require(marker in code,

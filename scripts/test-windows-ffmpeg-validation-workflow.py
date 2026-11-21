@@ -300,13 +300,20 @@ class FailClosedContracts(unittest.TestCase):
     def test_requires_relative_gpg_paths(self):
         # GnuPG on Windows reads a drive-qualified path as a key resource URL.
         # Both the explicit keyring and drive-letter paths must be absent.
-        marker = "& gpg --homedir $home --batch --import $key"
+        marker = "& gpg --homedir $gpgHome --batch --import $key"
         self.assertIn(marker, self.text)
         mutated = self.text.replace(marker, "& gpg --batch --import $key", 1)
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
         self.assertIn('$gpgDir = "build/validation/gpg"', self.text)
         self.assertNotIn("--keyring", self.text)
+        # PowerShell variable names are case-insensitive: assigning to $home
+        # would overwrite the read-only automatic $HOME variable.
+        self.assertNotRegex(self.text, r"\$(?i:home)\s*=")
+        for mutation in ('$home = "x"', '$HOME = "x"'):
+            mutated = self.text.replace('$gpgHome = "$gpgDir/home"', mutation, 1)
+            with self.assertRaises(ValueError):
+                self.mod.validate(mutated)
 
     def test_rejects_implicit_missing_input_states(self):
         # A failed preflight must still yield an explicit not_run state rather
