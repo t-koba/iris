@@ -90,7 +90,7 @@ def validate_source_dir(path):
     text = str(path)
     # POSIX-rooted paths are absolute in the vcpkg portfile even when the
     # validation host is Windows, where pathlib requires a drive letter.
-    require(text.startswith("/") or Path(text).is_absolute(),
+    require(text.startswith("/") or re.match(r"^[A-Za-z]:[/\\]", text) or Path(text).is_absolute(),
             "verified source path must be absolute")
     require(" " not in text and "\t" not in text, "vcpkg cannot build with spaces in the source path")
     require(not re.search(r"[;&|`$\"']", text), "unsafe characters in verified source path")
@@ -124,10 +124,14 @@ def derive(portfile, source_dir):
             "unexpected baseline fetch identity")
 
     source = validate_source_dir(source_dir)
+    # CMake parses backslashes inside strings as escape sequences; an
+    # unescaped Windows path such as D:\a\iris fails at configure time.
+    # Forward slashes are accepted for Windows paths by CMake and vcpkg.
+    cmake_source = source.replace("\\", "/")
     replacement = (
         "# Production overlay: use the signature-verified FFmpeg 8.1.3 source\n"
         "# staged by windows-ffmpeg-source.py. No network fetch or git source.\n"
-        'set(SOURCE_PATH "%s")\n' % source
+        'set(SOURCE_PATH "%s")\n' % cmake_source
     )
     for marker in REPLACEMENT_UNSAFE:
         require(marker not in replacement,

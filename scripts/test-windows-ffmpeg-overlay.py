@@ -51,6 +51,16 @@ class SourcePathContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             mod.validate_source_dir("build/staged/ffmpeg-8.1.3-src")
 
+    def test_windows_source_path_is_cmake_string_safe(self):
+        # CMake treats \a as an invalid escape; the overlay must use
+        # forward-slash separators while evidence keeps the caller's path.
+        source = r"D:\a\iris\iris\build\validation\ffmpeg-src\ffmpeg-8.1.3"
+        rewritten, evidence = mod.derive(portfile(), source)
+        line = 'set(SOURCE_PATH "D:/a/iris/iris/build/validation/ffmpeg-src/ffmpeg-8.1.3")'
+        self.assertIn(line, rewritten)
+        self.assertNotIn('set(SOURCE_PATH "D:\\', rewritten)
+        self.assertEqual(evidence["source_path"], source)
+
 
 class DerivationContracts(unittest.TestCase):
     def test_derivation_replaces_fetch_with_verified_local_source(self):
