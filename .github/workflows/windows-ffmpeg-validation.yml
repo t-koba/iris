@@ -292,6 +292,32 @@ jobs:
           }
           $staged = @(Get-ChildItem -LiteralPath $stage -File)
           if ($staged.Count -lt ($dlls.Count + 4)) { throw "staged runtime incomplete" }
+          $evidenceDir = $env:IRIS_VALIDATION_EVIDENCE
+          if ([string]::IsNullOrWhiteSpace($evidenceDir)) { throw "evidence directory not bound" }
+          New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
+          # Only shippable files are inventoried: the preview helper, the
+          # compiler and its DLLs stay in the runtime stage for the smoke only.
+          $productNames = @("Iris.exe") + @($dlls | ForEach-Object { $_.Name }) + @("pdfium.dll")
+          $productNames = @($productNames | Sort-Object -Unique)
+          if ($productNames.Count -lt 3) { throw "product inventory empty" }
+          foreach ($helper in @("rustc.exe", "preview_corpus_smoke.exe")) {
+            if ($productNames -contains $helper) { throw "preview helper in product inventory: $helper" }
+          }
+          foreach ($required in @("Iris.exe", "pdfium.dll")) {
+            if (!(Test-Path -LiteralPath (Join-Path $stage $required) -PathType Leaf)) { throw "required product file missing: $required" }
+          }
+          $productFiles = @()
+          foreach ($name in $productNames) {
+            $copy = Join-Path $stage $name
+            if (!(Test-Path -LiteralPath $copy -PathType Leaf)) { throw "shippable product file missing: $name" }
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $copy).Hash.ToLowerInvariant()
+            $bytes = (Get-Item -LiteralPath $copy).Length
+            if ($bytes -le 0) { throw "shippable product file empty: $name" }
+            $productFiles += @{ name = $name; sha256 = $hash; bytes = $bytes }
+          }
+          if ($productFiles.Count -eq 0) { throw "product inventory empty" }
+          $inventory = @{ roots = @($stage); files = @($productFiles) }
+          Set-Content -LiteralPath (Join-Path $evidenceDir "product-inventory.json") -Value ($inventory | ConvertTo-Json -Depth 5 -Compress) -Encoding utf8
           "IRIS_VALIDATION_STAGE=$stage" >> $env:GITHUB_ENV
           Write-Host "staged Iris runtime: $stage"
 
@@ -424,6 +450,82 @@ jobs:
           Set-Content -LiteralPath (Join-Path $evidenceDir "preview-smoke.json") -Value ($record | ConvertTo-Json -Depth 4 -Compress) -Encoding utf8
           if ($exitCode -ne 0) { throw "installed preview smoke failed with exit code $exitCode" }
 
+      - name: Assemble clean product ZIP payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Copy only inventory-named files out of the smoke stage, so helper
+          # binaries and toolchain DLLs cannot leak into the rehearsal ZIP.
+          $inventoryPath = Join-Path $env:IRIS_VALIDATION_EVIDENCE "product-inventory.json"
+          if (!(Test-Path -LiteralPath $inventoryPath -PathType Leaf)) { throw "product inventory missing: $inventoryPath" }
+          $inventory = Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json
+          if (@($inventory.files).Count -eq 0) { throw "product inventory empty" }
+          $clean = Join-Path $env:RUNNER_TEMP "iris-product-clean"
+          if (Test-Path -LiteralPath $clean) { Remove-Item -Recurse -Force -LiteralPath $clean }
+          New-Item -ItemType Directory -Force -Path $clean | Out-Null
+          foreach ($item in @($inventory.files)) {
+            $name = [string]$item.name
+            if ($name -ne [IO.Path]::GetFileName($name) -or $name -eq ".." -or $name -match '[\\/]') { throw "unsafe product inventory name: $name" }
+            $source = Join-Path $env:IRIS_VALIDATION_STAGE $name
+            if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "staged product file missing: $name" }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $clean $name) -Force
+          }
+          $zipPath = Join-Path $env:RUNNER_TEMP "iris-product-rehearsal.zip"
+          if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+          "IRIS_PRODUCT_STAGE=$clean" >> $env:GITHUB_ENV
+          "IRIS_PRODUCT_INVENTORY=$inventoryPath" >> $env:GITHUB_ENV
+          "IRIS_PRODUCT_ZIP=$zipPath" >> $env:GITHUB_ENV
+          pwsh scripts/windows-product-package.ps1
+          if ($LASTEXITCODE -ne 0) { throw "product package rehearsal failed" }
+
+      - name: Verify product ZIP entry inventory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $inventory = Get-Content -LiteralPath $env:IRIS_PRODUCT_INVENTORY -Raw | ConvertFrom-Json
+          $expected = @{}
+          foreach ($item in @($inventory.files)) {
+            $name = [string]$item.name
+            if ($name -ne [IO.Path]::GetFileName($name) -or $name -eq ".." -or $name -match '[\\/]') { throw "unsafe product inventory entry: $name" }
+            $expected[$name.ToLowerInvariant()] = @{ sha256 = ([string]$item.sha256).ToLowerInvariant(); bytes = [long]$item.bytes }
+          }
+          if ($expected.Count -eq 0 -or $expected.Count -gt 256) { throw "product inventory bounds exceeded" }
+          $seen = @{}
+          $archive = [IO.Compression.ZipFile]::OpenRead($env:IRIS_PRODUCT_ZIP)
+          try {
+            foreach ($entry in $archive.Entries) {
+              $name = $entry.FullName
+              if ($name -ne [IO.Path]::GetFileName($name) -or $name -eq ".." -or $name -match '[\\/]') { throw "unsafe zip entry: $name" }
+              $key = $name.ToLowerInvariant()
+              if (!$expected.ContainsKey($key)) { throw "unexpected zip entry: $name" }
+              if ($seen.ContainsKey($key)) { throw "duplicate zip entry: $name" }
+              $stream = $entry.Open()
+              try {
+                $sha = [System.Security.Cryptography.SHA256]::Create()
+                try {
+                  $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace("-", "").ToLowerInvariant()
+                } finally { $sha.Dispose() }
+              } finally { $stream.Dispose() }
+              if ($hash -ne $expected[$key].sha256) { throw "zip entry hash mismatch: $name" }
+              if ($entry.Length -ne $expected[$key].bytes) { throw "zip entry byte mismatch: $name" }
+              $seen[$key] = $true
+            }
+          } finally { $archive.Dispose() }
+          $missing = @($expected.Keys | Where-Object { !$seen.ContainsKey($_) })
+          $extra = @($seen.Keys | Where-Object { !$expected.ContainsKey($_) })
+          $equal = ($seen.Count -eq $expected.Count -and $missing.Count -eq 0 -and $extra.Count -eq 0)
+          if (!$equal) { throw "product zip entry inventory mismatch" }
+          $result = @{
+            status = "pass"
+            zip_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:IRIS_PRODUCT_ZIP).Hash.ToLowerInvariant()
+            entry_count = $seen.Count
+            inventory_equal = $equal
+          }
+          $evidenceDir = $env:IRIS_VALIDATION_EVIDENCE
+          New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
+          Set-Content -LiteralPath (Join-Path $evidenceDir "product-package-rehearsal.json") -Value ($result | ConvertTo-Json -Depth 4 -Compress) -Encoding utf8
+
       - name: Assemble bounded evidence manifest
         if: ${{ !cancelled() }}
         shell: bash
@@ -445,8 +547,9 @@ jobs:
           inputs = report(ev / "validation-inputs.json", json.loads)
           closure = report(ev / "pe-import-closure.json", json.loads)
           smoke = report(ev / "preview-smoke.json", json.loads)
+          package = report(ev / "product-package-rehearsal.json", json.loads)
           out = dict(validation_inputs=inputs, pe_import_closure=closure,
-                     preview_smoke=smoke,
+                     preview_smoke=smoke, product_package_rehearsal=package,
                      release_promotion=False, native_runtime_retained=False)
           (ev / "windows-validation.json").write_text(json.dumps(out, indent=2) + "\n")
           PY
@@ -455,8 +558,11 @@ jobs:
         if: always()
         shell: bash
         run: |
-          for native_dir in "${IRIS_VALIDATION_STAGE:-}" "${IRIS_VALIDATION_PDFIUM_RUNTIME:-}" "${RUNNER_TEMP:-}/iris-runtime-stage" "${RUNNER_TEMP:-}/pdfium-extract" "${RUNNER_TEMP:-}/pdfium-runtime"; do
+          for native_dir in "${IRIS_VALIDATION_STAGE:-}" "${IRIS_VALIDATION_PDFIUM_RUNTIME:-}" "${IRIS_PRODUCT_STAGE:-}" "${RUNNER_TEMP:-}/iris-runtime-stage" "${RUNNER_TEMP:-}/iris-product-clean" "${RUNNER_TEMP:-}/pdfium-extract" "${RUNNER_TEMP:-}/pdfium-runtime"; do
             if [ -n "$native_dir" ] && [ -d "$native_dir" ]; then rm -rf "$native_dir"; fi
+          done
+          for native_file in "${IRIS_PRODUCT_ZIP:-}" "${RUNNER_TEMP:-}/iris-product-rehearsal.zip"; do
+            if [ -n "$native_file" ] && [ -f "$native_file" ]; then rm -f "$native_file"; fi
           done
           rm -rf build/validation/ffmpeg-src build/validation/overlay target/debug target/release .vcpkg-validation/installed
 
@@ -471,5 +577,7 @@ jobs:
             build/validation/evidence/windows-validation.json
             build/validation/evidence/pe-import-closure.json
             build/validation/evidence/preview-smoke.json
+            build/validation/evidence/product-package-rehearsal.json
+            build/validation/evidence/product-inventory.json
           retention-days: 7
           compression-level: 9

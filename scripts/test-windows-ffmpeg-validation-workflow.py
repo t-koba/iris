@@ -657,5 +657,81 @@ class WiringContracts(unittest.TestCase):
         self.assertIn("uses: ./.github/workflows/windows-ffmpeg-validation.yml", ci)
 
 
+class ProductRehearsalContracts(unittest.TestCase):
+    """The ZIP rehearsal is report-only, exact-SHA bound and fully cleaned."""
+
+    def setUp(self):
+        self.mod = load()
+        self.text = (ROOT / ".github/workflows/windows-ffmpeg-validation.yml").read_text()
+        self.groups = (
+            self.mod.PRODUCT_INVENTORY_MARKERS,
+            self.mod.PRODUCT_PACKAGE_MARKERS,
+            self.mod.PRODUCT_ZIP_MARKERS,
+            self.mod.PRODUCT_EVIDENCE_MARKERS,
+            self.mod.PRODUCT_CLEANUP_MARKERS,
+        )
+
+    def test_new_markers_are_required_and_removal_fails_closed(self):
+        for group in self.groups:
+            for marker in group:
+                with self.subTest(marker=marker):
+                    self.assertIn(marker, self.text)
+                    self.assertIn(marker, self.mod.REQUIRED_MARKERS)
+                    with self.assertRaises(ValueError):
+                        self.mod.validate(self.text.replace(marker, "<removed>"))
+
+    def test_new_markers_cannot_be_commented_out(self):
+        for group in self.groups:
+            for marker in group:
+                if self.text.count(marker) != 1:
+                    continue
+                with self.subTest(marker=marker):
+                    line = next(line for line in self.text.splitlines() if marker in line)
+                    indent = " " * (len(line) - len(line.lstrip()))
+                    commented = indent + "# " + line.strip()
+                    mutated = self.text.replace(line, commented, 1)
+                    self.assertNotEqual(mutated, self.text)
+                    with self.assertRaises(ValueError):
+                        self.mod.validate(mutated)
+
+    def test_rejects_helper_in_product_inventory(self):
+        old = '$productNames = @("Iris.exe") + @($dlls | ForEach-Object { $_.Name }) + @("pdfium.dll")'
+        new = '$productNames = @("Iris.exe", "rustc.exe") + @($dlls | ForEach-Object { $_.Name }) + @("pdfium.dll")'
+        mutated = self.text.replace(old, new, 1)
+        self.assertNotEqual(mutated, self.text)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_tolerated_zip_hash_mismatch(self):
+        old = '          if ($hash -ne $expected[$key].sha256) { throw "zip entry hash mismatch: $name" }\n'
+        self.assertIn(old, self.text)
+        mutated = self.text.replace(old, "          Write-Host \"ignoring zip hash mismatch\"\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_zip_extraction(self):
+        anchor = '          Add-Type -AssemblyName System.IO.Compression.FileSystem\n'
+        self.assertIn(anchor, self.text)
+        mutated = self.text.replace(
+            anchor, anchor + '          Expand-Archive -LiteralPath $env:IRIS_PRODUCT_ZIP -DestinationPath $clean\n', 1)
+        with self.assertRaisesRegex(ValueError, "never extracted"):
+            self.mod.validate(mutated)
+
+    def test_rejects_smoke_from_assembled_zip(self):
+        anchor = '          if (!$equal) { throw "product zip entry inventory mismatch" }\n'
+        self.assertIn(anchor, self.text)
+        mutated = self.text.replace(anchor, anchor + '          & $smokeExe $corpus\n', 1)
+        with self.assertRaisesRegex(ValueError, "only the staged preview smoke"):
+            self.mod.validate(mutated)
+
+    def test_rehearsal_reported_in_single_json_manifest(self):
+        checks = self.mod.validate(self.text)
+        self.assertTrue(checks["product_rehearsal"])
+        self.assertTrue(checks["product_evidence_upload"])
+        self.assertTrue(checks["no_extracted_zip_smoke"])
+        self.assertEqual(checks["upload_count"], 1)
+        self.assertTrue(checks["evidence_json_only"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

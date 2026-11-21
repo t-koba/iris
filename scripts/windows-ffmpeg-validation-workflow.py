@@ -112,6 +112,63 @@ ATTESTATION_MARKERS = (
     "PDFium release attestation verification failed",
 )
 
+
+# The shippable inventory is derived only from the product binary, the vcpkg
+# DLL closure and the attested PDFium DLL. Preview helpers and toolchain DLLs
+# stay in the smoke stage and cannot enter the rehearsal ZIP.
+PRODUCT_INVENTORY_MARKERS = (
+    '$productNames = @("Iris.exe") + @($dlls | ForEach-Object { $_.Name }) + @("pdfium.dll")',
+    'if ($productNames.Count -lt 3) { throw "product inventory empty" }',
+    'foreach ($helper in @("rustc.exe", "preview_corpus_smoke.exe")) {',
+    'if (!(Test-Path -LiteralPath (Join-Path $stage $required) -PathType Leaf)) { throw "required product file missing: $required" }',
+    '$hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $copy).Hash.ToLowerInvariant()',
+    '$inventory = @{ roots = @($stage); files = @($productFiles) }',
+    '"product-inventory.json"',
+)
+
+# The clean directory is rebuilt from inventory names only, the ZIP is
+# assembled by the fail-closed script, and its paths are exported for the next
+# step and for cleanup.
+PRODUCT_PACKAGE_MARKERS = (
+    "- name: Assemble clean product ZIP payload",
+    '$clean = Join-Path $env:RUNNER_TEMP "iris-product-clean"',
+    '$source = Join-Path $env:IRIS_VALIDATION_STAGE $name',
+    'Copy-Item -LiteralPath $source -Destination (Join-Path $clean $name) -Force',
+    '"IRIS_PRODUCT_STAGE=$clean" >> $env:GITHUB_ENV',
+    '"IRIS_PRODUCT_INVENTORY=$inventoryPath" >> $env:GITHUB_ENV',
+    '"IRIS_PRODUCT_ZIP=$zipPath" >> $env:GITHUB_ENV',
+    "pwsh scripts/windows-product-package.ps1",
+    'if ($LASTEXITCODE -ne 0) { throw "product package rehearsal failed" }',
+)
+
+# The ZIP is read in place: entry names, SHA-256 digests and byte counts must
+# match the inventory exactly. No preview is run from the ZIP.
+PRODUCT_ZIP_MARKERS = (
+    "- name: Verify product ZIP entry inventory",
+    "Add-Type -AssemblyName System.IO.Compression.FileSystem",
+    '$archive = [IO.Compression.ZipFile]::OpenRead($env:IRIS_PRODUCT_ZIP)',
+    "foreach ($entry in $archive.Entries) {",
+    'if (!$expected.ContainsKey($key)) { throw "unexpected zip entry: $name" }',
+    'if ($hash -ne $expected[$key].sha256) { throw "zip entry hash mismatch: $name" }',
+    'if (!$equal) { throw "product zip entry inventory mismatch" }',
+    '"product-package-rehearsal.json"',
+)
+
+PRODUCT_EVIDENCE_MARKERS = (
+    'report(ev / "product-package-rehearsal.json", json.loads)',
+    "product_package_rehearsal=package",
+    "build/validation/evidence/product-package-rehearsal.json",
+    "build/validation/evidence/product-inventory.json",
+)
+
+PRODUCT_CLEANUP_MARKERS = (
+    '"${IRIS_PRODUCT_STAGE:-}"',
+    '"${RUNNER_TEMP:-}/iris-product-clean"',
+    '"${IRIS_PRODUCT_ZIP:-}"',
+    '"${RUNNER_TEMP:-}/iris-product-rehearsal.zip"',
+    'if [ -n "$native_file" ] && [ -f "$native_file" ]; then rm -f "$native_file"; fi',
+)
+
 REQUIRED_MARKERS = (
     "workflow_call:",
     "ref: ${{ github.sha }}",
@@ -146,6 +203,8 @@ REQUIRED_MARKERS = (
     '"status": "not_run"',
 ) + ATTESTATION_MARKERS + STAGE_MARKERS + PE_IMPORT_MARKERS + EVIDENCE_MARKERS + (
     CLEANUP_MARKER, PATH_MARKER,
+) + PRODUCT_INVENTORY_MARKERS + PRODUCT_PACKAGE_MARKERS + PRODUCT_ZIP_MARKERS + (
+    PRODUCT_EVIDENCE_MARKERS + PRODUCT_CLEANUP_MARKERS
 )
 
 # Only these actions may appear in the validation workflow. A closed allowlist
@@ -484,6 +543,39 @@ def validate(text):
     for evidence in ("pe-import-closure.json", "preview-smoke.json"):
         require(any(p.endswith(evidence) for p in paths),
                 f"bounded evidence upload missing: {evidence}")
+    require(any(p.endswith("product-package-rehearsal.json") for p in paths),
+            "bounded evidence upload missing: product-package-rehearsal.json")
+    checks["product_evidence_upload"] = True
+
+    # The product rehearsal is an offline assembly over the already-validated
+    # stage. Every new behaviour must be executable, ordered after the smoke,
+    # and joined to the single JSON evidence upload.
+    for group in (PRODUCT_INVENTORY_MARKERS, PRODUCT_PACKAGE_MARKERS,
+                  PRODUCT_ZIP_MARKERS, PRODUCT_EVIDENCE_MARKERS,
+                  PRODUCT_CLEANUP_MARKERS):
+        for marker in group:
+            require(marker in code,
+                    f"product rehearsal marker missing from executable workflow lines: {marker}")
+    checks["product_rehearsal"] = True
+    inventory_before_order = (
+        '$productNames = @("Iris.exe") + @($dlls | ForEach-Object { $_.Name }) + @("pdfium.dll")',
+        "pwsh scripts/windows-product-package.ps1",
+        '$archive = [IO.Compression.ZipFile]::OpenRead($env:IRIS_PRODUCT_ZIP)',
+        'report(ev / "product-package-rehearsal.json", json.loads)',
+    )
+    positions = [code.index(marker) for marker in inventory_before_order]
+    require(positions == sorted(positions),
+            "product rehearsal must inventory, package, verify and report in order")
+    require(code.index('"IRIS_VALIDATION_STAGE=$stage" >> $env:GITHUB_ENV')
+            < code.index(PATH_MARKER) < code.index("pwsh scripts/windows-product-package.ps1"),
+            "product rehearsal must bind the stage before the smoke and packaging")
+    require(code.count("pwsh scripts/windows-product-package.ps1") == 1,
+            "product package script must be invoked exactly once")
+    require("Expand-Archive" not in code and "ZipFile.ExtractToDirectory" not in code,
+            "the product ZIP must be verified in place, never extracted")
+    require(code.count("& $smokeExe $corpus") == 1,
+            "only the staged preview smoke may run; never smoke an assembled ZIP")
+    checks["no_extracted_zip_smoke"] = True
 
     # Native bytes must be cleaned before upload.
     require(CLEANUP_MARKER in text and "rm -rf" in text and "if: always()" in text,
