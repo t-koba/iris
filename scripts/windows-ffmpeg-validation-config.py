@@ -136,8 +136,10 @@ def validate_import_allowlists(os_entries, vc_entries):
 
 
 def validate_release_hold(release_yml, package_ps1, release_audit, release_policy, ci_yml):
-    require("IRIS_BUILD_VARIANT: minimal" in release_yml,
-            "release.yml must keep the minimal Windows build variant")
+    require("IRIS_WINDOWS_RELEASE_HELD" in release_yml,
+            "release.yml must carry the explicit Windows release hold marker")
+    require("./scripts/package-windows.ps1" not in release_yml,
+            "release.yml must not invoke the Windows packaging script while held")
     require(all(token in package_ps1 for token in (
             "IRIS_PRODUCT_STAGE", "IRIS_PRODUCT_INVENTORY", "IRIS_PRODUCT_ZIP",
             "pwsh scripts/windows-product-package.ps1")),

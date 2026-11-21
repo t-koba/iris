@@ -146,7 +146,7 @@ fuzz 用のクレートは各 `fuzz/` ディレクトリで同じ操作をしま
 
 1. ルートの `Cargo.toml` にある `[workspace.package].version` を上げます。各クレートのバージョンはここから継承され、Windows 実行ファイルの VERSIONINFO とインストーラーのバージョンもこの値から生成されます。`cargo check --workspace` で `Cargo.lock` を更新し、両方をコミットします。
 2. 更新したバージョンと一致する `v<version>` タグ（例: `v0.4.0`）を `main` 上のコミットに付けて push します。リリース前検証はタグとルートのワークスペースバージョンの一致を確認します。
-3. `release.yml` が macOS・Linux・Windows のパッケージを作り、GitHub の Release に添付します。
+3. `release.yml` が macOS・Linux のパッケージを作り、GitHub の Release に添付します。Windows は検証済み product stage の接続まで保留中です。
 
 手元でパッケージを作るスクリプトもあります。出力先は `dist/` です。
 
@@ -154,7 +154,7 @@ fuzz 用のクレートは各 `fuzz/` ディレクトリで同じ操作をしま
 |---|---|---|
 | macOS | `./scripts/package-macos-app.sh` | pinned FFmpeg/liblzma をビルドした `Iris.app` と ZIP/PKG（[runtime/source/notice](../packaging/macos/ffmpeg-README.md) 同梱）。`IRIS_MACOS_SIGN_IDENTITY` と `IRIS_MACOS_NOTARY_PROFILE` を設定すると署名と公証も行う |
 | Linux | `./scripts/package-linux-appdir.sh` | `Iris.AppDir`（`appimagetool` があれば AppImage にできる） |
-| Windows | `./scripts/package-windows.ps1` | `Iris.exe` を含む zip（`IRIS_BUILD_VARIANT=minimal`） |
+| Windows | `./scripts/package-windows.ps1` | ビルドせず、検証済みの product stage から `Iris.exe` を含む zip を作成。`IRIS_PRODUCT_STAGE` / `IRIS_PRODUCT_INVENTORY` / `IRIS_PRODUCT_ZIP` / `IRIS_RELEASE_OUTPUT_DIR` が必須。リリース workflow は product stage の接続まで `IRIS_WINDOWS_RELEASE_HELD` で保留中 |
 
 ### 公開しないパッケージ監査
 

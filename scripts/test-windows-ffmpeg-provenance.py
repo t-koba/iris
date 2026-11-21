@@ -240,7 +240,8 @@ class WindowsFfmpegProvenance(unittest.TestCase):
 
     def test_windows_release_hold_is_explicit(self):
         release = read(".github/workflows/release.yml")
-        self.assertIn("IRIS_BUILD_VARIANT: minimal", release)
+        self.assertIn("IRIS_WINDOWS_RELEASE_HELD", release)
+        self.assertNotIn("./scripts/package-windows.ps1", release)
         policy = json.loads(read("scripts/release-policy.json"))
         self.assertEqual(policy["required_variants"]["windows"], "product")
         self.assertIn("python scripts/release-policy.py", release)

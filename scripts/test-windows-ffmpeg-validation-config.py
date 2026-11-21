@@ -210,6 +210,35 @@ class PackagingHoldContracts(unittest.TestCase):
         self.assertNotIn('"--features", "minimal"', pkg)
 
 
+class ReleaseHoldMarkerContracts(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.release = (ROOT / ".github/workflows/release.yml").read_text()
+        cls.package = (ROOT / "scripts/package-windows.ps1").read_text()
+        cls.audit = (ROOT / "scripts/release-audit.py").read_text()
+        cls.policy = mod.read_json("scripts/release-policy.json")
+        cls.ci = (ROOT / ".github/workflows/ci.yml").read_text()
+
+    def validate(self, release):
+        return mod.validate_release_hold(release, self.package, self.audit,
+                                         self.policy, self.ci)
+
+    def test_hold_marker_present_and_no_direct_packager_call(self):
+        self.assertIn("IRIS_WINDOWS_RELEASE_HELD", self.release)
+        self.assertNotIn("./scripts/package-windows.ps1", self.release)
+        self.assertTrue(self.validate(self.release))
+
+    def test_missing_hold_marker_fails(self):
+        mutated = self.release.replace("IRIS_WINDOWS_RELEASE_HELD", "IRIS_WINDOWS_RELEASE_OPEN")
+        with self.assertRaises(ValueError):
+            self.validate(mutated)
+
+    def test_reintroduced_packager_call_fails(self):
+        mutated = self.release + "        run: ./scripts/package-windows.ps1\n"
+        with self.assertRaises(ValueError):
+            self.validate(mutated)
+
+
 class WiringContracts(unittest.TestCase):
     def test_validator_and_contract_wired_into_ci(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()

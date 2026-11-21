@@ -70,7 +70,7 @@ Linux のリリースビルドは、PDF プレビュー用 PDFium 共有ライ�
 - `Iris-windows.zip`: 展開して `Iris.exe` を実行します。
 - `Iris-windows-setup.exe`: 管理者権限なしのユーザー単位で `%LOCALAPPDATA%\Programs\Iris` にインストールします。スタートメニューに登録され、インストーラでデスクトップショートカットも選べます。アンインストールは Windows のアプリ一覧から行えます。
 
-現在の Windows リリースは `minimal` ビルドです。動画・PDF プレビューと `raw-full` の RAW 形式は含まれません。また、現在の workflow では実行ファイルやインストーラにコード署名を行わないため、Windows の警告や SmartScreen の表示は環境によって異なります。
+Windows のリリース用パッケージ作成は現在保留中です。検証済みの exact-SHA product stage を workflow に接続するまで、`IRIS_WINDOWS_RELEASE_HELD` によりリリース job は失敗します。開発者向けの `./scripts/package-windows.ps1` はビルドを行わず、`IRIS_PRODUCT_STAGE` / `IRIS_PRODUCT_INVENTORY` / `IRIS_PRODUCT_ZIP` / `IRIS_RELEASE_OUTPUT_DIR` で渡した検証済みステージから zip とインストーラーを作成します。また、現在の workflow では実行ファイルやインストーラにコード署名を行わないため、Windows の警告や SmartScreen の表示は環境によって異なります。
 
 ### チェックサムの確認
 

@@ -311,11 +311,10 @@ jobs:
           choco install innosetup --version=6.7.1 --allow-downgrade --yes --no-progress
           if ($LASTEXITCODE -notin @(0, 3010)) { throw "Inno Setup installation failed" }
           exit 0
-      - name: Package Windows app
-        env:
-          IRIS_BUILD_VARIANT: minimal
+      - name: Hold Windows release packaging (IRIS_WINDOWS_RELEASE_HELD)
         shell: pwsh
-        run: ./scripts/package-windows.ps1
+        run: |
+          throw "IRIS_WINDOWS_RELEASE_HELD: Windows release packaging is held until the verified exact-SHA product stage is wired into this workflow. Wire the IRIS_PRODUCT_STAGE, IRIS_PRODUCT_INVENTORY, IRIS_PRODUCT_ZIP and IRIS_RELEASE_OUTPUT_DIR inputs into the packaging script, then remove this hold."
       - name: Verify Windows artifact
         shell: pwsh
         run: |
