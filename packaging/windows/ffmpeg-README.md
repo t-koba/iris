@@ -66,7 +66,8 @@ set to the derived overlay and `VCPKG_OVERLAY_TRIPLETS` to
 beside `Iris.exe`. `.github/workflows/windows-ffmpeg-validation.yml` performs
 these steps with stock locked bindings, builds locally for validation and
 emits bounded JSON evidence. It promotes no release and publishes no release
-artifact; the rehearsal ZIP stays an uploaded validation artifact only.
+artifact: the rehearsal ZIP is assembled and hash-verified inside the run,
+never uploaded, and removed at cleanup; only bounded JSON evidence is uploaded.
 
 These are replaceable shared DLLs, not statically linked into Iris. Under LGPL
 section 6(b), users may modify and rebuild FFmpeg, swap the versioned DLL set
