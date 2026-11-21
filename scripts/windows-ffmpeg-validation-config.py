@@ -138,8 +138,12 @@ def validate_import_allowlists(os_entries, vc_entries):
 def validate_release_hold(release_yml, package_ps1, release_audit, release_policy, ci_yml):
     require("IRIS_BUILD_VARIANT: minimal" in release_yml,
             "release.yml must keep the minimal Windows build variant")
-    require("--no-default-features" in package_ps1 and '"--features", "minimal"' in package_ps1,
-            "package-windows.ps1 must keep the minimal feature build")
+    require(all(token in package_ps1 for token in (
+            "IRIS_PRODUCT_STAGE", "IRIS_PRODUCT_INVENTORY", "IRIS_PRODUCT_ZIP",
+            "pwsh scripts/windows-product-package.ps1")),
+            "package-windows.ps1 must consume the bounded exact-SHA product inventory")
+    require("--no-default-features" not in package_ps1 and '"--features", "minimal"' not in package_ps1,
+            "package-windows.ps1 must not rebuild a reduced feature variant")
     require('variant="minimal"' in release_audit, "release audit must keep the Windows minimal variant")
     require(release_policy["required_variants"]["windows"] == "product",
             "release policy must still require the product Windows variant (the hold)")

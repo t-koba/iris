@@ -197,6 +197,19 @@ class CompositionContracts(unittest.TestCase):
         self.assertIn("minimal", e["release_hold"])
 
 
+class PackagingHoldContracts(unittest.TestCase):
+    def test_release_hold_requires_inventory_packager(self):
+        cfg = (ROOT / "scripts/windows-ffmpeg-validation-config.py").read_text()
+        pkg = (ROOT / "scripts/package-windows.ps1").read_text()
+        self.assertIn("package-windows.ps1 must consume the bounded exact-SHA product inventory", cfg)
+        self.assertIn("package-windows.ps1 must not rebuild a reduced feature variant", cfg)
+        for token in ("IRIS_PRODUCT_STAGE", "IRIS_PRODUCT_INVENTORY", "IRIS_PRODUCT_ZIP",
+                      "pwsh scripts/windows-product-package.ps1"):
+            self.assertIn(token, pkg)
+        self.assertNotIn("--no-default-features", pkg)
+        self.assertNotIn('"--features", "minimal"', pkg)
+
+
 class WiringContracts(unittest.TestCase):
     def test_validator_and_contract_wired_into_ci(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()

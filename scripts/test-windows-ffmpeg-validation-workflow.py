@@ -774,6 +774,7 @@ class ProductRehearsalContracts(unittest.TestCase):
             self.mod.PRODUCT_PACKAGE_MARKERS,
             self.mod.PRODUCT_NOTICE_MARKERS,
             self.mod.PRODUCT_ZIP_MARKERS,
+            self.mod.RELEASE_PACKAGE_MARKERS,
             self.mod.PRODUCT_EVIDENCE_MARKERS,
             self.mod.PRODUCT_CLEANUP_MARKERS,
         )
@@ -841,6 +842,21 @@ class ProductRehearsalContracts(unittest.TestCase):
         self.assertIn(create, self.text)
         mutated = self.text.replace(append, "", 1).replace(create, create + append, 1)
         with self.assertRaisesRegex(ValueError, "runtime stage"):
+            self.mod.validate(mutated)
+
+    def test_rejects_release_packaging_before_zip_verification(self):
+        zip_step = "      - name: Verify product ZIP entry inventory\n"
+        release_step = "      - name: Exercise release packaging from exact product inventory\n"
+        self.assertIn(zip_step, self.text)
+        self.assertIn(release_step, self.text)
+        zip_start = self.text.index(zip_step)
+        release_start = self.text.index(release_step)
+        release_end = self.text.index("      - name: Assemble bounded evidence manifest\n")
+        release_block = self.text[release_start:release_end]
+        mutated = (self.text[:zip_start] + release_block
+                   + self.text[zip_start:release_start] + self.text[release_end:])
+        self.assertNotEqual(mutated, self.text)
+        with self.assertRaisesRegex(ValueError, "release package rehearsal must follow"):
             self.mod.validate(mutated)
 
     def test_rejects_helper_in_product_inventory(self):

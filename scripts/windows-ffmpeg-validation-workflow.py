@@ -206,6 +206,24 @@ PRODUCT_NOTICE_MARKERS = (
 )
 
 
+# The release packager is exercised against the same clean stage, with a real
+# compiler, but its output and report are discarded after one bounded upload.
+RELEASE_PACKAGE_MARKERS = (
+    "- name: Install Inno Setup for release package rehearsal",
+    "choco install innosetup --version=6.7.1 --allow-downgrade --yes --no-progress",
+    "- name: Exercise release packaging from exact product inventory",
+    "$env:IRIS_RELEASE_OUTPUT_DIR = $releaseDir",
+    "pwsh scripts/package-windows.ps1",
+    'if ($result.status -ne "pass") { throw "release package result is not pass" }',
+    'if ($result.installer_source_count -ne $expectedNames.Count) { throw "installer source count mismatch" }',
+    '"release-package-rehearsal.json"',
+    'report(ev / "release-package-rehearsal.json", json.loads)',
+    "release_package_rehearsal=release_package",
+    "build/validation/evidence/release-package-rehearsal.json",
+    '"${RUNNER_TEMP:-}/iris-release-package"',
+)
+
+
 # The ZIP is read in place: entry names, SHA-256 digests and byte counts must
 # match the inventory exactly. No preview is run from the ZIP.
 PRODUCT_ZIP_MARKERS = (
@@ -271,7 +289,7 @@ REQUIRED_MARKERS = (
     CLEANUP_MARKER, PATH_MARKER,
 ) + PRODUCT_INVENTORY_MARKERS + PRODUCT_PACKAGE_MARKERS + PRODUCT_NOTICE_MARKERS + (
     PRODUCT_EVIDENCE_MARKERS + PRODUCT_CLEANUP_MARKERS
-) + PRODUCT_ZIP_MARKERS
+) + PRODUCT_ZIP_MARKERS + RELEASE_PACKAGE_MARKERS
 
 # Only these actions may appear in the validation workflow. A closed allowlist
 # fails closed on any new or renamed action (including a differently spelled
@@ -644,6 +662,7 @@ def validate(text):
     # and joined to the single JSON evidence upload.
     for group in (PRODUCT_INVENTORY_MARKERS, PRODUCT_PACKAGE_MARKERS,
                   PRODUCT_NOTICE_MARKERS, PRODUCT_ZIP_MARKERS,
+                  RELEASE_PACKAGE_MARKERS,
                   PRODUCT_EVIDENCE_MARKERS, PRODUCT_CLEANUP_MARKERS):
         for marker in group:
             require(marker in code,
@@ -663,6 +682,12 @@ def validate(text):
             "product rehearsal must bind the stage before the smoke and packaging")
     require(code.count("pwsh scripts/windows-product-package.ps1") == 1,
             "product package script must be invoked exactly once")
+    require(code.count("pwsh scripts/package-windows.ps1") == 1,
+            "release package script must be invoked exactly once")
+    require(code.index("- name: Verify product ZIP entry inventory")
+            < code.index("- name: Exercise release packaging from exact product inventory")
+            < code.index("- name: Assemble bounded evidence manifest"),
+            "release package rehearsal must follow ZIP verification and precede reporting")
     script_pos = code.index("pwsh scripts/windows-product-package.ps1")
     # $clean/$inventoryPath/$zipPath are step-local PowerShell variables defined
     # only in the Assemble step; requiring each binding to follow the $clean

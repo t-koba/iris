@@ -71,6 +71,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/test-windows-product-package.py
 
+      - name: Windows release package contract
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-windows-package.py
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1

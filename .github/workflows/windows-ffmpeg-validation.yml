@@ -614,6 +614,61 @@ jobs:
           New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
           Set-Content -LiteralPath (Join-Path $evidenceDir "product-package-rehearsal.json") -Value ($result | ConvertTo-Json -Depth 4 -Compress) -Encoding utf8
 
+      - name: Install Inno Setup for release package rehearsal
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install innosetup --version=6.7.1 --allow-downgrade --yes --no-progress
+          if ($LASTEXITCODE -notin @(0, 3010)) { throw "Inno Setup installation failed: $LASTEXITCODE" }
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6/ISCC.exe"
+          if (!(Test-Path -LiteralPath $iscc -PathType Leaf)) { throw "ISCC.exe missing after install: $iscc" }
+
+      - name: Exercise release packaging from exact product inventory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # The real release packager consumes only the clean hash-verified
+          # stage; it must not build, download or publish anything here.
+          $releaseDir = Join-Path $env:RUNNER_TEMP "iris-release-package"
+          if (!(Test-Path -LiteralPath $releaseDir -PathType Container)) { New-Item -ItemType Directory -Path $releaseDir | Out-Null }
+          $releaseZip = Join-Path $releaseDir "Iris-windows.zip"
+          $env:IRIS_PRODUCT_ZIP = $releaseZip
+          $env:IRIS_RELEASE_OUTPUT_DIR = $releaseDir
+          pwsh scripts/package-windows.ps1
+          if ($LASTEXITCODE -ne 0) { throw "release package rehearsal failed" }
+          $resultPath = Join-Path $releaseDir "release-package-result.json"
+          if (!(Test-Path -LiteralPath $resultPath -PathType Leaf)) { throw "release package result missing: $resultPath" }
+          $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+          $inventory = Get-Content -LiteralPath $env:IRIS_PRODUCT_INVENTORY -Raw | ConvertFrom-Json
+          $expectedNames = @($inventory.files | ForEach-Object { [string]$_.name })
+          if ($result.status -ne "pass") { throw "release package result is not pass" }
+          if (@($result.entries).Count -ne $expectedNames.Count) { throw "release package entry count mismatch" }
+          foreach ($name in $expectedNames) {
+            if ($result.entries -notcontains $name) { throw "release package result missing entry: $name" }
+          }
+          if ($result.installer_source_count -ne $expectedNames.Count) { throw "installer source count mismatch" }
+          if ($result.zip_sha256 -notmatch '^[0-9a-f]{64}$') { throw "invalid release ZIP sha256" }
+          if ($result.installer_sha256 -notmatch '^[0-9a-f]{64}$') { throw "invalid installer sha256" }
+          if ($result.installer_bytes -le 0) { throw "invalid installer byte count" }
+          $includePath = Join-Path $releaseDir "windows-installer-files.inc"
+          if (!(Test-Path -LiteralPath $includePath -PathType Leaf)) { throw "installer file list missing" }
+          $include = Get-Content -LiteralPath $includePath -Raw
+          foreach ($name in $expectedNames) {
+            if (!$include.Contains($name)) { throw "installer file list missing entry: $name" }
+          }
+          $record = @{
+            status = "pass"
+            entry_count = $expectedNames.Count
+            inventory_equal = $true
+            installer_source_count = $result.installer_source_count
+            zip_sha256 = $result.zip_sha256
+            installer_sha256 = $result.installer_sha256
+            release_promotion = $false
+          }
+          $evidenceDir = $env:IRIS_VALIDATION_EVIDENCE
+          New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
+          Set-Content -LiteralPath (Join-Path $evidenceDir "release-package-rehearsal.json") -Value ($record | ConvertTo-Json -Depth 4 -Compress) -Encoding utf8
+
       - name: Assemble bounded evidence manifest
         if: ${{ !cancelled() }}
         shell: bash
@@ -636,8 +691,10 @@ jobs:
           closure = report(ev / "pe-import-closure.json", json.loads)
           smoke = report(ev / "preview-smoke.json", json.loads)
           package = report(ev / "product-package-rehearsal.json", json.loads)
+          release_package = report(ev / "release-package-rehearsal.json", json.loads)
           out = dict(validation_inputs=inputs, pe_import_closure=closure,
                      preview_smoke=smoke, product_package_rehearsal=package,
+                     release_package_rehearsal=release_package,
                      release_promotion=False, native_runtime_retained=False)
           (ev / "windows-validation.json").write_text(json.dumps(out, indent=2) + "\n")
           PY
@@ -646,7 +703,7 @@ jobs:
         if: always()
         shell: bash
         run: |
-          for native_dir in "${IRIS_VALIDATION_STAGE:-}" "${IRIS_VALIDATION_PDFIUM_RUNTIME:-}" "${IRIS_PRODUCT_STAGE:-}" "${RUNNER_TEMP:-}/iris-runtime-stage" "${RUNNER_TEMP:-}/iris-product-clean" "${RUNNER_TEMP:-}/pdfium-extract" "${RUNNER_TEMP:-}/pdfium-runtime"; do
+          for native_dir in "${IRIS_VALIDATION_STAGE:-}" "${IRIS_VALIDATION_PDFIUM_RUNTIME:-}" "${IRIS_PRODUCT_STAGE:-}" "${RUNNER_TEMP:-}/iris-runtime-stage" "${RUNNER_TEMP:-}/iris-product-clean" "${RUNNER_TEMP:-}/iris-release-package" "${RUNNER_TEMP:-}/pdfium-extract" "${RUNNER_TEMP:-}/pdfium-runtime"; do
             if [ -n "$native_dir" ] && [ -d "$native_dir" ]; then rm -rf "$native_dir"; fi
           done
           for native_file in "${IRIS_PRODUCT_ZIP:-}" "${RUNNER_TEMP:-}/iris-product-rehearsal.zip"; do
@@ -666,6 +723,7 @@ jobs:
             build/validation/evidence/pe-import-closure.json
             build/validation/evidence/preview-smoke.json
             build/validation/evidence/product-package-rehearsal.json
+            build/validation/evidence/release-package-rehearsal.json
             build/validation/evidence/product-inventory.json
           retention-days: 7
           compression-level: 9
