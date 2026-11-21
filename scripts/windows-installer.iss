@@ -1,4 +1,5 @@
-; Inputs are supplied by package-windows.ps1 from Cargo metadata and the built app.
+; AppVersion/FileVersion come from Cargo metadata; InstallerFiles is generated
+; from the exact-SHA product inventory by windows-installer-files.py.
 #ifndef AppVersion
   #error AppVersion is required
 #endif
@@ -7,6 +8,9 @@
 #endif
 #ifndef SourceDir
   #error SourceDir is required
+#endif
+#ifndef InstallerFiles
+  #error InstallerFiles is required
 #endif
 
 [Setup]
@@ -26,7 +30,7 @@ WizardStyle=modern
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; Flags: unchecked
 
 [Files]
-Source: "{#SourceDir}\Iris.exe"; DestDir: "{app}"; Flags: ignoreversion
+#include "{#InstallerFiles}"
 
 [Icons]
 Name: "{userprograms}\Iris"; Filename: "{app}\Iris.exe"
