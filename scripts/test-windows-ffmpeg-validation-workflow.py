@@ -317,7 +317,11 @@ class FailClosedContracts(unittest.TestCase):
                          'Set-Variable -Name:HOME -Value x',
                          'sv HOME x',
                          '$global:HOME = "x"', '${global:HOME} = "x"',
-                         '$script:HOME = "x"'):
+                         '$script:HOME = "x"', 'set HOME x',
+                         'Set-V HOME x', 'Set-Var HOME x',
+                         'Set-`Variable HOME x', 'Set-Item variable:HOME x',
+                         'New-Variable -Name HOME -Value x',
+                         'Get-Variable HOME'):
             mutated = self.text.replace(
                 '$gpgHome = "$gpgDir/home"',
                 '$gpgHome = "$gpgDir/home"\n          ' + mutation, 1)
