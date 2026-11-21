@@ -3,9 +3,10 @@ name: Windows FFmpeg native validation
 # Reusable, report-only Windows default-preview validation. The registered CI
 # workflow calls this only on manual dispatch at the caller's exact SHA. It
 # acquires the signature-verified FFmpeg source, derives a local-source vcpkg
-# overlay, builds the product, inventories the PE import closure, stages the
-# attested PDFium runtime and smoke-tests installed previews. It never promotes
-# a release, changes the minimal packaging variant, or retains native bytes.
+# overlay, builds the release binaries, stages one isolated Iris runtime,
+# inventories the staged PE import closure and smoke-tests that staged runtime
+# with a system-only PATH. It never promotes a release, changes the minimal
+# packaging variant, or retains native bytes.
 on:
   workflow_call:
 
@@ -181,19 +182,28 @@ jobs:
             "--x-install-root=$installRoot" `
             --triplet=x64-windows-iris-dynamic
           if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
-          # Rust does not copy vcpkg DLLs beside the binary; expose the installed
-          # triplet bin dir so Iris.exe and the preview example load the FFmpeg
-          # closure at runtime, and fail closed if the DLLs are absent.
+          # Rust does not copy vcpkg DLLs beside the binary. The DLLs are copied
+          # into one isolated runtime stage below; the install tree is never
+          # placed on PATH, so no later smoke run can load FFmpeg from it.
           $binDir = Join-Path $env:VCPKG_INSTALLED_DIR "x64-windows-iris-dynamic/bin"
           if (!(Test-Path -LiteralPath $binDir)) { throw "vcpkg FFmpeg DLL bin dir missing: $binDir" }
           $dlls = @(Get-ChildItem -LiteralPath $binDir -Filter "*.dll" -File)
           if ($dlls.Count -lt 2) { throw "FFmpeg DLL closure missing in $binDir" }
           $dlls | ForEach-Object { Write-Host "FFmpeg DLL: $($_.Name)" }
-          "$binDir" >> $env:GITHUB_PATH
 
       - name: Build product with stock locked bindings
-        shell: bash
-        run: cargo build -p iris-ui-shell --locked
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Git bash puts its own link.exe ahead of MSVC's, so build from pwsh
+          # where the MSVC developer PATH from the previous step is authoritative.
+          cargo build --release -p iris-ui-shell --locked
+          if ($LASTEXITCODE -ne 0) { throw "release product build failed" }
+          cargo build --release -p iris-thumb-preview --example preview_corpus_smoke --locked
+          if ($LASTEXITCODE -ne 0) { throw "release preview example build failed" }
+          foreach ($relative in @("target/release/Iris.exe", "target/release/examples/preview_corpus_smoke.exe")) {
+            if (!(Test-Path -LiteralPath (Join-Path $env:GITHUB_WORKSPACE $relative) -PathType Leaf)) { throw "release binary missing: $relative" }
+          }
 
       - name: Stage attested PDFium runtime
         shell: pwsh
@@ -243,33 +253,180 @@ jobs:
           foreach ($m in $dllMembers) {
             Copy-Item -LiteralPath (Join-Path $extract ($m -replace "/", [IO.Path]::DirectorySeparatorChar)) -Destination (Join-Path $runtime "pdfium.dll") -Force
           }
-          "$runtime" >> $env:GITHUB_PATH
+          if (!(Test-Path -LiteralPath (Join-Path $runtime "pdfium.dll") -PathType Leaf)) { throw "attested PDFium DLL missing" }
+          "IRIS_VALIDATION_PDFIUM_RUNTIME=$runtime" >> $env:GITHUB_ENV
           Write-Host "verified and staged $($pin.asset): $($pin.bytes) bytes"
 
-      - name: Inventory PE import closure
+      - name: Stage one isolated Iris runtime
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $bin = "target/debug/Iris.exe"
-          if (!(Test-Path -LiteralPath $bin)) { throw "built binary missing: $bin" }
-          $imports = (& dumpbin /DEPENDENTS $bin | Out-String)
-          Write-Host $imports
-          $closure = Join-Path $env:IRIS_VALIDATION_EVIDENCE "pe-imports.txt"
-          New-Item -ItemType Directory -Force -Path (Split-Path $closure) | Out-Null
-          $imports | Out-File -Encoding utf8 $closure
+          $stage = Join-Path $env:RUNNER_TEMP "iris-runtime-stage"
+          if (Test-Path -LiteralPath $stage) { Remove-Item -Recurse -Force -LiteralPath $stage }
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $dllDir = Join-Path $env:VCPKG_INSTALLED_DIR "$env:IRIS_VALIDATION_TRIPLET/bin"
+          if (!(Test-Path -LiteralPath $dllDir -PathType Container)) { throw "vcpkg DLL directory missing: $dllDir" }
+          if ([string]::IsNullOrWhiteSpace($env:IRIS_VALIDATION_PDFIUM_RUNTIME)) { throw "attested PDFium runtime not bound" }
+          $pdfium = Join-Path $env:IRIS_VALIDATION_PDFIUM_RUNTIME "pdfium.dll"
+          if (!(Test-Path -LiteralPath $pdfium -PathType Leaf)) { throw "attested PDFium DLL missing: $pdfium" }
+          foreach ($relative in @("target/release/Iris.exe", "target/release/examples/preview_corpus_smoke.exe")) {
+            $source = Join-Path $env:GITHUB_WORKSPACE $relative
+            if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "release binary missing: $relative" }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $stage (Split-Path $source -Leaf)) -Force
+          }
+          $dlls = @(Get-ChildItem -LiteralPath $dllDir -Filter "*.dll" -File)
+          if ($dlls.Count -lt 2) { throw "vcpkg DLL closure missing in $dllDir" }
+          foreach ($dll in $dlls) { Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $stage $dll.Name) -Force }
+          Copy-Item -LiteralPath $pdfium -Destination (Join-Path $stage "pdfium.dll") -Force
+          # The example's own identity probe calls `rustc --version`; stage the
+          # real compiler and its DLLs too, so the smoke needs no toolchain on
+          # PATH. The sysroot is read before PATH is narrowed for the smoke.
+          $sysroot = (& rustc --print sysroot | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sysroot)) { throw "rustc sysroot probe failed" }
+          $rustcBin = Join-Path $sysroot "bin"
+          $rustcExe = Join-Path $rustcBin "rustc.exe"
+          if (!(Test-Path -LiteralPath $rustcExe -PathType Leaf)) { throw "rustc executable missing: $rustcExe" }
+          Copy-Item -LiteralPath $rustcExe -Destination (Join-Path $stage "rustc.exe") -Force
+          foreach ($dll in @(Get-ChildItem -LiteralPath $rustcBin -Filter "*.dll" -File)) {
+            Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $stage $dll.Name) -Force
+          }
+          $staged = @(Get-ChildItem -LiteralPath $stage -File)
+          if ($staged.Count -lt ($dlls.Count + 4)) { throw "staged runtime incomplete" }
+          "IRIS_VALIDATION_STAGE=$stage" >> $env:GITHUB_ENV
+          Write-Host "staged Iris runtime: $stage"
 
-      - name: Clean-installed preview smoke (video, PDF, RAW)
+      - name: Inventory staged PE import closure
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          # The product's own corpus example exercises JPEG/CR3/video/PDF decode
-          # against the staged native runtime; PDFium is placed in the runtime
-          # search path by the staging step above.
+          if ([string]::IsNullOrWhiteSpace($env:IRIS_VALIDATION_STAGE)) { throw "runtime stage not bound" }
+          $stage = $env:IRIS_VALIDATION_STAGE
+          if (!(Test-Path -LiteralPath $stage -PathType Container)) { throw "runtime stage missing: $stage" }
+          # Windows-provided libraries (including API sets) are the only imports
+          # allowed to resolve outside the stage. Every other name must resolve
+          # to a file in the stage and is then inventoried in turn.
+          $system = @(
+            "ntdll.dll", "kernel32.dll", "kernelbase.dll", "user32.dll", "gdi32.dll",
+            "advapi32.dll", "shell32.dll", "shlwapi.dll", "ole32.dll", "oleaut32.dll",
+            "ws2_32.dll", "iphlpapi.dll", "crypt32.dll", "bcrypt.dll", "secur32.dll",
+            "sspicli.dll", "userenv.dll", "version.dll", "winmm.dll", "msvcrt.dll",
+            "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll",
+            "msvcp140_2.dll", "concrt140.dll", "ucrtbase.dll", "api-ms-win-*", "ext-ms-win-*",
+            "dwmapi.dll", "dxgi.dll", "d3d11.dll", "d3d12.dll", "mfplat.dll", "mf.dll",
+            "propsys.dll", "setupapi.dll", "cfgmgr32.dll", "psapi.dll", "mpr.dll",
+            "dnsapi.dll", "netapi32.dll", "wintrust.dll", "comdlg32.dll", "imm32.dll",
+            "winhttp.dll", "wininet.dll", "urlmon.dll", "dxva2.dll", "evr.dll", "evrcore.dll",
+            "ncrypt.dll", "authz.dll", "comctl32.dll", "msimg32.dll", "uxtheme.dll",
+            "wtsapi32.dll", "profapi.dll", "powrprof.dll", "devobj.dll", "cryptui.dll",
+            "msasn1.dll", "srvcli.dll", "wkssvc.dll", "wldap32.dll", "oleacc.dll",
+            "tdh.dll", "wer.dll", "gdiplus.dll", "mscms.dll", "d2d1.dll", "dwrite.dll",
+            "windowscodecs.dll", "shcore.dll", "rpcrt4.dll", "sechost.dll", "normaliz.dll",
+            "cryptsp.dll", "apphelp.dll", "ucrtbase.dll", "msvcp140.dll",
+            "vcruntime140.dll", "msvcp140_atomic_wait.dll", "vcruntime140_threads.dll"
+          )
+          # API sets and extension DLLs are Windows-provided forwarders.
+          $isForwarder = $import.StartsWith("api-ms-win-") -or $import.StartsWith("ext-ms-win-")
+          $roots = @(
+            (Join-Path $env:IRIS_VALIDATION_STAGE "Iris.exe"),
+            (Join-Path $env:IRIS_VALIDATION_STAGE "preview_corpus_smoke.exe"),
+            (Join-Path $env:IRIS_VALIDATION_STAGE "rustc.exe")
+          )
+          $queue = New-Object System.Collections.Generic.Queue[string]
+          foreach ($root in $roots) {
+            if (!(Test-Path -LiteralPath $root -PathType Leaf)) { throw "staged binary missing: $root" }
+            $queue.Enqueue($root)
+          }
+          $visited = @{}
+          $imports = @()
+          $unresolved = @()
+          while ($queue.Count -gt 0) {
+            $binary = $queue.Dequeue()
+            $name = [IO.Path]::GetFileName($binary)
+            $key = $name.ToLowerInvariant()
+            if ($visited.ContainsKey($key)) { continue }
+            if ($visited.Count -ge 256) { throw "PE import closure exceeds binary bound" }
+            $visited[$key] = $true
+            $output = (& dumpbin /DEPENDENTS $binary | Out-String)
+            if ($LASTEXITCODE -ne 0) { throw "dumpbin /DEPENDENTS failed for $name" }
+            $importMatches = [regex]::Matches($output, '(?im)^\s{2,}([A-Za-z0-9_.-]{1,128}\.dll)\s*$')
+            foreach ($m in $importMatches) {
+              $import = $m.Groups[1].Value.ToLowerInvariant()
+              if ($imports.Count -ge 4096) { throw "PE import evidence exceeds bound" }
+              $isSystem = $isForwarder -or @($system | Where-Object { $import -like $_ }).Count -gt 0
+              $resolution = "stage"
+              if ($isSystem) {
+                $resolution = "system"
+              } else {
+                $candidate = Join-Path $stage $import
+                if (!(Test-Path -LiteralPath $candidate -PathType Leaf)) {
+                  $resolution = "unresolved"
+                  $unresolved += "$name -> $import"
+                } else {
+                  $queue.Enqueue($candidate)
+                }
+              }
+              $imports += @{ from = $name; import = $import; resolution = $resolution }
+            }
+          }
+          if ($imports.Count -eq 0) { throw "no PE imports parsed; dumpbin output shape drifted" }
+          $evidenceDir = $env:IRIS_VALIDATION_EVIDENCE
+          New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
+          $closure = @{
+            roots = @("Iris.exe", "preview_corpus_smoke.exe", "rustc.exe")
+            binaries = @($visited.Keys | Sort-Object)
+            imports = @($imports)
+            unresolved = @($unresolved)
+          }
+          Set-Content -LiteralPath (Join-Path $evidenceDir "pe-import-closure.json") -Value ($closure | ConvertTo-Json -Depth 6 -Compress) -Encoding utf8
+          if ($unresolved.Count -gt 0) { throw ("unresolved staged PE imports: " + ($unresolved -join ", ")) }
+
+      - name: Staged preview smoke (video, PDF, RAW)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Fetch with the runner PATH, then run only the staged binary with a
+          # PATH of system directories plus the one stage directory. No build,
+          # vcpkg or PDFium directory can satisfy this smoke run.
           $corpus = Join-Path $env:RUNNER_TEMP "iris-preview-corpus"
           python3 scripts/fetch-preview-corpus.py --output $corpus
           if ($LASTEXITCODE -ne 0) { throw "preview corpus fetch failed" }
-          & cargo run --release -p iris-thumb-preview --example preview_corpus_smoke --locked -- $corpus
-          if ($LASTEXITCODE -ne 0) { throw "installed preview smoke failed" }
+          if ([string]::IsNullOrWhiteSpace($env:IRIS_VALIDATION_STAGE)) { throw "runtime stage not bound" }
+          $stage = $env:IRIS_VALIDATION_STAGE
+          $smokeExe = Join-Path $env:IRIS_VALIDATION_STAGE "preview_corpus_smoke.exe"
+          if (!(Test-Path -LiteralPath $smokeExe -PathType Leaf)) { throw "staged preview example missing: $smokeExe" }
+          $systemPath = @(
+            (Join-Path $env:SystemRoot "System32"),
+            $env:SystemRoot,
+            (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0")
+          )
+          foreach ($dir in @($stage) + $systemPath) {
+            if (!(Test-Path -LiteralPath $dir -PathType Container)) { throw "smoke PATH directory missing: $dir" }
+          }
+          $env:PATH = (@($stage) + $systemPath) -join [IO.Path]::PathSeparator
+          $smokeOutput = ""
+          $exitCode = -1
+          try {
+            $smokeOutput = (& $smokeExe $corpus | Out-String)
+            $exitCode = $LASTEXITCODE
+          } catch {
+            $smokeOutput = $_.Exception.Message
+            $exitCode = -1
+          }
+          if ($smokeOutput.Length -gt 2000) { $smokeOutput = $smokeOutput.Substring($smokeOutput.Length - 2000) }
+          $status = "fail"
+          if ($exitCode -eq 0) { $status = "pass" }
+          $evidenceDir = $env:IRIS_VALIDATION_EVIDENCE
+          New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
+          $record = @{
+            status = $status
+            exit_code = $exitCode
+            executable = "preview_corpus_smoke.exe"
+            stage = $stage
+            path = "stage+system"
+            output_tail = $smokeOutput
+          }
+          Set-Content -LiteralPath (Join-Path $evidenceDir "preview-smoke.json") -Value ($record | ConvertTo-Json -Depth 4 -Compress) -Encoding utf8
+          if ($exitCode -ne 0) { throw "installed preview smoke failed with exit code $exitCode" }
 
       - name: Assemble bounded evidence manifest
         if: ${{ !cancelled() }}
@@ -290,8 +447,10 @@ jobs:
                   return {"status": "invalid"}
 
           inputs = report(ev / "validation-inputs.json", json.loads)
-          pe = report(ev / "pe-imports.txt")
-          out = dict(validation_inputs=inputs, pe_imports=pe,
+          closure = report(ev / "pe-import-closure.json", json.loads)
+          smoke = report(ev / "preview-smoke.json", json.loads)
+          out = dict(validation_inputs=inputs, pe_import_closure=closure,
+                     preview_smoke=smoke,
                      release_promotion=False, native_runtime_retained=False)
           (ev / "windows-validation.json").write_text(json.dumps(out, indent=2) + "\n")
           PY
@@ -300,7 +459,10 @@ jobs:
         if: always()
         shell: bash
         run: |
-          rm -rf build/validation/ffmpeg-src build/validation/overlay target/debug .vcpkg-validation/installed
+          for native_dir in "${IRIS_VALIDATION_STAGE:-}" "${IRIS_VALIDATION_PDFIUM_RUNTIME:-}" "${RUNNER_TEMP:-}/iris-runtime-stage" "${RUNNER_TEMP:-}/pdfium-extract" "${RUNNER_TEMP:-}/pdfium-runtime"; do
+            if [ -n "$native_dir" ] && [ -d "$native_dir" ]; then rm -rf "$native_dir"; fi
+          done
+          rm -rf build/validation/ffmpeg-src build/validation/overlay target/debug target/release .vcpkg-validation/installed
 
       - name: Retain bounded JSON evidence only
         if: always()
@@ -311,5 +473,7 @@ jobs:
           path: |
             build/validation/evidence/validation-inputs.json
             build/validation/evidence/windows-validation.json
+            build/validation/evidence/pe-import-closure.json
+            build/validation/evidence/preview-smoke.json
           retention-days: 7
           compression-level: 9

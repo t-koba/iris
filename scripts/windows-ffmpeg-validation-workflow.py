@@ -32,6 +32,55 @@ OFFLINE_GATES = (
     "python3 scripts/test-windows-ffmpeg-validation-workflow.py",
 )
 
+# One RUNNER_TEMP stage binds both release binaries, the vcpkg DLL closure and
+# the attested PDFium DLL. The preview example probes `rustc --version`, so the
+# real compiler and its DLLs are staged too; no toolchain path is added to PATH.
+STAGE_MARKERS = (
+    "cargo build --release -p iris-ui-shell --locked",
+    "cargo build --release -p iris-thumb-preview --example preview_corpus_smoke --locked",
+    '$stage = Join-Path $env:RUNNER_TEMP "iris-runtime-stage"',
+    '"IRIS_VALIDATION_PDFIUM_RUNTIME=$runtime" >> $env:GITHUB_ENV',
+    '"IRIS_VALIDATION_STAGE=$stage" >> $env:GITHUB_ENV',
+    'Copy-Item -LiteralPath $pdfium -Destination (Join-Path $stage "pdfium.dll") -Force',
+    'Copy-Item -LiteralPath $rustcExe -Destination (Join-Path $stage "rustc.exe") -Force',
+    '$smokeExe = Join-Path $env:IRIS_VALIDATION_STAGE "preview_corpus_smoke.exe"',
+    "& $smokeExe $corpus",
+    "$exitCode = $LASTEXITCODE",
+    '$status = "fail"',
+    'if ($exitCode -ne 0) { throw "installed preview smoke failed with exit code $exitCode" }',
+    '"preview-smoke.json"',
+)
+
+# dumpbin must be checked for failure, and every non-system import must be
+# resolved in the stage and then queued for its own inventory.
+PE_IMPORT_MARKERS = (
+    "dumpbin /DEPENDENTS $binary",
+    '$isForwarder = $import.StartsWith("api-ms-win-")',
+    "$isSystem = $isForwarder -or @($system | Where-Object { $import -like $_ }).Count -gt 0",
+    "$candidate = Join-Path $stage $import",
+    'if (!(Test-Path -LiteralPath $candidate -PathType Leaf)) {',
+    'if ($LASTEXITCODE -ne 0) { throw "dumpbin /DEPENDENTS failed for $name" }',
+    "while ($queue.Count -gt 0)",
+    "$queue.Enqueue($candidate)",
+    '$unresolved += "$name -> $import"',
+    'if ($unresolved.Count -gt 0) { throw ("unresolved staged PE imports: "',
+    '"pe-import-closure.json"',
+)
+
+# Both staged-runtime results must be read into the single JSON manifest.
+EVIDENCE_MARKERS = (
+    'report(ev / "pe-import-closure.json", json.loads)',
+    'report(ev / "preview-smoke.json", json.loads)',
+    "pe_import_closure=closure",
+    "preview_smoke=smoke",
+)
+
+CLEANUP_MARKER = (
+    "rm -rf build/validation/ffmpeg-src build/validation/overlay "
+    "target/debug target/release .vcpkg-validation/installed"
+)
+PATH_MARKER = "$env:PATH = (@($stage) + $systemPath) -join [IO.Path]::PathSeparator"
+
 # The PDFium attestation step must verify the exact asset against the pinned
 # bundle, identity and source before extraction. Check these on executable
 # lines, so a comment describing verification cannot stand in for the command.
@@ -84,7 +133,9 @@ REQUIRED_MARKERS = (
     'empty vcpkg path',
     '.Where({ [string]::IsNullOrWhiteSpace($_) }).Count -gt 0',
     '"status": "not_run"',
-) + ATTESTATION_MARKERS
+) + ATTESTATION_MARKERS + STAGE_MARKERS + PE_IMPORT_MARKERS + EVIDENCE_MARKERS + (
+    CLEANUP_MARKER, PATH_MARKER,
+)
 
 # Only these actions may appear in the validation workflow. A closed allowlist
 # fails closed on any new or renamed action (including a differently spelled
@@ -288,6 +339,34 @@ def validate(text):
         require(marker in code,
                 f"attestation verification missing from executable workflow lines: {marker}")
     checks["attestation_verification"] = True
+    for marker in PE_IMPORT_MARKERS:
+        require(marker in code,
+                f"staged PE import guard missing from executable workflow lines: {marker}")
+    checks["pe_import_closure"] = True
+
+    # Git bash prepends its own link.exe ahead of MSVC's; cargo builds must run
+    # from pwsh so the developer PATH created by msvc-dev-cmd is authoritative.
+    build_marker = "- name: Build product with stock locked bindings"
+    require(build_marker in text, "release build step missing")
+    build_block = text.split(build_marker, 1)[1].split("\n      - name:", 1)[0]
+    require(re.search(r"^\s+shell: pwsh\s*$", build_block, re.MULTILINE) is not None,
+            "release builds must use pwsh so MSVC link.exe wins over Git bash link.exe")
+    checks["release_build_shell"] = True
+
+    # No build, vcpkg or PDFium directory may be added to PATH; the smoke must
+    # run with exactly one PATH assignment naming the stage and system dirs.
+    require(">> $env:GITHUB_PATH" not in code,
+            "no build, vcpkg or PDFium directory may be added to the job PATH")
+    path_assignments = [line.strip() for line in code_lines
+                        if re.search(r"\$env:PATH\s*\+?=", line, re.IGNORECASE)]
+    require(path_assignments == [PATH_MARKER],
+            f"smoke PATH must contain only the stage and system directories: {path_assignments}")
+    checks["staged_only_path"] = True
+    stage_export = '"IRIS_VALIDATION_STAGE=$stage" >> $env:GITHUB_ENV'
+    require(code.index(stage_export)
+            < code.index(PATH_MARKER) < code.index("& $smokeExe $corpus"),
+            "the smoke must bind the stage before narrowing PATH and running it")
+    checks["stage_binding"] = True
     require(code.index("PDFium sha256 mismatch")
             < code.index("gh attestation verify $asset --repo $pin.repo --bundle $bundle")
             < code.index("tar -xzf $asset"),
@@ -339,9 +418,13 @@ def validate(text):
     checks["evidence_json_only"] = bool(paths) and all(p.endswith(".json") for p in paths)
     require(checks["evidence_json_only"],
             "every uploaded artifact path must be JSON evidence only")
+    for evidence in ("pe-import-closure.json", "preview-smoke.json"):
+        require(any(p.endswith(evidence) for p in paths),
+                f"bounded evidence upload missing: {evidence}")
 
     # Native bytes must be cleaned before upload.
-    require("rm -rf" in text and "if: always()" in text, "native bytes cleanup is not fail-closed")
+    require(CLEANUP_MARKER in text and "rm -rf" in text and "if: always()" in text,
+            "native bytes cleanup is not fail-closed")
     return checks
 
 

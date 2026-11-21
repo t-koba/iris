@@ -29,6 +29,9 @@ class WorkflowContracts(unittest.TestCase):
         self.assertEqual(checks["upload_count"], 1)
         self.assertEqual(checks["upload_literal_count"], 1)
         self.assertTrue(checks["evidence_json_only"])
+        self.assertTrue(checks["pe_import_closure"])
+        self.assertTrue(checks["staged_only_path"])
+        self.assertTrue(checks["stage_binding"])
 
     def test_all_offline_gates_present(self):
         for gate in self.mod.OFFLINE_GATES:
@@ -44,6 +47,9 @@ class WorkflowContracts(unittest.TestCase):
         self.assertEqual(shape["triggers"], ["workflow_call"])
         self.assertIn("actions/upload-artifact@v4", shape["allowed_actions"])
         for marker in self.mod.ATTESTATION_MARKERS:
+            self.assertIn(marker, shape["required_markers"])
+        for marker in (self.mod.STAGE_MARKERS + self.mod.PE_IMPORT_MARKERS
+                       + self.mod.EVIDENCE_MARKERS + (self.mod.PATH_MARKER,)):
             self.assertIn(marker, shape["required_markers"])
 
     def test_action_refs_normalizes_yaml_spelling(self):
@@ -411,6 +417,137 @@ class FailClosedContracts(unittest.TestCase):
             "          path: target/debug/Iris.exe\n", 1)
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
+
+
+class StagedRuntimeContracts(unittest.TestCase):
+    """The PE evidence and smoke must bind to one isolated staged runtime."""
+
+    def setUp(self):
+        self.mod = load()
+        self.text = (ROOT / ".github/workflows/windows-ffmpeg-validation.yml").read_text()
+
+    def test_rejects_missing_dumpbin_exit_check(self):
+        marker = '          if ($LASTEXITCODE -ne 0) { throw "dumpbin /DEPENDENTS failed for $name" }\n'
+        self.assertIn(marker, self.text)
+        mutated = self.text.replace(marker, "", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_non_recursive_import_inventory(self):
+        for marker in ("          while ($queue.Count -gt 0) {\n",
+                       "          $queue.Enqueue($candidate)\n"):
+            with self.subTest(marker=marker.strip()):
+                self.assertIn(marker, self.text)
+                mutated = self.text.replace(marker, "", 1)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(mutated)
+
+    def test_rejects_unresolved_import_tolerance(self):
+        marker = '          if ($unresolved.Count -gt 0) { throw ("unresolved staged PE imports: " + ($unresolved -join ", ")) }\n'
+        self.assertIn(marker, self.text)
+        mutated = self.text.replace(marker, "          Write-Host \"ignoring unresolved imports\"\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_weakened_system_classification(self):
+        marker = "          $isSystem = $isForwarder -or @($system | Where-Object { $import -like $_ }).Count -gt 0\n"
+        self.assertIn(marker, self.text)
+        mutated = self.text.replace(marker, "          $isSystem = $true\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_import_resolution_outside_stage(self):
+        marker = "          $candidate = Join-Path $stage $import\n"
+        self.assertIn(marker, self.text)
+        mutated = self.text.replace(
+            marker,
+            "          $candidate = Join-Path $env:VCPKG_INSTALLED_DIR $import\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_bash_release_build(self):
+        marker = "        shell: pwsh\n        run: |\n          $ErrorActionPreference = \"Stop\"\n          # Git bash puts its own link.exe ahead of MSVC's"
+        self.assertIn(marker, self.text)
+        mutated = self.text.replace(marker,
+            "        shell: bash\n        run: |\n          set -e\n          # Git bash puts its own link.exe ahead of MSVC's", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_unstaged_path(self):
+        mutations = (
+            '$env:PATH = "$env:PATH;$stage"',
+            '$env:PATH = (@($stage) + $systemPath + "$env:VCPKG_INSTALLED_DIR") '
+            '-join [IO.Path]::PathSeparator',
+            '$env:PATH = (@($stage) + $systemPath) -join [IO.Path]::PathSeparator\n'
+            '          $env:PATH += "target/release"',
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                mutated = self.text.replace(self.mod.PATH_MARKER, mutation, 1)
+                with self.assertRaisesRegex(ValueError, "PATH"):
+                    self.mod.validate(mutated)
+
+    def test_rejects_readding_build_directories_to_path(self):
+        anchor = '          $dlls | ForEach-Object { Write-Host "FFmpeg DLL: $($_.Name)" }\n'
+        self.assertIn(anchor, self.text)
+        mutated = self.text.replace(
+            anchor, anchor + '          "$binDir" >> $env:GITHUB_PATH\n', 1)
+        with self.assertRaisesRegex(ValueError, "PATH"):
+            self.mod.validate(mutated)
+
+    def test_rejects_unbound_stage(self):
+        marker = '          "IRIS_VALIDATION_STAGE=$stage" >> $env:GITHUB_ENV\n'
+        self.assertIn(marker, self.text)
+        mutated = self.text.replace(marker, "", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+        moved = self.text.replace(
+            '          $stage = Join-Path $env:RUNNER_TEMP "iris-runtime-stage"\n',
+            '          $stage = Join-Path $env:GITHUB_WORKSPACE "target/release"\n', 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(moved)
+
+    def test_rejects_missing_smoke_exit_check(self):
+        marker = '          if ($exitCode -ne 0) { throw "installed preview smoke failed with exit code $exitCode" }\n'
+        self.assertIn(marker, self.text)
+        mutated = self.text.replace(marker, "", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_smoke_outside_stage(self):
+        for old, new in (
+            ('$smokeExe = Join-Path $env:IRIS_VALIDATION_STAGE "preview_corpus_smoke.exe"',
+             '$smokeExe = Join-Path $env:GITHUB_WORKSPACE "target/release/examples/preview_corpus_smoke.exe"'),
+            ("& $smokeExe $corpus",
+             "cargo run --release -p iris-thumb-preview --example preview_corpus_smoke"),
+        ):
+            with self.subTest(old=old):
+                mutated = self.text.replace(old, new, 1)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(mutated)
+
+    def test_rejects_unattested_or_debug_stage(self):
+        for old, new in (
+            ("cargo build --release -p iris-ui-shell --locked",
+             "cargo build -p iris-ui-shell --locked"),
+            ('Copy-Item -LiteralPath $pdfium -Destination (Join-Path $stage "pdfium.dll") -Force',
+             'Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP "pdfium-extract/pdfium.dll") '
+             '-Destination (Join-Path $stage "pdfium.dll") -Force'),
+            ('Copy-Item -LiteralPath $rustcExe -Destination (Join-Path $stage "rustc.exe") -Force',
+             'Write-Host "no compiler staged"'),
+        ):
+            with self.subTest(old=old):
+                mutated = self.text.replace(old, new, 1)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(mutated)
+
+    def test_requires_bounded_evidence_in_manifest(self):
+        for marker in self.mod.EVIDENCE_MARKERS:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.text)
+                mutated = self.text.replace(marker, "<removed>", 1)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(mutated)
 
 
 class WiringContracts(unittest.TestCase):
