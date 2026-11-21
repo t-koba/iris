@@ -309,10 +309,14 @@ class FailClosedContracts(unittest.TestCase):
         self.assertNotIn("--keyring", self.text)
         # PowerShell variable names are case-insensitive: assigning to $home
         # would overwrite the read-only automatic $HOME variable.
-        self.assertNotRegex(self.text, r"\$(?i:home)\s*=")
-        for mutation in ('$home = "x"', '$HOME = "x"'):
-            mutated = self.text.replace('$gpgHome = "$gpgDir/home"', mutation, 1)
-            with self.assertRaises(ValueError):
+        self.assertNotRegex(self.text, r"\$(?:\{(?i:home)\}|(?i:home)\b)")
+        for mutation in ('$home = "x"', '$HOME = "x"',
+                         '${HOME} = "x"', '$HOME += "x"',
+                         'Set-Variable -Name HOME -Value x'):
+            mutated = self.text.replace(
+                '$gpgHome = "$gpgDir/home"',
+                '$gpgHome = "$gpgDir/home"\n          ' + mutation, 1)
+            with self.assertRaisesRegex(ValueError, r"read-only PowerShell \$HOME"):
                 self.mod.validate(mutated)
 
     def test_rejects_implicit_missing_input_states(self):

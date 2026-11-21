@@ -104,8 +104,11 @@ EXPLICIT_KEY_RE = re.compile(r"^\s*(?:-\s*)?[?:](?:\s|$)")
 ANCHOR_KEY_RE = re.compile(r"^\s*(?:-\s*)?[&*]\S")
 # YAML tags on a key are another way to spell a key without a literal token.
 TAG_KEY_RE = re.compile(r"^\s*(?:-\s*)?!")
-# PowerShell variable names are case-insensitive; $HOME is read-only.
-HOME_ASSIGNMENT_RE = re.compile(r"\$(?i:home)\s*=")
+# PowerShell variable names are case-insensitive; $HOME is read-only. Reject
+# every reference to it (including braced and compound forms) on executable
+# lines, plus the Set-Variable spelling of the same assignment.
+HOME_REFERENCE_RE = re.compile(r"\$(?:\{(?i:home)\}|(?i:home)\b)")
+SET_VARIABLE_HOME_RE = re.compile(r"(?i)Set-Variable\s+-Name\s+['\"]?home['\"]?\b")
 # YAML double-quoted scalars resolve numeric escapes before GitHub reads a
 # mapping key, so decode them before any action reference is scanned.
 YAML_ESCAPE_RE = re.compile(r"\\(?:u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|x[0-9a-fA-F]{2})")
@@ -258,9 +261,10 @@ def validate(text):
                 f"YAML tag in key position is not permitted: {line.strip()}")
     checks["no_special_keys"] = True
     for line in code_lines:
-        require(not HOME_ASSIGNMENT_RE.search(line),
-                f"assignment to read-only PowerShell $HOME is not permitted: {line.strip()}")
-    checks["no_home_assignment"] = True
+        require(not HOME_REFERENCE_RE.search(line)
+                and not SET_VARIABLE_HOME_RE.search(line),
+                f"reference to read-only PowerShell $HOME is not permitted: {line.strip()}")
+    checks["no_home_reference"] = True
     code = "\n".join(code_lines)
     for marker in ATTESTATION_MARKERS:
         require(marker in code,
