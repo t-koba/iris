@@ -373,14 +373,16 @@ jobs:
           function Test-LooksLikeCrt($lower) {
             return ($lower -like "msvc*.dll" -or $lower -like "vcruntime*.dll" -or $lower -like "msvcp*.dll" -or $lower -like "ucrt*.dll" -or $lower -like "api-ms-win-crt-*.dll" -or $lower -like "concrt*.dll" -or $lower -like "vcomp*.dll")
           }
-          # Fixed order: virtual forwarders, staged file, VC/CRT, OS allowlist
-          # plus physical presence, unresolved. $inSystemDir is consulted only
-          # after the VC/CRT screen, so a runner-installed CRT cannot be os.
+          # Fixed order: virtual forwarders, staged file, allowlisted VC,
+          # unknown CRT fails closed, OS allowlist plus physical presence,
+          # unresolved. $inSystemDir is consulted only after the VC/CRT
+          # screen, so a runner-installed CRT cannot be os.
           function Resolve-ImportResolution([string]$Import, [string]$Stage, [bool]$inSystemDir) {
             if ($Import.StartsWith("api-ms-win-") -or $Import.StartsWith("ext-ms-win-")) { return "system" }
             $candidate = Join-Path $Stage $Import
             if (Test-Path -LiteralPath $candidate -PathType Leaf) { return "stage" }
-            if ((Test-AllowedVcRedist $Import) -or (Test-LooksLikeCrt $Import)) { return "vc-redist" }
+            if (Test-AllowedVcRedist $Import) { return "vc-redist" }
+            if (Test-LooksLikeCrt $Import) { return "unresolved" }
             if ($inSystemDir -and (Test-AllowedOSDll $Import)) { return "os" }
             return "unresolved"
           }

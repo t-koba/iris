@@ -702,12 +702,20 @@ class VcImportContracts(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.mod.validate(mutated)
 
+    def test_rejects_unknown_crt_accepted_as_vc_redist(self):
+        unknown_crt = '            if (Test-LooksLikeCrt $Import) { return "unresolved" }\n'
+        self.assertIn(unknown_crt, self.text)
+        for replacement in ('', '            if (Test-LooksLikeCrt $Import) { return "vc-redist" }\n'):
+            with self.subTest(replacement=replacement):
+                mutated = self.text.replace(unknown_crt, replacement, 1)
+                self.assertNotEqual(mutated, self.text)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(mutated)
+
     def test_rejects_crt_classified_as_os(self):
         cases = (
-            ('            if ((Test-AllowedVcRedist $Import) -or (Test-LooksLikeCrt $Import)) '
-             '{ return "vc-redist" }\n',
-             '            if ((Test-AllowedVcRedist $Import) -or (Test-LooksLikeCrt $Import)) '
-             '{ return "os" }\n'),
+            ('            if (Test-AllowedVcRedist $Import) { return "vc-redist" }\n',
+             '            if (Test-AllowedVcRedist $Import) { return "os" }\n'),
             ('            if ($inSystemDir -and (Test-AllowedOSDll $Import)) { return "os" }\n',
              '            if ($inSystemDir) { return "os" }\n'),
             ('            if ($Import.StartsWith("api-ms-win-") -or '
