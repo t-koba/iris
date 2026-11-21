@@ -357,6 +357,27 @@ def validate(text):
             "forwarder classification must read the bound import")
     require(code.index(import_binding) < code.index(forwarder),
             "forwarder classification must run after $import is bound inside the loop")
+    # The directory allowlist itself must be pinned. If a build/vcpkg/PDFium
+    # directory could be added to $systemDirs, a private DLL in that tree would
+    # be classified "system" without staging or recursive inventory, voiding
+    # the fail-closed closure. Extract the $systemDirs block and require exactly
+    # the three Windows-provided roots, nothing else.
+    block_start = code.index('$systemDirs = @(')
+    block_body = code[block_start:].split('\n', 1)[1]
+    block_body = block_body.split('\n          )', 1)[0]
+    entries = sorted(line.strip().rstrip(',').strip()
+                     for line in block_body.splitlines() if line.strip())
+    allowed = sorted((
+        '(Join-Path $env:SystemRoot "System32")',
+        '(Join-Path $env:SystemRoot "SysWOW64")',
+        '$env:SystemRoot',
+    ))
+    require(entries == allowed,
+            f"system dirs must be exactly the Windows system roots, got: {entries}")
+    assignments = [line.strip() for line in code_lines if re.search(r"\$systemDirs\s*(\+?=)", line)]
+    require(assignments == ['$systemDirs = @('],
+            f"system dirs must be declared exactly once and never appended: {assignments}")
+    checks["system_dirs_pinned"] = True
     checks["system_dll_resolution"] = True
     checks["pe_import_closure"] = True
 

@@ -464,6 +464,40 @@ class StagedRuntimeContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
+    def test_rejects_build_tree_in_system_dirs(self):
+        anchor = '            $env:SystemRoot\n          )\n'
+        self.assertIn(anchor, self.text)
+        for injected in (
+            '            (Join-Path $env:VCPKG_INSTALLED_DIR "x64-windows-iris-dynamic/bin")\n',
+            '            (Join-Path $env:GITHUB_WORKSPACE "build/validation/overlay")\n',
+        ):
+            with self.subTest(injected=injected):
+                mutated = self.text.replace(anchor, '            $env:SystemRoot\n' + injected + '          )\n', 1)
+                self.assertNotEqual(mutated, self.text)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(mutated)
+
+    def test_rejects_system_dirs_append_or_reassign(self):
+        anchor = '          $roots = @(\n'
+        self.assertIn(anchor, self.text)
+        for injected in (
+            '          $systemDirs += (Join-Path $env:VCPKG_INSTALLED_DIR "installed/bin")\n',
+            '          $systemDirs = @("C:\\Windows")\n',
+        ):
+            with self.subTest(injected=injected):
+                mutated = self.text.replace(anchor, injected + anchor, 1)
+                self.assertNotEqual(mutated, self.text)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(mutated)
+
+    def test_rejects_replacing_system_root_entry(self):
+        anchor = '            $env:SystemRoot\n          )\n'
+        self.assertIn(anchor, self.text)
+        mutated = self.text.replace(anchor, '            $env:GITHUB_WORKSPACE\n          )\n', 1)
+        self.assertNotEqual(mutated, self.text)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
     def test_rejects_missing_system_directory_probe(self):
         marker = '                  if (Test-Path -LiteralPath (Join-Path $sysDir $import) -PathType Leaf) { $isSystem = $true; break }\n'
         self.assertIn(marker, self.text)
