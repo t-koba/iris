@@ -785,8 +785,15 @@ class WindowsNativeEvidencePipeline(unittest.TestCase):
             path.mkdir()
         dist = base / "dist" / "windows"
         (dist / "Iris").mkdir(parents=True)
-        inputs = json.loads((ROOT / "build/validation/evidence/validation-inputs.json").read_text())
-        (ev / "validation-inputs.json").write_text(json.dumps(inputs))
+        # Generate the reviewed plan from checked-in contracts. A checked-out
+        # tree has no build/validation/evidence directory, so the fixture must
+        # never depend on evidence produced by an earlier runner.
+        inputs_path = ev / "validation-inputs.json"
+        generated = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/windows-ffmpeg-validation-config.py"),
+             str(inputs_path)], capture_output=True, text=True)
+        self.assertEqual(generated.returncode, 0, generated.stderr)
+        inputs = json.loads(inputs_path.read_text())
         names = ["Iris.exe", "avcodec-62.dll", "avformat-61.dll", "avutil-60.dll",
                  "pdfium.dll", "FFMPEG-NOTICE.md",
                  "ffmpeg-8.1.3.tar.xz", "ffmpeg-legal-notices.tar.gz",
