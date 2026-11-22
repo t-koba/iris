@@ -221,6 +221,7 @@ RELEASE_PACKAGE_MARKERS = (
     'report(ev / "release-package-rehearsal.json", json.loads)',
     "release_package_rehearsal=release_package",
     "build/validation/evidence/release-package-rehearsal.json",
+    "Copy-Item -LiteralPath $env:IRIS_PRODUCT_INVENTORY",
     '"${RUNNER_TEMP:-}/iris-release-package"',
 )
 
@@ -310,6 +311,7 @@ EXPORT_ASSET_BASENAMES = (
     "release-package-result.json",
     "product-inventory.json",
 )
+EXPORT_ARTIFACT_ROOT = "${{ runner.temp }}/iris-release-package"
 # Resolve action references syntactically, not by line position: block,
 # spaced, quoted and flow-mapping spellings all yield the same reference.
 ACTION_REF_RE = re.compile(r"['\"]?uses['\"]?\s*:\s*['\"]?([^\s,'\"}#]+)")
@@ -819,11 +821,23 @@ def validate(text):
             "gated export retention must be bounded to at most seven days")
     require("compression-level" in export["flags"],
             "gated export must declare a compression level")
-    basenames = sorted(p.replace("\\", "/").rsplit("/", 1)[-1]
-                       for p in export["paths"])
+    normalized = sorted(p.replace("\\", "/") for p in export["paths"])
+    basenames = sorted(p.rsplit("/", 1)[-1] for p in normalized)
     require(basenames == sorted(EXPORT_ASSET_BASENAMES),
             f"gated export must contain exactly the verified release assets, got: {basenames}")
     checks["export_assets_bounded"] = True
+    # upload-artifact roots each artifact at the least common ancestor of
+    # its search paths. One shared parent is what keeps the download flat
+    # for the release consumer; basename checks alone cannot detect it.
+    parents = {p.rsplit("/", 1)[0] for p in normalized}
+    require(len(parents) == 1,
+            f"gated export search paths must share one parent so artifact entries stay flat: {parents}")
+    parent = parents.pop()
+    require(parent == EXPORT_ARTIFACT_ROOT,
+            f"gated export must read only the verified release stage, got: {parent}")
+    require(normalized == [f"{parent}/{name}" for name in sorted(EXPORT_ASSET_BASENAMES)],
+            "gated export artifact-relative paths must match the release consumer")
+    checks["export_flat_root"] = True
 
     # The product rehearsal is an offline assembly over the already-validated
     # stage. Every new behaviour must be executable, ordered after the smoke,
@@ -923,6 +937,7 @@ def main():
             upload_count=2, evidence_upload_count=1, export_upload_count=1,
             export_input=UPLOAD_EXPORT_INPUT, export_artifact_name=EXPORT_ARTIFACT_NAME,
             export_asset_basenames=list(EXPORT_ASSET_BASENAMES),
+            export_artifact_root=EXPORT_ARTIFACT_ROOT,
         ), indent=2))
         return
     checks = validate(WORKFLOW.read_text())

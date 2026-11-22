@@ -646,6 +646,11 @@ jobs:
           if (!(Test-Path -LiteralPath $resultPath -PathType Leaf)) { throw "release package result missing: $resultPath" }
           $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
           $inventory = Get-Content -LiteralPath $env:IRIS_PRODUCT_INVENTORY -Raw | ConvertFrom-Json
+          # Export every release asset from one directory: upload-artifact uses
+          # the least common ancestor of its search paths as the artifact root.
+          $exportInventory = Join-Path $releaseDir "product-inventory.json"
+          Copy-Item -LiteralPath $env:IRIS_PRODUCT_INVENTORY -Destination $exportInventory -Force
+          if (!(Test-Path -LiteralPath $exportInventory -PathType Leaf)) { throw "export inventory missing: $exportInventory" }
           $expectedNames = @($inventory.files | ForEach-Object { [string]$_.name })
           if ($result.status -ne "pass") { throw "release package result is not pass" }
           if (@($result.entries).Count -ne $expectedNames.Count) { throw "release package entry count mismatch" }
@@ -685,7 +690,7 @@ jobs:
             ${{ runner.temp }}/iris-release-package/Iris-windows.zip
             ${{ runner.temp }}/iris-release-package/Iris-windows-setup.exe
             ${{ runner.temp }}/iris-release-package/release-package-result.json
-            build/validation/evidence/product-inventory.json
+            ${{ runner.temp }}/iris-release-package/product-inventory.json
           retention-days: 7
           compression-level: 9
 

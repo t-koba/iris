@@ -32,6 +32,7 @@ class WorkflowContracts(unittest.TestCase):
         self.assertEqual(checks["export_upload_count"], 1)
         self.assertTrue(checks["export_input_declared"])
         self.assertTrue(checks["export_assets_bounded"])
+        self.assertTrue(checks["export_flat_root"])
         self.assertTrue(checks["evidence_json_only"])
         self.assertTrue(checks["pe_import_closure"])
         self.assertTrue(checks["staged_only_path"])
@@ -153,6 +154,21 @@ class FailClosedContracts(unittest.TestCase):
         mutated = self.text.replace(anchor, anchor + "            target/debug/Iris.exe\n", 1)
         with self.assertRaisesRegex(ValueError, "exactly the verified release assets"):
             self.mod.validate(mutated)
+
+    def test_rejects_mixed_export_roots(self):
+        flat = "            ${{ runner.temp }}/iris-release-package/product-inventory.json\n"
+        self.assertEqual(self.text.count(flat), 1)
+        mutated = self.text.replace(
+            flat, "            build/validation/evidence/product-inventory.json\n", 1)
+        with self.assertRaisesRegex(ValueError, "share one parent"):
+            self.mod.validate(mutated)
+
+    def test_release_rehearsal_stages_the_export_inventory(self):
+        anchor = (
+            "          Copy-Item -LiteralPath $env:IRIS_PRODUCT_INVENTORY "
+            "-Destination $exportInventory -Force\n")
+        self.assertEqual(self.text.count(anchor), 1)
+        self.assertTrue(self.mod.validate(self.text)["product_rehearsal"])
 
     def test_rejects_missing_export_input_declaration(self):
         declaration = (
