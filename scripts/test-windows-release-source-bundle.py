@@ -310,7 +310,7 @@ class SourceBundleContracts(unittest.TestCase):
                     self.build()
 
     def test_rejects_unicode_and_spaced_host_paths_in_portfile(self):
-        original = (self.overlay / "portfile.cmake").read_text()
+        original = (self.overlay / "portfile.cmake").read_text(encoding="utf-8")
         leaks = (r'set(LEAK "C:\Üsers\runneradmin\.cargo")',
                  r'set(LEAK "C:\\Üsers\\runneradmin\\.cargo")',
                  r'set(LEAK "C:\Ünicode Users\runneradmin\.cargo")',
@@ -325,8 +325,8 @@ class SourceBundleContracts(unittest.TestCase):
                  r'set(LEAK "\\\\ private share\\share\\secret")')
         for leak in leaks:
             with self.subTest(leak=leak):
-                (self.overlay / "portfile.cmake").write_text(
-                    original + leak + "\n", newline="\n")
+                (self.overlay / "portfile.cmake").write_bytes(
+                    (original + leak + "\n").encode("utf-8"))
                 with self.assertRaisesRegex(ValueError, "host path after redaction"):
                     self.build()
 
