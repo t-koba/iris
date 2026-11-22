@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Light offline regressions; no native package build or dependency installation."""
 import argparse
+import contextlib
 import copy
+import io
 import hashlib
 import importlib.util
 import json
@@ -1040,6 +1042,151 @@ class WindowsNativeEvidencePipeline(unittest.TestCase):
             self.assertFalse(any(row["kind"] == "native-closure" for row in report["records"]))
 
 
+
+class InstalledWindowsPayload(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        script = ROOT / "scripts/windows-installed-smoke.py"
+        spec = importlib.util.spec_from_file_location("windows_installed_smoke", script)
+        cls.smoke = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.smoke)
+
+    def stage(self, root, *, owned=(), extra=()):
+        install = Path(root, "install")
+        install.mkdir()
+        verified = Path(root, "verified")
+        verified.mkdir()
+        product = {
+            "Iris.exe": b"iris executable",
+            "pdfium.dll": b"pdfium library",
+            "FFMPEG-NOTICE.md": b"runtime notice",
+        }
+        for name, contents in product.items():
+            (install / name).write_bytes(contents)
+        inventory = {
+            "roots": [],
+            "files": [{"name": name, "sha256": hashlib.sha256(contents).hexdigest(),
+                       "bytes": len(contents)} for name, contents in product.items()],
+        }
+        inventory_path = verified / "product-inventory.json"
+        inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+        setup = Path(root, "Iris-windows-setup.exe")
+        setup.write_bytes(b"exact setup bytes")
+        result_path = verified / "release-package-result.json"
+        result_path.write_text(json.dumps({
+            "status": "pass",
+            "entries": list(product),
+            "installer_sha256": hashlib.sha256(setup.read_bytes()).hexdigest(),
+            "installer_bytes": setup.stat().st_size,
+        }), encoding="utf-8")
+        for name in owned:
+            (install / name).write_bytes(b"installer generated")
+        for name in extra:
+            (install / name).write_bytes(b"unexpected payload")
+        return install, inventory_path, result_path, setup
+
+    def check(self, paths):
+        return self.smoke.verify_install(*paths)
+
+    def test_matching_installed_payload_passes_with_bounded_installer_owned_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            paths = self.stage(root, owned=("unins000.exe", "unins000.dat", "unins000.msg"))
+            record = self.check(paths)
+            self.assertEqual(record["status"], "pass")
+            self.assertEqual(record["product_entries"], 3)
+            self.assertEqual(record["matched_entries"], 3)
+            self.assertEqual(record["installer_sha256"], hashlib.sha256(b"exact setup bytes").hexdigest())
+            self.assertEqual(record["inventory_sha256"],
+                             hashlib.sha256(paths[1].read_bytes()).hexdigest())
+            self.assertEqual([row["name"] for row in record["installer_owned"]],
+                             ["unins000.dat", "unins000.exe", "unins000.msg"])
+            for row in record["installer_owned"]:
+                self.assertEqual(row["sha256"], hashlib.sha256(b"installer generated").hexdigest())
+
+    def test_missing_or_modified_inventory_fails_closed(self):
+        for mode in ("missing", "malformed", "hash", "bytes", "entry_removed", "installed_file_removed"):
+            with tempfile.TemporaryDirectory() as root, self.subTest(mode=mode):
+                paths = self.stage(root)
+                install, inventory_path, _, _ = paths
+                if mode == "missing":
+                    inventory_path.unlink()
+                elif mode == "malformed":
+                    inventory_path.write_text("{not json", encoding="utf-8")
+                elif mode == "installed_file_removed":
+                    (install / "pdfium.dll").unlink()
+                else:
+                    inventory = json.loads(inventory_path.read_text())
+                    if mode == "hash":
+                        inventory["files"][0]["sha256"] = "0" * 64
+                    elif mode == "bytes":
+                        inventory["files"][0]["bytes"] += 1
+                    elif mode == "entry_removed":
+                        inventory["files"].pop()
+                    inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    self.check(paths)
+
+    def test_unexpected_file_fails_unless_explicitly_installer_owned(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.assertEqual(self.check(self.stage(root, owned=("unins000.exe",)))["status"], "pass")
+        for name in ("surprise.dll", "preview_corpus_smoke.exe", "rustc.exe"):
+            with tempfile.TemporaryDirectory() as root, self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    self.check(self.stage(root, extra=(name,)))
+        with tempfile.TemporaryDirectory() as root:
+            paths = self.stage(root, owned=("unins000.exe",))
+            with patch.object(self.smoke, "MAX_INSTALLER_OWNED_BYTES", 2):
+                with self.assertRaises(ValueError):
+                    self.check(paths)
+        with tempfile.TemporaryDirectory() as root:
+            paths = self.stage(root)
+            (paths[0] / "nested").mkdir()
+            with self.assertRaises(ValueError):
+                self.check(paths)
+
+    def test_cli_writes_bound_evidence_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as root:
+            paths = self.stage(root, owned=("unins000.exe",))
+            output = Path(root, "audit/windows-installer-smoke.json")
+            def invoke():
+                args = ["verify", "--install-dir", str(paths[0]), "--inventory", str(paths[1]),
+                        "--result", str(paths[2]), "--setup", str(paths[3]), "--output", str(output)]
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    return self.smoke.main(args)
+            self.assertEqual(invoke(), 0)
+            record = json.loads(output.read_text())
+            self.assertEqual(record["status"], "pass")
+            self.assertEqual(record["installer_sha256"], hashlib.sha256(b"exact setup bytes").hexdigest())
+            paths[3].write_bytes(b"tampered setup bytes")
+            self.assertEqual(invoke(), 1)
+            self.assertEqual(json.loads(output.read_text())["status"], "fail")
+
+    def test_installer_hash_binding_fails_closed(self):
+        for mode in ("setup", "result_hash", "invalid_hash", "result_bytes", "status", "entries", "renamed_setup"):
+            with tempfile.TemporaryDirectory() as root, self.subTest(mode=mode):
+                paths = self.stage(root)
+                install, inventory_path, result_path, setup = paths
+                result = json.loads(result_path.read_text())
+                if mode == "setup":
+                    setup.write_bytes(b"tampered setup bytes")
+                elif mode == "renamed_setup":
+                    setup = Path(root, "other-setup.exe")
+                    setup.write_bytes(b"exact setup bytes")
+                else:
+                    if mode == "result_hash":
+                        result["installer_sha256"] = "1" * 64
+                    elif mode == "invalid_hash":
+                        result["installer_sha256"] = "not-a-sha256"
+                    elif mode == "result_bytes":
+                        result["installer_bytes"] += 1
+                    elif mode == "status":
+                        result["status"] = "fail"
+                    elif mode == "entries":
+                        result["entries"].append("surprise.dll")
+                    result_path.write_text(json.dumps(result), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    self.check((install, inventory_path, result_path, setup))
+
 class Workflow(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1088,6 +1235,24 @@ class Workflow(unittest.TestCase):
         self.assertNotIn("pdfium_attestation_verified", self.source)
         for limit in ("MAX_REPORT_BYTES", "MAX_METADATA_BYTES", "MAX_CARGO_PACKAGES"):
             self.assertIn("vars.IRIS_RELEASE_AUDIT_" + limit, self.source)
+
+    def test_windows_installer_smoke_binds_inventory_and_exact_setup(self):
+        job = self.jobs["package-windows"]
+        smoke = job.split("      - name: Smoke-test Windows installer\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("$exported.installer_sha256 -notmatch", smoke)
+        self.assertIn("Get-FileHash -Algorithm SHA256 -LiteralPath $setup", smoke)
+        self.assertIn("python scripts/windows-installed-smoke.py verify", smoke)
+        for flag in ("--install-dir", "--inventory", "--result", "--setup", "--output"):
+            self.assertIn(flag, smoke)
+        self.assertIn("verified/windows/product-inventory.json", smoke)
+        self.assertIn("audit/windows-installer-smoke.json", smoke)
+        self.assertIn("if ($LASTEXITCODE -ne 0) { throw", smoke)
+        self.assertIn("finally", smoke)
+        self.assertIn("unins000.exe", smoke)
+        # The ZIP, required notice and checksum gates stay in the same job.
+        self.assertIn("ZIP entries differ from the verified product inventory", job)
+        self.assertIn('@("Iris.exe", "pdfium.dll", "FFMPEG-NOTICE.md")', job)
+        self.assertIn("checksum verification failed", job)
 
     def test_failed_pdfium_verification_cannot_be_written_as_verified(self):
         fetch = (ROOT / "scripts/fetch-pdfium-runtime.sh").read_text()

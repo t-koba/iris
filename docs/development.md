@@ -156,6 +156,16 @@ fuzz 用のクレートは各 `fuzz/` ディレクトリで同じ操作をしま
 | Linux | `./scripts/package-linux-appdir.sh` | `Iris.AppDir`（`appimagetool` があれば AppImage にできる） |
 | Windows | `./scripts/package-windows.ps1` | ビルドせず、検証済みの product stage から `Iris.exe` を含む zip を作成。`IRIS_PRODUCT_STAGE` / `IRIS_PRODUCT_INVENTORY` / `IRIS_PRODUCT_ZIP` / `IRIS_RELEASE_OUTPUT_DIR` が必須。リリース workflow は検証済みの asset をダウンロードして同じスクリプトの成果物をそのまま stage する |
 
+Windows のリリースでは、ZIP とライセンス関連の検証に加えて、インストーラの smoke で
+`Iris-windows-setup.exe` を空のディレクトリにインストールし、インストール済みファイルを export 済み
+`product-inventory.json` と名前・サイズ・SHA-256 で照合します（`scripts/windows-installed-smoke.py`）。
+Inno Setup が生成する `unins000.exe` / `unins000.dat` / `unins000.msg` のみをインストーラ管理の
+エントリとして別枠で記録し、それ以外のファイルやディレクトリは失敗にします。照合の前に export 済み
+`release-package-result.json` の `installer_sha256` と実際の setup の SHA-256 を照合し、結果は
+`audit/windows-installer-smoke.json` に残します。この workflow にインストール済み preview の
+smoke はないため、同じインストールはアンインストールまでの一生命周期のままです
+（preview の smoke は検証用 reusable workflow の stage 上で実行します）。
+
 ### 公開しないパッケージ監査
 
 `Release` の **Run workflow** で監査機能を含む workflow revision を選択します。
@@ -403,5 +413,5 @@ synthetic positive regression は到達可能な PASS を確認するだけで�
 | ワークフロー | いつ | 内容 |
 |---|---|---|
 | `ci.yml` | push・プルリクエスト・週 1 回 | 整形、lint、依存の監査、ビルド、バイナリサイズの上限、テスト、SFTP / SMB の結合テスト、fuzz の短時間実行。CI の Windows ビルドは minimal 構成だが、リリースは検証済み product stage を使用 |
-| `release.yml` | `main` 上の version 一致 `v<version>` タグ / 選択した run ref での手動監査 | 3 OS のパッケージ・チェックサムと別 artifact の監査レポート。Windows は検証用 reusable workflow の成果物を検証して stage。Release 公開はタグ push のみ |
+| `release.yml` | `main` 上の version 一致 `v<version>` タグ / 選択した run ref での手動監査 | 3 OS のパッケージ・チェックサムと別 artifact の監査レポート。Windows は検証用 reusable workflow の成果物を検証して stage し、インストール済みペイロードを product inventory と照合。Release 公開はタグ push のみ |
 | `fuzz-long.yml` | 週 1 回 | fuzz を長時間実行 |

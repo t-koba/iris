@@ -421,19 +421,34 @@ jobs:
       - name: Smoke-test Windows installer
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $installDir = Join-Path $env:RUNNER_TEMP "Iris-install-smoke"
+          if (Test-Path -LiteralPath $installDir) { Remove-Item -LiteralPath $installDir -Recurse -Force }
           $setup = (Resolve-Path "dist/windows/Iris-windows-setup.exe").Path
-          $result = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
+          $resultPath = "verified/windows/release-package-result.json"
+          $exported = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+          if ($exported.status -ne "pass" -or $exported.installer_sha256 -notmatch '^[0-9a-f]{64}$') {
+            throw "exported installer sha256 is missing or invalid"
+          }
+          $setupHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash.ToLowerInvariant()
+          if ($setupHash -ne $exported.installer_sha256) { throw "setup does not match exported installer sha256" }
+          $install = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
             '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$installDir`"")
-          if ($result.ExitCode -ne 0) { throw "Installer failed: $($result.ExitCode)" }
+          if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }
           try {
-            $installed = Get-FileHash -Algorithm SHA256 (Join-Path $installDir "Iris.exe")
-            $portable = Get-FileHash -Algorithm SHA256 "dist/windows/Iris/Iris.exe"
-            if ($installed.Hash -ne $portable.Hash) { throw "Installed executable differs from portable executable" }
+            # Compare the installed bytes, not the generated installer [Files] list.
+            # The verifier re-binds the setup hash and records the bound result.
+            python scripts/windows-installed-smoke.py verify `
+              --install-dir "$installDir" `
+              --inventory "verified/windows/product-inventory.json" `
+              --result $resultPath `
+              --setup "$setup" `
+              --output audit/windows-installer-smoke.json
+            if ($LASTEXITCODE -ne 0) { throw "installed payload does not match the verified product inventory" }
           } finally {
-            $result = Start-Process -FilePath (Join-Path $installDir "unins000.exe") -Wait -PassThru -ArgumentList @(
+            $uninstall = Start-Process -FilePath (Join-Path $installDir "unins000.exe") -Wait -PassThru -ArgumentList @(
               '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
-            if ($result.ExitCode -ne 0) { throw "Uninstaller failed: $($result.ExitCode)" }
+            if ($uninstall.ExitCode -ne 0) { throw "Uninstaller failed: $($uninstall.ExitCode)" }
           }
           if (Test-Path (Join-Path $installDir "Iris.exe")) { throw "Uninstaller left Iris.exe behind" }
       - name: Generate Windows checksums
@@ -483,7 +498,9 @@ jobs:
         with:
           name: audit-windows
           if-no-files-found: error
-          path: audit/windows.json
+          path: |
+            audit/windows.json
+            audit/windows-installer-smoke.json
 
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
