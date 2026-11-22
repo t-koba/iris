@@ -387,13 +387,37 @@ mod tests {
         }
     }
 
-    fn assert_identity_rejected(result: io::Result<()>) {
-        match result {
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                panic!("identity rejection must not depend on held ownership: {error}")
+    fn assert_rejected(
+        label: &str,
+        expected_kind: io::ErrorKind,
+        mut operation: impl FnMut() -> io::Result<()>,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match operation() {
+                Ok(()) => panic!("{label} accepted a different owner identity"),
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    assert_eq!(
+                        error.kind(),
+                        expected_kind,
+                        "{label} rejected unexpectedly: {error}"
+                    );
+                    if expected_kind == io::ErrorKind::Other {
+                        assert!(
+                            error
+                                .to_string()
+                                .contains("staging ownership or identity mismatch"),
+                            "{label} rejected for the wrong reason: {error}"
+                        );
+                    }
+                    return;
+                }
             }
-            Err(_) => (),
-            Ok(()) => panic!("a different owner identity must be rejected"),
         }
     }
 
@@ -432,8 +456,12 @@ mod tests {
         assert_eq!(contention.kind(), io::ErrorKind::WouldBlock);
         assert!(remove(&path, "job-entry-version-destination", 4).is_err());
         drop(stage);
-        assert_identity_rejected(OwnedStage::reopen(&path, "another identity", 4).map(|_| ()));
-        assert_identity_rejected(remove(&path, "another identity", 4));
+        assert_rejected("reopen with another identity", io::ErrorKind::Other, || {
+            OwnedStage::reopen(&path, "another identity", 4).map(|_| ())
+        });
+        assert_rejected("remove with another identity", io::ErrorKind::Other, || {
+            remove(&path, "another identity", 4)
+        });
         let stage = after_release("reopen after release", || {
             OwnedStage::reopen(&path, "job-entry-version-destination", 4)
         });
@@ -441,9 +469,9 @@ mod tests {
         // discard the manifest but never consults the final path.
         std::fs::rename(stage.path(), root.path().join("final")).unwrap();
         drop(stage);
-        assert_identity_rejected(
-            OwnedStage::reopen(&path, "job-entry-version-destination", 4).map(|_| ()),
-        );
+        assert_rejected("reopen after install", io::ErrorKind::NotFound, || {
+            OwnedStage::reopen(&path, "job-entry-version-destination", 4).map(|_| ())
+        });
         after_release("terminal cleanup", || {
             remove(&path, "job-entry-version-destination", 4)
         });
