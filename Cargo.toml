@@ -156,6 +156,6 @@ cryoglyph = { path = "vendor/cryoglyph" }
 # Temporary jpegxr 0.3.1 vendor copy: update bindgen for newer libclang and
 # release the C decoder when initialization fails (the fuzz-discovered leak).
 jpegxr = { path = "vendor/jpegxr" }
-# RUSTSEC-2026-0543: paste is unmaintained; a small Iris-owned facade re-exports
+# RUSTSEC-2024-0436: paste is unmaintained; a small Iris-owned facade re-exports
 # maintained pastey 0.1.1 under the paste name until rav1e migrates.
 paste = { path = "crates/paste-compat" }
