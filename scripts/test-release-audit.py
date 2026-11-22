@@ -851,6 +851,25 @@ class WindowsNativeEvidencePipeline(unittest.TestCase):
         command = [sys.executable, str(ROOT / "scripts/windows-native-evidence.py"), *map(str, args)]
         return subprocess.run(command, capture_output=True, text=True)
 
+    def add_native(self, ev, release, stage, dist, name):
+        """Add one reviewed native DLL to every producer input and stage."""
+        data = (name + " binary").encode()
+        (stage / name).write_bytes(data)
+        (dist / "Iris" / name).write_bytes(data)
+        binding = dict(name=name, sha256=module.Audit.sha256_file(stage / name),
+                       bytes=len(data))
+        inventory = json.loads((ev / "product-inventory.json").read_text())
+        inventory["files"].append(binding)
+        (ev / "product-inventory.json").write_text(json.dumps(inventory))
+        (release / "product-inventory.json").write_text(json.dumps(inventory))
+        closure = json.loads((ev / "pe-import-closure.json").read_text())
+        closure["binaries"].append(name)
+        (ev / "pe-import-closure.json").write_text(json.dumps(closure))
+        result = json.loads((release / "release-package-result.json").read_text())
+        result["entries"].append(name)
+        result["installer_source_count"] = len(result["entries"])
+        (release / "release-package-result.json").write_text(json.dumps(result))
+
     def sealed(self, base, ev, release, stage, dist, output=None):
         prepared = self.run_evidence("prepare", "--evidence", ev, "--release", release,
                                      "--stage", stage, "--output", ev / "windows-native-evidence.json")
@@ -928,22 +947,7 @@ class WindowsNativeEvidencePipeline(unittest.TestCase):
             sealed, output = self.sealed(base, ev, release, stage, dist)
             self.assertEqual(sealed.returncode, 0, sealed.stderr)
             name = "evil.dll"
-            data = b"unreviewed native binary"
-            (stage / name).write_bytes(data)
-            (dist / "Iris" / name).write_bytes(data)
-            binding = dict(name=name, sha256=module.Audit.sha256_file(stage / name),
-                           bytes=len(data))
-            inventory = json.loads((ev / "product-inventory.json").read_text())
-            inventory["files"].append(binding)
-            (ev / "product-inventory.json").write_text(json.dumps(inventory))
-            (release / "product-inventory.json").write_text(json.dumps(inventory))
-            closure = json.loads((ev / "pe-import-closure.json").read_text())
-            closure["binaries"].append(name)
-            (ev / "pe-import-closure.json").write_text(json.dumps(closure))
-            result = json.loads((release / "release-package-result.json").read_text())
-            result["entries"].append(name)
-            result["installer_source_count"] = len(result["entries"])
-            (release / "release-package-result.json").write_text(json.dumps(result))
+            self.add_native(ev, release, stage, dist, name)
             prepared = self.run_evidence("prepare", "--evidence", ev, "--release", release,
                                          "--stage", stage, "--output", ev / "rejected.json")
             self.assertNotEqual(prepared.returncode, 0)
@@ -955,6 +959,46 @@ class WindowsNativeEvidencePipeline(unittest.TestCase):
                                        "--product", dist / "Iris", "--output", base / "rejected.json")
             self.assertNotEqual(sealed.returncode, 0)
             self.assertFalse((base / "rejected.json").exists())
+
+    def test_unrecognized_ffmpeg_like_dlls_are_refused_by_prepare(self):
+        # A filename starting like an FFmpeg library is not a license claim:
+        # probe selection, policy and evidence must share one recognizer.
+        for name in ("avcodec-extra.dll", "postproc-57.dll"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                base, ev, release, stage, dist, names = self.fixture(directory)
+                self.assertIsNone(module.ffmpeg_component(name))
+                self.add_native(ev, release, stage, dist, name)
+                output = ev / "rejected.json"
+                prepared = self.run_evidence("prepare", "--evidence", ev,
+                                             "--release", release, "--stage", stage,
+                                             "--output", output)
+                self.assertNotEqual(prepared.returncode, 0)
+                self.assertIn(name, prepared.stderr)
+                self.assertFalse(output.exists())
+
+    def test_shared_recognizer_assigns_the_ffmpeg_component(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base, ev, release, stage, dist, names = self.fixture(directory)
+            added = "libavcodec-62.dll"
+            self.add_native(ev, release, stage, dist, added)
+            prepared = self.run_evidence("prepare", "--evidence", ev,
+                                         "--release", release, "--stage", stage,
+                                         "--output", ev / "windows-native-evidence.json")
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            manifest = json.loads((ev / "windows-native-evidence.json").read_text())
+            components = {row["artifact"]["path"]: row for row in manifest["components"]}
+            self.assertIn("Iris/" + added, components)
+            component = module.ffmpeg_component(added)
+            self.assertEqual(component, "avcodec")
+            for name in ("avcodec-62.dll", added):
+                row = components["Iris/" + name]
+                self.assertEqual(row["name"], "FFmpeg " + component)
+                self.assertEqual(row["license"]["id"], "LGPL-2.1-or-later")
+                self.assertEqual(row["license"]["disposition"], "review")
+            ids = [row["id"] for row in manifest["components"]]
+            self.assertEqual(len(ids), len(set(ids)))
+            sealed, output = self.sealed(base, ev, release, stage, dist)
+            self.assertEqual(sealed.returncode, 0, sealed.stderr)
 
     def test_uncovered_native_artifact_is_refused_at_seal(self):
         with tempfile.TemporaryDirectory() as directory:

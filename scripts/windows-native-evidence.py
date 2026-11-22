@@ -23,8 +23,8 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from release_evidence import (MODES, OBLIGATIONS, load_json, require,
-                              validate_closure)
+from release_evidence import (MODES, OBLIGATIONS, ffmpeg_component, load_json,
+                              require, validate_closure)
 
 MAX_BYTES = 2 * 1024 * 1024
 MAX_FILES = 256
@@ -35,8 +35,6 @@ COMPONENT_ID = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
 INPUT_NAMES = ("validation-inputs.json", "pe-import-closure.json",
                "product-inventory.json")
 ASSET_NAMES = ("Iris-windows.zip", "Iris-windows-setup.exe")
-FFMPEG_PREFIXES = ("avcodec", "avformat", "avutil", "avdevice", "avfilter",
-                   "swresample", "swscale", "postproc")
 PRODUCER_FIELDS = {"schema", "artifacts", "components", "reviewed_inputs",
                    "assets", "expected_bytes"}
 RESOLUTIONS = {"system", "stage", "vc-redist", "os", "unresolved"}
@@ -216,15 +214,21 @@ def prepare(args):
                 "pdfium-dll", ref, "dynamic", "PDFium dll", pdfium_pin["url"],
                 pdfium_pin["sha256"], "BSD-3-Clause", "allowed", "unmodified",
                 notice_ref, pdfium=True))
-        elif low.endswith(".dll") and any(low.startswith(prefix) for prefix in FFMPEG_PREFIXES):
+        elif low.endswith((".dll", ".exe")):
+            # The shared recognizer decides both eligibility and the component
+            # label, matching the audit's probe selection and policy checks.
+            # IDs stay per artifact because the closure binds one artifact per
+            # component record; both spellings of an FFmpeg library therefore
+            # receive the same license component.
+            ffmpeg = ffmpeg_component(name)
+            require(ffmpeg is not None,
+                    "no reviewed license component for shipped native file: " + name)
             cid = "ffmpeg-" + re.sub(r"[^a-z0-9._-]", "-", low)
             coverage_by_path.setdefault(path, {}).setdefault("dynamic", []).append(cid)
             components.append(component(
-                cid, ref, "dynamic", "FFmpeg " + name, source_pin["url"],
+                cid, ref, "dynamic", "FFmpeg " + ffmpeg, source_pin["url"],
                 source_pin["sha256"], "LGPL-2.1-or-later", "review", "modified",
                 notice_ref))
-        elif low.endswith((".dll", ".exe")):
-            require(False, "no reviewed license component for shipped native file: " + name)
 
     licensed = {row["artifact"]["path"] for row in components}
     require({"Iris/" + name for name in natives} <= licensed,
