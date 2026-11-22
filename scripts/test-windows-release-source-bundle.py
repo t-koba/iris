@@ -50,8 +50,8 @@ class SourceBundleContracts(unittest.TestCase):
         self.archive.write_bytes(self.source_bytes)
         self.tree = base / "source" / "ffmpeg-8.1.3"
         self.tree.mkdir(parents=True)
-        (self.tree / "configure").write_text("#!/bin/sh\n")
-        (self.tree / "RELEASE").write_text("8.1.3\n")
+        (self.tree / "configure").write_text("#!/bin/sh\n", newline="\n")
+        (self.tree / "RELEASE").write_text("8.1.3\n", newline="\n")
         self.legal = {
             "COPYING.LGPLv2.1": "LGPL 2.1 text\n",
             "COPYING.GPLv2": "GPL 2 text\n",
@@ -59,7 +59,7 @@ class SourceBundleContracts(unittest.TestCase):
             "CREDITS": "FFmpeg credits\n",
         }
         for name, value in self.legal.items():
-            (self.tree / name).write_text(value)
+            (self.tree / name).write_text(value, newline="\n")
         acquisition = {
             "policy": {"sha256": self.pin["sha256"], "url": self.pin["url"]},
             "signature_verified": True,
@@ -71,32 +71,32 @@ class SourceBundleContracts(unittest.TestCase):
                 } for name, value in self.legal.items()
             },
         }
-        (self.tree / "acquisition.json").write_text(json.dumps(acquisition, indent=2))
+        (self.tree / "acquisition.json").write_text(json.dumps(acquisition, indent=2), newline="\n")
         self.gpg = base / "gpg"
         self.gpg.mkdir()
         for name in ("ffmpeg-8.1.3.tar.xz.asc", "ffmpeg-key.asc", "status.txt"):
-            (self.gpg / name).write_text("[GNUPG:] VALIDSIG mock\n")
+            (self.gpg / name).write_text("[GNUPG:] VALIDSIG mock\n", newline="\n")
         self.overlay = base / "overlay" / "ffmpeg"
         self.overlay.mkdir(parents=True)
         (self.overlay / "portfile.cmake").write_text(
-            'set(SOURCE_PATH "%s")\n' % self.tree)
+            'set(SOURCE_PATH "%s")\n' % self.tree, newline="\n")
         (self.overlay / "portfile.evidence.json").write_text(
-            json.dumps({"source_path": str(self.tree), "baseline_patches": []}))
-        (self.overlay / "vcpkg.json").write_text('{"name":"ffmpeg","version":"8.1.3"}\n')
-        (self.overlay / "usage").write_text("ffmpeg needs nasm\n")
+            json.dumps({"source_path": str(self.tree), "baseline_patches": []}), newline="\n")
+        (self.overlay / "vcpkg.json").write_text('{"name":"ffmpeg","version":"8.1.3"}\n', newline="\n")
+        (self.overlay / "usage").write_text("ffmpeg needs nasm\n", newline="\n")
         patches = self.overlay / "patches"
         patches.mkdir()
         for name in self.mod.overlay.baseline_patches():
-            (patches / name).write_text("patch " + name + "\n")
+            (patches / name).write_text("patch " + name + "\n", newline="\n")
         self.pdf_asset = base / "pdfium-win-x64.tgz"
         self.pdf_asset.write_bytes(self.pdfium_bytes)
         self.extract = base / "pdfium-extract"
         (self.extract / "licenses").mkdir(parents=True)
-        (self.extract / "LICENSE").write_text("PDFium BSD license\n")
-        (self.extract / "VERSION").write_text("MAJOR=159\nBUILD=8138\n")
-        (self.extract / "args.gn").write_text("is_official_build = true\n")
-        (self.extract / "licenses" / "pdfium.txt").write_text("third party\n")
-        (self.extract / "licenses" / "extra.txt").write_text("more notices\n")
+        (self.extract / "LICENSE").write_text("PDFium BSD license\n", newline="\n")
+        (self.extract / "VERSION").write_text("MAJOR=159\nBUILD=8138\n", newline="\n")
+        (self.extract / "args.gn").write_text("is_official_build = true\n", newline="\n")
+        (self.extract / "licenses" / "pdfium.txt").write_text("third party\n", newline="\n")
+        (self.extract / "licenses" / "extra.txt").write_text("more notices\n", newline="\n")
         self.stage = base / "stage"
         self.stage.mkdir()
         self.report = base / "evidence" / "ffmpeg-source-bundle.json"
@@ -104,7 +104,7 @@ class SourceBundleContracts(unittest.TestCase):
         # keeping the real checked-in wording and replacement instructions.
         self.notice = base / "FFMPEG-NOTICE.md"
         self.notice.write_text((ROOT / "packaging/windows/ffmpeg-README.md").read_text()
-                               .replace(real_pdfium["sha256"], self.pdfium["sha256"]))
+                               .replace(real_pdfium["sha256"], self.pdfium["sha256"]), newline="\n")
         self.args = argparse.Namespace(
             source_archive=self.archive, source_tree=self.tree, gpg_dir=self.gpg,
             overlay=self.overlay.parent, pdfium_asset=self.pdf_asset,
@@ -188,14 +188,14 @@ class SourceBundleContracts(unittest.TestCase):
             self.build()
 
     def test_rejects_legal_text_drifted_from_acquisition(self):
-        (self.tree / "COPYING.LGPLv2.1").write_text("changed license\n")
+        (self.tree / "COPYING.LGPLv2.1").write_text("changed license\n", newline="\n")
         with self.assertRaisesRegex(ValueError, "differs from the verified source"):
             self.build()
 
     def test_rejects_notice_without_replacement_instructions(self):
         damaged = self.notice.parent / "notice.tmp"
         damaged.write_text(self.notice.read_text()
-                           .replace("swap the versioned DLL set", "replace the DLL set"))
+                           .replace("swap the versioned DLL set", "replace the DLL set"), newline="\n")
         self.args.notice = damaged
         with self.assertRaisesRegex(ValueError, "replacement section lacks marker"):
             self.build()
@@ -206,13 +206,13 @@ class SourceBundleContracts(unittest.TestCase):
             self.build()
 
     def test_rejects_unexpected_overlay_file(self):
-        (self.overlay / "unexpected.txt").write_text("extra\n")
+        (self.overlay / "unexpected.txt").write_text("extra\n", newline="\n")
         with self.assertRaisesRegex(ValueError, "unexpected file set"):
             self.build()
 
     def test_rejects_unsafe_patch_name(self):
         patches = self.overlay / "patches"
-        (patches / "..evil.patch").write_text("..evil\n")
+        (patches / "..evil.patch").write_text("..evil\n", newline="\n")
         with self.assertRaisesRegex(ValueError, "unsafe evidence path"):
             self.build()
 
