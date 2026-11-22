@@ -197,12 +197,20 @@ def replacement_section(notice):
     return section.encode("utf-8")
 
 
+# Absolute Windows paths include a drive letter, a separator and a path
+# segment. Upstream CMake portfiles legitimately contain doubled backslashes
+# in regex escapes and `-libpath:\"`, so a bare backslash is not evidence of
+# a leaked runner path.
+HOST_PATH = re.compile(r"[A-Za-z]:[\\/][A-Za-z0-9_.-]")
+
+
 def redact(text, source_tree, label):
     variants = {str(source_tree), str(source_tree).replace("\\", "/"),
                 json.dumps(str(source_tree))[1:-1]}
     for variant in sorted(variants, key=len, reverse=True):
         text = text.replace(variant, SOURCE_TOKEN)
-    require(not re.search(r"[A-Za-z]:[\\/]|\\\\", text),
+    require(not any(variant in text for variant in variants)
+            and HOST_PATH.search(text) is None,
             label + " still carries a host path after redaction")
     return text.encode("utf-8")
 

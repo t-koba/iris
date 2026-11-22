@@ -79,8 +79,13 @@ class SourceBundleContracts(unittest.TestCase):
             (self.gpg / name).write_text("[GNUPG:] VALIDSIG mock\n", newline="\n")
         self.overlay = base / "overlay" / "ffmpeg"
         self.overlay.mkdir(parents=True)
-        (self.overlay / "portfile.cmake").write_text(
-            'set(SOURCE_PATH "%s")\n' % self.tree, newline="\n")
+        # The pinned vcpkg portfile contains legitimate doubled-backslash
+        # CMake escapes; the redactor must retain them while hiding the path.
+        portfile = ('set(SOURCE_PATH "%s")\n' % self.tree
+                    + r'if(VCPKG_DETECTED_CMAKE_C_COMPILER MATCHES "clang(-[0-9]+)?(\\.exe)?$")' + '\n'
+                    + r'set(OPTIONS_RELEASE "--extra-ldflags=-libpath:\"${CURRENT_INSTALLED_DIR}/lib\"")' + '\n'
+                    + r'set(LIBPATH "$ENV{LIBPATH};$ENV{_WKITS10}references\\windows.foundation.foundationcontract\\2.0.0.0\\")' + '\n')
+        (self.overlay / "portfile.cmake").write_text(portfile, newline="\n")
         (self.overlay / "portfile.evidence.json").write_text(
             json.dumps({"source_path": str(self.tree), "baseline_patches": []}), newline="\n")
         (self.overlay / "vcpkg.json").write_text('{"name":"ffmpeg","version":"8.1.3"}\n', newline="\n")
@@ -184,8 +189,12 @@ class SourceBundleContracts(unittest.TestCase):
         section = " ".join(legal["REPLACEMENT.md"].decode().lower().split())
         self.assertIn("swap the versioned dll set in place", section)
         materials = self.members("ffmpeg-build-materials.tar.gz")
-        self.assertIn(self.mod.SOURCE_TOKEN.encode(), materials["overlay/ffmpeg/portfile.cmake"])
-        self.assertNotIn(str(self.tree).encode(), materials["overlay/ffmpeg/portfile.cmake"])
+        portfile = materials["overlay/ffmpeg/portfile.cmake"].decode()
+        self.assertIn(self.mod.SOURCE_TOKEN, portfile)
+        self.assertNotIn(str(self.tree), portfile)
+        self.assertIn(r"\\.exe", portfile)
+        self.assertIn(r'-libpath:\"', portfile)
+        self.assertIn(r"references\\windows.foundation.foundationcontract", portfile)
         self.assertIn("source-acquisition.json", materials)
         for name in self.mod.overlay.baseline_patches():
             self.assertIn("overlay/ffmpeg/" + name, materials)
@@ -286,6 +295,14 @@ class SourceBundleContracts(unittest.TestCase):
         notices = self.mod.overlay_notices()
         for name in self.mod.overlay.baseline_patches():
             self.assertEqual(notices[name], "vcpkg-license.txt")
+
+    def test_rejects_unrelated_host_path_in_portfile(self):
+        portfile = self.overlay / "portfile.cmake"
+        portfile.write_text(portfile.read_text()
+                            + r'set(LEAK "C:\Users\runneradmin\.cargo")' + "\n",
+                            newline="\n")
+        with self.assertRaisesRegex(ValueError, "host path after redaction"):
+            self.build()
 
     def test_rejects_oversized_member(self):
         (self.tree / "COPYRIGHT").write_bytes(b"x" * (self.mod.MAX_MEMBER_BYTES + 1))
