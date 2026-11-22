@@ -1,5 +1,5 @@
 {
-  "$comment": "Approved production Windows native-preview runtime plan. This is a contract and single source of truth for a future Windows build, not a release payload. A Windows-runner build must realize this plan and pass exact-SHA CI before release.yml may ship a product Windows build; until then the release variant stays minimal.",
+  "$comment": "Approved production Windows native-preview runtime plan. This is a contract and single source of truth for the product Windows build, not a release payload. A Windows-runner build must realize this plan and pass exact-SHA CI; release.yml packages the resulting verified assets.",
   "ffmpeg": {
     "source": "packaging/linux/ffmpeg.json",
     "note": "Reuse the signature-verified FFmpeg 8.1.3 source pin defined there (url, sha256, signature_url, key_url, fingerprint, avcodec_version 62.28.103, required_decoders). The pin is deliberately not duplicated here; the offline contract checks the reference resolves to the approved release."
