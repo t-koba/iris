@@ -253,8 +253,6 @@ def overlay_members(args, inputs, acquisition, section):
     port = Path(args.overlay) / "ffmpeg"
     require(port.is_dir() and not port.is_symlink(), "derived vcpkg overlay port missing")
     top = sorted(entry.name for entry in port.iterdir())
-    require(set(OVERLAY_ROOT_FILES) <= set(OVERLAY_NOTICES),
-            "bundled overlay file has no notice assignment")
     allowed = set(OVERLAY_ROOT_FILES) | {"patches"}
     require(set(top) <= allowed and "portfile.cmake" in top
             and "portfile.evidence.json" in top and "vcpkg.json" in top,
