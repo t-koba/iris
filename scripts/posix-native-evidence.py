@@ -121,8 +121,9 @@ def source_pins(mapping, platform):
                 "unsupported reviewed pin: " + str(name))
         pin = read_json(ROOT / location)
         if name == "pdfium":
-            require(platform == "linux" and "pdfium" in pin, "invalid PDFium pin document")
-            row = pin["pdfium"]
+            require(platform == "linux", "PDFium pin only applies to Linux")
+            row = pin.get("pdfium", pin)
+            require(isinstance(row, dict), "invalid PDFium pin document")
         else:
             require(platform == "macos" or name == "ffmpeg", "unsupported pin for platform")
             row = pin
@@ -307,7 +308,12 @@ def build(args):
     output = Path(args.output)
     require(not output.resolve().is_relative_to(stage.resolve()),
             "native evidence sidecar must be written outside the release stage")
-    mapping = review_mapping(Path(args.mapping), args.platform)
+    mapping_path = Path(args.mapping)
+    if not mapping_path.is_absolute():
+        mapping_path = ROOT / mapping_path
+    require(mapping_path.resolve().is_relative_to(ROOT),
+            "reviewed mapping must be inside the repository: " + str(mapping_path))
+    mapping = review_mapping(mapping_path, args.platform)
     pins = source_pins(mapping, args.platform)
     staged = walk_stage(stage, max_files)
     require(staged, "empty release stage")
@@ -420,8 +426,8 @@ def build(args):
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(json.dumps(dict(
             scope=mapping["scope"], platform=args.platform,
-            mapping={"path": str(Path(args.mapping).relative_to(ROOT)),
-                     "sha256": sha256(Path(args.mapping))},
+            mapping={"path": str(mapping_path.resolve().relative_to(ROOT)),
+                     "sha256": sha256(mapping_path)},
             pins={name: {"path": location, "sha256": sha256(ROOT / location)}
                   for name, location in mapping["pins"].items()},
             staged_files=len(staged), external_files=len(external),

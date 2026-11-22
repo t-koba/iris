@@ -176,6 +176,29 @@ class PosixNativeEvidence(TestCase):
         with tempfile.TemporaryDirectory() as directory:
             self.check_stage(Path(directory), "linux")
 
+    def test_repository_relative_mapping_path_is_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = make_stage(root, "linux")
+            output = root / "generated/relative.json"
+            report = root / "generated/relative-review.json"
+            with offline_scan():
+                self.assertEqual(generate("linux", stage, output,
+                                          mapping_path=Path("packaging/native-evidence/linux-mapping.json"),
+                                          report=report), 0)
+            review = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(review["mapping"]["path"],
+                             "packaging/native-evidence/linux-mapping.json")
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+            pdfium = [row for row in manifest["components"]
+                      if row["name"] == "bundled PDFium shared library"]
+            self.assertEqual(len(pdfium), 1)
+            self.assertEqual(pdfium[0]["source"]["origin"],
+                             "https://github.com/bblanchon/pdfium-binaries/releases/download/"
+                             "chromium/8138/pdfium-linux-x64.tgz")
+            self.assertEqual(pdfium[0]["source"]["revision"],
+                             "d6b1e28950a0392590d79bbdbb7eb19686872b688f8a36f170acb19e41473113")
+
     def test_missing_and_tampered_evidence_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -71,7 +71,7 @@
   ],
   "pins": {
     "ffmpeg": "packaging/linux/ffmpeg.json",
-    "pdfium": "packaging/windows/ffmpeg.json"
+    "pdfium": "packaging/linux/pdfium.json"
   },
   "platform": "linux",
   "schema": 1,

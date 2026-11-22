@@ -1,0 +1,18 @@
+{
+  "release": "chromium/8138",
+  "version": "159.0.8138.0",
+  "asset": "pdfium-linux-x64.tgz",
+  "bytes": 3945444,
+  "sha256": "d6b1e28950a0392590d79bbdbb7eb19686872b688f8a36f170acb19e41473113",
+  "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8138/pdfium-linux-x64.tgz",
+  "repo": "bblanchon/pdfium-binaries",
+  "signer_workflow": "github.com/bblanchon/pdfium-binaries/.github/workflows/build-all.yml",
+  "signer_digest": "0eb94b28c2252d2baae3dfe15dc6b237131d8cd8",
+  "source_digest": "0eb94b28c2252d2baae3dfe15dc6b237131d8cd8",
+  "source_ref": "refs/heads/master",
+  "attestation_required": true,
+  "attestation_asset": "pdfium-attestation.json",
+  "attestation_bytes": 18267,
+  "attestation_sha256": "7526f4b934ab498d6206ac7f3d78dd4ce8e0f7d3175227ab3f4ecc255d950ad7",
+  "$comment": "Linux x86-64 PDFium pin shared by scripts/fetch-pdfium-runtime.sh and scripts/release-audit.py. It is deliberately not the Windows tarball; the source binding in a Linux closure must name these bytes."
+}
