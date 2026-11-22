@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Authoritative offline contract for the Windows native-preview validation workflow.
 
-The workflow is reusable (workflow_call only), report-only, and never promotes
-a release. This module is the single source of truth for its fail-closed shape:
+The workflow is reusable (workflow_call only) and report-only by default; a
+release caller may opt into a bounded native asset export. It never promotes a
+release itself. This module is the single source of truth for its fail-closed shape:
 exact-SHA checkout, all offline gates, pinned vcpkg HEAD assertion, verified
 source acquisition, derived overlay, stock bindings, PDFium attestation, PE
 import inventory, clean-install preview smoke, bounded JSON evidence and

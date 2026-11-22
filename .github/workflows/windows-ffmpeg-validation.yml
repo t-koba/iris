@@ -1,12 +1,13 @@
 name: Windows FFmpeg native validation
 
-# Reusable, report-only Windows default-preview validation. The registered CI
-# workflow calls this only on manual dispatch at the caller's exact SHA. It
-# acquires the signature-verified FFmpeg source, derives a local-source vcpkg
-# overlay, builds the release binaries, stages one isolated Iris runtime,
+# Reusable Windows default-preview validation. The registered CI workflow calls
+# this only on manual dispatch at the caller's exact SHA; the default path is
+# report-only. A release caller can opt into exporting the verified native
+# assets. It acquires the signature-verified FFmpeg source, derives a local-source
+# vcpkg overlay, builds the release binaries, stages one isolated Iris runtime,
 # inventories the staged PE import closure and smoke-tests that staged runtime
-# with a system-only PATH. It never promotes a release, changes the minimal
-# packaging variant, or retains native bytes.
+# with a system-only PATH. It never promotes a release itself; the default path
+# retains no native bytes and the gated export is bounded to a verified artifact.
 on:
   workflow_call:
     inputs:

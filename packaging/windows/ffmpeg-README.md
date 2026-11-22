@@ -48,9 +48,9 @@ corresponding source can be supplied as the verified `ffmpeg-8.1.3.tar.xz` with
 its detached signature and signing key; this notice is the written-offer
 record with that archive's exact URL, SHA-256 and fingerprint. Configuration,
 the derived vcpkg overlay, triplet and any retained baseline-port patches are
-described below. The report-only rehearsal ZIP verifies Iris.exe, the
-versioned FFmpeg DLL set, pdfium.dll and this notice; staging of the other
-listed documents in a product payload is not decided here.
+described below. The rehearsal ZIP verifies Iris.exe, the versioned FFmpeg
+DLL set, pdfium.dll and this notice; staging of the other listed documents in
+a product payload is not decided here.
 
 ## Rebuilding and LGPL section 6(b) replacement
 
@@ -65,9 +65,11 @@ set to the derived overlay and `VCPKG_OVERLAY_TRIPLETS` to
 `cargo build --release -p iris-ui-shell --locked` and stage the installed DLLs
 beside `Iris.exe`. `.github/workflows/windows-ffmpeg-validation.yml` performs
 these steps with stock locked bindings, builds locally for validation and
-emits bounded JSON evidence. It promotes no release and publishes no release
-artifact: the rehearsal ZIP is assembled and hash-verified inside the run,
-never uploaded, and removed at cleanup; only bounded JSON evidence is uploaded.
+emits bounded JSON evidence. The default path promotes no release and retains
+no native bytes: the rehearsal ZIP is assembled and hash-verified inside the
+run and removed at cleanup, with only JSON evidence uploaded. A release caller
+can opt into exporting the verified ZIP, installer and their hashes as
+`windows-release-assets`; `release.yml` re-verifies them before packaging.
 
 These are replaceable shared DLLs, not statically linked into Iris. Under LGPL
 section 6(b), users may modify and rebuild FFmpeg, swap the versioned DLL set
