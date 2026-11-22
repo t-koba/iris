@@ -485,7 +485,7 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
             )[1].split("      - name: Package Linux AppDir for tagged release", 1)[0]
             tagged_step = workflow.split(
                 "      - name: Package Linux AppDir for tagged release", 1
-            )[1].split("      - name: Build PDFium smoke test", 1)[0]
+            )[1].split("      - name: Build Linux thumbnail smokes", 1)[0]
             self.assertIn("if: github.event_name == 'workflow_dispatch'", manual_step)
             self.assertIn('IRIS_VERIFY_PDFIUM_PROVENANCE: "0"', manual_step)
             self.assertNotIn("GH_TOKEN:", manual_step)
@@ -609,6 +609,28 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
         release_linux = (ROOT / ".github/workflows/release.yml").read_text().split('  package-linux:', 1)[1].split('  package-windows:', 1)[0]
         self.assertNotIn('libavcodec-dev', release_linux)
         self.assertNotIn('clang ffmpeg', release_linux)
+
+
+    def test_release_installed_video_smoke_uses_exact_deb(self):
+        release_linux = (ROOT / ".github/workflows/release.yml").read_text().split(
+            "  package-linux:", 1)[1].split("  package-windows:", 1)[0]
+        build = release_linux.split(
+            "      - name: Build Linux thumbnail smokes", 1)[1].split(
+            "      - name: Archive Linux AppDir", 1)[0]
+        self.assertIn("--example pdf_thumbnail_smoke --example video_thumbnail_smoke", build)
+        self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/target/package-linux", build)
+        deb = release_linux.split(
+            "      - name: Verify Debian installer", 1)[1].split(
+            "      - name: Generate Linux checksums", 1)[0]
+        self.assertIn("IRIS_FFMPEG_PREFIX: ${{ github.workspace }}/build/linux-ffmpeg", deb)
+        self.assertIn('LD_LIBRARY_PATH="$IRIS_FFMPEG_PREFIX/lib', deb)
+        self.assertIn('-f lavfi -i testsrc2=size=64x48:rate=4 -t 1 -c:v mpeg4 -an "$RUNNER_TEMP/iris-video.avi"', deb)
+        invocation = deb.split("./scripts/smoke-linux-deb.sh", 1)[1]
+        self.assertIn("target/package-linux/release/examples/pdf_thumbnail_smoke", invocation)
+        self.assertIn('target/package-linux/release/examples/video_thumbnail_smoke "$RUNNER_TEMP/iris-video.avi"', invocation)
+        # Neither the probe nor the clip is staged into the release package.
+        self.assertNotIn("dist/linux/Iris.AppDir/usr/bin/iris-video-smoke", release_linux)
+        self.assertNotIn("dist/linux/iris-video.avi", release_linux)
 
 
 if __name__ == "__main__":
