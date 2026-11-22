@@ -810,7 +810,7 @@ dependencies = [
  "regex",
  "rustc-hash 2.1.3",
  "shlex",
- "syn 2.0.119",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -1415,7 +1415,7 @@ version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
- "generic-array 0.14.7",
+ "generic-array",
  "typenum",
 ]
 
@@ -2148,16 +2148,6 @@ checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
  "typenum",
  "version_check",
-]
-
-[[package]]
-name = "generic-array"
-version = "1.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "337d46834ee672ab3e48caca2cb0c78cc174fb12b3a68d0d88f99a0519a5e36e"
-dependencies = [
- "rustversion",
- "typenum",
 ]
 
 [[package]]
@@ -3039,17 +3029,21 @@ dependencies = [
  "futures-util",
  "iris-auth",
  "iris-core-domain",
+ "iris-path-service",
  "iris-platform-integration",
  "iris-smb-client",
  "mime_guess",
  "reqwest",
  "ring",
+ "rustix 1.1.6",
  "rustls",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
+ "winapi-util",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3080,6 +3074,7 @@ name = "iris-jobstore"
 version = "0.4.0"
 dependencies = [
  "iris-core-domain",
+ "iris-platform-integration",
  "rusqlite",
  "thiserror 2.0.21",
  "tracing",
@@ -3097,25 +3092,33 @@ dependencies = [
 name = "iris-platform-integration"
 version = "0.4.0"
 dependencies = [
+ "getrandom 0.4.3",
  "keyring",
  "notify",
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
  "open",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
  "trash",
+ "winapi-util",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "iris-remote-transport"
 version = "0.4.0"
 dependencies = [
+ "getrandom 0.4.3",
  "iris-core-domain",
  "iris-platform-integration",
  "russh",
  "russh-sftp",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -3126,6 +3129,7 @@ version = "0.4.0"
 dependencies = [
  "chrono",
  "iris-core-domain",
+ "iris-platform-integration",
  "unicode-normalization",
 ]
 
@@ -3186,6 +3190,7 @@ dependencies = [
  "iris-backends",
  "iris-core-domain",
  "iris-jobstore",
+ "serde_json",
  "sha2",
  "tokio",
  "tokio-util",
@@ -5375,9 +5380,9 @@ dependencies = [
 
 [[package]]
 name = "russh"
-version = "0.65.1"
+version = "0.65.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94be3d86c71b9ed220a675c405e35c7a02565a009bf8da2e9cc13a700320a5c5"
+checksum = "569d8c45e20c123af2fc5ecb4803fde0a98572449ba4c24ed97741d7b02fedf7"
 dependencies = [
  "aes",
  "bitflags 2.13.2",
@@ -5399,7 +5404,6 @@ dependencies = [
  "enum_dispatch",
  "flate2",
  "futures",
- "generic-array 1.4.5",
  "getrandom 0.4.3",
  "ghash",
  "hex-literal",
@@ -6183,9 +6187,9 @@ dependencies = [
 
 [[package]]
 name = "ssh-key"
-version = "0.7.0-rc.11"
+version = "0.7.0-rc.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9a32fae177b74a22aa9c5b01bf7e68b33545be32d9e381e248058d2adc15ce3"
+checksum = "0701b552e6bd8f13a6e07bde25307c32d7daad80a79b65832d110c0416e7b638"
 dependencies = [
  "argon2",
  "bcrypt-pbkdf",
