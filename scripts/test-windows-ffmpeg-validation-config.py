@@ -345,16 +345,17 @@ class ReleaseWiringContracts(unittest.TestCase):
             self.validate(release=mutated)
 
     def test_missing_native_evidence_consumer_fails_closed(self):
-        for marker, expected in (
-                ("          name: windows-native-evidence\n", "download and seal"),
+        for marker, expected, count in (
+                ("          name: windows-native-evidence\n", "download and seal", 1),
                 ("python3 scripts/windows-native-evidence.py seal",
-                 "download and seal"),
-                ("--require-native-evidence", "fail closed"),
-                ("          name: windows-native-evidence\n", "download and seal")):
+                 "download and seal", 1),
+                ("--require-native-evidence", "fail closed", 3)):
             with self.subTest(marker=marker):
-                self.assertEqual(self.release.count(marker), 1)
+                self.assertEqual(self.release.count(marker), count)
+                mutated = self.release.replace(marker, "")
+                self.assertNotIn(marker, mutated)
                 with self.assertRaisesRegex(ValueError, expected):
-                    self.validate(release=self.release.replace(marker, "", 1))
+                    self.validate(release=mutated)
 
     def test_silent_missing_native_audit_fails_closed(self):
         marker = "native evidence required but absent or invalid"
