@@ -116,7 +116,7 @@ class Reports(unittest.TestCase):
                                ("windows", "x86_64-pc-windows-msvc")):
             with self.subTest(platform=platform):
                 report = audit(platform=platform)
-                minimal = platform == "windows"
+                minimal = False
                 with patch.dict(os.environ, CARGO_TERM_COLOR="always"), \
                      patch.object(report, "cargo_metadata", return_value=metadata(minimal)) as meta_cmd, \
                      patch.object(report, "cargo_tree", return_value=tree_text(minimal)) as tree_cmd:
@@ -191,7 +191,7 @@ class Reports(unittest.TestCase):
     def test_metadata_miss_retains_partial_product_tree(self):
         for platform, host in (("macos", "aarch64-apple-darwin"),
                                ("windows", "x86_64-pc-windows-msvc")):
-            minimal = platform == "windows"
+            minimal = False
             tree = ("iris-ui-shell v0.4.0 (/workspace/crates/ui-shell)|" +
                     ("minimal" if minimal else "default,video,pdf") + "\n" +
                     ("" if minimal else "|-- video v1.2.3|decode\n") +
@@ -527,7 +527,7 @@ class Reports(unittest.TestCase):
             self.assertEqual(match["status"], "candidate only")
             self.assertFalse(any(r["kind"] == "missing" for r in report.records))
 
-    def test_windows_minimal_and_import_inspector(self):
+    def test_windows_product_and_import_inspector(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "Iris.exe"
             path.write_bytes(b"actual portable executable")
@@ -536,9 +536,10 @@ class Reports(unittest.TestCase):
                 report.windows(path)
             command.assert_called_once_with("llvm-readobj", "--coff-imports", str(path))
             build = next(r for r in report.records if r["kind"] == "build")
-            self.assertEqual(build["variant"], "minimal")
-            self.assertEqual(build["cargo_flags"], ["--no-default-features", "--features", "minimal"])
-            self.assertIn("not selected", build["native_preview"])
+            self.assertEqual(build["variant"], "product")
+            self.assertEqual(build["features"], "Cargo defaults")
+            self.assertNotIn("cargo_flags", build)
+            self.assertIn("verified exact-SHA product stage", build["native_preview"])
             report = audit()
             with patch.object(module.shutil, "which", return_value=None), patch.object(report, "command", return_value=""):
                 report.windows(path)

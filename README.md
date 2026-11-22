@@ -26,7 +26,7 @@ Rust と [iced](https://iced.rs) で作ったクロスプラットフォーム�
 |---|---|
 | macOS 14 以降 | 標準プレビュー機能を含む |
 | Linux（Wayland / X11） | 標準 feature でビルド。配布パッケージには検証済み PDFium を同梱 |
-| Windows | `minimal` 構成。動画・PDF は無効で、RAW は ARW・CR3・DNG・NEF のみ |
+| Windows | 署名検証済み FFmpeg/PDFium を含む検証済み product stage を同梱。動画・PDF preview 有効 |
 
 ソースビルドに使う Rust は `rust-toolchain.toml` で指定しています（1.97.1）。
 
@@ -70,7 +70,7 @@ Linux のリリースビルドは、PDF プレビュー用 PDFium 共有ライ�
 - `Iris-windows.zip`: 展開して `Iris.exe` を実行します。
 - `Iris-windows-setup.exe`: 管理者権限なしのユーザー単位で `%LOCALAPPDATA%\Programs\Iris` にインストールします。スタートメニューに登録され、インストーラでデスクトップショートカットも選べます。アンインストールは Windows のアプリ一覧から行えます。
 
-Windows のリリース用パッケージ作成は現在保留中です。検証済みの exact-SHA product stage を workflow に接続するまで、`IRIS_WINDOWS_RELEASE_HELD` によりリリース job は失敗します。開発者向けの `./scripts/package-windows.ps1` はビルドを行わず、`IRIS_PRODUCT_STAGE` / `IRIS_PRODUCT_INVENTORY` / `IRIS_PRODUCT_ZIP` / `IRIS_RELEASE_OUTPUT_DIR` で渡した検証済みステージから zip とインストーラーを作成します。また、現在の workflow では実行ファイルやインストーラにコード署名を行わないため、Windows の警告や SmartScreen の表示は環境によって異なります。
+Windows のリリースは、同じ SHA で動く `windows-ffmpeg-validation` の reusable workflow が検証した exact-SHA product stage を `windows-release-assets` から受け取り、成果物の SHA-256 と収録ファイルを照合してから zip とインストーラーを作成します。開発者向けの `./scripts/package-windows.ps1` もビルドを行わず、`IRIS_PRODUCT_STAGE` / `IRIS_PRODUCT_INVENTORY` / `IRIS_PRODUCT_ZIP` / `IRIS_RELEASE_OUTPUT_DIR` で渡した検証済みステージから同じ成果物を作成します。現在の workflow では実行ファイルやインストーラにコード署名を行わないため、Windows の警告や SmartScreen の表示は環境によって異なります。
 
 ### チェックサムの確認
 

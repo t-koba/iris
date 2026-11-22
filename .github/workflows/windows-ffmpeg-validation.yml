@@ -9,6 +9,12 @@ name: Windows FFmpeg native validation
 # packaging variant, or retains native bytes.
 on:
   workflow_call:
+    inputs:
+      export_release_assets:
+        description: "Upload bounded verified release assets for release packaging"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -668,6 +674,20 @@ jobs:
           $evidenceDir = $env:IRIS_VALIDATION_EVIDENCE
           New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
           Set-Content -LiteralPath (Join-Path $evidenceDir "release-package-rehearsal.json") -Value ($record | ConvertTo-Json -Depth 4 -Compress) -Encoding utf8
+
+      - name: Upload verified release assets for release packaging
+        if: ${{ inputs.export_release_assets }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-assets
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/iris-release-package/Iris-windows.zip
+            ${{ runner.temp }}/iris-release-package/Iris-windows-setup.exe
+            ${{ runner.temp }}/iris-release-package/release-package-result.json
+            build/validation/evidence/product-inventory.json
+          retention-days: 7
+          compression-level: 9
 
       - name: Assemble bounded evidence manifest
         if: ${{ !cancelled() }}

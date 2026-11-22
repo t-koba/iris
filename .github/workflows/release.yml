@@ -286,8 +286,17 @@ jobs:
           if-no-files-found: error
           path: audit/linux.json
 
-  package-windows:
+  windows-product-assets:
     needs: release-preflight
+    permissions:
+      contents: read
+      attestations: read
+    uses: ./.github/workflows/windows-ffmpeg-validation.yml
+    with:
+      export_release_assets: true
+
+  package-windows:
+    needs: [release-preflight, windows-product-assets]
     env:
       IRIS_RELEASE_VERSION: ${{ needs.release-preflight.outputs.version }}
     runs-on: windows-latest
@@ -299,22 +308,65 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
+      - name: Download verified Windows release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-release-assets
+          path: verified/windows
+      - name: Verify exported Windows release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = "verified/windows"
+          $resultPath = Join-Path $root "release-package-result.json"
+          if (!(Test-Path -LiteralPath $resultPath -PathType Leaf)) { throw "release package result missing" }
+          $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+          if ($result.status -ne "pass") { throw "release package result is not pass" }
+          if ($result.zip_sha256 -notmatch '^[0-9a-f]{64}$') { throw "invalid release ZIP sha256" }
+          if ($result.installer_sha256 -notmatch '^[0-9a-f]{64}$') { throw "invalid installer sha256" }
+          $zipPath = Join-Path $root "Iris-windows.zip"
+          $setupPath = Join-Path $root "Iris-windows-setup.exe"
+          foreach ($asset in @(
+              @{ path = $zipPath; hash = $result.zip_sha256 },
+              @{ path = $setupPath; hash = $result.installer_sha256 })) {
+            if (!(Test-Path -LiteralPath $asset.path -PathType Leaf)) { throw "release asset missing: $($asset.path)" }
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $asset.path).Hash.ToLowerInvariant()
+            if ($actual -ne $asset.hash) { throw "release asset hash mismatch: $($asset.path)" }
+          }
+          $inventoryPath = Join-Path $root "product-inventory.json"
+          if (!(Test-Path -LiteralPath $inventoryPath -PathType Leaf)) { throw "product inventory missing" }
+          $inventory = Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json
+          if ($null -eq $inventory -or $null -eq $inventory.files) { throw "product inventory has no files" }
+          $names = @($inventory.files | ForEach-Object { [string]$_.name })
+          $entries = @($result.entries)
+          if ($names.Count -eq 0 -or $names.Count -gt 256 -or $names.Count -ne $entries.Count) { throw "inventory/result entry count mismatch" }
+          if (@(Compare-Object -ReferenceObject $names -DifferenceObject $entries -CaseSensitive).Count -ne 0) {
+            throw "inventory and result entries differ"
+          }
+          foreach ($required in @("Iris.exe", "pdfium.dll", "FFMPEG-NOTICE.md")) {
+            if ($names -notcontains $required) { throw "required product file missing: $required" }
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+          try {
+            $zipNames = @($archive.Entries | ForEach-Object { $_.FullName })
+            if (@(Compare-Object -ReferenceObject $names -DifferenceObject $zipNames -CaseSensitive).Count -ne 0) {
+              throw "ZIP entries differ from the verified product inventory"
+            }
+          } finally { $archive.Dispose() }
+          if (Test-Path -LiteralPath "dist/windows") { Remove-Item -LiteralPath "dist/windows" -Recurse -Force }
+          New-Item -ItemType Directory -Path "dist/windows/Iris" -Force | Out-Null
+          Copy-Item -LiteralPath $zipPath -Destination "dist/windows/Iris-windows.zip" -Force
+          Copy-Item -LiteralPath $setupPath -Destination "dist/windows/Iris-windows-setup.exe" -Force
+          Expand-Archive -LiteralPath "dist/windows/Iris-windows.zip" -DestinationPath "dist/windows/Iris" -Force
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-windows-cargo
-      - name: Install Inno Setup
-        shell: pwsh
-        run: |
-          choco install innosetup --version=6.7.1 --allow-downgrade --yes --no-progress
-          if ($LASTEXITCODE -notin @(0, 3010)) { throw "Inno Setup installation failed" }
-          exit 0
-      - name: Hold Windows release packaging (IRIS_WINDOWS_RELEASE_HELD)
-        shell: pwsh
-        run: |
-          throw "IRIS_WINDOWS_RELEASE_HELD: Windows release packaging is held until the verified exact-SHA product stage is wired into this workflow. Wire the IRIS_PRODUCT_STAGE, IRIS_PRODUCT_INVENTORY, IRIS_PRODUCT_ZIP and IRIS_RELEASE_OUTPUT_DIR inputs into the packaging script, then remove this hold."
+      - name: Fetch locked Rust inputs before offline audit
+        run: cargo fetch --locked
       - name: Verify Windows artifact
         shell: pwsh
         run: |

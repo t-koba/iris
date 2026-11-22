@@ -2,9 +2,9 @@
 """Fail-closed validation of the production Windows native-preview build inputs.
 
 Composes the pinned vcpkg manifest/config/triplet, the verified source and PDFium
-pins, the stock binding ABI, the overlay feature gate and the release hold into
-one evidence manifest. No network, no vcpkg and no build occurs here: this is
-the offline contract the Windows runner must satisfy before any native work.
+pins, the stock binding ABI, the overlay feature gate and the fail-closed release
+wiring into one evidence manifest. No network, no vcpkg and no build occurs here:
+this is the offline contract the Windows runner must satisfy before any native work.
 """
 
 import argparse
@@ -135,24 +135,56 @@ def validate_import_allowlists(os_entries, vc_entries):
     return True
 
 
-def validate_release_hold(release_yml, package_ps1, release_audit, release_policy, ci_yml):
-    require("IRIS_WINDOWS_RELEASE_HELD" in release_yml,
-            "release.yml must carry the explicit Windows release hold marker")
+def validate_release_wiring(release_yml, package_ps1, release_audit, release_policy,
+                            ci_yml, validation_workflow):
+    require("IRIS_WINDOWS_RELEASE_HELD" not in release_yml,
+            "release.yml must not carry the Windows release hold marker")
     require("./scripts/package-windows.ps1" not in release_yml,
-            "release.yml must not invoke the Windows packaging script while held")
+            "release.yml must consume verified assets instead of invoking the packaging script")
+    require("  windows-product-assets:\n" in release_yml
+            and "    needs: release-preflight\n" in release_yml,
+            "release.yml must run the windows-product-assets job after preflight")
+    require("uses: ./.github/workflows/windows-ffmpeg-validation.yml" in release_yml
+            and "export_release_assets: true" in release_yml,
+            "release.yml must call the validation workflow with export_release_assets: true")
+    require("    needs: [release-preflight, windows-product-assets]\n" in release_yml,
+            "package-windows must depend on the verified product assets")
+    require("uses: actions/download-artifact@v4" in release_yml
+            and "name: windows-release-assets" in release_yml,
+            "release.yml must download the windows-release-assets artifact")
+    require(all(token in release_yml for token in ("zip_sha256", "installer_sha256")),
+            "release.yml must verify the exported product asset digests")
     require(all(token in package_ps1 for token in (
             "IRIS_PRODUCT_STAGE", "IRIS_PRODUCT_INVENTORY", "IRIS_PRODUCT_ZIP",
-            "pwsh scripts/windows-product-package.ps1")),
+            "IRIS_RELEASE_OUTPUT_DIR", "pwsh scripts/windows-product-package.ps1")),
             "package-windows.ps1 must consume the bounded exact-SHA product inventory")
     require("--no-default-features" not in package_ps1 and '"--features", "minimal"' not in package_ps1,
             "package-windows.ps1 must not rebuild a reduced feature variant")
-    require('variant="minimal"' in release_audit, "release audit must keep the Windows minimal variant")
+    audit_marker = "    def windows(self, executable):\n"
+    require(audit_marker in release_audit, "release audit Windows section missing")
+    windows_audit = release_audit.split(audit_marker, 1)[1].split("\n    def ", 1)[0]
+    require('variant="product"' in windows_audit and 'features="Cargo defaults"' in windows_audit,
+            "release audit must record the Windows product build variant")
+    require("--no-default-features" not in windows_audit
+            and 'variant="minimal"' not in windows_audit,
+            "release audit Windows build must not claim a minimal variant")
+    require("native_preview=" in windows_audit and "exact-SHA" in windows_audit,
+            "release audit must describe the verified exact-SHA native preview stage")
+    require(not (re.search(r'self\.args\.platform\s*==\s*"windows"', release_audit)
+                 and "minimal" in release_audit)
+            and 'variant="minimal"' not in release_audit,
+            "release audit must not carry a Windows minimal build/graph path")
     require(release_policy["required_variants"]["windows"] == "product",
-            "release policy must still require the product Windows variant (the hold)")
+            "release policy must require the product Windows variant")
+    require("        if: ${{ inputs.export_release_assets }}\n" in validation_workflow,
+            "validation workflow must gate the windows-release-assets upload")
+    workflow = load("wvwfv", "scripts/windows-ffmpeg-validation-workflow.py")
+    checks = workflow.validate(validation_workflow)
+    require(checks["export_input_declared"] and checks["export_upload_count"] == 1,
+            "validation workflow must gate the windows-release-assets upload")
     require("python3 scripts/test-windows-ffmpeg-validation-config.py" in ci_yml,
             "validation config contract must be wired into CI")
     return True
-
 
 def build():
     source = load("wfs", "scripts/windows-ffmpeg-source.py")
@@ -178,12 +210,13 @@ def build():
     for feature in features:
         require(feature not in FORBIDDEN_FEATURES, "forbidden feature selected")
 
-    validate_release_hold(
+    validate_release_wiring(
         (ROOT / ".github/workflows/release.yml").read_text(),
         (ROOT / "scripts/package-windows.ps1").read_text(),
         (ROOT / "scripts/release-audit.py").read_text(),
         read_json("scripts/release-policy.json"),
         (ROOT / ".github/workflows/ci.yml").read_text(),
+        (ROOT / ".github/workflows/windows-ffmpeg-validation.yml").read_text(),
     )
 
     return dict(
@@ -206,7 +239,7 @@ def build():
         lgpl_features=features,
         forbidden_features=list(FORBIDDEN_FEATURES),
         bindings={"ffmpeg-next": "9.0.0", "ffmpeg-sys-next": "9.0.1"},
-        release_hold="minimal until exact Windows-runner evidence",
+        release_variant="product",
         publishes_release_artifacts=False,
     )
 

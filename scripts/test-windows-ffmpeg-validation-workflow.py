@@ -26,8 +26,12 @@ class WorkflowContracts(unittest.TestCase):
     def test_real_workflow_validates(self):
         checks = self.mod.validate(self.text)
         self.assertEqual(checks["reusable_only"], True)
-        self.assertEqual(checks["upload_count"], 1)
-        self.assertEqual(checks["upload_literal_count"], 1)
+        self.assertEqual(checks["upload_count"], 2)
+        self.assertEqual(checks["upload_literal_count"], 2)
+        self.assertEqual(checks["evidence_upload_count"], 1)
+        self.assertEqual(checks["export_upload_count"], 1)
+        self.assertTrue(checks["export_input_declared"])
+        self.assertTrue(checks["export_assets_bounded"])
         self.assertTrue(checks["evidence_json_only"])
         self.assertTrue(checks["pe_import_closure"])
         self.assertTrue(checks["staged_only_path"])
@@ -139,6 +143,34 @@ class FailClosedContracts(unittest.TestCase):
         mutated = self.text.replace(
             "            build/validation/evidence/windows-validation.json",
             "            target/debug/Iris.exe")
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_extra_native_path_in_gated_export(self):
+        anchor = ("            ${{ runner.temp }}/iris-release-package/"
+                  "release-package-result.json\n")
+        self.assertEqual(self.text.count(anchor), 1)
+        mutated = self.text.replace(anchor, anchor + "            target/debug/Iris.exe\n", 1)
+        with self.assertRaisesRegex(ValueError, "exactly the verified release assets"):
+            self.mod.validate(mutated)
+
+    def test_rejects_missing_export_input_declaration(self):
+        declaration = (
+            "      export_release_assets:\n"
+            "        description: \"Upload bounded verified release assets for release packaging\"\n"
+            "        required: false\n"
+            "        type: boolean\n"
+            "        default: false\n"
+        )
+        self.assertEqual(self.text.count(declaration), 1)
+        mutated = self.text.replace(declaration, "", 1)
+        with self.assertRaisesRegex(ValueError, "export_release_assets as boolean"):
+            self.mod.validate(mutated)
+
+    def test_rejects_ungated_release_asset_export(self):
+        gate = "        if: ${{ inputs.export_release_assets }}\n"
+        self.assertEqual(self.text.count(gate), 1)
+        mutated = self.text.replace(gate, "", 1)
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
@@ -923,7 +955,9 @@ class ProductRehearsalContracts(unittest.TestCase):
         self.assertTrue(checks["product_rehearsal"])
         self.assertTrue(checks["product_evidence_upload"])
         self.assertTrue(checks["no_extracted_zip_smoke"])
-        self.assertEqual(checks["upload_count"], 1)
+        self.assertEqual(checks["upload_count"], 2)
+        self.assertEqual(checks["evidence_upload_count"], 1)
+        self.assertEqual(checks["export_upload_count"], 1)
         self.assertTrue(checks["evidence_json_only"])
 
 

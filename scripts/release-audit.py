@@ -258,9 +258,8 @@ class Audit:
         # tokio/test-util or iris-thumb-preview/test-fixtures). Its
         # `resolve.nodes[*].deps[*].dep_kinds` also keeps every target
         # declaration, so those predicates are never expanded or serialized.
-        flags = (["--no-default-features", "--features", "minimal"]
-                 if self.args.platform == "windows" else [])
-        context = dict(variant="minimal" if flags else "product", cargo_flags=flags,
+        flags = []
+        context = dict(variant="product", cargo_flags=flags,
                        target=None, root=None, truncated=False)
         try:
             hosts = re.findall(r"^host: (\S+)$", rustc, re.M)
@@ -673,8 +672,8 @@ class Audit:
         for path in payload:
             if path != executable:
                 self.file(path)
-        self.add("build", variant="minimal", cargo_flags=["--no-default-features", "--features", "minimal"],
-                 native_preview="FFmpeg and PDFium are not selected by this release build; no video/PDF preview support is asserted.")
+        self.add("build", variant="product", features="Cargo defaults",
+                 native_preview="FFmpeg and PDFium come from the verified exact-SHA product stage; video/PDF preview support is asserted from that stage's evidence.")
         tool = shutil.which("llvm-readobj")
         if not tool:
             candidate = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "LLVM/bin/llvm-readobj.exe"
@@ -690,7 +689,7 @@ class Audit:
                 self.command(str(tools[-1]), "/NOLOGO", "/IMPORTS", str(executable))
             else:
                 self.add("missing", reason="no llvm-readobj or Visual Studio dumpbin import inspector")
-        self.add("scope", note="Imports are direct PE imports, not proof of the runtime closure or static library licenses. Absence of FFmpeg/PDFium selection follows explicit minimal build flags, not executable naming.")
+        self.add("scope", note="Imports are direct PE imports, not proof of the runtime closure or static library licenses. The released FFmpeg/PDFium bytes come from the verified exact-SHA product stage, not from executable naming or a reduced build variant.")
 
 
 def probe_library(path):

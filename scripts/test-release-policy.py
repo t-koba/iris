@@ -706,8 +706,10 @@ class Policy(unittest.TestCase):
         self.assertIn('git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main', guard)
         self.assertIn("exit 1", guard)
         self.assertLess(guard_start, preflight.index("  package-macos:\n"))
-        for job in ("package-macos", "package-linux", "package-windows"):
+        for job in ("package-macos", "package-linux"):
             self.assertIn(f"  {job}:\n    needs: release-preflight", preflight)
+        self.assertIn("  windows-product-assets:\n    needs: release-preflight", preflight)
+        self.assertIn("  package-windows:\n    needs: [release-preflight, windows-product-assets]", preflight)
         for platform in POLICY["required_variants"]:
             self.assertIn("name: audit-" + platform, publish)
             self.assertIn(f"audit/{platform}/{platform}.json", publish)

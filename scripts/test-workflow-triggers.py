@@ -375,8 +375,10 @@ permissions:
         and main_tag_guard in release
         and all(
             f"  {job}:\n    needs: release-preflight\n" in release
-            for job in ("package-macos", "package-linux", "package-windows")
+            for job in ("package-macos", "package-linux")
         )
+        and "  windows-product-assets:\n    needs: release-preflight\n" in release
+        and "  package-windows:\n    needs: [release-preflight, windows-product-assets]\n" in release
     ),
     "Trash path preflight regressions run on Ubuntu and Windows outside container smoke": ci_matrix_job_has(
         "trash-path-preflight",
@@ -421,10 +423,10 @@ permissions:
       attestations: read
     uses: ./.github/workflows/windows-ffmpeg-validation.yml
 """ in ci,
-    "Windows native validation is workflow_call only": """on:
+    "Windows native validation is workflow_call only with a gated asset export": """on:
   workflow_call:
-
-permissions:
+    inputs:
+      export_release_assets:
 """
     in win_validation
     and all(

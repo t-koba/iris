@@ -146,7 +146,7 @@ fuzz 用のクレートは各 `fuzz/` ディレクトリで同じ操作をしま
 
 1. ルートの `Cargo.toml` にある `[workspace.package].version` を上げます。各クレートのバージョンはここから継承され、Windows 実行ファイルの VERSIONINFO とインストーラーのバージョンもこの値から生成されます。`cargo check --workspace` で `Cargo.lock` を更新し、両方をコミットします。
 2. 更新したバージョンと一致する `v<version>` タグ（例: `v0.4.0`）を `main` 上のコミットに付けて push します。リリース前検証はタグとルートのワークスペースバージョンの一致を確認します。
-3. `release.yml` が macOS・Linux のパッケージを作り、GitHub の Release に添付します。Windows は検証済み product stage の接続まで保留中です。
+3. `release.yml` が 3 OS のパッケージを作り、GitHub の Release に添付します。Windows は検証用 reusable workflow が同じ SHA で作った exact-SHA product stage を取得して packages に使います。
 
 手元でパッケージを作るスクリプトもあります。出力先は `dist/` です。
 
@@ -154,7 +154,7 @@ fuzz 用のクレートは各 `fuzz/` ディレクトリで同じ操作をしま
 |---|---|---|
 | macOS | `./scripts/package-macos-app.sh` | pinned FFmpeg/liblzma をビルドした `Iris.app` と ZIP/PKG（[runtime/source/notice](../packaging/macos/ffmpeg-README.md) 同梱）。`IRIS_MACOS_SIGN_IDENTITY` と `IRIS_MACOS_NOTARY_PROFILE` を設定すると署名と公証も行う |
 | Linux | `./scripts/package-linux-appdir.sh` | `Iris.AppDir`（`appimagetool` があれば AppImage にできる） |
-| Windows | `./scripts/package-windows.ps1` | ビルドせず、検証済みの product stage から `Iris.exe` を含む zip を作成。`IRIS_PRODUCT_STAGE` / `IRIS_PRODUCT_INVENTORY` / `IRIS_PRODUCT_ZIP` / `IRIS_RELEASE_OUTPUT_DIR` が必須。リリース workflow は product stage の接続まで `IRIS_WINDOWS_RELEASE_HELD` で保留中 |
+| Windows | `./scripts/package-windows.ps1` | ビルドせず、検証済みの product stage から `Iris.exe` を含む zip を作成。`IRIS_PRODUCT_STAGE` / `IRIS_PRODUCT_INVENTORY` / `IRIS_PRODUCT_ZIP` / `IRIS_RELEASE_OUTPUT_DIR` が必須。リリース workflow は検証済みの asset をダウンロードして同じスクリプトの成果物をそのまま stage する |
 
 ### 公開しないパッケージ監査
 
@@ -175,7 +175,7 @@ status は `not_attempted` です。タグ push の `main` 到達性・バージ
 実行の Actions artifacts に `release-macos` / `release-linux` / `release-windows` と、
 別名の `audit-macos` / `audit-linux` / `audit-windows`（JSON）が残ります。
 公開ジョブは `release-*` のみ取得します。監査は検証失敗時にも可能な範囲で実行します。
-監査追加はリリース保留の解除やライセンス・脆弱性対応の承認ではありません。
+監査追加はリリース公開やライセンス・脆弱性対応の承認ではありません。
 
 - macOS: staged `Iris.app` の実行ファイル・dylib の SHA-256 と `otool` load commands、
   解決できた依存を記録します。製品の pinned FFmpeg の source/signature/configuration と
@@ -189,16 +189,16 @@ status は `not_attempted` です。タグ push の `main` 到達性・バージ
 - FFmpeg 情報は辿った**実ライブラリ**を別プロセスで読み、その version/configuration/license API
   を問い合わせます。`ffmpeg-next` や別の `ffmpeg` 実行ファイルから推測しません。
   読込み失敗・不足証拠は失敗として残ります。
-- Windows: 現行 release の minimal flags、staged executable の SHA-256 と payload files、
+- Windows: リリース成果物の product variant、staged executable の SHA-256 と payload files、
   利用可能なら LLVM / Visual Studio ツールによる PE imports を記録します。
-  FFmpeg/PDFium は選択されず、動画・PDF preview 対応を主張しません。
+  FFmpeg/PDFium は検証済み exact-SHA product stage 由来で、動画・PDF preview はその stage の evidence に基づきます。
 
 各 OS の report は `rustc --version --verbose` の host を使い、
 `cargo tree -p iris-ui-shell --target <host> --offline --locked --prefix indent --charset ascii --format '{p}|{f}' -e normal,build`
-を実行します（macOS/Linux は defaults、Windows は `--no-default-features --features minimal`）。
+を実行します（3 OS とも Cargo defaults の product graph です）。
 product graph、有効 features、target filtering 後の normal/build edges はこの package-rooted tree が正とし、
 `cargo metadata --format-version 1 --locked --offline --filter-platform <host> --manifest-path crates/ui-shell/Cargo.toml`
-（同じ variant flags）は package/license カタログにのみ使います。Cargo tree の build group から edge kind を読み、
+（同じ Cargo defaults）は package/license カタログにのみ使います。Cargo tree の build group から edge kind を読み、
 metadata の未評価 target predicates は graph に載せません。
 `cargo metadata` 単体は workspace 全体を解決するため per-node features が水増しされる
 （dev/bench 由来の image/avif、tokio/test-util、iris-thumb-preview/test-fixtures 等）ので、
@@ -242,9 +242,10 @@ patch 適用状況やライセンス互換性をこのレポートだけで保�
 署名検証済み FFmpeg 8.1.3 source と pinned vcpkg overlay から product をビルドし、
 PE import closure、PDFium の固定 pin/`gh attestation verify` と staging、
 インストール済み preview の video/PDF/RAW smoke を検査して JSON evidence に残します。
-permission は read-only で、upload する成果物は JSON 一つだけです。
-native binary や署名付き archive は upload せず、Release、`minimal` packaging、
-product feature flag も変更しません。検証が成功してもリリース保留は解除されません。
+permission は read-only で、通常の dispatch では JSON evidence だけを upload します。
+`export_release_assets: true` を指定した release workflow からの呼び出しでは、検証済みの
+zip・インストーラー・package result・product inventory だけを gated に upload し、
+release 側で SHA-256 と収録ファイルを再検証してから stage します。
 
 ### Release policy gate（法的承認ではない）
 
@@ -291,7 +292,7 @@ subject と実際の staged library hash が一致する場合に限ります。
 staged `PROVENANCE.json` schema 2 は、tag-only 検証で実際に使った `gh` の X.Y.Z と実行ファイル SHA-256 も記録し、
 report-only の場合は両値を `null` にします。audit はこの verifier identity を表示しますが、それだけで TUF trust root の内容や法的承認を証明しません。
 TUF bootstrap の挙動は、記録された verifier binary に対応する upstream source で別途確認する必要があります。
-Windows は build と graph の `product` variant が必須で、現行 minimal release は公開できません。
+Windows も build と graph の `product` variant が必須で、公開する zip・インストーラーは検証済み exact-SHA product stage 由来でなければなりません。
 この gate は package 内容・build flags を変更しません。
 
 #### Native closure evidence（audit schema 2）
@@ -379,6 +380,6 @@ synthetic positive regression は到達可能な PASS を確認するだけで�
 
 | ワークフロー | いつ | 内容 |
 |---|---|---|
-| `ci.yml` | push・プルリクエスト・週 1 回 | 整形、lint、依存の監査、ビルド、バイナリサイズの上限、テスト、SFTP / SMB の結合テスト、fuzz の短時間実行。Windows は minimal 構成 |
-| `release.yml` | `main` 上の version 一致 `v<version>` タグ / 選択した run ref での手動監査 | 3 OS のパッケージ・チェックサムと別 artifact の監査レポート。Release 公開はタグ push のみ |
+| `ci.yml` | push・プルリクエスト・週 1 回 | 整形、lint、依存の監査、ビルド、バイナリサイズの上限、テスト、SFTP / SMB の結合テスト、fuzz の短時間実行。CI の Windows ビルドは minimal 構成だが、リリースは検証済み product stage を使用 |
+| `release.yml` | `main` 上の version 一致 `v<version>` タグ / 選択した run ref での手動監査 | 3 OS のパッケージ・チェックサムと別 artifact の監査レポート。Windows は検証用 reusable workflow の成果物を検証して stage。Release 公開はタグ push のみ |
 | `fuzz-long.yml` | 週 1 回 | fuzz を長時間実行 |

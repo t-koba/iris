@@ -8,7 +8,8 @@ a test-only prototype's unsigned source or binding override.
 
 This module performs acquisition and verification only. vcpkg overlay derivation,
 native build, DLL/PDFium closure staging, notices and clean-install preview smoke
-remain for a Windows runner via exact-SHA CI; release.yml stays minimal until then.
+remain for a Windows runner via exact-SHA CI, whose verified product stage the
+release workflow consumes.
 The GPG signature verifier and digest helper are imported from linux-ffmpeg.py so
 there is a single approved verification implementation.
 """

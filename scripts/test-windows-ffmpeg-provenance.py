@@ -14,10 +14,10 @@ this contract checks it resolves to the approved source and locked bindings, and
 that the recorded binding ABI matches the approved source without a crate cache.
 This checks the dependency route and the boundary, not native execution: the
 native Windows build, DLL/PDFium closure, notices and clean-install preview
-smoke still require a Windows runner via exact-SHA CI before release.yml may
-ship a product build. Until then the Windows release variant stays minimal and
-the release policy fails closed. The constants here are config evidence, not a
-claim that a release artifact was built or that a codec is safe.
+smoke are performed by a Windows runner via exact-SHA CI; release.yml consumes
+the verified product assets exported by that reusable workflow. The constants
+here are config evidence, not a claim that a release artifact was built or that
+a codec is safe.
 """
 
 from pathlib import Path
@@ -238,10 +238,13 @@ class WindowsFfmpegProvenance(unittest.TestCase):
         self.assertIsNotNone(match, f"Linux contract pin {name} missing")
         return match.group(1) or match.group(2)
 
-    def test_windows_release_hold_is_explicit(self):
+    def test_windows_release_consumes_verified_product_stage(self):
         release = read(".github/workflows/release.yml")
-        self.assertIn("IRIS_WINDOWS_RELEASE_HELD", release)
+        self.assertNotIn("IRIS_WINDOWS_RELEASE_HELD", release)
         self.assertNotIn("./scripts/package-windows.ps1", release)
+        self.assertIn("uses: ./.github/workflows/windows-ffmpeg-validation.yml", release)
+        self.assertIn("export_release_assets: true", release)
+        self.assertIn("name: windows-release-assets", release)
         policy = json.loads(read("scripts/release-policy.json"))
         self.assertEqual(policy["required_variants"]["windows"], "product")
         self.assertIn("python scripts/release-policy.py", release)

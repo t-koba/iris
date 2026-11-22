@@ -207,7 +207,8 @@ PRODUCT_NOTICE_MARKERS = (
 
 
 # The release packager is exercised against the same clean stage, with a real
-# compiler, but its output and report are discarded after one bounded upload.
+# compiler. The default discards its output after one bounded JSON evidence
+# upload; a gated release caller may export the verified assets instead.
 RELEASE_PACKAGE_MARKERS = (
     "- name: Install Inno Setup for release package rehearsal",
     "choco install innosetup --version=6.7.1 --allow-downgrade --yes --no-progress",
@@ -301,6 +302,14 @@ ALLOWED_ACTIONS = frozenset((
     "actions/upload-artifact@v4",
 ))
 UPLOAD_ACTION_PREFIX = "actions/upload-artifact@"
+UPLOAD_EXPORT_INPUT = "inputs.export_release_assets"
+EXPORT_ARTIFACT_NAME = "windows-release-assets"
+EXPORT_ASSET_BASENAMES = (
+    "Iris-windows.zip",
+    "Iris-windows-setup.exe",
+    "release-package-result.json",
+    "product-inventory.json",
+)
 # Resolve action references syntactically, not by line position: block,
 # spaced, quoted and flow-mapping spellings all yield the same reference.
 ACTION_REF_RE = re.compile(r"['\"]?uses['\"]?\s*:\s*['\"]?([^\s,'\"}#]+)")
@@ -447,6 +456,131 @@ def upload_paths(text):
     return steps, paths
 
 
+def indent_of(line):
+    return len(line) - len(line.lstrip())
+
+
+def upload_step_records(text):
+    """Return one record per upload-artifact step, fail-closed by shape.
+
+    Each record carries the action reference, `if:` condition, artifact name,
+    `with:` flags and paths. Step boundaries come from indentation, so an
+    inserted upload cannot hide inside another step or escape classification.
+    """
+    lines = [decode_yaml_escapes(line) for line in text.splitlines()]
+    records = []
+    for i, line in enumerate(lines):
+        refs = [ref for ref in action_refs(line)
+                if ref.startswith(UPLOAD_ACTION_PREFIX)]
+        if not refs:
+            continue
+        action_ind = indent_of(line)
+        start = i
+        while start > 0:
+            prev = lines[start - 1]
+            if prev.strip().startswith("- ") and indent_of(prev) <= action_ind:
+                start -= 1
+                break
+            if prev.strip() and indent_of(prev) < action_ind:
+                start -= 1
+                break
+            start -= 1
+        end = i + 1
+        while end < len(lines):
+            nxt = lines[end]
+            if nxt.strip() and indent_of(nxt) < action_ind:
+                break
+            if nxt.strip().startswith("- ") and indent_of(nxt) <= action_ind:
+                break
+            end += 1
+        block = lines[start:end]
+        body_ind = max(action_ind, indent_of(block[0]) + 2)
+        condition = ""
+        name = ""
+        flags = {}
+        with_ind = None
+        for bl in block:
+            stripped = bl.strip()
+            if not stripped or stripped.startswith("#") or indent_of(bl) < body_ind:
+                continue
+            key = re.match(
+                r"^(?:-\s*)?['\"]?(if|name|with)['\"]?\s*:\s*(.*)$", stripped)
+            if key and indent_of(bl) == body_ind:
+                field, value = key.group(1), key.group(2).strip()
+                if field == "if":
+                    condition = value.strip("\"'")
+                elif field == "name":
+                    name = value.strip("\"'")
+                else:
+                    with_ind = indent_of(bl)
+                continue
+            if with_ind is not None and indent_of(bl) > with_ind:
+                flag = re.match(r"^['\"]?([a-z][a-z-]*)['\"]?\s*:\s*(.*)$", stripped)
+                if flag:
+                    flags[flag.group(1)] = flag.group(2).strip().strip("\"'")
+        if with_ind is not None and not name and "name" in flags:
+            name = flags.pop("name")
+        paths = [value.strip() for value in INLINE_PATH_RE.findall(line)]
+        for k in range(i - start + 1, len(block)):
+            bl = block[k]
+            stripped = bl.strip()
+            if not stripped.startswith("path:"):
+                continue
+            value = stripped[len("path:"):].strip()
+            if value in ("|", "|-", "|+", ">", ">-", ">+"):
+                pi = indent_of(bl)
+                for entry in block[k + 1:]:
+                    if not entry.strip():
+                        continue
+                    if indent_of(entry) <= pi:
+                        break
+                    paths.append(entry.strip())
+            elif value:
+                paths.append(value.strip("\"'"))
+        for ref in refs:
+            records.append(dict(
+                action=ref, condition=condition, name=name, flags=dict(flags),
+                paths=list(paths), gated=UPLOAD_EXPORT_INPUT in condition))
+    return records
+
+
+def export_input_declared(text):
+    """Require workflow_call.inputs to declare the boolean export switch."""
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        if not re.match(r"^\s*workflow_call:\s*$", line):
+            continue
+        base = indent_of(line)
+        inputs_idx = None
+        for j in range(idx + 1, len(lines)):
+            nxt = lines[j]
+            if nxt.strip() and indent_of(nxt) <= base:
+                break
+            if re.match(r"^\s*inputs:\s*$", nxt) and indent_of(nxt) > base:
+                inputs_idx = j
+                break
+        if inputs_idx is None:
+            continue
+        inputs_ind = indent_of(lines[inputs_idx])
+        for j in range(inputs_idx + 1, len(lines)):
+            entry = lines[j]
+            if entry.strip() and indent_of(entry) <= inputs_ind:
+                break
+            if not re.match(r"^\s*export_release_assets:\s*$", entry):
+                continue
+            decl_ind = indent_of(entry)
+            fields = {}
+            for sub in lines[j + 1:]:
+                if sub.strip() and indent_of(sub) <= decl_ind:
+                    break
+                field = re.match(r"^\s*([a-z-]+):\s*(.*)$", sub)
+                if field:
+                    fields[field.group(1)] = field.group(2).strip()
+            if fields.get("type") == "boolean" and fields.get("default") == "false":
+                return True
+    return False
+
+
 def validate(text):
     """Return a dict of checks; raise ValueError on the first fail-closed violation."""
     checks = {}
@@ -454,6 +588,9 @@ def validate(text):
     triggers = re.findall(r"^  ([a-z_]+):", trigger_block, re.MULTILINE)
     checks["reusable_only"] = triggers == ["workflow_call"]
     require(checks["reusable_only"], "workflow must be workflow_call only")
+    checks["export_input_declared"] = export_input_declared(trigger_block)
+    require(checks["export_input_declared"],
+            "workflow_call must declare export_release_assets as boolean defaulting to false")
 
     # Flow-style step mappings are not used by this workflow. Rejecting them
     # keeps every step in the block form the structural checks below can see.
@@ -621,8 +758,8 @@ def validate(text):
     literal_uploads = sum(decode_yaml_escapes(line).count(UPLOAD_ACTION_PREFIX)
                           for line in code_lines)
     checks["upload_literal_count"] = literal_uploads
-    require(literal_uploads == 1,
-            "workflow must name exactly one upload-artifact action")
+    require(literal_uploads == 2,
+            "workflow must name exactly two upload-artifact actions")
 
     # Every action step must be known. This catches new or renamed actions,
     # including upload actions written with unusual but valid YAML spelling.
@@ -643,19 +780,50 @@ def validate(text):
     require(ok, reason)
     checks["read_only_permissions"] = True
 
-    # Exactly one bounded evidence upload; every path form must be JSON.
-    steps, paths = upload_paths(text)
+    # Exactly two uploads: one ungated bounded JSON evidence upload and one
+    # release-asset export gated on the workflow_call input. Classify by the
+    # step's own `if:` condition so no extra native upload can slip through.
+    steps, _ = upload_paths(text)
+    records = upload_step_records(text)
     checks["upload_count"] = steps
-    require(steps == 1, "workflow must have exactly one bounded evidence upload")
-    checks["evidence_json_only"] = bool(paths) and all(p.endswith(".json") for p in paths)
+    require(steps == 2, "workflow must have exactly two upload-artifact steps")
+    require(len(records) == steps,
+            "every upload-artifact step must be classified by the upload guard")
+    evidence_uploads = [r for r in records if not r["gated"]]
+    export_uploads = [r for r in records if r["gated"]]
+    checks["evidence_upload_count"] = len(evidence_uploads)
+    checks["export_upload_count"] = len(export_uploads)
+    require(checks["evidence_upload_count"] == 1,
+            "workflow must have exactly one ungated evidence upload")
+    require(checks["export_upload_count"] == 1,
+            "workflow must have exactly one gated release asset export")
+    evidence_paths = [p for r in evidence_uploads for p in r["paths"]]
+    checks["evidence_json_only"] = bool(evidence_paths) and all(
+        p.endswith(".json") for p in evidence_paths)
     require(checks["evidence_json_only"],
-            "every uploaded artifact path must be JSON evidence only")
+            "every evidence upload path must be JSON evidence only")
     for evidence in ("pe-import-closure.json", "preview-smoke.json"):
-        require(any(p.endswith(evidence) for p in paths),
+        require(any(p.endswith(evidence) for p in evidence_paths),
                 f"bounded evidence upload missing: {evidence}")
-    require(any(p.endswith("product-package-rehearsal.json") for p in paths),
+    require(any(p.endswith("product-package-rehearsal.json") for p in evidence_paths),
             "bounded evidence upload missing: product-package-rehearsal.json")
     checks["product_evidence_upload"] = True
+
+    export = export_uploads[0]
+    require(export["name"] == EXPORT_ARTIFACT_NAME,
+            "gated export must upload the windows-release-assets artifact")
+    require(export["flags"].get("if-no-files-found") == "error",
+            "gated export must fail when a verified asset is missing")
+    retention = export["flags"].get("retention-days", "")
+    require(retention.isdigit() and 0 < int(retention) <= 7,
+            "gated export retention must be bounded to at most seven days")
+    require("compression-level" in export["flags"],
+            "gated export must declare a compression level")
+    basenames = sorted(p.replace("\\", "/").rsplit("/", 1)[-1]
+                       for p in export["paths"])
+    require(basenames == sorted(EXPORT_ASSET_BASENAMES),
+            f"gated export must contain exactly the verified release assets, got: {basenames}")
+    checks["export_assets_bounded"] = True
 
     # The product rehearsal is an offline assembly over the already-validated
     # stage. Every new behaviour must be executable, ordered after the smoke,
@@ -752,6 +920,9 @@ def main():
             triggers=["workflow_call"], offline_gates=list(OFFLINE_GATES),
             required_markers=list(REQUIRED_MARKERS), forbidden_markers=list(FORBIDDEN_MARKERS),
             allowed_actions=sorted(ALLOWED_ACTIONS), flow_steps_allowed=False,
+            upload_count=2, evidence_upload_count=1, export_upload_count=1,
+            export_input=UPLOAD_EXPORT_INPUT, export_artifact_name=EXPORT_ARTIFACT_NAME,
+            export_asset_basenames=list(EXPORT_ASSET_BASENAMES),
         ), indent=2))
         return
     checks = validate(WORKFLOW.read_text())

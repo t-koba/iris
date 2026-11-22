@@ -191,10 +191,11 @@ class CompositionContracts(unittest.TestCase):
             self.assertEqual(len(e[key]), 64)
             self.assertTrue(all(c in "0123456789abcdef" for c in e[key]))
 
-    def test_build_declares_forbidden_features_and_hold(self):
+    def test_build_declares_forbidden_features_and_release_variant(self):
         e = mod.build()
         self.assertEqual(e["forbidden_features"], ["gpl", "version3", "nonfree"])
-        self.assertIn("minimal", e["release_hold"])
+        self.assertEqual(e["release_variant"], "product")
+        self.assertNotIn("release_hold", e)
 
 
 class PackagingHoldContracts(unittest.TestCase):
@@ -210,7 +211,7 @@ class PackagingHoldContracts(unittest.TestCase):
         self.assertNotIn('"--features", "minimal"', pkg)
 
 
-class ReleaseHoldMarkerContracts(unittest.TestCase):
+class ReleaseWiringContracts(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.release = (ROOT / ".github/workflows/release.yml").read_text()
@@ -218,25 +219,123 @@ class ReleaseHoldMarkerContracts(unittest.TestCase):
         cls.audit = (ROOT / "scripts/release-audit.py").read_text()
         cls.policy = mod.read_json("scripts/release-policy.json")
         cls.ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        cls.validation = (ROOT / ".github/workflows/windows-ffmpeg-validation.yml").read_text()
 
-    def validate(self, release):
-        return mod.validate_release_hold(release, self.package, self.audit,
-                                         self.policy, self.ci)
+    def validate(self, **overrides):
+        values = dict(release=self.release, package=self.package, audit=self.audit,
+                      policy=self.policy, ci=self.ci, validation=self.validation)
+        values.update(overrides)
+        return mod.validate_release_wiring(values["release"], values["package"],
+                                           values["audit"], values["policy"],
+                                           values["ci"], values["validation"])
 
-    def test_hold_marker_present_and_no_direct_packager_call(self):
-        self.assertIn("IRIS_WINDOWS_RELEASE_HELD", self.release)
-        self.assertNotIn("./scripts/package-windows.ps1", self.release)
-        self.assertTrue(self.validate(self.release))
+    def test_release_consumes_the_verified_product_stage(self):
+        for marker in ("IRIS_WINDOWS_RELEASE_HELD", "Install Inno Setup"):
+            self.assertNotIn(marker, self.release)
+        for marker in ("  windows-product-assets:\n",
+                       "    needs: [release-preflight, windows-product-assets]\n",
+                       "uses: ./.github/workflows/windows-ffmpeg-validation.yml",
+                       "export_release_assets: true",
+                       "name: windows-release-assets",
+                       "zip_sha256", "installer_sha256"):
+            self.assertIn(marker, self.release)
+        self.assertTrue(self.validate())
 
-    def test_missing_hold_marker_fails(self):
-        mutated = self.release.replace("IRIS_WINDOWS_RELEASE_HELD", "IRIS_WINDOWS_RELEASE_OPEN")
-        with self.assertRaises(ValueError):
-            self.validate(mutated)
+    def test_hold_marker_fails_closed(self):
+        mutated = self.release.replace("  windows-product-assets:\n",
+                                       "  windows-product-assets:\n  # IRIS_WINDOWS_RELEASE_HELD\n", 1)
+        with self.assertRaisesRegex(ValueError, "hold marker"):
+            self.validate(release=mutated)
 
-    def test_reintroduced_packager_call_fails(self):
+    def test_direct_packager_call_fails_closed(self):
         mutated = self.release + "        run: ./scripts/package-windows.ps1\n"
-        with self.assertRaises(ValueError):
-            self.validate(mutated)
+        with self.assertRaisesRegex(ValueError, "instead of invoking"):
+            self.validate(release=mutated)
+
+    def test_missing_validation_call_fails_closed(self):
+        marker = "uses: ./.github/workflows/windows-ffmpeg-validation.yml\n"
+        self.assertEqual(self.release.count(marker), 1)
+        with self.assertRaisesRegex(ValueError, "validation workflow"):
+            self.validate(release=self.release.replace(marker, "", 1))
+
+    def test_disabled_asset_export_fails_closed(self):
+        marker = "export_release_assets: true"
+        self.assertEqual(self.release.count(marker), 1)
+        with self.assertRaisesRegex(ValueError, "export_release_assets: true"):
+            self.validate(release=self.release.replace(marker, "export_release_assets: false", 1))
+
+    def test_missing_asset_dependency_fails_closed(self):
+        marker = "    needs: [release-preflight, windows-product-assets]\n"
+        self.assertEqual(self.release.count(marker), 1)
+        with self.assertRaisesRegex(ValueError, "depend on the verified product assets"):
+            self.validate(release=self.release.replace(marker, "", 1))
+
+    def test_missing_asset_download_fails_closed(self):
+        marker = "          name: windows-release-assets\n"
+        self.assertEqual(self.release.count(marker), 1)
+        with self.assertRaisesRegex(ValueError, "download the windows-release-assets"):
+            self.validate(release=self.release.replace(marker, "", 1))
+
+    def test_missing_hash_checks_fail_closed(self):
+        for marker, expected in (("zip_sha256", "product asset digests"),
+                                 ("installer_sha256", "product asset digests")):
+            with self.subTest(marker=marker):
+                mutated = self.release.replace(marker, "removed_digest")
+                with self.assertRaisesRegex(ValueError, expected):
+                    self.validate(release=mutated)
+
+    def test_minimal_package_inputs_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "bounded exact-SHA product inventory"):
+            self.validate(package=self.package.replace("IRIS_PRODUCT_STAGE", "IRIS_UNUSED_STAGE"))
+        with self.assertRaisesRegex(ValueError, "reduced feature variant"):
+            self.validate(package=self.package + '--no-default-features\n')
+
+    def test_minimal_audit_variant_fails_closed(self):
+        mutated = self.audit.replace('variant="product"', 'variant="minimal"')
+        self.assertNotEqual(mutated, self.audit)
+        with self.assertRaisesRegex(ValueError, "product build variant"):
+            self.validate(audit=mutated)
+
+    def test_windows_minimal_graph_path_fails_closed(self):
+        product_graph = ('        flags = []\n'
+                         '        context = dict(variant="product", cargo_flags=flags,\n'
+                         '                       target=None, root=None, truncated=False)\n')
+        self.assertEqual(self.audit.count(product_graph), 1)
+        mutations = (
+            ("windows condition with minimal flags",
+             '        flags = (["--no-default-features", "--features", "minimal"]\n'
+             '                 if self.args.platform == "windows" else [])\n'
+             '        context = dict(variant="minimal" if flags else "product", cargo_flags=flags,\n'
+             '                       target=None, root=None, truncated=False)\n'),
+            ("minimal graph variant",
+             '        flags = []\n'
+             '        context = dict(variant="minimal", cargo_flags=flags,\n'
+             '                       target=None, root=None, truncated=False)\n'),
+        )
+        for name, injected in mutations:
+            with self.subTest(name=name):
+                mutated = self.audit.replace(product_graph, injected, 1)
+                self.assertNotEqual(mutated, self.audit)
+                with self.assertRaisesRegex(ValueError, "Windows minimal build/graph path"):
+                    self.validate(audit=mutated)
+
+    def test_minimal_policy_variant_fails_closed(self):
+        policy = copy.deepcopy(self.policy)
+        policy["required_variants"]["windows"] = "minimal"
+        with self.assertRaisesRegex(ValueError, "product Windows variant"):
+            self.validate(policy=policy)
+
+    def test_ungated_validation_export_fails_closed(self):
+        gate = "        if: ${{ inputs.export_release_assets }}\n"
+        self.assertEqual(self.validation.count(gate), 1)
+        with self.assertRaisesRegex(ValueError, "gate the windows-release-assets"):
+            self.validate(validation=self.validation.replace(gate, "", 1))
+
+    def test_missing_ci_contract_fails_closed(self):
+        marker = "python3 scripts/test-windows-ffmpeg-validation-config.py"
+        self.assertEqual(self.ci.count(marker), 1)
+        with self.assertRaisesRegex(ValueError, "wired into CI"):
+            self.validate(ci=self.ci.replace(marker, "", 1))
 
 
 class WiringContracts(unittest.TestCase):
