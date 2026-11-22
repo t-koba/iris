@@ -55,7 +55,7 @@ graph TD
 
 `vendor/cryoglyph` は外部クレート `cryoglyph` 0.1.0 の一時的な修正版です。iced_wgpu 経由で使われる lru 0.16 の `pop_lru` に解放後使用の問題があるため lru 0.18 に切り替えており、upstream が修正版をリリースすれば不要になります。
 
-`vendor/paste` は RUSTSEC-2026-0543（paste はメンテナンス停止）への一時的な vendor パッチで、rav1e が必要とする `paste` の名前で保守中のフォーク pastey 0.1.1 を提供します。
+`crates/paste-compat` は RUSTSEC-2026-0543（paste はメンテナンス停止）に対する Iris 所有の小さな独立ファサードです。保守停止した `paste` の修正版を vendor に置かず、保守中の pastey 0.1.1 の proc macro（`paste`・`item`・`expr`）を再エクスポートして、rav1e などが要求する `paste = "1.0"` の API を提供します。
 
 ## ui-shell の中身
 

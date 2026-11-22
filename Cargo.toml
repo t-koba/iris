@@ -19,6 +19,7 @@ version = "0.4.0"
 [workspace]
 members = [
     "crates/core-domain",
+    "crates/paste-compat",
     "crates/platform-integration",
     "crates/catalog",
     "crates/jobstore",
@@ -155,6 +156,6 @@ cryoglyph = { path = "vendor/cryoglyph" }
 # Temporary jpegxr 0.3.1 vendor copy: update bindgen for newer libclang and
 # release the C decoder when initialization fails (the fuzz-discovered leak).
 jpegxr = { path = "vendor/jpegxr" }
-# RUSTSEC-2026-0543: paste is unmaintained; use the maintained pastey fork under
-# the paste name until rav1e migrates. Remove once upstream paste is maintained.
-paste = { path = "vendor/paste" }
+# RUSTSEC-2026-0543: paste is unmaintained; a small Iris-owned facade re-exports
+# maintained pastey 0.1.1 under the paste name until rav1e migrates.
+paste = { path = "crates/paste-compat" }

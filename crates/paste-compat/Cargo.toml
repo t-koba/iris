@@ -1,0 +1,9 @@
+[package]
+name = "paste"
+version = "1.0.15"
+edition = "2021"
+description = "Iris compatibility facade exposing pastey's proc macros under the paste name."
+publish = false
+
+[dependencies]
+pastey = "0.1.1"

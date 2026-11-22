@@ -139,6 +139,10 @@ jobs:
           cargo test -p iris-thumb-preview --lib modern_image::tests::tlm_ --locked
           python3 scripts/test-openjpeg-unpatched.py
 
+      - name: Paste compatibility facade regression
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-paste-compat.py
+
       - name: Path identity regressions
         run: |
           cargo test -p iris-core-domain --lib path_identity::tests:: --locked

@@ -5303,6 +5303,9 @@ dependencies = [
 [[package]]
 name = "paste"
 version = "1.0.15"
+dependencies = [
+ "pastey",
+]
 
 [[package]]
 name = "pastey"
