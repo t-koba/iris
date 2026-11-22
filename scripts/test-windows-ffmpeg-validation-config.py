@@ -327,9 +327,54 @@ class ReleaseWiringContracts(unittest.TestCase):
 
     def test_ungated_validation_export_fails_closed(self):
         gate = "        if: ${{ inputs.export_release_assets }}\n"
-        self.assertEqual(self.validation.count(gate), 1)
+        self.assertEqual(self.validation.count(gate), 3)
+        position = self.validation.index("          name: windows-release-assets\n")
+        position = self.validation.index(gate, position)
+        mutated = self.validation[:position] + self.validation[position + len(gate):]
         with self.assertRaisesRegex(ValueError, "gate the windows-release-assets"):
-            self.validate(validation=self.validation.replace(gate, "", 1))
+            self.validate(validation=mutated)
+
+    def test_absent_checked_in_windows_evidence_fails_closed(self):
+        marker = "--native-evidence packaging/native-evidence/windows.json"
+        self.assertNotIn(marker, self.release)
+        mutated = self.release.replace(
+            "--native-evidence verified/windows-native-evidence/windows-native-closure.json",
+            marker, 1)
+        self.assertIn(marker, mutated)
+        with self.assertRaisesRegex(ValueError, "absent checked-in Windows evidence"):
+            self.validate(release=mutated)
+
+    def test_missing_native_evidence_consumer_fails_closed(self):
+        for marker, expected in (
+                ("          name: windows-native-evidence\n", "download and seal"),
+                ("python3 scripts/windows-native-evidence.py seal",
+                 "download and seal"),
+                ("--require-native-evidence", "fail closed"),
+                ("          name: windows-native-evidence\n", "download and seal")):
+            with self.subTest(marker=marker):
+                self.assertEqual(self.release.count(marker), 1)
+                with self.assertRaisesRegex(ValueError, expected):
+                    self.validate(release=self.release.replace(marker, "", 1))
+
+    def test_silent_missing_native_audit_fails_closed(self):
+        marker = "native evidence required but absent or invalid"
+        self.assertEqual(self.audit.count(marker), 1)
+        with self.assertRaisesRegex(ValueError, "fail when reviewed native evidence is absent"):
+            self.validate(audit=self.audit.replace(marker, "", 1))
+
+    def test_native_closure_policy_cannot_be_relaxed(self):
+        policy = copy.deepcopy(self.policy)
+        policy["require_complete_native_license_closure"] = False
+        with self.assertRaisesRegex(ValueError, "complete native license closure"):
+            self.validate(policy=policy)
+
+    def test_gated_native_evidence_export_required(self):
+        gate = "        if: ${{ inputs.export_release_assets }}\n"
+        position = self.validation.index("          name: windows-native-evidence\n")
+        position = self.validation.rindex(gate, 0, position)
+        mutated = self.validation[:position] + self.validation[position + len(gate):]
+        with self.assertRaises(ValueError):
+            self.validate(validation=mutated)
 
     def test_missing_ci_contract_fails_closed(self):
         marker = "python3 scripts/test-windows-ffmpeg-validation-config.py"

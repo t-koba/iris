@@ -2,7 +2,9 @@
 """Offline contracts for the Windows native-validation workflow guard."""
 
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
 import sys
 import unittest
 
@@ -26,10 +28,12 @@ class WorkflowContracts(unittest.TestCase):
     def test_real_workflow_validates(self):
         checks = self.mod.validate(self.text)
         self.assertEqual(checks["reusable_only"], True)
-        self.assertEqual(checks["upload_count"], 2)
-        self.assertEqual(checks["upload_literal_count"], 2)
+        self.assertEqual(checks["upload_count"], 3)
+        self.assertEqual(checks["upload_literal_count"], 3)
         self.assertEqual(checks["evidence_upload_count"], 1)
-        self.assertEqual(checks["export_upload_count"], 1)
+        self.assertEqual(checks["export_upload_count"], 2)
+        self.assertTrue(checks["native_evidence_bounded"])
+        self.assertTrue(checks["native_evidence_json_only"])
         self.assertTrue(checks["export_input_declared"])
         self.assertTrue(checks["export_assets_bounded"])
         self.assertTrue(checks["export_flat_root"])
@@ -45,7 +49,6 @@ class WorkflowContracts(unittest.TestCase):
             self.assertIn(gate, self.text)
 
     def test_contract_cli_emits_shape(self):
-        import json, subprocess
         r = subprocess.run(
             [sys.executable, str(ROOT / "scripts/windows-ffmpeg-validation-workflow.py"), "contract"],
             capture_output=True, text=True)
@@ -185,8 +188,10 @@ class FailClosedContracts(unittest.TestCase):
 
     def test_rejects_ungated_release_asset_export(self):
         gate = "        if: ${{ inputs.export_release_assets }}\n"
-        self.assertEqual(self.text.count(gate), 1)
-        mutated = self.text.replace(gate, "", 1)
+        self.assertEqual(self.text.count(gate), 3)
+        position = self.text.index("          name: windows-release-assets\n")
+        position = self.text.index(gate, position)
+        mutated = self.text[:position] + self.text[position + len(gate):]
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
@@ -971,10 +976,71 @@ class ProductRehearsalContracts(unittest.TestCase):
         self.assertTrue(checks["product_rehearsal"])
         self.assertTrue(checks["product_evidence_upload"])
         self.assertTrue(checks["no_extracted_zip_smoke"])
-        self.assertEqual(checks["upload_count"], 2)
+        self.assertEqual(checks["upload_count"], 3)
         self.assertEqual(checks["evidence_upload_count"], 1)
-        self.assertEqual(checks["export_upload_count"], 1)
+        self.assertEqual(checks["export_upload_count"], 2)
         self.assertTrue(checks["evidence_json_only"])
+
+
+class NativeEvidenceExportContracts(unittest.TestCase):
+    """The gated reviewed-evidence export cannot weaken the default path."""
+
+    def setUp(self):
+        self.mod = load()
+        self.text = (ROOT / ".github/workflows/windows-ffmpeg-validation.yml").read_text()
+
+    def test_expected_shape(self):
+        shape = json.loads(subprocess.run(
+            [sys.executable, str(ROOT / "scripts/windows-ffmpeg-validation-workflow.py"),
+             "contract"], capture_output=True, text=True, check=True).stdout)
+        self.assertEqual(shape["upload_count"], 3)
+        self.assertEqual(shape["export_upload_count"], 2)
+        self.assertEqual(shape["native_evidence_artifact_name"], "windows-native-evidence")
+        self.assertEqual(shape["native_evidence_root"], "build/validation/evidence")
+        self.assertIn(self.mod.NATIVE_EVIDENCE_PREPARE_MARKER, shape["required_markers"])
+        self.assertEqual(sorted(shape["native_evidence_basenames"]),
+                         sorted(self.mod.NATIVE_EVIDENCE_BASENAMES))
+
+    def test_reviewed_evidence_upload_is_gated(self):
+        marker = "      - name: Upload reviewed Windows native evidence\n        if: ${{ inputs.export_release_assets }}\n"
+        self.assertEqual(self.text.count(marker), 1)
+        mutated = self.text.replace(marker,
+                                    "      - name: Upload reviewed Windows native evidence\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_native_bytes_in_gated_evidence(self):
+        marker = "            build/validation/evidence/release-package-result.json\n"
+        self.assertEqual(self.text.count(marker), 1)
+        mutated = self.text.replace(marker, marker + "            target/release/Iris.exe\n", 1)
+        with self.assertRaisesRegex(ValueError, "JSON evidence only"):
+            self.mod.validate(mutated)
+
+    def test_rejects_missing_reviewed_input(self):
+        marker = ("            build/validation/evidence/windows-native-evidence.json\n"
+                  "            build/validation/evidence/validation-inputs.json\n"
+                  "            build/validation/evidence/pe-import-closure.json\n")
+        self.assertEqual(self.text.count(marker), 1)
+        mutated = self.text.replace(marker, marker.replace(
+            "            build/validation/evidence/pe-import-closure.json\n", ""), 1)
+        with self.assertRaisesRegex(ValueError, "exactly the reviewed inputs"):
+            self.mod.validate(mutated)
+
+    def test_rejects_mixed_gated_evidence_roots(self):
+        marker = "            build/validation/evidence/windows-native-evidence.json\n"
+        self.assertEqual(self.text.count(marker), 1)
+        mutated = self.text.replace(
+            marker, "            ${{ runner.temp }}/iris-release-package/windows-native-evidence.json\n", 1)
+        with self.assertRaisesRegex(ValueError, "bounded evidence directory"):
+            self.mod.validate(mutated)
+
+    def test_reviewed_evidence_is_prepared_before_upload(self):
+        marker = self.mod.NATIVE_EVIDENCE_PREPARE_MARKER
+        self.assertEqual(self.text.count(marker), 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(self.text.replace(marker, "", 1))
+        validate_pos = self.text.index("      - name: Assemble bounded evidence manifest\n")
+        self.assertLess(self.text.index(marker), validate_pos)
 
 
 if __name__ == "__main__":

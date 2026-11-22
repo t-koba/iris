@@ -725,6 +725,8 @@ def main():
     parser.add_argument("platform", choices=("macos", "linux", "windows"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--native-evidence", type=Path, help="reviewed native closure JSON manifest; paths relative to dist/<platform> (not approval)")
+    parser.add_argument("--require-native-evidence", action="store_true",
+                        help="fail this audit when the native closure manifest is absent or invalid")
     parser.add_argument("--max-native-components", type=int,
                         default=os.environ.get("IRIS_RELEASE_AUDIT_MAX_NATIVE_COMPONENTS", "4096"))
     parser.add_argument("--max-report-bytes", type=int,
@@ -746,6 +748,7 @@ def main():
     limits = vars(args).copy()
     del limits["output"]
     del limits["native_evidence"]
+    del limits["require_native_evidence"]
     minimum_report = dict(schema=2, platform=args.platform, limits=limits,
                           omitted_records=0, records=[])
     if len((json.dumps(minimum_report, ensure_ascii=True) + "\n").encode()) > args.max_report_bytes:
@@ -782,6 +785,9 @@ def main():
     else:
         audit.windows(directory / "Iris/Iris.exe")
     audit.native_evidence(directory, args.native_evidence)
+    if args.require_native_evidence and not any(
+            row["kind"] == "native-closure" for row in audit.records):
+        parser.error("native evidence required but absent or invalid")
     while True:
         report = dict(schema=2, platform=args.platform, limits=limits,
                       omitted_records=audit.omitted, records=audit.records)

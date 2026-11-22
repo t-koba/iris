@@ -681,6 +681,16 @@ jobs:
           New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
           Set-Content -LiteralPath (Join-Path $evidenceDir "release-package-rehearsal.json") -Value ($record | ConvertTo-Json -Depth 4 -Compress) -Encoding utf8
 
+      - name: Prepare reviewed native closure evidence
+        if: ${{ inputs.export_release_assets }}
+        shell: bash
+        run: |
+          python3 scripts/windows-native-evidence.py prepare \
+            --evidence "$IRIS_VALIDATION_EVIDENCE" \
+            --release "${RUNNER_TEMP}/iris-release-package" \
+            --stage "$IRIS_PRODUCT_STAGE" \
+            --output "$IRIS_VALIDATION_EVIDENCE/windows-native-evidence.json"
+
       - name: Upload verified release assets for release packaging
         if: ${{ inputs.export_release_assets }}
         uses: actions/upload-artifact@v4
@@ -692,6 +702,21 @@ jobs:
             ${{ runner.temp }}/iris-release-package/Iris-windows-setup.exe
             ${{ runner.temp }}/iris-release-package/release-package-result.json
             ${{ runner.temp }}/iris-release-package/product-inventory.json
+          retention-days: 7
+          compression-level: 9
+
+      - name: Upload reviewed Windows native evidence
+        if: ${{ inputs.export_release_assets }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-evidence
+          if-no-files-found: error
+          path: |
+            build/validation/evidence/windows-native-evidence.json
+            build/validation/evidence/validation-inputs.json
+            build/validation/evidence/pe-import-closure.json
+            build/validation/evidence/product-inventory.json
+            build/validation/evidence/release-package-result.json
           retention-days: 7
           compression-level: 9
 

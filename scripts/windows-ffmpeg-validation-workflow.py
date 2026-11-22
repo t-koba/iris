@@ -256,6 +256,20 @@ PRODUCT_CLEANUP_MARKERS = (
     'if [ -n "$native_file" ] && [ -f "$native_file" ]; then rm -f "$native_file"; fi',
 )
 
+# The reviewed native closure evidence is exported separately, gated by the
+# same input. Both gated artifacts stay flat and JSON-only where appropriate;
+# the default report-only path still uploads only the bounded JSON report.
+NATIVE_EVIDENCE_ARTIFACT_NAME = "windows-native-evidence"
+NATIVE_EVIDENCE_BASENAMES = (
+    "windows-native-evidence.json",
+    "validation-inputs.json",
+    "pe-import-closure.json",
+    "product-inventory.json",
+    "release-package-result.json",
+)
+NATIVE_EVIDENCE_ROOT = "build/validation/evidence"
+NATIVE_EVIDENCE_PREPARE_MARKER = "python3 scripts/windows-native-evidence.py prepare"
+
 REQUIRED_MARKERS = (
     "workflow_call:",
     "ref: ${{ github.sha }}",
@@ -278,6 +292,7 @@ REQUIRED_MARKERS = (
     "if: always()",
     "rm -rf",
     "ev.mkdir(parents=True, exist_ok=True)",
+    NATIVE_EVIDENCE_PREPARE_MARKER,
     "$gpgDir = \"build/validation/gpg\"",
     "& gpg --homedir $gpgHome --batch --import $key",
     "$gpgHome = \"$gpgDir/home\"",
@@ -761,8 +776,8 @@ def validate(text):
     literal_uploads = sum(decode_yaml_escapes(line).count(UPLOAD_ACTION_PREFIX)
                           for line in code_lines)
     checks["upload_literal_count"] = literal_uploads
-    require(literal_uploads == 2,
-            "workflow must name exactly two upload-artifact actions")
+    require(literal_uploads == 3,
+            "workflow must name exactly three upload-artifact actions")
 
     # Every action step must be known. This catches new or renamed actions,
     # including upload actions written with unusual but valid YAML spelling.
@@ -783,13 +798,14 @@ def validate(text):
     require(ok, reason)
     checks["read_only_permissions"] = True
 
-    # Exactly two uploads: one ungated bounded JSON evidence upload and one
-    # release-asset export gated on the workflow_call input. Classify by the
-    # step's own `if:` condition so no extra native upload can slip through.
+    # Exactly three uploads: one ungated bounded JSON report, one gated
+    # release-asset export and one gated reviewed native-evidence export.
+    # Classify by each step's own `if:` condition so no extra native upload
+    # can slip through and the default path stays JSON-evidence-only.
     steps, _ = upload_paths(text)
     records = upload_step_records(text)
     checks["upload_count"] = steps
-    require(steps == 2, "workflow must have exactly two upload-artifact steps")
+    require(steps == 3, "workflow must have exactly three upload-artifact steps")
     require(len(records) == steps,
             "every upload-artifact step must be classified by the upload guard")
     evidence_uploads = [r for r in records if not r["gated"]]
@@ -798,8 +814,8 @@ def validate(text):
     checks["export_upload_count"] = len(export_uploads)
     require(checks["evidence_upload_count"] == 1,
             "workflow must have exactly one ungated evidence upload")
-    require(checks["export_upload_count"] == 1,
-            "workflow must have exactly one gated release asset export")
+    require(checks["export_upload_count"] == 2,
+            "workflow must have exactly two gated release exports")
     evidence_paths = [p for r in evidence_uploads for p in r["paths"]]
     checks["evidence_json_only"] = bool(evidence_paths) and all(
         p.endswith(".json") for p in evidence_paths)
@@ -812,7 +828,12 @@ def validate(text):
             "bounded evidence upload missing: product-package-rehearsal.json")
     checks["product_evidence_upload"] = True
 
-    export = export_uploads[0]
+    asset_exports = [r for r in export_uploads if r["name"] == EXPORT_ARTIFACT_NAME]
+    native_exports = [r for r in export_uploads
+                      if r["name"] == NATIVE_EVIDENCE_ARTIFACT_NAME]
+    require(len(asset_exports) == 1 and len(native_exports) == 1,
+            "gated exports must be windows-release-assets and windows-native-evidence")
+    export = asset_exports[0]
     require(export["name"] == EXPORT_ARTIFACT_NAME,
             "gated export must upload the windows-release-assets artifact")
     require(export["flags"].get("if-no-files-found") == "error",
@@ -839,6 +860,30 @@ def validate(text):
     require(normalized == [f"{parent}/{name}" for name in sorted(EXPORT_ASSET_BASENAMES)],
             "gated export artifact-relative paths must match the release consumer")
     checks["export_flat_root"] = True
+
+    native = native_exports[0]
+    require(native["flags"].get("if-no-files-found") == "error",
+            "gated native evidence export must fail when a reviewed input is missing")
+    retention = native["flags"].get("retention-days", "")
+    require(retention.isdigit() and 0 < int(retention) <= 7,
+            "gated native evidence retention must be bounded to at most seven days")
+    require("compression-level" in native["flags"],
+            "gated native evidence export must declare a compression level")
+    native_paths = sorted(p.replace("\\", "/") for p in native["paths"])
+    native_basenames = sorted(p.rsplit("/", 1)[-1] for p in native_paths)
+    checks["native_evidence_json_only"] = bool(native_paths) and all(
+        p.endswith(".json") for p in native_paths)
+    require(checks["native_evidence_json_only"],
+            "gated native evidence export must be JSON evidence only")
+    require(native_basenames == sorted(NATIVE_EVIDENCE_BASENAMES),
+            f"gated native evidence must contain exactly the reviewed inputs, got: {native_basenames}")
+    native_parents = {p.rsplit("/", 1)[0] for p in native_paths}
+    require(native_parents == {NATIVE_EVIDENCE_ROOT},
+            "gated native evidence must read only the bounded evidence directory")
+    require(native_paths == [f"{NATIVE_EVIDENCE_ROOT}/{name}"
+                             for name in sorted(NATIVE_EVIDENCE_BASENAMES)],
+            "gated native evidence artifact-relative paths must match the consumer")
+    checks["native_evidence_bounded"] = True
 
     # The product rehearsal is an offline assembly over the already-validated
     # stage. Every new behaviour must be executable, ordered after the smoke,
@@ -935,10 +980,14 @@ def main():
             triggers=["workflow_call"], offline_gates=list(OFFLINE_GATES),
             required_markers=list(REQUIRED_MARKERS), forbidden_markers=list(FORBIDDEN_MARKERS),
             allowed_actions=sorted(ALLOWED_ACTIONS), flow_steps_allowed=False,
-            upload_count=2, evidence_upload_count=1, export_upload_count=1,
+            upload_count=3, evidence_upload_count=1, export_upload_count=2,
             export_input=UPLOAD_EXPORT_INPUT, export_artifact_name=EXPORT_ARTIFACT_NAME,
             export_asset_basenames=list(EXPORT_ASSET_BASENAMES),
             export_artifact_root=EXPORT_ARTIFACT_ROOT,
+            native_evidence_artifact_name=NATIVE_EVIDENCE_ARTIFACT_NAME,
+            native_evidence_basenames=list(NATIVE_EVIDENCE_BASENAMES),
+            native_evidence_root=NATIVE_EVIDENCE_ROOT,
+            native_evidence_prepare=NATIVE_EVIDENCE_PREPARE_MARKER,
         ), indent=2))
         return
     checks = validate(WORKFLOW.read_text())

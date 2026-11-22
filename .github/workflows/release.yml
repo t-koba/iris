@@ -313,6 +313,11 @@ jobs:
         with:
           name: windows-release-assets
           path: verified/windows
+      - name: Download reviewed Windows native evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-native-evidence
+          path: verified/windows-native-evidence
       - name: Verify exported Windows release assets
         shell: pwsh
         run: |
@@ -424,10 +429,21 @@ jobs:
             dist/windows/Iris-windows-setup.exe
             dist/windows/Iris-windows-setup.exe.sha256
 
+      - name: Seal reviewed Windows native evidence
+        shell: bash
+        run: |
+          python3 scripts/windows-native-evidence.py seal \
+            --manifest verified/windows-native-evidence/windows-native-evidence.json \
+            --evidence verified/windows-native-evidence \
+            --assets verified/windows \
+            --dist dist/windows \
+            --product dist/windows/Iris \
+            --output verified/windows-native-evidence/windows-native-closure.json
+
       - name: Audit staged windows runtime
         if: ${{ !cancelled() }}
         shell: bash
-        run: python scripts/release-audit.py windows --output audit/windows.json --native-evidence packaging/native-evidence/windows.json
+        run: python scripts/release-audit.py windows --output audit/windows.json --native-evidence verified/windows-native-evidence/windows-native-closure.json --require-native-evidence
       - name: Retain windows audit evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4

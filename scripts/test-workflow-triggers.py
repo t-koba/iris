@@ -235,8 +235,23 @@ checks = {
     "Every production release audit supplies its platform closure manifest": all(
         f"        run: python scripts/release-audit.py {platform} --output audit/{platform}.json "
         f"--native-evidence packaging/native-evidence/{platform}.json\n" in release
-        for platform in ("macos", "linux", "windows")
-    ) and len(re.findall(r"run: python scripts/release-audit\.py ", release)) == 3,
+        for platform in ("macos", "linux")
+    ) and ("        run: python scripts/release-audit.py windows --output audit/windows.json "
+           "--native-evidence verified/windows-native-evidence/windows-native-closure.json "
+           "--require-native-evidence\n" in release)
+    and "packaging/native-evidence/windows.json" not in release
+    and len(re.findall(r"run: python scripts/release-audit\.py ", release)) == 3,
+    "Windows release consumes reviewed native-stage evidence end to end": (
+        "        if: ${{ inputs.export_release_assets }}\n"
+        "        uses: actions/upload-artifact@v4\n"
+        "        with:\n"
+        "          name: windows-native-evidence\n" in win_validation
+        and "python3 scripts/windows-native-evidence.py prepare" in win_validation
+        and "          name: windows-native-evidence\n"
+        "          path: verified/windows-native-evidence\n" in release
+        and "python3 scripts/windows-native-evidence.py seal" in release
+        and "--require-native-evidence" in release
+    ),
     "CI reruns bounded SMB diagnostics for exact invalid-parameter/access-denied statuses": (
         smb_diagnostic_status_contract()
         and "IRIS_PERF_SKIP_SFTP=1" in ci

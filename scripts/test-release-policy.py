@@ -366,6 +366,27 @@ class Policy(unittest.TestCase):
             self.assertIn("not legal/compliance approval: PASS", result.stdout)
             self.assertTrue(policy["require_complete_native_license_closure"])
 
+    def test_windows_closure_hold_cannot_be_satisfied_by_a_silent_missing(self):
+        """Windows evidence must be a schema-2 closure, never a `missing` pass."""
+        self.assertTrue(POLICY["require_complete_native_license_closure"])
+        self.assertEqual(POLICY["lgpl_legal_approvals"], [])
+        value = complete_report("windows")
+        self.assertEqual(value["platform"], "windows")
+        self.assertEqual(module.validate(value, POLICY, WORKSPACE), [])
+        without = copy.deepcopy(value)
+        without["records"] = [row for row in without["records"]
+                              if row["kind"] != "native-closure"]
+        with self.assertRaisesRegex(ValueError, "complete native license closure requires one schema-2"):
+            module.validate(without, POLICY, WORKSPACE)
+        silent = copy.deepcopy(value)
+        silent["records"].append(dict(kind="missing", reason="native evidence: absent"))
+        with self.assertRaisesRegex(ValueError, "missing evidence"):
+            module.validate(silent, POLICY, WORKSPACE)
+        checked_in = copy.deepcopy(value)
+        checked_in["records"][-1]["evidence"]["components"] = []
+        with self.assertRaises(ValueError):
+            module.validate(checked_in, POLICY, WORKSPACE)
+
     def test_identical_inventory_observations_preserved_and_conflicts_rejected(self):
         baseline, policy = complete_report("macos"), copy.deepcopy(POLICY)
         for kind in ("file", "native-file", "staged-file"):

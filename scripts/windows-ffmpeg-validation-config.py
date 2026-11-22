@@ -176,12 +176,31 @@ def validate_release_wiring(release_yml, package_ps1, release_audit, release_pol
             "release audit must not carry a Windows minimal build/graph path")
     require(release_policy["required_variants"]["windows"] == "product",
             "release policy must require the product Windows variant")
-    require("        if: ${{ inputs.export_release_assets }}\n" in validation_workflow,
+    require(validation_workflow.count("        if: ${{ inputs.export_release_assets }}\n") == 3,
             "validation workflow must gate the windows-release-assets upload")
+    # The Windows native closure is produced by the validating workflow and
+    # consumed by the release job; an absent checked-in manifest is never a
+    # source of approval or a silent `missing` record.
+    require("packaging/native-evidence/windows.json" not in release_yml,
+            "release must not reference an absent checked-in Windows evidence manifest")
+    require("name: windows-native-evidence" in release_yml
+            and "path: verified/windows-native-evidence" in release_yml
+            and "windows-native-evidence.py seal" in release_yml,
+            "release must download and seal the reviewed Windows native evidence")
+    require("--native-evidence verified/windows-native-evidence/windows-native-closure.json"
+            in release_yml and "--require-native-evidence" in release_yml,
+            "Windows audit must consume the sealed evidence and fail closed")
+    require("--require-native-evidence" in release_audit
+            and "native evidence required but absent or invalid" in release_audit,
+            "release audit must fail when reviewed native evidence is absent/invalid")
+    require(release_policy["require_complete_native_license_closure"] is True,
+            "Windows evidence must not relax the complete native license closure")
     workflow = load("wvwfv", "scripts/windows-ffmpeg-validation-workflow.py")
     checks = workflow.validate(validation_workflow)
-    require(checks["export_input_declared"] and checks["export_upload_count"] == 1,
-            "validation workflow must gate the windows-release-assets upload")
+    require(checks["export_input_declared"] and checks["export_upload_count"] == 2
+            and checks["native_evidence_bounded"] and checks["native_evidence_json_only"]
+            and checks["evidence_upload_count"] == 1,
+            "validation workflow must gate both bounded Windows exports")
     require("python3 scripts/test-windows-ffmpeg-validation-config.py" in ci_yml,
             "validation config contract must be wired into CI")
     return True

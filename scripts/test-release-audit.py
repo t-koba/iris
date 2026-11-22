@@ -775,6 +775,145 @@ class Reports(unittest.TestCase):
             self.assertEqual(pdfium["attestation_status"], "unknown")
 
 
+class WindowsNativeEvidencePipeline(unittest.TestCase):
+    """Producer evidence -> sealed manifest -> audit closure, all offline."""
+
+    def fixture(self, directory):
+        base = Path(directory)
+        ev, stage, release = base / "evidence", base / "stage", base / "release"
+        for path in (ev, stage, release):
+            path.mkdir()
+        dist = base / "dist" / "windows"
+        (dist / "Iris").mkdir(parents=True)
+        inputs = json.loads((ROOT / "build/validation/evidence/validation-inputs.json").read_text())
+        (ev / "validation-inputs.json").write_text(json.dumps(inputs))
+        names = ["Iris.exe", "avcodec-62.dll", "avformat-61.dll", "avutil-60.dll",
+                 "pdfium.dll", "FFMPEG-NOTICE.md"]
+        notice = (ROOT / "packaging/windows/ffmpeg-README.md").read_text()
+        for name in names:
+            data = notice.encode() if name == "FFMPEG-NOTICE.md" else (name + " binary").encode()
+            (stage / name).write_bytes(data)
+            (dist / "Iris" / name).write_bytes(data)
+        files = [dict(name=name, sha256=module.Audit.sha256_file(stage / name),
+                      bytes=(stage / name).stat().st_size) for name in names]
+        inventory = dict(roots=[str(stage)], files=files)
+        (ev / "product-inventory.json").write_text(json.dumps(inventory))
+        (ev / "pe-import-closure.json").write_text(json.dumps(dict(
+            roots=["Iris.exe"], binaries=names,
+            imports=[{"from": "Iris.exe", "import": "avcodec-62.dll",
+                      "resolution": "stage"}],
+            unresolved=[],
+            resolution_values=["system", "stage", "vc-redist", "os", "unresolved"],
+            vc_imports=[], vc_self_test=dict(status="pass", dlls=[]))))
+        assets = {}
+        for name, key in (("Iris-windows.zip", "zip_sha256"),
+                          ("Iris-windows-setup.exe", "installer_sha256")):
+            data = (name + " bytes").encode()
+            (release / name).write_bytes(data)
+            (dist / name).write_bytes(data)
+            digest = module.Audit.sha256_file(release / name)
+            (dist / (name + ".sha256")).write_text(f"{digest}  {name}\r\n")
+            assets[key] = digest
+        (release / "product-inventory.json").write_text(json.dumps(inventory))
+        (release / "release-package-result.json").write_text(json.dumps(dict(
+            status="pass", entries=names, installer_source_count=len(names),
+            inventory_equal=True, **assets)))
+        return base, ev, release, stage, dist, names
+
+    def run_evidence(self, *args):
+        command = [sys.executable, str(ROOT / "scripts/windows-native-evidence.py"), *map(str, args)]
+        return subprocess.run(command, capture_output=True, text=True)
+
+    def sealed(self, base, ev, release, stage, dist, output=None):
+        prepared = self.run_evidence("prepare", "--evidence", ev, "--release", release,
+                                     "--stage", stage, "--output", ev / "windows-native-evidence.json")
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        output = output or base / "windows-native-closure.json"
+        sealed = self.run_evidence("seal", "--manifest", ev / "windows-native-evidence.json",
+                                   "--evidence", ev, "--assets", release, "--dist", dist,
+                                   "--product", dist / "Iris", "--output", output)
+        return sealed, output
+
+    def test_sealed_evidence_becomes_an_audit_closure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base, ev, release, stage, dist, names = self.fixture(directory)
+            sealed, output = self.sealed(base, ev, release, stage, dist)
+            self.assertEqual(sealed.returncode, 0, sealed.stderr)
+            manifest = json.loads(output.read_text())
+            self.assertEqual(set(manifest), {"schema", "artifacts", "components"})
+            self.assertEqual(manifest["schema"], 1)
+            self.assertEqual(len(manifest["artifacts"]), len(names) + 4)
+            # The audit binds each reference to the exact staged bytes again.
+            report = audit(max_native_components=64)
+            for path in sorted(dist.rglob("*")):
+                if path.is_file():
+                    report.add("staged-file", path=str(path), bytes=path.stat().st_size,
+                               sha256=module.Audit.sha256_file(path))
+            native = dist / "Iris" / "Iris.exe"
+            entry = dict(path=str(native), bytes=native.stat().st_size,
+                         sha256=module.Audit.sha256_file(native))
+            report.add("native-file", **entry)
+            report.add("file", **entry)
+            report.native_evidence(dist, output)
+            self.assertFalse(any(row["kind"] == "missing" for row in report.records),
+                             report.records)
+            closure = next(row["evidence"] for row in report.records
+                           if row["kind"] == "native-closure")
+            components = module.validate_closure(closure, report.records, 256, 64)
+            self.assertTrue(components)
+            self.assertTrue(all(c["license"]["id"] in ("LGPL-2.1-or-later", "BSD-3-Clause")
+                                for c in components))
+
+    def test_missing_or_tampered_evidence_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base, ev, release, stage, dist, names = self.fixture(directory)
+            sealed, output = self.sealed(base, ev, release, stage, dist)
+            self.assertEqual(sealed.returncode, 0, sealed.stderr)
+            for path in (ev / "pe-import-closure.json", ev / "validation-inputs.json",
+                         release / "Iris-windows.zip", dist / "Iris" / "pdfium.dll",
+                         dist / "Iris-windows.zip.sha256"):
+                original = path.read_bytes()
+                path.write_bytes(original + b"tampered")
+                failed = self.run_evidence("seal", "--manifest",
+                                           ev / "windows-native-evidence.json",
+                                           "--evidence", ev, "--assets", release,
+                                           "--dist", dist, "--product", dist / "Iris",
+                                           "--output", base / "rejected.json")
+                self.assertNotEqual(failed.returncode, 0, path.name)
+                self.assertIn("refused", failed.stderr)
+                self.assertFalse((base / "rejected.json").exists())
+                path.write_bytes(original)
+            (dist / "Iris" / "unlisted.dll").write_bytes(b"unlisted")
+            failed = self.run_evidence("seal", "--manifest", ev / "windows-native-evidence.json",
+                                       "--evidence", ev, "--assets", release, "--dist", dist,
+                                       "--product", dist / "Iris", "--output", base / "rejected.json")
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertFalse((base / "rejected.json").exists())
+            failed = self.run_evidence("seal", "--manifest", base / "absent.json",
+                                       "--evidence", ev, "--assets", release, "--dist", dist,
+                                       "--product", dist / "Iris", "--output", base / "rejected.json")
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertFalse((base / "rejected.json").exists())
+
+    def test_audit_fails_closed_when_closure_is_required(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "audit.json"
+            command = [sys.executable, str(ROOT / "scripts/release-audit.py"), "windows",
+                       "--output", str(output),
+                       "--native-evidence", str(Path(directory) / "absent.json")]
+            missing = subprocess.run(command + ["--require-native-evidence"],
+                                     cwd=directory, capture_output=True, text=True)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("native evidence required but absent or invalid", missing.stderr)
+            self.assertFalse(output.exists())
+            # The default collector stays report-only for the other platforms.
+            allowed = subprocess.run(command, cwd=directory, capture_output=True, text=True)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+            report = json.loads(output.read_text())
+            self.assertTrue(any(row["kind"] == "missing" for row in report["records"]))
+            self.assertFalse(any(row["kind"] == "native-closure" for row in report["records"]))
+
+
 class Workflow(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

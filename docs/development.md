@@ -246,6 +246,12 @@ permission は read-only で、通常の dispatch では JSON evidence だけを
 `export_release_assets: true` を指定した release workflow からの呼び出しでは、検証済みの
 zip・インストーラー・package result・product inventory だけを gated に upload し、
 release 側で SHA-256 と収録ファイルを再検証してから stage します。
+同じ gated 経路で、PE import closure・validation inputs・product inventory から作った
+reviewed な native evidence（JSON のみ、manifest と入力/asset の hash）を別 artifact として
+export します。release 側は checksum sidecar を含む staged bytes と export 済み bytes を
+照合して manifest を seal し、audit の `--native-evidence` に渡します。
+manifest が欠落・不正な場合は `--require-native-evidence` が audit を失敗させます。
+これは evidence の受け渡しであり、法的承認や release readiness の主張ではありません。
 
 ### Release policy gate（法的承認ではない）
 
@@ -300,8 +306,13 @@ Windows も build と graph の `product` variant が必須で、公開する zi
 collector は audit schema 2 を生成します。`--native-evidence <sidecar.json>` で別途作成・review した
 構造化 evidence を渡すと、staged bytes を再 hash した inventory と照合して `native-closure` record に
 格納します。sidecar と `--output` は `dist/<platform>` の外に置き、検査中に stage を変更しないでください。
-release workflow は `packaging/native-evidence/{macos,linux,windows}.json` を明示的に渡します。
-これらの review 済み manifest と実在する supporting evidence はまだ揃っていないため、**現行 release は引き続き blocked** です。
+macOS/Linux の release audit は `packaging/native-evidence/{macos,linux}.json` を渡しますが、
+これらの review 済み manifest と supporting evidence はまだ揃っていないため、
+**macOS/Linux の native closure は引き続き blocked** です。
+Windows は checked-in path を使わず、validation workflow が gated に export した
+`windows-native-evidence`（JSON のみ）を release 側で staged/exported bytes に seal してから
+`--native-evidence` に渡します。audit が `native-closure` record を作れない場合は失敗し、
+`missing` のまま通過することはありません。
 旧 audit schema 1、sidecar の欠落、`complete: true` のような宣言だけでは closure 要件を満たしません。
 この入力は package・runtime composition を変更せず、既存の公開 policy gate を迂回しません。
 
