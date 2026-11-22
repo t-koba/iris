@@ -201,8 +201,13 @@ def replacement_section(notice):
 # segment; UNC paths start with two separators. Upstream CMake portfiles
 # legitimately contain doubled backslashes in regex escapes and `-libpath:\"`,
 # so detection runs on a backslash-normalized copy of the redacted text.
-HOST_PATH = re.compile(r"[A-Za-z]:[\\/][A-Za-z0-9_.-]")
-UNC_PATH = re.compile(r"(?<=[\"'(\s])[\\]{2}[A-Za-z0-9_.-]+[\\/]{1,2}[A-Za-z0-9_.-]+")
+# A component is any non-empty Windows name: Unicode letters and spaces are
+# valid there, while separators, quotes, controls and the reserved set
+# < > : " / \ | ? * cannot occur in a directory or share name.
+WINDOWS_NAME = r'[^\\/<>:"|?*\x00-\x1f\x7f-\x9f]+'
+HOST_PATH = re.compile(r"[A-Za-z]:[\\/]" + WINDOWS_NAME)
+UNC_PATH = re.compile(r'(?<=["\'(\s])[\\]{2}' + WINDOWS_NAME
+                      + r'[\\/]{1,2}' + WINDOWS_NAME)
 
 
 def redact(text, source_tree, label):

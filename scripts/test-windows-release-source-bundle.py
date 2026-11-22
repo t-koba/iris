@@ -309,6 +309,27 @@ class SourceBundleContracts(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "host path after redaction"):
                     self.build()
 
+    def test_rejects_unicode_and_spaced_host_paths_in_portfile(self):
+        original = (self.overlay / "portfile.cmake").read_text()
+        leaks = (r'set(LEAK "C:\Üsers\runneradmin\.cargo")',
+                 r'set(LEAK "C:\\Üsers\\runneradmin\\.cargo")',
+                 r'set(LEAK "C:\Ünicode Users\runneradmin\.cargo")',
+                 r'set(LEAK "C:\\Ünicode Users\\runneradmin\\.cargo")',
+                 r'set(LEAK "C:\ Program Files\secret")',
+                 r'set(LEAK "C:\\ Program Files\\secret")',
+                 r'set(LEAK "\\sérver\share\secret")',
+                 r'set(LEAK "\\\\sérver\\share\\secret")',
+                 r'set(LEAK "\\sérver share\share\secret")',
+                 r'set(LEAK "\\\\sérver share\\share\\secret")',
+                 r'set(LEAK "\\ private share\share\secret")',
+                 r'set(LEAK "\\\\ private share\\share\\secret")')
+        for leak in leaks:
+            with self.subTest(leak=leak):
+                (self.overlay / "portfile.cmake").write_text(
+                    original + leak + "\n", newline="\n")
+                with self.assertRaisesRegex(ValueError, "host path after redaction"):
+                    self.build()
+
     def test_rejects_oversized_member(self):
         (self.tree / "COPYRIGHT").write_bytes(b"x" * (self.mod.MAX_MEMBER_BYTES + 1))
         with self.assertRaisesRegex(ValueError, "exceeds member bound"):
