@@ -53,6 +53,8 @@ graph TD
 
 `vendor/block` は外部クレート `block` 0.1.6 の修正版です。描画に使う metal-rs が依存していますが、元の版は今後の Rust で拒否される型の書き方をしているため、API と ABI を保ったまま置き換えています（metal-rs がこのクレートを使わなくなれば不要になります）。
 
+`vendor/cryoglyph` は外部クレート `cryoglyph` 0.1.0 の一時的な修正版です。iced_wgpu 経由で使われる lru 0.16 の `pop_lru` に解放後使用の問題があるため lru 0.18 に切り替えており、upstream が修正版をリリースすれば不要になります。
+
 ## ui-shell の中身
 
 | モジュール | 内容 |
