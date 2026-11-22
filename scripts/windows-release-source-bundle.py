@@ -198,10 +198,11 @@ def replacement_section(notice):
 
 
 # Absolute Windows paths include a drive letter, a separator and a path
-# segment. Upstream CMake portfiles legitimately contain doubled backslashes
-# in regex escapes and `-libpath:\"`, so a bare backslash is not evidence of
-# a leaked runner path.
+# segment; UNC paths start with two separators. Upstream CMake portfiles
+# legitimately contain doubled backslashes in regex escapes and `-libpath:\"`,
+# so detection runs on a backslash-normalized copy of the redacted text.
 HOST_PATH = re.compile(r"[A-Za-z]:[\\/][A-Za-z0-9_.-]")
+UNC_PATH = re.compile(r"(?<=[\"'(\s])[\\]{2}[A-Za-z0-9_.-]+[\\/]{1,2}[A-Za-z0-9_.-]+")
 
 
 def redact(text, source_tree, label):
@@ -209,8 +210,18 @@ def redact(text, source_tree, label):
                 json.dumps(str(source_tree))[1:-1]}
     for variant in sorted(variants, key=len, reverse=True):
         text = text.replace(variant, SOURCE_TOKEN)
+    # Drive paths are checked after collapsing every escaped separator;
+    # UNC paths must keep their two leading separators, so only four-backslash
+    # runs are halved for that probe.
+    drive_probe = text
+    while "\\\\" in drive_probe:
+        drive_probe = drive_probe.replace("\\\\", "\\")
+    unc_probe = text
+    while "\\\\\\\\" in unc_probe:
+        unc_probe = unc_probe.replace("\\\\\\\\", "\\\\")
     require(not any(variant in text for variant in variants)
-            and HOST_PATH.search(text) is None,
+            and HOST_PATH.search(drive_probe) is None
+            and UNC_PATH.search(unc_probe) is None,
             label + " still carries a host path after redaction")
     return text.encode("utf-8")
 

@@ -296,13 +296,18 @@ class SourceBundleContracts(unittest.TestCase):
         for name in self.mod.overlay.baseline_patches():
             self.assertEqual(notices[name], "vcpkg-license.txt")
 
-    def test_rejects_unrelated_host_path_in_portfile(self):
-        portfile = self.overlay / "portfile.cmake"
-        portfile.write_text(portfile.read_text()
-                            + r'set(LEAK "C:\Users\runneradmin\.cargo")' + "\n",
-                            newline="\n")
-        with self.assertRaisesRegex(ValueError, "host path after redaction"):
-            self.build()
+    def test_rejects_unrelated_host_paths_in_portfile(self):
+        original = (self.overlay / "portfile.cmake").read_text()
+        leaks = (r'set(LEAK "C:\Users\runneradmin\.cargo")',
+                 r'set(LEAK "C:\\Users\\runneradmin\\.cargo")',
+                 r'set(LEAK "\\server\share\secret")',
+                 r'set(LEAK "\\\\server\\share\\secret")')
+        for leak in leaks:
+            with self.subTest(leak=leak):
+                (self.overlay / "portfile.cmake").write_text(
+                    original + leak + "\n", newline="\n")
+                with self.assertRaisesRegex(ValueError, "host path after redaction"):
+                    self.build()
 
     def test_rejects_oversized_member(self):
         (self.tree / "COPYRIGHT").write_bytes(b"x" * (self.mod.MAX_MEMBER_BYTES + 1))
