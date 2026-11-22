@@ -124,6 +124,12 @@ class SourceBundleContracts(unittest.TestCase):
             return {member.name: archive.extractfile(member).read()
                     for member in archive.getmembers()}
 
+    def test_product_notice_inventories_bundled_build_helpers(self):
+        notice = (ROOT / "packaging/windows/ffmpeg-README.md").read_text()
+        for name in ("FindFFMPEG.cmake.in", "build.sh.in", "vcpkg-cmake-wrapper.cmake",
+                     "cmake-copyright.txt", "vcpkg-license.txt", "BSD-3-Clause", "MIT"):
+            self.assertIn(name, notice)
+
     def test_plan_is_bounded_and_names_outputs(self):
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts/windows-release-source-bundle.py"), "plan"],

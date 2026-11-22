@@ -55,6 +55,10 @@ the installer source file and the reviewed native evidence.
 - `ffmpeg-build-materials.tar.gz`: the derived vcpkg portfile and its evidence,
   retained baseline-port patches, manifest, registry configuration, triplet,
   source-acquisition record, detached signature, signing key and GPG status.
+  The pinned baseline port also contributes `FindFFMPEG.cmake.in` (CMake,
+  BSD-3-Clause), plus `build.sh.in` and `vcpkg-cmake-wrapper.cmake` (vcpkg ports
+  tree, MIT); the legal archive retains their upstream notices as
+  `cmake-copyright.txt` and `vcpkg-license.txt`.
   The portfile's runner-local source path is replaced by
   `$IRIS_VALIDATION_SOURCE/ffmpeg-8.1.3`; the original hash stays in the
   bundle report so the derivation remains checkable without publishing a
