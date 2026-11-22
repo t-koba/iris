@@ -122,7 +122,7 @@ impl OwnedStage {
             .write(true)
             .create_new(fresh)
             .open(&owner_path)?;
-        owner.try_lock().map_err(io::Error::other)?;
+        owner.try_lock()?;
         if fresh {
             // Immutable intent is durable before data creation. An interrupted data or
             // identity write is discardable only with this exact binding and the lock.
@@ -245,7 +245,7 @@ impl InstalledStage {
                     .read(true)
                     .write(true)
                     .open(dir.join("owner"))?;
-                owner.try_lock().map_err(io::Error::other)?;
+                owner.try_lock()?;
                 let saved: Owner = serde_json::from_reader(&mut owner)?;
                 if saved.binding != binding || saved.len != len {
                     return Err(invalid());
@@ -298,7 +298,7 @@ pub fn remove(dir: &Path, binding: &str, len: u64) -> io::Result<()> {
         .read(true)
         .write(true)
         .open(&owner_path)?;
-    owner.try_lock().map_err(io::Error::other)?;
+    owner.try_lock()?;
     let mut bytes = Vec::new();
     owner.read_to_end(&mut bytes)?;
     let saved = serde_json::from_slice::<Owner>(&bytes);
@@ -366,6 +366,25 @@ pub fn remove(dir: &Path, binding: &str, len: u64) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread::sleep;
+    use std::time::{Duration, Instant};
+
+    /// Advisory lock release is synchronous on every supported platform, but some
+    /// filesystems expose the unlocked state to another opener a moment late.
+    fn reopen_after_release(dir: &Path, binding: &str, len: u64) -> OwnedStage {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match OwnedStage::reopen(dir, binding, len) {
+                Ok(stage) => return stage,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("reopen after release failed: {error}"),
+            }
+        }
+    }
 
     #[test]
     fn native_path_locator_round_trips_without_unicode_replacement() {
@@ -395,12 +414,16 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("stage");
         let stage = OwnedStage::create(&path, "job-entry-version-destination", 4).unwrap();
-        assert!(OwnedStage::reopen(&path, "job-entry-version-destination", 4).is_err());
+        let contention = match OwnedStage::reopen(&path, "job-entry-version-destination", 4) {
+            Err(error) => error,
+            Ok(_) => panic!("a live owner must hold an exclusive lock"),
+        };
+        assert_eq!(contention.kind(), io::ErrorKind::WouldBlock);
         assert!(remove(&path, "job-entry-version-destination", 4).is_err());
         drop(stage);
         assert!(OwnedStage::reopen(&path, "another identity", 4).is_err());
         assert!(remove(&path, "another identity", 4).is_err());
-        let stage = OwnedStage::reopen(&path, "job-entry-version-destination", 4).unwrap();
+        let stage = reopen_after_release(&path, "job-entry-version-destination", 4);
         // A normal stage reopen rejects installed data. Terminal cleanup may
         // discard the manifest but never consults the final path.
         std::fs::rename(stage.path(), root.path().join("final")).unwrap();
