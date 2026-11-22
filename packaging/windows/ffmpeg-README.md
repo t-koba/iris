@@ -39,18 +39,34 @@ build inputs:
 
 ## Notices and corresponding source
 
-A product payload carrying these DLLs is accompanied by the FFmpeg
-`COPYING.LGPLv2.1` and `COPYING.GPLv2` texts and the upstream copyright notices
-from the exact archive, and by the attested PDFium `LICENSE`, `VERSION` and
-`licenses/` notices with the provenance above. The archive also contains the
-upstream configure script, build system and complete source. The exact
-corresponding source can be supplied as the verified `ffmpeg-8.1.3.tar.xz` with
-its detached signature and signing key; this notice is the written-offer
-record with that archive's exact URL, SHA-256 and fingerprint. Configuration,
-the derived vcpkg overlay, triplet and any retained baseline-port patches are
-described below. The rehearsal ZIP verifies Iris.exe, the versioned FFmpeg
-DLL set, pdfium.dll and this notice; staging of the other listed documents in
-a product payload is not decided here.
+The portable ZIP and the clean installer now carry the following flat files
+beside `Iris.exe`, the versioned FFmpeg DLL set, `pdfium.dll` and this notice.
+They are produced offline by
+`scripts/windows-release-source-bundle.py build` from the already verified
+runner inputs, hashed in `ffmpeg-source-bundle.json`, and inventoried together
+with the binaries in `product-inventory.json`; the same list feeds the ZIP,
+the installer source file and the reviewed native evidence.
+
+- `ffmpeg-8.1.3.tar.xz`: the byte-exact, signature-verified upstream source
+  archive, including its configure script, build system and complete source.
+- `ffmpeg-legal-notices.tar.gz`: upstream `COPYING.LGPLv2.1`, `COPYING.GPLv2`,
+  `COPYRIGHT`/`CREDITS`, this notice and a `REPLACEMENT.md` excerpt of the
+  DLL replacement instructions below.
+- `ffmpeg-build-materials.tar.gz`: the derived vcpkg portfile and its evidence,
+  retained baseline-port patches, manifest, registry configuration, triplet,
+  source-acquisition record, detached signature, signing key and GPG status.
+  The portfile's runner-local source path is replaced by
+  `$IRIS_VALIDATION_SOURCE/ffmpeg-8.1.3`; the original hash stays in the
+  bundle report so the derivation remains checkable without publishing a
+  runner path.
+- `pdfium-notices.tar.gz`: the attested bundle's `LICENSE`, `VERSION`,
+  `args.gn` and complete `licenses/` tree.
+- `ffmpeg-source-bundle.json`: SHA-256 and byte counts for every input and
+  output of that offline bundling step.
+
+The DLLs remain dynamically linked and replaceable; no Iris object files or
+relink step are added. This is a factual source, configuration and notice
+record, not legal approval, parity evidence or release readiness.
 
 ## Rebuilding and LGPL section 6(b) replacement
 

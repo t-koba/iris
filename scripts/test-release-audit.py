@@ -788,7 +788,10 @@ class WindowsNativeEvidencePipeline(unittest.TestCase):
         inputs = json.loads((ROOT / "build/validation/evidence/validation-inputs.json").read_text())
         (ev / "validation-inputs.json").write_text(json.dumps(inputs))
         names = ["Iris.exe", "avcodec-62.dll", "avformat-61.dll", "avutil-60.dll",
-                 "pdfium.dll", "FFMPEG-NOTICE.md"]
+                 "pdfium.dll", "FFMPEG-NOTICE.md",
+                 "ffmpeg-8.1.3.tar.xz", "ffmpeg-legal-notices.tar.gz",
+                 "ffmpeg-build-materials.tar.gz", "pdfium-notices.tar.gz",
+                 "ffmpeg-source-bundle.json"]
         notice = (ROOT / "packaging/windows/ffmpeg-README.md").read_text()
         for name in names:
             data = notice.encode() if name == "FFMPEG-NOTICE.md" else (name + " binary").encode()

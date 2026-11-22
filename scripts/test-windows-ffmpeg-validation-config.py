@@ -389,6 +389,14 @@ class WiringContracts(unittest.TestCase):
         self.assertIn("python3 scripts/windows-ffmpeg-validation-config.py", ci)
         self.assertIn("python3 scripts/test-windows-ffmpeg-validation-config.py", ci)
 
+    def test_source_bundle_gate_wired_into_ci_and_validation(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        workflow = (ROOT / ".github/workflows/windows-ffmpeg-validation.yml").read_text()
+        gate = "python3 scripts/test-windows-release-source-bundle.py"
+        self.assertEqual(ci.count(gate), 1)
+        self.assertEqual(workflow.count(gate), 1)
+        self.assertEqual(workflow.count("python3 scripts/windows-release-source-bundle.py build"), 1)
+
     def test_no_unsigned_prototype_source_in_validation_inputs(self):
         for relative in (
             "packaging/windows/validation/vcpkg.json",

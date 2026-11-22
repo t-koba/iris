@@ -191,6 +191,18 @@ class InstallerFilesContracts(unittest.TestCase):
             'Source: "{#SourceDir}\\FFMPEG-NOTICE.md"; DestDir: "{app}"; Flags: ignoreversion',
         ])
 
+    def test_source_bundle_entries_flow_into_installer_source_list(self):
+        bundles = ("ffmpeg-8.1.3.tar.xz", "ffmpeg-legal-notices.tar.gz",
+                   "ffmpeg-build-materials.tar.gz", "pdfium-notices.tar.gz",
+                   "ffmpeg-source-bundle.json")
+        inventory = write_inventory(self.root, [entry("Iris.exe")]
+                                    + [entry(name) for name in bundles])
+        lines = generator.installer_files(inventory)
+        self.assertEqual(len(lines), len(bundles) + 1)
+        for name, line in zip(bundles, lines[1:]):
+            self.assertEqual(line, 'Source: "{#SourceDir}\\' + name
+                             + '"; DestDir: "{app}"; Flags: ignoreversion')
+
     def test_unsafe_names_and_bounds_are_rejected(self):
         cases = {
             "traversal": entry("../Iris.exe"),

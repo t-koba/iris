@@ -57,6 +57,9 @@ jobs:
       - name: Windows FFmpeg overlay derivation contract
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/test-windows-ffmpeg-overlay.py
+      - name: Windows release source bundle contract
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-windows-release-source-bundle.py
       - name: Windows FFmpeg validation input gate
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/windows-ffmpeg-validation-config.py

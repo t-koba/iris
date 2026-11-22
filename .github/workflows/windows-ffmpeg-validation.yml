@@ -58,6 +58,9 @@ jobs:
       - name: Windows FFmpeg overlay derivation contract
         shell: bash
         run: python3 scripts/test-windows-ffmpeg-overlay.py
+      - name: Windows release source bundle contract
+        shell: bash
+        run: python3 scripts/test-windows-release-source-bundle.py
       - name: Windows FFmpeg validation input gate
         shell: bash
         run: python3 scripts/windows-ffmpeg-validation-config.py build/validation/evidence/validation-inputs.json
@@ -292,6 +295,38 @@ jobs:
           if (!(Test-Path -LiteralPath $noticeSource -PathType Leaf)) { throw "FFmpeg notice missing: $noticeSource" }
           if ((Get-Item -LiteralPath $noticeSource).Length -le 0) { throw "FFmpeg notice empty: $noticeSource" }
           Copy-Item -LiteralPath $noticeSource -Destination (Join-Path $stage "FFMPEG-NOTICE.md") -Force
+
+          # Pack the verified source, licences, build materials and PDFium
+          # notices into the same flat stage before the inventory is written.
+          # The helper only reads the already verified inputs; no build, no
+          # fetch and no helper binaries enter the product inventory.
+          $sourceBundle = @(
+            "ffmpeg-8.1.3.tar.xz",
+            "ffmpeg-legal-notices.tar.gz",
+            "ffmpeg-build-materials.tar.gz",
+            "pdfium-notices.tar.gz",
+            "ffmpeg-source-bundle.json"
+          )
+          $sourceArchive = Join-Path $env:RUNNER_TEMP "ffmpeg-8.1.3.tar.xz"
+          $pdfiumAsset = Join-Path $env:RUNNER_TEMP "pdfium-win-x64.tgz"
+          $verifiedSource = Join-Path $env:IRIS_VALIDATION_SOURCE "ffmpeg-8.1.3"
+          $bundleReport = Join-Path $env:IRIS_VALIDATION_EVIDENCE "ffmpeg-source-bundle.json"
+          python3 scripts/windows-release-source-bundle.py build `
+            --source-archive $sourceArchive `
+            --source-tree $verifiedSource `
+            --gpg-dir "build/validation/gpg" `
+            --overlay $env:IRIS_VALIDATION_OVERLAY `
+            --pdfium-asset $pdfiumAsset `
+            --pdfium-extract (Join-Path $env:RUNNER_TEMP "pdfium-extract") `
+            --notice $noticeSource `
+            --output $stage `
+            --report $bundleReport
+          if ($LASTEXITCODE -ne 0) { throw "source and notice bundle derivation failed" }
+          foreach ($name in $sourceBundle) {
+            $bundled = Join-Path $stage $name
+            if (!(Test-Path -LiteralPath $bundled -PathType Leaf)) { throw "source/notice bundle missing from stage: $name" }
+            if ((Get-Item -LiteralPath $bundled).Length -le 0) { throw "source/notice bundle empty: $name" }
+          }
           # The example's own identity probe calls `rustc --version`; stage the
           # real compiler and its DLLs too, so the smoke needs no toolchain on
           # PATH. The sysroot is read before PATH is narrowed for the smoke.
@@ -313,6 +348,7 @@ jobs:
           # compiler and its DLLs stay in the runtime stage for the smoke only.
           $productNames = @("Iris.exe") + @($dlls | ForEach-Object { $_.Name }) + @("pdfium.dll")
           $productNames += "FFMPEG-NOTICE.md"
+          $productNames += $sourceBundle
           $productNames = @($productNames | Sort-Object -Unique)
           if ($productNames.Count -lt 3) { throw "product inventory empty" }
           foreach ($helper in @("rustc.exe", "preview_corpus_smoke.exe")) {
@@ -586,6 +622,9 @@ jobs:
           }
           if ($expected.Count -eq 0 -or $expected.Count -gt 256) { throw "product inventory bounds exceeded" }
           if (!$expected.ContainsKey("ffmpeg-notice.md")) { throw "FFmpeg notice missing from product inventory" }
+          foreach ($name in @("ffmpeg-8.1.3.tar.xz", "ffmpeg-legal-notices.tar.gz", "ffmpeg-build-materials.tar.gz", "pdfium-notices.tar.gz", "ffmpeg-source-bundle.json")) {
+            if (!$expected.ContainsKey($name)) { throw "source/notice bundle missing from product inventory: $name" }
+          }
           $seen = @{}
           $archive = [IO.Compression.ZipFile]::OpenRead($env:IRIS_PRODUCT_ZIP)
           try {
@@ -743,8 +782,10 @@ jobs:
           smoke = report(ev / "preview-smoke.json", json.loads)
           package = report(ev / "product-package-rehearsal.json", json.loads)
           release_package = report(ev / "release-package-rehearsal.json", json.loads)
+          source_bundle = report(ev / "ffmpeg-source-bundle.json", json.loads)
           out = dict(validation_inputs=inputs, pe_import_closure=closure,
                      preview_smoke=smoke, product_package_rehearsal=package,
+                     source_bundle=source_bundle,
                      release_package_rehearsal=release_package,
                      release_promotion=False, native_runtime_retained=False)
           (ev / "windows-validation.json").write_text(json.dumps(out, indent=2) + "\n")

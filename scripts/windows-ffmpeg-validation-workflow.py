@@ -28,6 +28,7 @@ OFFLINE_GATES = (
     "python3 scripts/test-windows-ffmpeg-provenance.py",
     "python3 scripts/test-windows-ffmpeg-source.py",
     "python3 scripts/test-windows-ffmpeg-overlay.py",
+    "python3 scripts/test-windows-release-source-bundle.py",
     "python3 scripts/windows-ffmpeg-validation-config.py",
     "python3 scripts/test-windows-ffmpeg-validation-config.py",
     "python3 scripts/test-windows-ffmpeg-validation-workflow.py",
@@ -130,6 +131,8 @@ EVIDENCE_MARKERS = (
     'report(ev / "preview-smoke.json", json.loads)',
     "pe_import_closure=closure",
     "preview_smoke=smoke",
+    'source_bundle = report(ev / "ffmpeg-source-bundle.json", json.loads)',
+    "source_bundle=source_bundle,",
 )
 
 CLEANUP_MARKER = (
@@ -204,6 +207,46 @@ PRODUCT_NOTICE_MARKERS = (
     'Copy-Item -LiteralPath $noticeSource -Destination (Join-Path $stage "FFMPEG-NOTICE.md") -Force',
     '$productNames += "FFMPEG-NOTICE.md"',
     'Copy-Item -LiteralPath $noticeSource -Destination (Join-Path $clean "FFMPEG-NOTICE.md") -Force',
+)
+
+
+# The source/notice bundle is built from already verified runner inputs and
+# inventoried with the product binaries. The helper writes only allowlisted
+# flat files; every name must survive into the ZIP, installer list and native
+# evidence through the one product inventory.
+SOURCE_BUNDLE_OUTPUTS = (
+    "ffmpeg-8.1.3.tar.xz",
+    "ffmpeg-legal-notices.tar.gz",
+    "ffmpeg-build-materials.tar.gz",
+    "pdfium-notices.tar.gz",
+    "ffmpeg-source-bundle.json",
+)
+SOURCE_BUNDLE_MARKERS = (
+    "$sourceBundle = @(",
+) + SOURCE_BUNDLE_OUTPUTS + (
+    '$sourceArchive = Join-Path $env:RUNNER_TEMP "ffmpeg-8.1.3.tar.xz"',
+    '$pdfiumAsset = Join-Path $env:RUNNER_TEMP "pdfium-win-x64.tgz"',
+    '$verifiedSource = Join-Path $env:IRIS_VALIDATION_SOURCE "ffmpeg-8.1.3"',
+    '$bundleReport = Join-Path $env:IRIS_VALIDATION_EVIDENCE "ffmpeg-source-bundle.json"',
+    "python3 scripts/windows-release-source-bundle.py build",
+    "--source-archive $sourceArchive",
+    "--source-tree $verifiedSource",
+    '--gpg-dir "build/validation/gpg"',
+    "--overlay $env:IRIS_VALIDATION_OVERLAY",
+    "--pdfium-asset $pdfiumAsset",
+    '--pdfium-extract (Join-Path $env:RUNNER_TEMP "pdfium-extract")',
+    "--notice $noticeSource",
+    "--output $stage",
+    "--report $bundleReport",
+    'if ($LASTEXITCODE -ne 0) { throw "source and notice bundle derivation failed" }',
+    "foreach ($name in $sourceBundle) {",
+    'throw "source/notice bundle missing from stage: $name"',
+    'throw "source/notice bundle empty: $name"',
+    "$productNames += $sourceBundle",
+    'foreach ($name in @("ffmpeg-8.1.3.tar.xz", "ffmpeg-legal-notices.tar.gz", "ffmpeg-build-materials.tar.gz", "pdfium-notices.tar.gz", "ffmpeg-source-bundle.json")) {',
+    'throw "source/notice bundle missing from product inventory: $name"',
+    'source_bundle = report(ev / "ffmpeg-source-bundle.json", json.loads)',
+    "source_bundle=source_bundle,",
 )
 
 
@@ -293,6 +336,7 @@ REQUIRED_MARKERS = (
     "rm -rf",
     "ev.mkdir(parents=True, exist_ok=True)",
     NATIVE_EVIDENCE_PREPARE_MARKER,
+    "python3 scripts/windows-release-source-bundle.py build",
     "$gpgDir = \"build/validation/gpg\"",
     "& gpg --homedir $gpgHome --batch --import $key",
     "$gpgHome = \"$gpgDir/home\"",
@@ -306,7 +350,7 @@ REQUIRED_MARKERS = (
 ) + ATTESTATION_MARKERS + STAGE_MARKERS + PE_IMPORT_MARKERS + EVIDENCE_MARKERS + VC_IMPORT_MARKERS + (
     CLEANUP_MARKER, PATH_MARKER,
 ) + PRODUCT_INVENTORY_MARKERS + PRODUCT_PACKAGE_MARKERS + PRODUCT_NOTICE_MARKERS + (
-    PRODUCT_EVIDENCE_MARKERS + PRODUCT_CLEANUP_MARKERS
+    PRODUCT_EVIDENCE_MARKERS + PRODUCT_CLEANUP_MARKERS + SOURCE_BUNDLE_MARKERS
 ) + PRODUCT_ZIP_MARKERS + RELEASE_PACKAGE_MARKERS
 
 # Only these actions may appear in the validation workflow. A closed allowlist
@@ -891,7 +935,8 @@ def validate(text):
     for group in (PRODUCT_INVENTORY_MARKERS, PRODUCT_PACKAGE_MARKERS,
                   PRODUCT_NOTICE_MARKERS, PRODUCT_ZIP_MARKERS,
                   RELEASE_PACKAGE_MARKERS,
-                  PRODUCT_EVIDENCE_MARKERS, PRODUCT_CLEANUP_MARKERS):
+                  PRODUCT_EVIDENCE_MARKERS, PRODUCT_CLEANUP_MARKERS,
+                  SOURCE_BUNDLE_MARKERS):
         for marker in group:
             require(marker in code,
                     f"product rehearsal marker missing from executable workflow lines: {marker}")
@@ -959,6 +1004,30 @@ def validate(text):
             "assembling step must verify and stage the FFmpeg notice after the inventory loop and before the ZIP path")
     checks["ffmpeg_notice_staged"] = True
 
+    # The bundle helper must run inside the runtime stage, after the notice is
+    # bound and before the inventory is written. Its names are appended to the
+    # same product list that feeds the ZIP, installer and native evidence.
+    bundle_def = "$sourceBundle = @("
+    bundle_call = "python3 scripts/windows-release-source-bundle.py build"
+    bundle_check = 'throw "source/notice bundle missing from stage: $name"'
+    bundle_inventory = "$productNames += $sourceBundle"
+    zip_guard = 'throw "source/notice bundle missing from product inventory: $name"'
+    positions = [code.index(marker) for marker in (
+        '$stage = Join-Path $env:RUNNER_TEMP "iris-runtime-stage"',
+        notice_bind, bundle_def, bundle_call, bundle_check,
+        bundle_inventory, inventory_create)]
+    require(positions == sorted(positions),
+            "source/notice bundle must be built and verified before the product inventory")
+    zip_start = code.index("- name: Verify product ZIP entry inventory")
+    require(zip_start < code.index(zip_guard) < code.index(
+            'report(ev / "product-package-rehearsal.json", json.loads)'),
+            "product ZIP must verify the source/notice bundle inventory before reporting")
+    bundle_lines = code.split(bundle_def, 1)[1].splitlines()[1:6]
+    bundle_names = tuple(line.strip().rstrip(",").strip('"') for line in bundle_lines)
+    require(SOURCE_BUNDLE_OUTPUTS == bundle_names,
+            "source/notice bundle output names drifted from the contract")
+    checks["source_bundle_staged"] = True
+
     require("Expand-Archive" not in code and "ZipFile.ExtractToDirectory" not in code,
             "the product ZIP must be verified in place, never extracted")
     require(code.count("& $smokeExe $corpus") == 1,
@@ -988,6 +1057,7 @@ def main():
             native_evidence_basenames=list(NATIVE_EVIDENCE_BASENAMES),
             native_evidence_root=NATIVE_EVIDENCE_ROOT,
             native_evidence_prepare=NATIVE_EVIDENCE_PREPARE_MARKER,
+            source_bundle_outputs=list(SOURCE_BUNDLE_OUTPUTS),
         ), indent=2))
         return
     checks = validate(WORKFLOW.read_text())

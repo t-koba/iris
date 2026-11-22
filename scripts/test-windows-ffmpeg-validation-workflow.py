@@ -43,6 +43,7 @@ class WorkflowContracts(unittest.TestCase):
         self.assertTrue(checks["stage_binding"])
         self.assertTrue(checks["system_dirs_token_scoped"])
         self.assertTrue(checks["vcpkg_empty_path_guard"])
+        self.assertTrue(checks["source_bundle_staged"])
 
     def test_all_offline_gates_present(self):
         for gate in self.mod.OFFLINE_GATES:
@@ -58,6 +59,7 @@ class WorkflowContracts(unittest.TestCase):
         self.assertIn("actions/upload-artifact@v4", shape["allowed_actions"])
         for marker in self.mod.ATTESTATION_MARKERS:
             self.assertIn(marker, shape["required_markers"])
+        self.assertEqual(shape["source_bundle_outputs"], list(self.mod.SOURCE_BUNDLE_OUTPUTS))
         for marker in (self.mod.STAGE_MARKERS + self.mod.PE_IMPORT_MARKERS
                        + self.mod.EVIDENCE_MARKERS + (self.mod.PATH_MARKER,)):
             self.assertIn(marker, shape["required_markers"])
@@ -203,7 +205,7 @@ class FailClosedContracts(unittest.TestCase):
     def test_rejects_wrong_source_path_layout(self):
         mutated = self.text.replace(
             'Join-Path $env:IRIS_VALIDATION_SOURCE "ffmpeg-8.1.3"',
-            "$env:IRIS_VALIDATION_SOURCE", 1)
+            "$env:IRIS_VALIDATION_SOURCE")
         with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
@@ -830,6 +832,7 @@ class ProductRehearsalContracts(unittest.TestCase):
             self.mod.RELEASE_PACKAGE_MARKERS,
             self.mod.PRODUCT_EVIDENCE_MARKERS,
             self.mod.PRODUCT_CLEANUP_MARKERS,
+            self.mod.SOURCE_BUNDLE_MARKERS,
         )
 
     def test_new_markers_are_required_and_removal_fails_closed(self):
@@ -910,6 +913,46 @@ class ProductRehearsalContracts(unittest.TestCase):
                    + self.text[zip_start:release_start] + self.text[release_end:])
         self.assertNotEqual(mutated, self.text)
         with self.assertRaisesRegex(ValueError, "release package rehearsal must follow"):
+            self.mod.validate(mutated)
+
+    def test_bundle_outputs_match_helper_plan(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/windows-release-source-bundle.py"), "plan"],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["outputs"],
+                         list(self.mod.SOURCE_BUNDLE_OUTPUTS))
+
+    def test_rejects_bundle_after_inventory_generation(self):
+        append = '          $productNames += $sourceBundle\n'
+        create = '          $inventory = @{ roots = @($stage); files = @($productFiles) }\n'
+        self.assertIn(append, self.text)
+        self.assertIn(create, self.text)
+        mutated = self.text.replace(append, "", 1).replace(create, create + append, 1)
+        with self.assertRaisesRegex(ValueError, "source/notice bundle must be built"):
+            self.mod.validate(mutated)
+
+    def test_rejects_bundle_before_notice(self):
+        call = '          python3 scripts/windows-release-source-bundle.py build `\n'
+        notice = '          Copy-Item -LiteralPath $noticeSource -Destination (Join-Path $stage "FFMPEG-NOTICE.md") -Force\n'
+        self.assertEqual(self.text.count(call), 1)
+        self.assertEqual(self.text.count(notice), 1)
+        mutated = self.text.replace(call, "", 1).replace(notice, call + notice, 1)
+        with self.assertRaisesRegex(ValueError, "source/notice bundle must be built"):
+            self.mod.validate(mutated)
+
+    def test_rejects_missing_zip_bundle_guard(self):
+        guard = '            if (!$expected.ContainsKey($name)) { throw "source/notice bundle missing from product inventory: $name" }\n'
+        self.assertEqual(self.text.count(guard), 1)
+        mutated = self.text.replace(guard, "", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_bundle_name_drift(self):
+        source = '"ffmpeg-legal-notices.tar.gz",\n'
+        self.assertEqual(self.text.count(source), 1)
+        mutated = self.text.replace(source, '"ffmpeg-legal-notice.tar.gz",\n', 1)
+        with self.assertRaises(ValueError):
             self.mod.validate(mutated)
 
     def test_rejects_helper_in_product_inventory(self):
