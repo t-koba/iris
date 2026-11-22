@@ -47,6 +47,9 @@ jobs:
       - name: Validate release policy gate offline
         timeout-minutes: 1
         run: python scripts/test-release-policy.py
+      - name: Validate POSIX native-evidence producer offline
+        timeout-minutes: 1
+        run: python scripts/test-posix-native-evidence.py
 
       - name: Resolve package source and workspace version
         id: source
@@ -158,17 +161,29 @@ jobs:
             dist/macos/Iris-macos.pkg
             dist/macos/Iris-macos.pkg.sha256
 
+      - name: Generate reviewed macOS native evidence
+        shell: bash
+        run: |
+          python3 scripts/posix-native-evidence.py generate \
+            --platform macos \
+            --stage dist/macos \
+            --mapping packaging/native-evidence/macos-mapping.json \
+            --output audit/native-evidence/macos.json \
+            --report audit/native-evidence/macos-review.json
       - name: Audit staged macos runtime
         if: ${{ !cancelled() }}
         shell: bash
-        run: python scripts/release-audit.py macos --output audit/macos.json --native-evidence packaging/native-evidence/macos.json
+        run: python scripts/release-audit.py macos --output audit/macos.json --native-evidence audit/native-evidence/macos.json --require-native-evidence
       - name: Retain macos audit evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: audit-macos
           if-no-files-found: error
-          path: audit/macos.json
+          path: |
+            audit/macos.json
+            audit/native-evidence/macos.json
+            audit/native-evidence/macos-review.json
 
   package-linux:
     needs: release-preflight
@@ -280,17 +295,29 @@ jobs:
             dist/linux/*.deb
             dist/linux/*.deb.sha256
 
+      - name: Generate reviewed Linux native evidence
+        shell: bash
+        run: |
+          python3 scripts/posix-native-evidence.py generate \
+            --platform linux \
+            --stage dist/linux \
+            --mapping packaging/native-evidence/linux-mapping.json \
+            --output audit/native-evidence/linux.json \
+            --report audit/native-evidence/linux-review.json
       - name: Audit staged linux runtime
         if: ${{ !cancelled() }}
         shell: bash
-        run: python scripts/release-audit.py linux --output audit/linux.json --native-evidence packaging/native-evidence/linux.json
+        run: python scripts/release-audit.py linux --output audit/linux.json --native-evidence audit/native-evidence/linux.json --require-native-evidence
       - name: Retain linux audit evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: audit-linux
           if-no-files-found: error
-          path: audit/linux.json
+          path: |
+            audit/linux.json
+            audit/native-evidence/linux.json
+            audit/native-evidence/linux-review.json
 
   windows-product-assets:
     needs: release-preflight

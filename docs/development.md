@@ -146,7 +146,7 @@ fuzz 用のクレートは各 `fuzz/` ディレクトリで同じ操作をしま
 
 1. ルートの `Cargo.toml` にある `[workspace.package].version` を上げます。各クレートのバージョンはここから継承され、Windows 実行ファイルの VERSIONINFO とインストーラーのバージョンもこの値から生成されます。`cargo check --workspace` で `Cargo.lock` を更新し、両方をコミットします。
 2. 更新したバージョンと一致する `v<version>` タグ（例: `v0.4.0`）を `main` 上のコミットに付けて push します。リリース前検証はタグとルートのワークスペースバージョンの一致を確認します。
-3. `release.yml` が 3 OS のパッケージを作り、GitHub の Release に添付します。Windows は検証用 reusable workflow が同じ SHA で作った exact-SHA product stage を取得して packages に使います。
+3. `release.yml` が 3 OS のパッケージを作り、GitHub の Release に添付します。macOS/Linux は各 stage の実 bytes から native-evidence sidecar を生成してから audit と policy を実行します。Windows は検証用 reusable workflow が同じ SHA で作った exact-SHA product stage を取得して packages に使います。
 
 手元でパッケージを作るスクリプトもあります。出力先は `dist/` です。
 
@@ -306,9 +306,17 @@ Windows も build と graph の `product` variant が必須で、公開する zi
 collector は audit schema 2 を生成します。`--native-evidence <sidecar.json>` で別途作成・review した
 構造化 evidence を渡すと、staged bytes を再 hash した inventory と照合して `native-closure` record に
 格納します。sidecar と `--output` は `dist/<platform>` の外に置き、検査中に stage を変更しないでください。
-macOS/Linux の release audit は `packaging/native-evidence/{macos,linux}.json` を渡しますが、
-これらの review 済み manifest と supporting evidence はまだ揃っていないため、
-**macOS/Linux の native closure は引き続き blocked** です。
+macOS/Linux はリリース stage の後、`scripts/posix-native-evidence.py generate` が
+`packaging/native-evidence/{macos,linux}-mapping.json` の review 済み rule と
+`packaging/{linux,macos}` の pin を使って、`audit/native-evidence/{macos,linux}.json`（sidecar）と
+review report を生成します。producer は stage 内の全 file を再 hash し、
+`ldd` / `otool` で見つかった stage 外の native dependency も実 bytes に束ねます。
+どの staged file にも一致する rule がなければ、また native file に review 済み license component が
+なければ Sidecar を書かずに失敗します。FFmpeg は review disposition の LGPL component として
+notice/source/relinking の義務を伴い、OS 提供ライブラリは review 済み mapping に載った
+license bucket だけを使います（未掲載なら拒否）。sidecar は `dist/<platform>` の外に置き、
+audit は `--native-evidence audit/native-evidence/<platform>.json --require-native-evidence` で
+これを要求します。未知・改ざん・欠落は producer と audit の両方で fail closed です。
 Windows は checked-in path を使わず、validation workflow が gated に export した
 `windows-native-evidence`（JSON のみ）を release 側で staged/exported bytes に seal してから
 `--native-evidence` に渡します。audit が `native-closure` record を作れない場合は失敗し、

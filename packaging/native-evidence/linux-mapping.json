@@ -1,0 +1,291 @@
+{
+  "components": {
+    "ffmpeg-{basename}": {
+      "disposition": "review",
+      "evidence": [
+        "Iris.AppDir/usr/share/doc/iris/ffmpeg/README.md",
+        "Iris.AppDir/usr/share/doc/iris/ffmpeg/COPYING.LGPLv2.1",
+        "Iris.AppDir/usr/share/doc/iris/ffmpeg/manifest.json",
+        "Iris.AppDir/usr/share/doc/iris/ffmpeg/source.tar.xz",
+        "Iris.AppDir/usr/share/doc/iris/system-dependencies.txt"
+      ],
+      "license": "LGPL-2.1-or-later",
+      "mode": "dynamic",
+      "modifications": "modified",
+      "name": "FFmpeg shared library",
+      "obligations": [
+        "notice",
+        "source",
+        "relinking"
+      ],
+      "pin": "ffmpeg"
+    },
+    "iris-imports": {
+      "disposition": "review",
+      "evidence": [
+        "Iris.AppDir/usr/share/doc/iris/ffmpeg/README.md",
+        "Iris.AppDir/usr/share/doc/iris/ffmpeg/COPYING.LGPLv2.1",
+        "Iris.AppDir/usr/share/doc/iris/ffmpeg/manifest.json",
+        "Iris.AppDir/usr/share/doc/iris/ffmpeg/source.tar.xz",
+        "Iris.AppDir/usr/share/doc/iris/system-dependencies.txt"
+      ],
+      "license": "LGPL-2.1-or-later",
+      "mode": "dynamic",
+      "modifications": "modified",
+      "name": "Iris FFmpeg dynamic imports",
+      "obligations": [
+        "notice",
+        "source",
+        "relinking"
+      ],
+      "pin": "ffmpeg"
+    },
+    "pdfium": {
+      "disposition": "allowed",
+      "evidence": [
+        "Iris.AppDir/usr/share/doc/iris/pdfium/LICENSE",
+        "Iris.AppDir/usr/share/doc/iris/pdfium/PROVENANCE.json",
+        "Iris.AppDir/usr/share/doc/iris/pdfium/VERSION"
+      ],
+      "license": "BSD-3-Clause",
+      "mode": "dynamic",
+      "modifications": "unmodified",
+      "name": "bundled PDFium shared library",
+      "obligations": [
+        "notice",
+        "source",
+        "relinking"
+      ],
+      "pin": "pdfium"
+    }
+  },
+  "evidence_files": [
+    "Iris.AppDir/usr/share/doc/iris/ffmpeg/README.md",
+    "Iris.AppDir/usr/share/doc/iris/ffmpeg/COPYING.LGPLv2.1",
+    "Iris.AppDir/usr/share/doc/iris/ffmpeg/manifest.json",
+    "Iris.AppDir/usr/share/doc/iris/ffmpeg/source.tar.xz",
+    "Iris.AppDir/usr/share/doc/iris/system-dependencies.txt",
+    "Iris.AppDir/usr/share/doc/iris/pdfium/LICENSE",
+    "Iris.AppDir/usr/share/doc/iris/pdfium/PROVENANCE.json",
+    "Iris.AppDir/usr/share/doc/iris/pdfium/VERSION"
+  ],
+  "pins": {
+    "ffmpeg": "packaging/linux/ffmpeg.json",
+    "pdfium": "packaging/windows/ffmpeg.json"
+  },
+  "platform": "linux",
+  "schema": 1,
+  "scope": "Reviewed stage-to-evidence mapping for the exact release stage. Declares license-policy buckets and evidence locations only; it is not legal approval, a source license claim for Iris, or a release decision. System library buckets follow the staged distro copyright evidence; an unlisted system library refuses the manifest rather than inheriting a license.",
+  "staged_rules": [
+    {
+      "component": "iris-imports",
+      "path": "Iris.AppDir/usr/bin/Iris",
+      "role": "native"
+    },
+    {
+      "component": "ffmpeg-{basename}",
+      "path": "Iris.AppDir/usr/lib/iris/libav*.so*",
+      "role": "native"
+    },
+    {
+      "component": "ffmpeg-{basename}",
+      "path": "Iris.AppDir/usr/lib/iris/libsw*.so*",
+      "role": "native"
+    },
+    {
+      "component": "pdfium",
+      "path": "Iris.AppDir/usr/lib/iris/libpdfium.so",
+      "role": "native"
+    },
+    {
+      "path": "Iris.AppDir/AppRun",
+      "role": "data"
+    },
+    {
+      "path": "Iris.AppDir/iris.desktop",
+      "role": "data"
+    },
+    {
+      "path": "Iris.AppDir/iris.png",
+      "role": "data"
+    },
+    {
+      "path": "Iris.AppDir/usr/share/applications/*.desktop",
+      "role": "data"
+    },
+    {
+      "path": "Iris.AppDir/usr/share/icons/hicolor/256x256/apps/*.png",
+      "role": "data"
+    },
+    {
+      "path": "Iris.AppDir/usr/share/doc/iris/*",
+      "role": "evidence"
+    },
+    {
+      "path": "Iris.AppDir/usr/share/doc/iris/ffmpeg/*",
+      "role": "evidence"
+    },
+    {
+      "path": "Iris.AppDir/usr/share/doc/iris/pdfium/*",
+      "role": "evidence"
+    },
+    {
+      "path": "Iris.AppDir/usr/share/doc/iris/pdfium/licenses/*",
+      "role": "evidence"
+    },
+    {
+      "path": "ffmpeg-audit.json",
+      "role": "data"
+    },
+    {
+      "path": "Iris-linux-*.tar.gz",
+      "role": "data"
+    },
+    {
+      "path": "Iris-*.AppImage",
+      "role": "data"
+    },
+    {
+      "path": "iris_*.deb",
+      "role": "data"
+    },
+    {
+      "path": "*.sha256",
+      "role": "data"
+    }
+  ],
+  "system_components": {
+    "ld-linux-aarch64.so.1": {
+      "disposition": "review",
+      "license": "LGPL-2.1-or-later",
+      "mode": "dynamic",
+      "name": "ld-linux-aarch64.so.1",
+      "obligations": {
+        "notice": "provided",
+        "relinking": "provided",
+        "source": "provided"
+      },
+      "package": "libc6"
+    },
+    "ld-linux-x86-64.so.2": {
+      "disposition": "review",
+      "license": "LGPL-2.1-or-later",
+      "mode": "dynamic",
+      "name": "ld-linux-x86-64.so.2",
+      "obligations": {
+        "notice": "provided",
+        "relinking": "provided",
+        "source": "provided"
+      },
+      "package": "libc6"
+    },
+    "libbz2.so.1.0": {
+      "disposition": "allowed",
+      "license": "BSD-3-Clause",
+      "mode": "dynamic",
+      "name": "libbz2.so.1.0",
+      "obligations": {
+        "notice": "provided",
+        "relinking": "not-applicable",
+        "source": "not-applicable"
+      },
+      "package": "libbz2-1.0"
+    },
+    "libc.so.6": {
+      "disposition": "review",
+      "license": "LGPL-2.1-or-later",
+      "mode": "dynamic",
+      "name": "libc.so.6",
+      "obligations": {
+        "notice": "provided",
+        "relinking": "provided",
+        "source": "provided"
+      },
+      "package": "libc6"
+    },
+    "libdl.so.2": {
+      "disposition": "review",
+      "license": "LGPL-2.1-or-later",
+      "mode": "dynamic",
+      "name": "libdl.so.2",
+      "obligations": {
+        "notice": "provided",
+        "relinking": "provided",
+        "source": "provided"
+      },
+      "package": "libc6"
+    },
+    "libgcc_s.so.1": {
+      "disposition": "allowed",
+      "license": "GPL-3.0-or-later WITH GCC-exception-3.1",
+      "mode": "dynamic",
+      "name": "libgcc_s.so.1",
+      "obligations": {
+        "notice": "provided",
+        "relinking": "not-applicable",
+        "source": "not-applicable"
+      },
+      "package": "libgcc-s1"
+    },
+    "liblzma.so.5": {
+      "disposition": "allowed",
+      "license": "0BSD",
+      "mode": "dynamic",
+      "name": "liblzma.so.5",
+      "obligations": {
+        "notice": "provided",
+        "relinking": "not-applicable",
+        "source": "not-applicable"
+      },
+      "package": "liblzma5"
+    },
+    "libm.so.6": {
+      "disposition": "review",
+      "license": "LGPL-2.1-or-later",
+      "mode": "dynamic",
+      "name": "libm.so.6",
+      "obligations": {
+        "notice": "provided",
+        "relinking": "provided",
+        "source": "provided"
+      },
+      "package": "libc6"
+    },
+    "libpthread.so.0": {
+      "disposition": "review",
+      "license": "LGPL-2.1-or-later",
+      "mode": "dynamic",
+      "name": "libpthread.so.0",
+      "obligations": {
+        "notice": "provided",
+        "relinking": "provided",
+        "source": "provided"
+      },
+      "package": "libc6"
+    },
+    "librt.so.1": {
+      "disposition": "review",
+      "license": "LGPL-2.1-or-later",
+      "mode": "dynamic",
+      "name": "librt.so.1",
+      "obligations": {
+        "notice": "provided",
+        "relinking": "provided",
+        "source": "provided"
+      },
+      "package": "libc6"
+    },
+    "libz.so.1": {
+      "disposition": "allowed",
+      "license": "Zlib",
+      "mode": "dynamic",
+      "name": "libz.so.1",
+      "obligations": {
+        "notice": "provided",
+        "relinking": "not-applicable",
+        "source": "not-applicable"
+      },
+      "package": "zlib1g"
+    }
+  }
+}

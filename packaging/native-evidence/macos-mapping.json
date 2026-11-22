@@ -1,0 +1,115 @@
+{
+  "components": {
+    "ffmpeg-{basename}": {
+      "disposition": "review",
+      "evidence": [
+        "Iris.app/Contents/Resources/ffmpeg/README.md",
+        "Iris.app/Contents/Resources/ffmpeg/COPYING.LGPLv2.1",
+        "Iris.app/Contents/Resources/ffmpeg/manifest.json",
+        "Iris.app/Contents/Resources/ffmpeg/source.tar.xz",
+        "Iris.app/Contents/Resources/ffmpeg-runtime.json",
+        "Iris.app/Contents/Resources/ffmpeg/xz-COPYING.0BSD"
+      ],
+      "license": "LGPL-2.1-or-later",
+      "mode": "dynamic",
+      "modifications": "modified",
+      "name": "FFmpeg shared library",
+      "obligations": [
+        "notice",
+        "source",
+        "relinking"
+      ],
+      "pin": "ffmpeg"
+    },
+    "iris-imports": {
+      "disposition": "review",
+      "evidence": [
+        "Iris.app/Contents/Resources/ffmpeg/README.md",
+        "Iris.app/Contents/Resources/ffmpeg/COPYING.LGPLv2.1",
+        "Iris.app/Contents/Resources/ffmpeg/manifest.json",
+        "Iris.app/Contents/Resources/ffmpeg/source.tar.xz",
+        "Iris.app/Contents/Resources/ffmpeg-runtime.json",
+        "Iris.app/Contents/Resources/ffmpeg/xz-COPYING.0BSD"
+      ],
+      "license": "LGPL-2.1-or-later",
+      "mode": "dynamic",
+      "modifications": "modified",
+      "name": "Iris FFmpeg dynamic imports",
+      "obligations": [
+        "notice",
+        "source",
+        "relinking"
+      ],
+      "pin": "ffmpeg"
+    }
+  },
+  "evidence_files": [
+    "Iris.app/Contents/Resources/ffmpeg/README.md",
+    "Iris.app/Contents/Resources/ffmpeg/COPYING.LGPLv2.1",
+    "Iris.app/Contents/Resources/ffmpeg/manifest.json",
+    "Iris.app/Contents/Resources/ffmpeg/source.tar.xz",
+    "Iris.app/Contents/Resources/ffmpeg-runtime.json",
+    "Iris.app/Contents/Resources/ffmpeg/xz-COPYING.0BSD"
+  ],
+  "pins": {
+    "ffmpeg": "packaging/linux/ffmpeg.json",
+    "liblzma": "packaging/macos/liblzma.json"
+  },
+  "platform": "macos",
+  "schema": 1,
+  "scope": "Reviewed stage-to-evidence mapping for the exact release stage. Declares license-policy buckets and evidence locations only; it is not legal approval, a source license claim for Iris, or a release decision.",
+  "staged_rules": [
+    {
+      "component": "iris-imports",
+      "path": "Iris.app/Contents/MacOS/Iris",
+      "role": "native"
+    },
+    {
+      "component": "ffmpeg-{basename}",
+      "path": "Iris.app/Contents/Frameworks/libav*.dylib",
+      "role": "native"
+    },
+    {
+      "component": "ffmpeg-{basename}",
+      "path": "Iris.app/Contents/Frameworks/libsw*.dylib",
+      "role": "native"
+    },
+    {
+      "path": "Iris.app/Contents/Resources/ffmpeg/*",
+      "role": "evidence"
+    },
+    {
+      "path": "Iris.app/Contents/Info.plist",
+      "role": "data"
+    },
+    {
+      "path": "Iris.app/Contents/Resources/Iris.icns",
+      "role": "data"
+    },
+    {
+      "path": "Iris.app/Contents/Resources/ffmpeg-runtime.json",
+      "role": "data"
+    },
+    {
+      "path": "Iris.app/Contents/_CodeSignature/CodeResources",
+      "role": "data"
+    },
+    {
+      "path": "Iris-macos.zip",
+      "role": "data"
+    },
+    {
+      "path": "Iris-macos.zip.sha256",
+      "role": "data"
+    },
+    {
+      "path": "Iris-macos.pkg",
+      "role": "data"
+    },
+    {
+      "path": "Iris-macos.pkg.sha256",
+      "role": "data"
+    }
+  ],
+  "system_components": {}
+}

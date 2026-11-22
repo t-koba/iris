@@ -232,13 +232,23 @@ checks = {
         and release.count("IRIS_RELEASE_AUDIT_MAX_NATIVE_COMPONENTS:") == 1
         and "--max-native-components" not in release
     ),
-    "Every production release audit supplies its platform closure manifest": all(
-        f"        run: python scripts/release-audit.py {platform} --output audit/{platform}.json "
-        f"--native-evidence packaging/native-evidence/{platform}.json\n" in release
+    "Every production release audit consumes a generated, required platform closure": all(
+        f"          python3 scripts/posix-native-evidence.py generate \\\n"
+        f"            --platform {platform} \\\n"
+        f"            --stage dist/{platform} \\\n"
+        f"            --mapping packaging/native-evidence/{platform}-mapping.json \\\n"
+        f"            --output audit/native-evidence/{platform}.json \\\n"
+        f"            --report audit/native-evidence/{platform}-review.json\n" in release
+        and f"        run: python scripts/release-audit.py {platform} --output audit/{platform}.json "
+        f"--native-evidence audit/native-evidence/{platform}.json "
+        "--require-native-evidence\n" in release
+        and f"            audit/native-evidence/{platform}.json\n" in release
         for platform in ("macos", "linux")
     ) and ("        run: python scripts/release-audit.py windows --output audit/windows.json "
            "--native-evidence verified/windows-native-evidence/windows-native-closure.json "
            "--require-native-evidence\n" in release)
+    and "      - name: Validate POSIX native-evidence producer offline\n" in release
+    and "        run: python scripts/test-posix-native-evidence.py\n" in release
     and "packaging/native-evidence/windows.json" not in release
     and len(re.findall(r"run: python scripts/release-audit\.py ", release)) == 3,
     "Windows release consumes reviewed native-stage evidence end to end": (
