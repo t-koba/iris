@@ -55,10 +55,25 @@ REPLACEMENT_HEADING = "## Rebuilding and LGPL section 6(b) replacement"
 REPLACEMENT_MARKERS = ("section 6(b)", "swap the versioned dll set in place",
                        "no iris object files")
 PDFIUM_FILES = ("LICENSE", "VERSION", "args.gn")
-OVERLAY_ROOT_FILES = (
-    "portfile.cmake", "portfile.evidence.json", "vcpkg.json", "usage",
-    "FindFFMPEG.cmake.in", "build.sh.in", "vcpkg-cmake-wrapper.cmake",
+THIRD_PARTY_NOTICES = (
+    ("cmake-copyright.txt", "packaging/windows/third-party-notices/cmake-copyright.txt",
+     "1d1bbba6a5789a10aeed40e452697468c3da4e4500e74e1e3650cf4782e08f56"),
+    ("vcpkg-license.txt", "packaging/windows/third-party-notices/vcpkg-license.txt",
+     "1ee376fc340e0aa6ad6a3581c94126e741468705096ac92263048a21daa86460"),
 )
+# Every redistributed overlay root file must name the upstream notice that
+# travels with it. Adding a helper without a notice assignment is refused.
+OVERLAY_NOTICES = {
+    "portfile.cmake": "vcpkg-license.txt",
+    "portfile.evidence.json": "vcpkg-license.txt",
+    "vcpkg.json": "vcpkg-license.txt",
+    "usage": "vcpkg-license.txt",
+    "FindFFMPEG.cmake.in": "cmake-copyright.txt",
+    "build.sh.in": "vcpkg-license.txt",
+    "vcpkg-cmake-wrapper.cmake": "vcpkg-license.txt",
+}
+OVERLAY_ROOT_FILES = tuple(OVERLAY_NOTICES)
+NOTICE_NAMES = tuple(item[0] for item in THIRD_PARTY_NOTICES)
 VCPKG_FILES = (
     ("vcpkg.json", "packaging/windows/validation/vcpkg.json"),
     ("vcpkg-configuration.json", "packaging/windows/validation/vcpkg-configuration.json"),
@@ -219,13 +234,27 @@ def ffmpeg_members(args, inputs, notice):
     members["FFMPEG-NOTICE.md"] = notice
     members["REPLACEMENT.md"] = replacement_section(notice)
     inputs["ffmpeg-notice"] = binding(notice)
+    add_third_party_notices(members, inputs)
     return members, acquisition
+
+
+def add_third_party_notices(members, inputs):
+    """Retain upstream notices for every redistributed helper in the bundle."""
+    require(set(OVERLAY_NOTICES.values()) <= set(NOTICE_NAMES),
+            "bundled overlay file has an unknown notice")
+    for name, relative, expected in THIRD_PARTY_NOTICES:
+        data = read_file(ROOT / relative, "third-party notice " + name)
+        require(sha256(data) == expected, "third-party notice changed: " + name)
+        members[name] = data
+        inputs["third-party-notices/" + name] = binding(data)
 
 
 def overlay_members(args, inputs, acquisition, section):
     port = Path(args.overlay) / "ffmpeg"
     require(port.is_dir() and not port.is_symlink(), "derived vcpkg overlay port missing")
     top = sorted(entry.name for entry in port.iterdir())
+    require(set(OVERLAY_ROOT_FILES) <= set(OVERLAY_NOTICES),
+            "bundled overlay file has no notice assignment")
     allowed = set(OVERLAY_ROOT_FILES) | {"patches"}
     require(set(top) <= allowed and "portfile.cmake" in top
             and "portfile.evidence.json" in top and "vcpkg.json" in top,
@@ -367,7 +396,8 @@ def main():
         if args.command == "plan":
             print(json.dumps({"version": SOURCE_VERSION, "outputs": list(OUTPUTS),
                               "archives": list(ARCHIVES), "report": REPORT_NAME,
-                              "legal_files": list(REQUIRED_LEGAL_FILES + COPYRIGHT_FILES),
+                              "legal_files": list(REQUIRED_LEGAL_FILES + COPYRIGHT_FILES
+                                                  + NOTICE_NAMES),
                               "pdfium_files": list(PDFIUM_FILES) + ["licenses/pdfium.txt"],
                               "source_token": SOURCE_TOKEN,
                               "bounds": {"source_bytes": MAX_SOURCE_BYTES,

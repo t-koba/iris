@@ -133,9 +133,27 @@ class SourceBundleContracts(unittest.TestCase):
         self.assertEqual(shape["version"], "8.1.3")
         self.assertEqual(shape["outputs"], list(self.mod.OUTPUTS))
         self.assertEqual(shape["legal_files"],
-                         list(self.mod.REQUIRED_LEGAL_FILES + self.mod.COPYRIGHT_FILES))
+                         list(self.mod.REQUIRED_LEGAL_FILES + self.mod.COPYRIGHT_FILES
+                              + self.mod.NOTICE_NAMES))
         self.assertIn("licenses/pdfium.txt", shape["pdfium_files"])
         self.assertTrue(all(shape["bounds"][key] > 0 for key in shape["bounds"]))
+
+    def test_bundled_helpers_retain_upstream_notices(self):
+        report = self.build()
+        legal = self.members("ffmpeg-legal-notices.tar.gz")
+        for name, relative, digest in self.mod.THIRD_PARTY_NOTICES:
+            data = (ROOT / relative).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), digest)
+            self.assertEqual(legal[name], data)
+            self.assertEqual(report["inputs"]["third-party-notices/" + name]["sha256"], digest)
+        self.assertEqual(self.mod.OVERLAY_NOTICES["FindFFMPEG.cmake.in"], "cmake-copyright.txt")
+        for name in ("build.sh.in", "vcpkg-cmake-wrapper.cmake", "portfile.cmake"):
+            self.assertEqual(self.mod.OVERLAY_NOTICES[name], "vcpkg-license.txt")
+
+    def test_unmapped_helper_notice_is_refused(self):
+        with mock.patch.dict(self.mod.OVERLAY_NOTICES, {"new-helper.cmake": "unknown.txt"}):
+            with self.assertRaisesRegex(ValueError, "unknown notice"):
+                self.mod.add_third_party_notices({}, {})
 
     def test_baseline_build_files_are_bundled_and_hashed(self):
         report = self.build()
