@@ -313,6 +313,9 @@ Windows は checked-in path を使わず、validation workflow が gated に exp
 `windows-native-evidence`（JSON のみ）を release 側で staged/exported bytes に seal してから
 `--native-evidence` に渡します。audit が `native-closure` record を作れない場合は失敗し、
 `missing` のまま通過することはありません。
+prepare は reviewed product inventory のすべての `.dll`/`.exe` を PE import closure と照合し、
+review 済み license component のない native file は文件名を添えて拒否します。未知の binary に
+license を推測することはありません。
 旧 audit schema 1、sidecar の欠落、`complete: true` のような宣言だけでは closure 要件を満たしません。
 この入力は package・runtime composition を変更せず、既存の公開 policy gate を迂回しません。
 

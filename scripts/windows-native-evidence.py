@@ -137,6 +137,9 @@ def prepare(args):
             "PE import closure is not reviewed")
     require({"Iris.exe", "pdfium.dll"} <= set(closure.get("binaries", [])),
             "PE import closure omits the required staged roots")
+    require(all(isinstance(name, str) and SAFE_NAME.fullmatch(name) is not None
+                for name in closure["binaries"]), "invalid PE import closure binary name")
+    closure_binaries = {name.lower() for name in closure["binaries"]}
 
     files = inventory.get("files")
     require(isinstance(files, list) and 0 < len(files) <= MAX_FILES,
@@ -156,6 +159,10 @@ def prepare(args):
         expected_bytes["Iris/" + name] = item["bytes"]
     require({"Iris.exe", "pdfium.dll", "FFMPEG-NOTICE.md"} <= set(products),
             "required product file missing from reviewed inventory")
+    natives = [name for name in products if name.lower().endswith((".dll", ".exe"))]
+    for name in natives:
+        require(name.lower() in closure_binaries,
+                "shipped native file absent from reviewed PE import closure: " + name)
     notice = require_file(stage_dir / "FFMPEG-NOTICE.md", "reviewed notice")
     with notice.open("rb") as stream:
         notice_bytes = stream.read(MAX_BYTES + 1)
@@ -216,7 +223,12 @@ def prepare(args):
                 cid, ref, "dynamic", "FFmpeg " + name, source_pin["url"],
                 source_pin["sha256"], "LGPL-2.1-or-later", "review", "modified",
                 notice_ref))
+        elif low.endswith((".dll", ".exe")):
+            require(False, "no reviewed license component for shipped native file: " + name)
 
+    licensed = {row["artifact"]["path"] for row in components}
+    require({"Iris/" + name for name in natives} <= licensed,
+            "a shipped native file has no reviewed license component")
     artifacts = [dict(file={"path": name, "sha256": binding["sha256"]},
                       coverage=coverage(notice_ref))
                  for name, binding in assets.items()]
@@ -280,6 +292,12 @@ def seal(args):
                     and sizes[path] == assets[path]["bytes"],
                     "producer asset binding differs from exported bytes: " + path)
         paths.append(path)
+    licensed = {row["artifact"]["path"] for row in components
+                if isinstance(row, dict) and isinstance(row.get("artifact"), dict)
+                and isinstance(row["artifact"].get("path"), str)}
+    for path in paths:
+        if path.startswith("Iris/") and path.lower().endswith((".dll", ".exe")):
+            require(path in licensed, "unlicensed shipped native file: " + path)
     require(any(a["file"] == notice_ref for a in artifacts),
             "reviewed notice is absent from the producer closure")
 

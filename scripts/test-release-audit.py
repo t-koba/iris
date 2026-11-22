@@ -922,6 +922,61 @@ class WindowsNativeEvidencePipeline(unittest.TestCase):
             self.assertNotEqual(failed.returncode, 0)
             self.assertFalse((base / "rejected.json").exists())
 
+    def test_unknown_native_dll_in_reviewed_inventory_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base, ev, release, stage, dist, names = self.fixture(directory)
+            sealed, output = self.sealed(base, ev, release, stage, dist)
+            self.assertEqual(sealed.returncode, 0, sealed.stderr)
+            name = "evil.dll"
+            data = b"unreviewed native binary"
+            (stage / name).write_bytes(data)
+            (dist / "Iris" / name).write_bytes(data)
+            binding = dict(name=name, sha256=module.Audit.sha256_file(stage / name),
+                           bytes=len(data))
+            inventory = json.loads((ev / "product-inventory.json").read_text())
+            inventory["files"].append(binding)
+            (ev / "product-inventory.json").write_text(json.dumps(inventory))
+            (release / "product-inventory.json").write_text(json.dumps(inventory))
+            closure = json.loads((ev / "pe-import-closure.json").read_text())
+            closure["binaries"].append(name)
+            (ev / "pe-import-closure.json").write_text(json.dumps(closure))
+            result = json.loads((release / "release-package-result.json").read_text())
+            result["entries"].append(name)
+            result["installer_source_count"] = len(result["entries"])
+            (release / "release-package-result.json").write_text(json.dumps(result))
+            prepared = self.run_evidence("prepare", "--evidence", ev, "--release", release,
+                                         "--stage", stage, "--output", ev / "rejected.json")
+            self.assertNotEqual(prepared.returncode, 0)
+            self.assertIn(name, prepared.stderr)
+            self.assertFalse((ev / "rejected.json").exists())
+            # The earlier sealed manifest cannot admit a shipped file it never reviewed.
+            sealed = self.run_evidence("seal", "--manifest", ev / "windows-native-evidence.json",
+                                       "--evidence", ev, "--assets", release, "--dist", dist,
+                                       "--product", dist / "Iris", "--output", base / "rejected.json")
+            self.assertNotEqual(sealed.returncode, 0)
+            self.assertFalse((base / "rejected.json").exists())
+
+    def test_uncovered_native_artifact_is_refused_at_seal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base, ev, release, stage, dist, names = self.fixture(directory)
+            sealed, output = self.sealed(base, ev, release, stage, dist)
+            self.assertEqual(sealed.returncode, 0, sealed.stderr)
+            name = "Iris/zlib1.dll"
+            data = b"unlicensed shipped dll"
+            (dist / name).write_bytes(data)
+            manifest = json.loads((ev / "windows-native-evidence.json").read_text())
+            manifest["artifacts"].append(dict(
+                file=dict(path=name, sha256=module.Audit.sha256_file(dist / name)),
+                coverage=manifest["artifacts"][0]["coverage"]))
+            manifest["expected_bytes"][name] = len(data)
+            (ev / "crafted.json").write_text(json.dumps(manifest))
+            sealed = self.run_evidence("seal", "--manifest", ev / "crafted.json",
+                                       "--evidence", ev, "--assets", release, "--dist", dist,
+                                       "--product", dist / "Iris", "--output", base / "rejected.json")
+            self.assertNotEqual(sealed.returncode, 0)
+            self.assertIn(name, sealed.stderr)
+            self.assertFalse((base / "rejected.json").exists())
+
     def test_audit_fails_closed_when_closure_is_required(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "audit.json"
