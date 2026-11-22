@@ -65,10 +65,8 @@ class SourceBundleContracts(unittest.TestCase):
             "signature_verified": True,
             "source_sha256": self.pin["sha256"],
             "files": {
-                "ffmpeg-8.1.3/" + name: {
-                    "sha256": hashlib.sha256(value.encode()).hexdigest(),
-                    "bytes": len(value.encode()),
-                } for name, value in self.legal.items()
+                "ffmpeg-8.1.3/" + name: hashlib.sha256(value.encode()).hexdigest()
+                for name, value in self.legal.items()
             },
         }
         # windows-ffmpeg-source.py stages the manifest beside the extracted
@@ -196,6 +194,15 @@ class SourceBundleContracts(unittest.TestCase):
         root_record.unlink()
         (self.tree / "acquisition.json").write_bytes(misplaced)
         with self.assertRaisesRegex(ValueError, "source acquisition absent or unsupported"):
+            self.build()
+
+    def test_rejects_unsupported_acquisition_digest_shape(self):
+        record = json.loads((self.tree.parent / "acquisition.json").read_text())
+        member = "ffmpeg-8.1.3/COPYING.LGPLv2.1"
+        record["files"][member] = {"sha256": record["files"][member]}
+        (self.tree.parent / "acquisition.json").write_text(
+            json.dumps(record, indent=2), newline="\n")
+        with self.assertRaisesRegex(ValueError, "digest for COPYING.LGPLv2.1 is unsupported"):
             self.build()
 
     def test_rejects_legal_text_drifted_from_acquisition(self):

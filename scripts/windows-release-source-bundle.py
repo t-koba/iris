@@ -200,10 +200,13 @@ def ffmpeg_members(args, inputs, notice):
                     "verified source lacks required copyright text: " + name)
             continue
         data = read_file(tree / name, "FFmpeg " + name)
-        require(binding(data) == {"sha256": acquisition["files"][member]["sha256"],
-                                  "bytes": len(data)},
+        recorded = acquisition["files"][member]
+        require(isinstance(recorded, str) and re.fullmatch(r"[0-9a-f]{64}", recorded) is not None,
+                "source acquisition digest for " + name + " is unsupported")
+        bound = binding(data)
+        require(bound["sha256"] == recorded,
                 "FFmpeg " + name + " differs from the verified source")
-        inputs["ffmpeg-source/" + name] = binding(data)
+        inputs["ffmpeg-source/" + name] = bound
         members[name] = data
     for name in REQUIRED_LEGAL_FILES:
         require(name in members, "missing required FFmpeg legal text: " + name)
