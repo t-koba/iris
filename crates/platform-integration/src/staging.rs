@@ -371,18 +371,29 @@ mod tests {
 
     /// Advisory lock release is synchronous on every supported platform, but some
     /// filesystems expose the unlocked state to another opener a moment late.
-    fn reopen_after_release(dir: &Path, binding: &str, len: u64) -> OwnedStage {
+    /// Every post-drop acquisition expected to succeed uses this bounded retry.
+    fn after_release<T>(label: &str, mut operation: impl FnMut() -> io::Result<T>) -> T {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            match OwnedStage::reopen(dir, binding, len) {
-                Ok(stage) => return stage,
+            match operation() {
+                Ok(value) => return value,
                 Err(error)
                     if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
                 {
                     sleep(Duration::from_millis(10));
                 }
-                Err(error) => panic!("reopen after release failed: {error}"),
+                Err(error) => panic!("{label} failed: {error}"),
             }
+        }
+    }
+
+    fn assert_identity_rejected(result: io::Result<()>) {
+        match result {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                panic!("identity rejection must not depend on held ownership: {error}")
+            }
+            Err(_) => (),
+            Ok(()) => panic!("a different owner identity must be rejected"),
         }
     }
 
@@ -421,15 +432,21 @@ mod tests {
         assert_eq!(contention.kind(), io::ErrorKind::WouldBlock);
         assert!(remove(&path, "job-entry-version-destination", 4).is_err());
         drop(stage);
-        assert!(OwnedStage::reopen(&path, "another identity", 4).is_err());
-        assert!(remove(&path, "another identity", 4).is_err());
-        let stage = reopen_after_release(&path, "job-entry-version-destination", 4);
+        assert_identity_rejected(OwnedStage::reopen(&path, "another identity", 4).map(|_| ()));
+        assert_identity_rejected(remove(&path, "another identity", 4));
+        let stage = after_release("reopen after release", || {
+            OwnedStage::reopen(&path, "job-entry-version-destination", 4)
+        });
         // A normal stage reopen rejects installed data. Terminal cleanup may
         // discard the manifest but never consults the final path.
         std::fs::rename(stage.path(), root.path().join("final")).unwrap();
         drop(stage);
-        assert!(OwnedStage::reopen(&path, "job-entry-version-destination", 4).is_err());
-        remove(&path, "job-entry-version-destination", 4).unwrap();
+        assert_identity_rejected(
+            OwnedStage::reopen(&path, "job-entry-version-destination", 4).map(|_| ()),
+        );
+        after_release("terminal cleanup", || {
+            remove(&path, "job-entry-version-destination", 4)
+        });
         assert!(!path.exists());
         assert_eq!(std::fs::read(root.path().join("final")).unwrap(), [0; 4]);
         assert!(OwnedStage::reopen(&path, "job-entry-version-destination", 4).is_err());
