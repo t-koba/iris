@@ -85,6 +85,8 @@ class SourceBundleContracts(unittest.TestCase):
             json.dumps({"source_path": str(self.tree), "baseline_patches": []}), newline="\n")
         (self.overlay / "vcpkg.json").write_text('{"name":"ffmpeg","version":"8.1.3"}\n', newline="\n")
         (self.overlay / "usage").write_text("ffmpeg needs nasm\n", newline="\n")
+        for name in ("FindFFMPEG.cmake.in", "build.sh.in", "vcpkg-cmake-wrapper.cmake"):
+            (self.overlay / name).write_text(name + " baseline\n", newline="\n")
         patches = self.overlay / "patches"
         patches.mkdir()
         for name in self.mod.overlay.baseline_patches():
@@ -134,6 +136,17 @@ class SourceBundleContracts(unittest.TestCase):
                          list(self.mod.REQUIRED_LEGAL_FILES + self.mod.COPYRIGHT_FILES))
         self.assertIn("licenses/pdfium.txt", shape["pdfium_files"])
         self.assertTrue(all(shape["bounds"][key] > 0 for key in shape["bounds"]))
+
+    def test_baseline_build_files_are_bundled_and_hashed(self):
+        report = self.build()
+        materials = self.members("ffmpeg-build-materials.tar.gz")
+        for name in ("FindFFMPEG.cmake.in", "build.sh.in", "vcpkg-cmake-wrapper.cmake"):
+            self.assertIn("overlay/ffmpeg/" + name, materials)
+            self.assertIn("overlay/ffmpeg/" + name, report["inputs"])
+        entry = self.overlay / "unexpected-port-file"
+        entry.write_text("unexpected\n", newline="\n")
+        with self.assertRaisesRegex(ValueError, "unexpected file set"):
+            self.build()
 
     def test_bundles_are_deterministic_and_hash_every_input(self):
         report = self.build()

@@ -55,6 +55,10 @@ REPLACEMENT_HEADING = "## Rebuilding and LGPL section 6(b) replacement"
 REPLACEMENT_MARKERS = ("section 6(b)", "swap the versioned dll set in place",
                        "no iris object files")
 PDFIUM_FILES = ("LICENSE", "VERSION", "args.gn")
+OVERLAY_ROOT_FILES = (
+    "portfile.cmake", "portfile.evidence.json", "vcpkg.json", "usage",
+    "FindFFMPEG.cmake.in", "build.sh.in", "vcpkg-cmake-wrapper.cmake",
+)
 VCPKG_FILES = (
     ("vcpkg.json", "packaging/windows/validation/vcpkg.json"),
     ("vcpkg-configuration.json", "packaging/windows/validation/vcpkg-configuration.json"),
@@ -222,8 +226,7 @@ def overlay_members(args, inputs, acquisition, section):
     port = Path(args.overlay) / "ffmpeg"
     require(port.is_dir() and not port.is_symlink(), "derived vcpkg overlay port missing")
     top = sorted(entry.name for entry in port.iterdir())
-    allowed = {"portfile.cmake", "portfile.evidence.json", "vcpkg.json",
-               "usage", "patches"}
+    allowed = set(OVERLAY_ROOT_FILES) | {"patches"}
     require(set(top) <= allowed and "portfile.cmake" in top
             and "portfile.evidence.json" in top and "vcpkg.json" in top,
             "derived overlay port has an unexpected file set: " + repr(top))
@@ -235,7 +238,7 @@ def overlay_members(args, inputs, acquisition, section):
         data = read_file(ROOT / relative, "vcpkg " + name)
         members[name] = data
         inputs["vcpkg/" + name] = binding(data)
-    for name in ("portfile.cmake", "portfile.evidence.json", "vcpkg.json", "usage"):
+    for name in OVERLAY_ROOT_FILES:
         if name not in top:
             continue
         data = read_file(port / name, "overlay " + name)
