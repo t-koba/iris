@@ -5,6 +5,7 @@ import copy
 import hashlib
 import os
 import importlib.util
+import shutil
 import json
 from pathlib import Path
 import subprocess
@@ -737,6 +738,174 @@ class Policy(unittest.TestCase):
         self.assertLess(publish.index("python scripts/release-policy.py"), publish.index("softprops/action-gh-release"))
         self.assertNotIn("continue-on-error", publish)
         self.assertNotIn("always()", publish)
+
+
+    def test_windows_dll_probe_end_to_end(self):
+        """A Windows stage passes only when its exact av*.dll bytes are probed."""
+        compiler = shutil.which("cc") or shutil.which("gcc")
+        if compiler is None:
+            self.skipTest("no offline C compiler for the synthetic probe library")
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            dist = base / "dist" / "windows"
+            product = dist / "Iris"
+            product.mkdir(parents=True)
+            source = base / "probe.c"
+            functions = []
+            for component in POLICY["ffmpeg_components"]:
+                functions.extend((
+                    f'const char *{component}_configuration(void) {{ return "--enable-shared"; }}',
+                    f'const char *{component}_license(void) {{ return "LGPL version 2.1 or later"; }}',
+                    f'unsigned {component}_version(void) {{ return 1; }}',
+                ))
+            source.write_text("\n".join(functions) + "\n")
+            built = base / "probe.bin"
+            compiled = subprocess.run([compiler, "-shared", "-fPIC", "-o", str(built), str(source)],
+                                      capture_output=True, text=True, timeout=30)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            names = {"avcodec": "avcodec-62.dll", "avformat": "avformat-61.dll",
+                     "avutil": "avutil-60.dll", "swscale": "swscale-9.dll"}
+            for name in names.values():
+                (product / name).write_bytes(built.read_bytes())
+            (product / "Iris.exe").write_bytes(b"SYNTHETIC PE stub; not approval")
+            notice = product / "FFMPEG-NOTICE.md"
+            notice.write_bytes(b"SYNTHETIC notice and supporting evidence")
+            (product / "ffmpeg.exe").write_bytes(b"SYNTHETIC substitute binary")
+
+            # The real audit collector invokes the real probe-library subprocess for
+            # each staged DLL; only the unrelated PE import inspector is stubbed out.
+            settings = dict(max_report_bytes=2097152, max_command_bytes=32768,
+                            max_native_files=256, command_seconds=10,
+                            max_metadata_bytes=8388608, max_cargo_packages=1024,
+                            max_native_components=64, platform="windows")
+            collected = audit_module.Audit(argparse.Namespace(**settings))
+            real_command = collected.command
+
+            def command(*argv):
+                if "probe-library" in argv:
+                    return real_command(*argv)
+                return ""
+
+            with patch.object(audit_module.shutil, "which", return_value="llvm-readobj"), \
+                 patch.object(collected, "command", side_effect=command):
+                collected.windows(product / "Iris.exe")
+            probes = [row for row in collected.records
+                      if row["kind"] == "command" and "probe-library" in row["argv"]]
+            self.assertEqual(len(probes), len(names))
+            self.assertEqual({row["argv"][3].rsplit("/", 1)[-1] for row in probes}, set(names.values()))
+            self.assertTrue(all(row["status"] == 0 and json.loads(row["text"])["library"] == row["argv"][3]
+                                for row in probes))
+            for name in list(names.values()) + ["ffmpeg.exe", "FFMPEG-NOTICE.md"]:
+                path = product / name
+                collected.add("native-file", path=str(path), bytes=path.stat().st_size,
+                              sha256=collected.sha256_file(path))
+
+            def ref(path):
+                return dict(path=path.relative_to(dist).as_posix(), sha256=collected.sha256_file(path))
+
+            def coverage():
+                return {mode: dict(components=[], evidence=[dict(proof)])
+                        for mode in ("static", "embedded", "dynamic", "dlopen")}
+
+            proof = ref(notice)
+            artifacts = [dict(file=ref(path), coverage=coverage())
+                         for path in sorted(product.iterdir()) if path.is_file()]
+            by_path = {row["file"]["path"]: row["coverage"] for row in artifacts}
+            components = []
+            for path in sorted(product.iterdir()):
+                if not path.is_file():
+                    continue
+                artifact = ref(path)
+                cid = "synthetic-" + path.name
+                by_path[artifact["path"]]["dynamic"]["components"].append(cid)
+                component = path.name in names.values()
+                components.append(dict(
+                    id=cid, artifact=artifact, mode="dynamic", name=path.name,
+                    source=dict(origin="https://example.invalid/synthetic", revision="test-revision",
+                                evidence=[dict(proof)]),
+                    modifications=dict(status="unmodified", evidence=[dict(proof)]),
+                    license=dict(id="LGPL-2.1-or-later" if component else "MIT",
+                                 disposition="review" if component else "allowed", evidence=[dict(proof)]),
+                    obligations={key: dict(status="provided", evidence=[dict(proof)])
+                                 for key in ("notice", "source", "relinking")}))
+            manifest_path = base / "manifest.json"
+            manifest_path.write_text(json.dumps(dict(schema=1, artifacts=artifacts, components=components)))
+            collected.native_evidence(dist, manifest_path)
+            self.assertFalse(any(row["kind"] == "missing" for row in collected.records))
+
+            template = report("windows")
+            value = dict(template, schema=2,
+                         records=[row for row in template["records"]
+                                  if row["kind"] not in ("file", "command", "build")] + collected.records,
+                         limits=dict(template["limits"], max_native_components=64))
+            self.assertEqual(len([row for row in value["records"] if row["kind"] == "build"]), 1)
+            self.assertEqual(module.probe_paths(value["records"]), {row["argv"][3] for row in probes})
+            self.assertEqual(module.native(value["records"], POLICY), [])
+            self.assertEqual(module.validate(value, POLICY, WORKSPACE), [])
+
+            policy = copy.deepcopy(POLICY)
+            policy_path = base / "synthetic-policy.json"
+            policy_path.write_text(json.dumps(policy))
+            other_reports = []
+            for platform in ("macos", "linux"):
+                path = base / (platform + ".json")
+                path.write_text(json.dumps(complete_report(platform)))
+                other_reports.append(str(path))
+            windows_path = base / "windows.json"
+            windows_path.write_text(json.dumps(value))
+
+            def cli():
+                return subprocess.run([sys.executable, str(ROOT / "scripts/release-policy.py"),
+                                       "--policy", str(policy_path), *other_reports, str(windows_path)],
+                                      capture_output=True, text=True, timeout=20)
+
+            passed = cli()
+            self.assertEqual(passed.returncode, 0, passed.stdout + passed.stderr)
+            self.assertIn("not legal/compliance approval: PASS", passed.stdout)
+
+            def probe(broken, name):
+                return next(row for row in broken["records"]
+                            if row["kind"] == "command" and "probe-library" in row["argv"]
+                            and row["argv"][3].endswith(name))
+
+            def substitute(broken):
+                target = probe(broken, "swscale-9.dll")
+                replacement = str(product / "ffmpeg.exe")
+                target["argv"][3] = replacement
+                target["text"] = json.dumps(dict(json.loads(target["text"]), library=replacement))
+
+            def forbidden(broken):
+                target = probe(broken, "avcodec-62.dll")
+                target["text"] = json.dumps(dict(json.loads(target["text"]),
+                                                 avcodec_configuration="--enable-shared --enable-gpl"))
+
+            mutations = (
+                (lambda broken: broken.update(records=[row for row in broken["records"]
+                    if not (row["kind"] == "command" and "probe-library" in row["argv"])]),
+                 "absent exact-library", "absent exact-library"),
+                (substitute, "unknown/duplicate exact library", "unknown/duplicate exact library"),
+                (lambda broken: next(row for row in broken["records"] if row["kind"] == "file"
+                                     and row["path"].endswith("avcodec-62.dll")).update(sha256="not-a-sha256"),
+                 "probe lacks exact file/hash binding", "invalid file"),
+                (forbidden, "forbidden", "forbidden"),
+            )
+            for mutate, native_marker, validate_marker in mutations:
+                broken = copy.deepcopy(value)
+                mutate(broken)
+                with self.subTest(mutation=native_marker):
+                    errors = module.native(broken["records"], POLICY)
+                    self.assertTrue(any(native_marker in error for error in errors), errors)
+                    try:
+                        detail = " ".join(module.validate(broken, POLICY, WORKSPACE))
+                        self.assertTrue(detail)
+                    except ValueError as error:
+                        detail = str(error)
+                    self.assertIn(validate_marker, detail)
+                    windows_path.write_text(json.dumps(broken))
+                    blocked = cli()
+                    self.assertEqual(blocked.returncode, 1, blocked.stdout)
+                    self.assertIn("BLOCKED", blocked.stdout)
+                    self.assertIn(validate_marker, blocked.stdout)
 
 
 if __name__ == "__main__":

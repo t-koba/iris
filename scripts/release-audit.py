@@ -12,7 +12,7 @@ import sys
 import tempfile
 import threading
 
-from release_evidence import load_json, require, validate_closure
+from release_evidence import ffmpeg_component, load_json, require, validate_closure
 
 
 # Keep in sync with fetch-pdfium-runtime.sh (checked by the offline contracts).
@@ -543,7 +543,7 @@ class Audit:
             self.add("missing", reason="native evidence: " + str(error))
 
     def ffmpeg(self, path):
-        if re.match(r"lib(?:avcodec|avformat|avutil|avdevice|avfilter|swscale|swresample)[.-]", path.name):
+        if ffmpeg_component(str(path)) is not None:
             # Probe the exact library, never a standalone ffmpeg or the Rust binding.
             self.command(sys.executable, str(Path(__file__).resolve()),
                          "probe-library", str(path.resolve()))
@@ -672,6 +672,7 @@ class Audit:
         for path in payload:
             if path != executable:
                 self.file(path)
+                self.ffmpeg(path)
         self.add("build", variant="product", features="Cargo defaults",
                  native_preview="FFmpeg and PDFium come from the verified exact-SHA product stage; video/PDF preview support is asserted from that stage's evidence.")
         tool = shutil.which("llvm-readobj")

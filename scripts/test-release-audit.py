@@ -443,13 +443,18 @@ class Reports(unittest.TestCase):
 
     def test_ffmpeg_probe_selects_each_exact_linked_library(self):
         report = audit()
+        libraries = ("libavcodec.62.dylib", "libavformat.62.dylib", "libavdevice.62.dylib",
+                     "libavfilter.11.dylib", "libavutil.60.dylib", "libswscale.9.dylib",
+                     "libswresample.6.dylib", "libavcodec.so.60", "avcodec-62.dll",
+                     "avformat-61.dll", "avutil-60.dll", "swscale-9.dll")
         with patch.object(report, "command") as command:
-            for name in ("libavcodec.62.dylib", "libavformat.62.dylib", "libavdevice.62.dylib",
-                         "libavfilter.11.dylib", "libavutil.60.dylib", "libswscale.9.dylib",
-                         "libswresample.6.dylib"):
+            for name in libraries:
                 report.ffmpeg(Path(name))
-        self.assertEqual(command.call_count, 7)
+            for name in ("ffmpeg.exe", "avcodec-62.dll.bak", "avcodec-62.exe", "libavcodec"):
+                report.ffmpeg(Path(name))
+        self.assertEqual(command.call_count, len(libraries))
         self.assertTrue(all(call.args[2] == "probe-library" for call in command.call_args_list))
+        self.assertEqual([Path(call.args[3]).name for call in command.call_args_list], list(libraries))
 
     def test_macos_load_commands_and_ambiguous_brew_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -531,10 +536,22 @@ class Reports(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "Iris.exe"
             path.write_bytes(b"actual portable executable")
+            dlls = [Path(directory) / name for name in ("avcodec-62.dll", "avformat-61.dll", "pdfium.dll")]
+            for dll in dlls:
+                dll.write_bytes(b"staged native bytes")
             report = audit()
             with patch.object(module.shutil, "which", return_value="llvm-readobj"), patch.object(report, "command") as command:
                 report.windows(path)
-            command.assert_called_once_with("llvm-readobj", "--coff-imports", str(path))
+            command.assert_any_call("llvm-readobj", "--coff-imports", str(path))
+            self.assertEqual(len([call for call in command.call_args_list
+                                  if call.args[:2] == ("llvm-readobj", "--coff-imports")]), 1)
+            probes = [call for call in command.call_args_list if "probe-library" in call.args]
+            self.assertEqual([call.args[3] for call in probes], [str(dll) for dll in dlls[:2]])
+            self.assertTrue(all(call.args[0] == sys.executable
+                                and Path(call.args[1]).name == "release-audit.py" for call in probes))
+            self.assertFalse(any(Path(call.args[0]).name == "ffmpeg" for call in command.call_args_list))
+            self.assertTrue(any(row["kind"] == "file" and row["path"] == str(dll) for dll in dlls
+                                for row in report.records))
             build = next(r for r in report.records if r["kind"] == "build")
             self.assertEqual(build["variant"], "product")
             self.assertEqual(build["features"], "Cargo defaults")

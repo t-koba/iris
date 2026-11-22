@@ -16,7 +16,8 @@ import shlex
 import sys
 import tomllib
 
-from release_evidence import OBLIGATIONS, inventory, load_json, parse_json, require, strings, text, validate_closure
+from release_evidence import (OBLIGATIONS, ffmpeg_component, inventory, load_json, parse_json,
+                              require, strings, text, validate_closure)
 
 ROOT = Path(__file__).resolve().parent.parent
 AUDIT_RECORD_KINDS = frozenset({
@@ -218,6 +219,7 @@ def cargo_graph(graph, policy, workspace):
 def probe_paths(records):
     """FFmpeg library paths named by a structurally well-formed probe command.
 
+    Recognizes both POSIX libav*.so and Windows av*-<version>.dll targets.
     native() performs the full exact-binding, license-name and forbidden-flag
     validation of every probe; this only enumerates probe targets so validate()
     can bind them to closure components. It cannot create a false pass: any probe
@@ -227,7 +229,8 @@ def probe_paths(records):
     for row in records:
         argv = row.get("argv")
         if (row["kind"] == "command" and isinstance(argv, list) and len(argv) == 4
-                and argv[2] == "probe-library" and isinstance(argv[3], str)):
+                and argv[2] == "probe-library" and isinstance(argv[3], str)
+                and ffmpeg_component(argv[3]) is not None):
             paths.add(argv[3])
     return paths
 
@@ -254,9 +257,8 @@ def native(records, policy):
             path = argv[3]
             require(isinstance(result, dict) and result.get("library") == path and path in files
                     and re.fullmatch(r"[0-9a-f]{64}", files[path].get("sha256", "")), "probe lacks exact file/hash binding")
-            match = re.match(r"lib(avcodec|avformat|avutil|avdevice|avfilter|swscale|swresample)[.-]", path.rsplit("/", 1)[-1])
-            require(match is not None and path not in probes, "unknown/duplicate exact library")
-            component = match[1]
+            component = ffmpeg_component(path)
+            require(component is not None and path not in probes, "unknown/duplicate exact library")
             probes[path] = component
             components = {key.rsplit("_", 1)[0] for key in result
                           if key.endswith(("_configuration", "_license"))} | {component}
@@ -269,8 +271,7 @@ def native(records, policy):
                         "unknown/blocked native FFmpeg license")
         except (ValueError, TypeError) as error:
             errors.append("FFmpeg: " + str(error))
-    expected = {path for path in files if isinstance(path, str) and re.search(
-        r"(?:^|/)lib(?:avcodec|avformat|avutil|avdevice|avfilter|swscale|swresample)[.-]", path)}
+    expected = {path for path in files if isinstance(path, str) and ffmpeg_component(path) is not None}
     if expected - probes.keys() or set(policy["ffmpeg_components"]) - set(probes.values()):
         errors.append("FFmpeg: absent exact-library native license/configuration evidence")
     return errors

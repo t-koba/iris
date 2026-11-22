@@ -9,6 +9,23 @@ import re
 
 MODES = ("static", "embedded", "dynamic", "dlopen")
 OBLIGATIONS = ("notice", "source", "relinking")
+FFMPEG_COMPONENTS = ("avcodec", "avformat", "avutil", "avdevice", "avfilter", "swscale", "swresample")
+_POSIX_FFMPEG = re.compile(r"lib(?P<component>" + "|".join(FFMPEG_COMPONENTS) + r")[.-]")
+_WINDOWS_FFMPEG = re.compile(r"(?P<component>" + "|".join(FFMPEG_COMPONENTS) + r")(?:-\d+)?\.dll", re.I)
+
+
+def ffmpeg_component(path):
+    """FFmpeg component named by an exact library filename, or None.
+
+    POSIX spellings (libavcodec.so.60, libavcodec.60.dylib) and Windows DLL
+    spellings (avcodec-62.dll) are both recognized. A name alone never proves
+    identity: callers still bind the probed path to inventoried bytes.
+    """
+    if not isinstance(path, str):
+        return None
+    name = path.replace("\\", "/").rsplit("/", 1)[-1]
+    match = _POSIX_FFMPEG.match(name) or _WINDOWS_FFMPEG.fullmatch(name)
+    return match.group("component").lower() if match else None
 
 
 def require(condition, message):
