@@ -182,7 +182,9 @@ def ffmpeg_members(args, inputs, notice):
     tree = Path(args.source_tree)
     require((tree / "configure").is_file() and (tree / "RELEASE").is_file(),
             "verified source tree layout drifted")
-    acquisition = read_json(tree / "acquisition.json", "source acquisition")
+    # windows-ffmpeg-source.py writes the manifest at the staging root,
+    # which is the parent of the extracted ffmpeg-<version> directory.
+    acquisition = read_json(tree.parent / "acquisition.json", "source acquisition")
     pin = source.source_pin()
     require(acquisition.get("signature_verified") is True
             and acquisition.get("source_sha256") == pin["sha256"]
@@ -313,7 +315,8 @@ def build(args):
     notice = read_file(args.notice, "product notice")
     legal, acquisition = ffmpeg_members(args, inputs, notice)
     section = legal["REPLACEMENT.md"]
-    inputs["ffmpeg-source/acquisition.json"] = file_binding(Path(args.source_tree) / "acquisition.json")
+    inputs["ffmpeg-source/acquisition.json"] = file_binding(
+        Path(args.source_tree).parent / "acquisition.json")
     build_materials = overlay_members(args, inputs, acquisition, section)
     pdfium = pdfium_members(args, inputs)
 

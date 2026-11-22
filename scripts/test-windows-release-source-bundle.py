@@ -71,7 +71,10 @@ class SourceBundleContracts(unittest.TestCase):
                 } for name, value in self.legal.items()
             },
         }
-        (self.tree / "acquisition.json").write_text(json.dumps(acquisition, indent=2), newline="\n")
+        # windows-ffmpeg-source.py stages the manifest beside the extracted
+        # ffmpeg-<version> directory, not inside it.
+        (self.tree.parent / "acquisition.json").write_text(
+            json.dumps(acquisition, indent=2), newline="\n")
         self.gpg = base / "gpg"
         self.gpg.mkdir()
         for name in ("ffmpeg-8.1.3.tar.xz.asc", "ffmpeg-key.asc", "status.txt"):
@@ -185,6 +188,14 @@ class SourceBundleContracts(unittest.TestCase):
         for name in self.mod.COPYRIGHT_FILES:
             (self.tree / name).unlink(missing_ok=True)
         with self.assertRaisesRegex(ValueError, "lacks upstream copyright"):
+            self.build()
+
+    def test_requires_acquisition_at_staging_root(self):
+        root_record = self.tree.parent / "acquisition.json"
+        misplaced = root_record.read_bytes()
+        root_record.unlink()
+        (self.tree / "acquisition.json").write_bytes(misplaced)
+        with self.assertRaisesRegex(ValueError, "source acquisition absent or unsupported"):
             self.build()
 
     def test_rejects_legal_text_drifted_from_acquisition(self):
