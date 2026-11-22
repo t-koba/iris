@@ -2,3 +2,6 @@
 
 # Retain the upstream C headers byte-for-byte, including their existing whitespace.
 vendor/jpegxr/** -whitespace
+
+# Retain third-party notice texts with the exact bytes pinned by the bundler.
+packaging/windows/third-party-notices/*.txt text eol=lf
