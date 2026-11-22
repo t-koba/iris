@@ -2,8 +2,11 @@
 """Offline contracts for the reviewed macOS/Linux native-evidence producer."""
 from contextlib import contextmanager
 from importlib.util import module_from_spec, spec_from_file_location
+from contextlib import redirect_stderr
 import hashlib
+import io
 import json
+import shutil
 from pathlib import Path
 import sys
 import tempfile
@@ -176,6 +179,23 @@ class PosixNativeEvidence(TestCase):
         with tempfile.TemporaryDirectory() as directory:
             self.check_stage(Path(directory), "linux")
 
+    def test_linux_pdfium_pin_matches_the_authoritative_release_pin(self):
+        pin = json.loads((ROOT / "packaging/linux/pdfium.json").read_text(encoding="utf-8"))
+        expected_bytes, expected_sha = audit_module.PDFIUM_ARCHIVES[pin["asset"]]
+        self.assertEqual(pin["bytes"], expected_bytes)
+        self.assertEqual(pin["sha256"], expected_sha)
+        self.assertEqual(pin["attestation_sha256"], audit_module.PDFIUM_ATTESTATION["pin_sha256"])
+        self.assertEqual(pin["signer_digest"], audit_module.PDFIUM_COMMIT)
+        self.assertEqual(pin["source_digest"], audit_module.PDFIUM_COMMIT)
+        fetch = (ROOT / "scripts/fetch-pdfium-runtime.sh").read_text(encoding="utf-8")
+        self.assertIn(f'asset="{pin["asset"]}"', fetch)
+        self.assertIn(f'asset_bytes={expected_bytes}', fetch)
+        self.assertIn(f'asset_sha256="{expected_sha}"', fetch)
+        self.assertIn(f'pdfium_release="{pin["release"]}"', fetch)
+        self.assertEqual(pin["url"],
+                         "https://github.com/" + audit_module.PDFIUM_ATTESTATION["repo"] +
+                         "/releases/download/" + pin["release"] + "/" + pin["asset"])
+
     def test_repository_relative_mapping_path_is_accepted(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -233,15 +253,21 @@ class PosixNativeEvidence(TestCase):
                     self.assertNotEqual(generate(
                         platform, stage, root / "rejected.json"), 0)
                 self.assertFalse((root / "rejected.json").exists())
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+        review_dir = Path(tempfile.mkdtemp(prefix=".iris-native-evidence-test-", dir=ROOT))
+        try:
+            root = review_dir
             stage = make_stage(root, "macos")
             value = mapping("macos")
             del value["components"]["ffmpeg-{basename}"]
-            with offline_scan():
+            errors = io.StringIO()
+            with offline_scan(), redirect_stderr(errors):
                 self.assertNotEqual(generate(
                     "macos", stage, root / "rejected.json",
                     mapping_path=write_mapping(root, "macos", value)), 0)
+            self.assertIn("no reviewed component rule for staged native file", errors.getvalue())
+            self.assertNotIn("reviewed mapping must be inside the repository", errors.getvalue())
+        finally:
+            shutil.rmtree(review_dir, ignore_errors=True)
 
     def test_stage_bytes_are_never_modified_and_sidecar_stays_outside(self):
         with tempfile.TemporaryDirectory() as directory:

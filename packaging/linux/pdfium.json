@@ -14,5 +14,5 @@
   "attestation_asset": "pdfium-attestation.json",
   "attestation_bytes": 18267,
   "attestation_sha256": "7526f4b934ab498d6206ac7f3d78dd4ce8e0f7d3175227ab3f4ecc255d950ad7",
-  "$comment": "Linux x86-64 PDFium pin shared by scripts/fetch-pdfium-runtime.sh and scripts/release-audit.py. It is deliberately not the Windows tarball; the source binding in a Linux closure must name these bytes."
+  "$comment": "Reviewed Linux x86-64 mirror of the authoritative pins in scripts/release-audit.py and scripts/fetch-pdfium-runtime.sh; an offline contract fails if they diverge. It is deliberately not the Windows tarball."
 }
