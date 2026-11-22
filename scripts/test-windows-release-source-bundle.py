@@ -87,10 +87,8 @@ class SourceBundleContracts(unittest.TestCase):
         (self.overlay / "usage").write_text("ffmpeg needs nasm\n", newline="\n")
         for name in ("FindFFMPEG.cmake.in", "build.sh.in", "vcpkg-cmake-wrapper.cmake"):
             (self.overlay / name).write_text(name + " baseline\n", newline="\n")
-        patches = self.overlay / "patches"
-        patches.mkdir()
         for name in self.mod.overlay.baseline_patches():
-            (patches / name).write_text("patch " + name + "\n", newline="\n")
+            (self.overlay / name).write_text("patch " + name + "\n", newline="\n")
         self.pdf_asset = base / "pdfium-win-x64.tgz"
         self.pdf_asset.write_bytes(self.pdfium_bytes)
         self.extract = base / "pdfium-extract"
@@ -190,7 +188,7 @@ class SourceBundleContracts(unittest.TestCase):
         self.assertNotIn(str(self.tree).encode(), materials["overlay/ffmpeg/portfile.cmake"])
         self.assertIn("source-acquisition.json", materials)
         for name in self.mod.overlay.baseline_patches():
-            self.assertIn("overlay/ffmpeg/patches/" + name, materials)
+            self.assertIn("overlay/ffmpeg/" + name, materials)
         for name in ("signature/ffmpeg-8.1.3.tar.xz.asc", "signature/ffmpeg-key.asc",
                      "signature/gpg-status.txt", "vcpkg.json",
                      "vcpkg-configuration.json", "triplets/x64-windows-iris-dynamic.cmake"):
@@ -266,10 +264,28 @@ class SourceBundleContracts(unittest.TestCase):
             self.build()
 
     def test_rejects_unsafe_patch_name(self):
+        for name in self.mod.overlay.baseline_patches():
+            (self.overlay / name).unlink()
+        (self.overlay / "..evil.patch").write_text("..evil\n", newline="\n")
+        with mock.patch.object(self.mod.overlay, "baseline_patches",
+                               return_value=["..evil.patch"]):
+            with self.assertRaisesRegex(ValueError, "unsafe evidence path"):
+                self.build()
+
+    def test_rejects_patches_subdirectory_layout(self):
+        for name in self.mod.overlay.baseline_patches():
+            (self.overlay / name).unlink()
         patches = self.overlay / "patches"
-        (patches / "..evil.patch").write_text("..evil\n", newline="\n")
-        with self.assertRaisesRegex(ValueError, "unsafe evidence path"):
+        patches.mkdir()
+        for name in self.mod.overlay.baseline_patches():
+            (patches / name).write_text("patch " + name + "\n", newline="\n")
+        with self.assertRaisesRegex(ValueError, "unexpected file set"):
             self.build()
+
+    def test_root_patches_have_vcpkg_notice_coverage(self):
+        notices = self.mod.overlay_notices()
+        for name in self.mod.overlay.baseline_patches():
+            self.assertEqual(notices[name], "vcpkg-license.txt")
 
     def test_rejects_oversized_member(self):
         (self.tree / "COPYRIGHT").write_bytes(b"x" * (self.mod.MAX_MEMBER_BYTES + 1))

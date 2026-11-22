@@ -73,6 +73,7 @@ OVERLAY_NOTICES = {
     "vcpkg-cmake-wrapper.cmake": "vcpkg-license.txt",
 }
 OVERLAY_ROOT_FILES = tuple(OVERLAY_NOTICES)
+PATCH_NOTICE = "vcpkg-license.txt"
 NOTICE_NAMES = tuple(item[0] for item in THIRD_PARTY_NOTICES)
 VCPKG_FILES = (
     ("vcpkg.json", "packaging/windows/validation/vcpkg.json"),
@@ -97,6 +98,15 @@ MAX_PDFIUM_BYTES = 8 * 1024 * 1024
 def require(ok, message):
     if not ok:
         raise ValueError(message)
+
+
+def overlay_notices():
+    """Assign an upstream notice to every redistributed overlay root file."""
+    notices = dict(OVERLAY_NOTICES)
+    for name in overlay.baseline_patches():
+        require(name not in notices, "baseline patch collides with overlay helper: " + name)
+        notices[name] = PATCH_NOTICE
+    return notices
 
 
 def sha256(data):
@@ -240,7 +250,7 @@ def ffmpeg_members(args, inputs, notice):
 
 def add_third_party_notices(members, inputs):
     """Retain upstream notices for every redistributed helper in the bundle."""
-    require(set(OVERLAY_NOTICES.values()) <= set(NOTICE_NAMES),
+    require(set(overlay_notices().values()) <= set(NOTICE_NAMES),
             "bundled overlay file has an unknown notice")
     for name, relative, expected in THIRD_PARTY_NOTICES:
         data = read_file(ROOT / relative, "third-party notice " + name)
@@ -253,9 +263,9 @@ def overlay_members(args, inputs, acquisition, section):
     port = Path(args.overlay) / "ffmpeg"
     require(port.is_dir() and not port.is_symlink(), "derived vcpkg overlay port missing")
     top = sorted(entry.name for entry in port.iterdir())
-    allowed = set(OVERLAY_ROOT_FILES) | {"patches"}
-    require(set(top) <= allowed and "portfile.cmake" in top
-            and "portfile.evidence.json" in top and "vcpkg.json" in top,
+    notices = overlay_notices()
+    required = {"portfile.cmake", "portfile.evidence.json", "vcpkg.json"}
+    require(set(top) <= set(notices) and required <= set(top),
             "derived overlay port has an unexpected file set: " + repr(top))
     members = {"BUILD-INSTRUCTIONS.md": section,
                "source-acquisition.json": json.dumps(acquisition, indent=2,
@@ -272,18 +282,19 @@ def overlay_members(args, inputs, acquisition, section):
         inputs["overlay/ffmpeg/" + name] = binding(data)
         members["overlay/ffmpeg/" + name] = redact(
             data.decode("utf-8"), Path(args.source_tree), "overlay " + name)
-    patches = port / "patches"
-    require(patches.is_dir() and not patches.is_symlink(), "overlay patches directory missing")
-    names = sorted(entry.name for entry in patches.iterdir())
+    # The pinned vcpkg baseline stores its patches at the port root, next to
+    # portfile.cmake. They are retained as evidence, never applied to 8.1.3.
+    patches = set(overlay.baseline_patches())
+    names = sorted(name for name in top if name in patches)
     require(0 < len(names) <= MAX_PATCHES, "overlay patch count out of bounds")
-    require(set(overlay.baseline_patches()) <= set(names),
-            "derived overlay lost a pinned baseline patch")
+    require(set(names) == patches,
+            "derived overlay patch set drifted from the pinned baseline")
     for name in names:
-        check_rel("overlay/ffmpeg/patches/" + name)
+        check_rel("overlay/ffmpeg/" + name)
         require(name.endswith(".patch"), "unexpected non-patch overlay file: " + name)
-        data = read_file(patches / name, "overlay patch " + name)
-        inputs["overlay/ffmpeg/patches/" + name] = binding(data)
-        members["overlay/ffmpeg/patches/" + name] = data
+        data = read_file(port / name, "overlay patch " + name)
+        inputs["overlay/ffmpeg/" + name] = binding(data)
+        members["overlay/ffmpeg/" + name] = data
     gpg = Path(args.gpg_dir)
     for archive_name, basename in SIGNATURE_FILES:
         data = read_file(gpg / basename, "signature " + basename)
