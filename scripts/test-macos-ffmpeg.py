@@ -928,6 +928,22 @@ class PreviewComparison(unittest.TestCase):
         self.assertIn('prevents attributing', diagnostic['interpretation'])
         self.assertIn('FFmpeg deltas', diagnostic['interpretation'])
 
+    def test_control_drift_boundary_uses_unrounded_value_for_attribution(self):
+        # The displayed drift rounds to exactly 10.0%, but the true drift is
+        # above the configured limit and must not be reported as attributable.
+        above = [self.drift_pair('image::extract_jpeg_thumbnail', 1000003, 1100004),
+                 self.drift_pair('raw::extract_cr3_thumbnail', 2000, 2000)]
+        below = [self.drift_pair('image::extract_jpeg_thumbnail', 1000003, 1100003),
+                 self.drift_pair('raw::extract_cr3_thumbnail', 2000, 2000)]
+        with patch.dict(m.os.environ, {}, clear=True):
+            for pairs, expected in ((above, False), (below, True)):
+                with self.subTest(expected=expected):
+                    diagnostic = m.control_drift(pairs)
+                    self.assertEqual(diagnostic['operations'][0]['drift_percent'], 10.0)
+                    self.assertEqual(diagnostic['max_drift_percent'], 10.0)
+                    self.assertEqual(diagnostic['attributable'], expected)
+                    self.assertEqual('exceeds' in diagnostic['interpretation'], not expected)
+
     def test_control_drift_limit_is_configurable_and_positive(self):
         pairs = [self.drift_pair('image::extract_jpeg_thumbnail', 1000, 1100),
                  self.drift_pair('raw::extract_cr3_thumbnail', 2000, 2400)]

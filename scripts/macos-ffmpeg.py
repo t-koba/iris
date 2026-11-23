@@ -623,12 +623,14 @@ def control_drift(pairs):
     controls = [pair for pair in pairs if not pair['uses_ffmpeg']]
     require(len(controls) >= 2, 'at least two non-FFmpeg controls required for drift diagnostic')
     operations = []
+    exact_drifts = []
     for pair in controls:
         baseline = pair['baseline_median_ns']
         require(baseline > 0, 'control baseline median must be positive')
-        drift = round(abs(pair['candidate_median_ns'] - baseline) * 100 / baseline, 2)
-        operations.append(dict(operation=pair['operation'], drift_percent=drift))
-    maximum = max(operation['drift_percent'] for operation in operations)
+        exact = abs(pair['candidate_median_ns'] - baseline) * 100 / baseline
+        exact_drifts.append(exact)
+        operations.append(dict(operation=pair['operation'], drift_percent=round(exact, 2)))
+    maximum = max(exact_drifts)
     attributable = maximum <= limit
     interpretation = (
         'Sequential paired diagnostic only, with no performance parity claim: non-FFmpeg control '
@@ -638,7 +640,7 @@ def control_drift(pairs):
         'drift exceeds the configured limit, which prevents attributing candidate-minus-baseline '
         'FFmpeg deltas to FFmpeg.'
     )
-    return dict(operations=operations, max_drift_percent=maximum, limit_percent=limit,
+    return dict(operations=operations, max_drift_percent=round(maximum, 2), limit_percent=limit,
                 attributable=attributable, interpretation=interpretation)
 
 
