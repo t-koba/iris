@@ -381,8 +381,12 @@ fn decode_jpeg_xl(data: &[u8]) -> Option<DynamicImage> {
     if !preview_dimensions_supported(width, height) {
         return None;
     }
-    // The JXL decoder allocates intermediate buffers beyond the output image;
-    // bound them so a crafted header cannot reserve unbounded memory at render.
+    // `image` allocates the output buffer from total_bytes() without consulting
+    // Limits::max_alloc, and high-bit-depth pixels can need 16 bytes each. Bound
+    // that buffer explicitly, then bound jxl-oxide's own scratch allocations.
+    if decoder.total_bytes() > JXL_MAX_ALLOC_BYTES {
+        return None;
+    }
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(JXL_MAX_ALLOC_BYTES);
     decoder.set_limits(limits).ok()?;
@@ -401,8 +405,8 @@ fn decode_heic(data: &[u8]) -> Option<DynamicImage> {
 const JXR_MAX_DIMENSION: u32 = 65_535;
 const JXR_MAX_PIXELS: u64 = 128_000_000;
 
-// 1 GiB bounds JXL decoder scratch buffers; the pixel cap allows up to 512 MiB
-// of output at four bytes per pixel, leaving room for intermediate allocations.
+// 1 GiB bounds both the JXL output buffer and decoder scratch allocations;
+// it applies regardless of the pixel format declared by the header.
 const JXL_MAX_ALLOC_BYTES: u64 = 1024 * 1024 * 1024;
 
 fn preview_dimensions_supported(width: u32, height: u32) -> bool {
@@ -1039,7 +1043,14 @@ mod tests {
     fn jxl_header_only_input_with_huge_dimensions_is_rejected() {
         // Fuzz input from image_sniff: the header declares 182151x182151, which
         // made JXL rendering try to allocate ~99 GB before the dimension guard.
-        assert!(decode_jpeg_xl(&[0xff, 0x0a, 0x34, 0x3c, 0x36, 0x05]).is_none());
+        let header = [0xff, 0x0a, 0x34, 0x3c, 0x36, 0x05];
+        assert!(decode_jpeg_xl(&header).is_none());
+        let decoder = jxl_oxide::integration::JxlDecoder::new(std::io::Cursor::new(header))
+            .expect("the fuzz header itself is parseable");
+        assert!(
+            image::ImageDecoder::total_bytes(&decoder) > JXL_MAX_ALLOC_BYTES,
+            "output buffer guard must also reject this header"
+        );
     }
 
     #[test]
