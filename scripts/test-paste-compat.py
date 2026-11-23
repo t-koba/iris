@@ -41,8 +41,8 @@ class PasteFacade(unittest.TestCase):
         for relative in ("Cargo.toml", "docs/architecture.md", ".gitattributes", ".github/workflows/ci.yml"):
             self.assertNotIn("vendor/paste", read(relative), f"{relative} still names vendor/paste")
         self.assertNotIn("vendor/paste", patch_section())
-        # The three other vendored copies keep their existing path patches.
-        for name, path in (("block", "vendor/block"), ("cryoglyph", "vendor/cryoglyph"), ("jpegxr", "vendor/jpegxr")):
+        # The two remaining vendored copies keep their existing path patches.
+        for name, path in (("cryoglyph", "vendor/cryoglyph"), ("jpegxr", "vendor/jpegxr")):
             self.assertIn(f'{name} = {{ path = "{path}" }}', patch_section())
             self.assertTrue((root / path).is_dir(), f"{path} is missing")
 

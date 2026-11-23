@@ -147,9 +147,9 @@ iris-transfer = { path = "crates/transfer" }
 
 [patch.crates-io]
 # block 0.1.6 models _NSConcreteStackBlock as an uninhabited enum, which is
-# rejected by future Rust versions. Keep the upstream API/ABI and use an
-# inhabited opaque FFI marker until metal-rs migrates away from rust-block.
-block = { path = "vendor/block" }
+# rejected by future Rust versions. Pin a public MIT-licensed fork with the
+# same API/ABI and an inhabited opaque FFI marker until metal-rs migrates.
+block = { git = "https://github.com/vaimeai/rust-block", rev = "b88ec0f" }
 # Scoped cryoglyph vendor waiver: lru 0.16 has a use-after-free in pop_lru,
 # which the text atlas calls. Upstream's lru>=0.18.2 fix exists only on the
 # wgpu>=29 line that iced 0.14 cannot accept. Revisit when Cargo.lock resolves

@@ -143,6 +143,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/test-paste-compat.py
 
+      - name: Block dependency regression
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-block-dependency.py
+
       - name: Path identity regressions
         run: |
           cargo test -p iris-core-domain --lib path_identity::tests:: --locked
