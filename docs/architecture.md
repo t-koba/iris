@@ -53,7 +53,7 @@ graph TD
 
 `vendor/block` は外部クレート `block` 0.1.6 の修正版です。描画に使う metal-rs が依存していますが、元の版は今後の Rust で拒否される型の書き方をしているため、API と ABI を保ったまま置き換えています（metal-rs がこのクレートを使わなくなれば不要になります）。
 
-`vendor/cryoglyph` は外部クレート `cryoglyph` 0.1.0 の一時的な修正版です。iced_wgpu 経由で使われる lru 0.16 の `pop_lru` に解放後使用の問題があるため lru 0.18 に切り替えており、upstream が修正版をリリースすれば不要になります。
+`vendor/cryoglyph` は外部クレート `cryoglyph` 0.1.0 のスコープ付き例外です。iced_wgpu 経由で使われる lru 0.16 の `pop_lru` に解放後使用の問題があるため lru 0.18.5 に切り替えています。upstream の修正は wgpu 29 以降の系統にしかなく、Iris が使う iced 0.14 / wgpu 27 には入らないため、「修正版がリリースされれば不要」という終了条件は成立しません。`Cargo.lock` で iced_wgpu が wgpu 29 以降に移行し、cryoglyph が lru 0.18.2 以上を要求する時点で再評価し、プレビューのレイテンシと対応形式の同等性を確認してから削除します。それまでは lru 0.18.5 への固定を維持します。
 
 `crates/paste-compat` は RUSTSEC-2024-0436（paste はメンテナンス停止）に対する Iris 所有の小さな独立ファサードです。保守停止した `paste` の修正版を vendor に置かず、保守中の pastey 0.1.1 の proc macro（`paste`・`item`・`expr`）を再エクスポートして、rav1e などが要求する `paste = "1.0"` の API を提供します。
 
