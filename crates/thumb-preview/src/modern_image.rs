@@ -374,7 +374,18 @@ fn decode_avif(data: &[u8]) -> Option<DynamicImage> {
 }
 
 fn decode_jpeg_xl(data: &[u8]) -> Option<DynamicImage> {
-    let decoder = jxl_oxide::integration::JxlDecoder::new(Cursor::new(data)).ok()?;
+    use image::ImageDecoder;
+
+    let mut decoder = jxl_oxide::integration::JxlDecoder::new(Cursor::new(data)).ok()?;
+    let (width, height) = decoder.dimensions();
+    if !preview_dimensions_supported(width, height) {
+        return None;
+    }
+    // The JXL decoder allocates intermediate buffers beyond the output image;
+    // bound them so a crafted header cannot reserve unbounded memory at render.
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(JXL_MAX_ALLOC_BYTES);
+    decoder.set_limits(limits).ok()?;
     DynamicImage::from_decoder(decoder).ok()
 }
 
@@ -385,16 +396,23 @@ fn decode_heic(data: &[u8]) -> Option<DynamicImage> {
 }
 
 // jxrlib computes intermediate buffers with 32-bit arithmetic and truncates
-// dimensions to 16 bits. Cap the declared image before its decode path sees it.
+// dimensions to 16 bits. Both JPEG XR and JPEG XL share these preview caps:
+// check declared dimensions before either decode path allocates for them.
 const JXR_MAX_DIMENSION: u32 = 65_535;
 const JXR_MAX_PIXELS: u64 = 128_000_000;
 
-fn jxr_dimensions_supported(width: u32, height: u32) -> bool {
+// 1 GiB bounds JXL decoder scratch buffers; the pixel cap allows up to 512 MiB
+// of output at four bytes per pixel, leaving room for intermediate allocations.
+const JXL_MAX_ALLOC_BYTES: u64 = 1024 * 1024 * 1024;
+
+fn preview_dimensions_supported(width: u32, height: u32) -> bool {
     width != 0
         && height != 0
         && width <= JXR_MAX_DIMENSION
         && height <= JXR_MAX_DIMENSION
-        && u64::from(width) * u64::from(height) <= JXR_MAX_PIXELS
+        && u64::from(width)
+            .checked_mul(u64::from(height))
+            .is_some_and(|pixels| pixels <= JXR_MAX_PIXELS)
 }
 
 fn decode_jpeg_xr(data: &[u8]) -> Option<DynamicImage> {
@@ -403,7 +421,7 @@ fn decode_jpeg_xr(data: &[u8]) -> Option<DynamicImage> {
     let mut decoder = ImageDecode::with_reader(Cursor::new(data)).ok()?;
     let (width, height) = decoder.get_size().ok()?;
     let (width, height) = (u32::try_from(width).ok()?, u32::try_from(height).ok()?);
-    if !jxr_dimensions_supported(width, height) {
+    if !preview_dimensions_supported(width, height) {
         return None;
     }
 
@@ -1005,16 +1023,40 @@ mod tests {
     }
 
     #[test]
-    fn jxr_dimension_cap_rejects_oversized_declarations() {
-        assert!(jxr_dimensions_supported(1, 1));
-        assert!(jxr_dimensions_supported(JXR_MAX_DIMENSION, 1));
-        assert!(jxr_dimensions_supported(12_000, 10_000)); // exactly 120M pixels
-        assert!(!jxr_dimensions_supported(0, 1));
-        assert!(!jxr_dimensions_supported(1, 0));
-        assert!(!jxr_dimensions_supported(JXR_MAX_DIMENSION + 1, 1));
-        assert!(!jxr_dimensions_supported(1, JXR_MAX_DIMENSION + 1));
-        assert!(!jxr_dimensions_supported(u32::MAX, u32::MAX));
-        assert!(!jxr_dimensions_supported(12_000, 11_000)); // 132M pixels
+    fn preview_dimension_cap_rejects_oversized_declarations() {
+        assert!(preview_dimensions_supported(1, 1));
+        assert!(preview_dimensions_supported(JXR_MAX_DIMENSION, 1));
+        assert!(preview_dimensions_supported(12_000, 10_000)); // exactly 120M pixels
+        assert!(!preview_dimensions_supported(0, 1));
+        assert!(!preview_dimensions_supported(1, 0));
+        assert!(!preview_dimensions_supported(JXR_MAX_DIMENSION + 1, 1));
+        assert!(!preview_dimensions_supported(1, JXR_MAX_DIMENSION + 1));
+        assert!(!preview_dimensions_supported(u32::MAX, u32::MAX));
+        assert!(!preview_dimensions_supported(12_000, 11_000)); // 132M pixels
+    }
+
+    #[test]
+    fn jxl_header_only_input_with_huge_dimensions_is_rejected() {
+        // Fuzz input from image_sniff: the header declares 182151x182151, which
+        // made JXL rendering try to allocate ~99 GB before the dimension guard.
+        assert!(decode_jpeg_xl(&[0xff, 0x0a, 0x34, 0x3c, 0x36, 0x05]).is_none());
+    }
+
+    #[test]
+    fn preview_dimension_cap_rejects_jxl_oom_dimensions() {
+        assert!(!preview_dimensions_supported(182_151, 182_151));
+        assert!(preview_dimensions_supported(4_000, 3_000));
+    }
+
+    #[test]
+    fn jxl_alloc_cap_is_finite_and_nonzero() {
+        const {
+            assert!(JXL_MAX_ALLOC_BYTES > 0);
+            assert!(JXL_MAX_ALLOC_BYTES < u64::MAX);
+            assert!(JXL_MAX_ALLOC_BYTES >= JXR_MAX_PIXELS * 4);
+        }
+        let usable_alloc = usize::try_from(JXL_MAX_ALLOC_BYTES).unwrap();
+        assert!(usable_alloc > 0 && usable_alloc < usize::MAX);
     }
 
     #[test]
