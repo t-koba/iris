@@ -892,6 +892,226 @@ class BundledLinuxClosure(unittest.TestCase):
                     self.assertIn(expected, missing[0]["reason"])
 
 
+    def test_linux_main_stage_and_verifier_gate_end_to_end(self):
+        # Gate-level regression for auditor finding seq 38: the production
+        # linux wiring (stage=directory) and verify_bundled_native_evidence()
+        # must both run inside release-audit.py main(). Existing unit tests call
+        # those methods directly, so removing either line from main() would not
+        # fail. This test exercises main() end to end offline and fails if
+        # either wiring is removed. Only external inspectors are patched
+        # (git/rustc/cargo/readelf/ldd/dpkg/apt and the producer ldd/nm
+        # helpers); Audit.linux/native_evidence/verify_bundled_native_evidence
+        # and posix-native-evidence.py run for real. No network, no real cargo.
+        host = "x86_64-unknown-linux-gnu"
+        natives = ("Iris.AppDir/usr/bin/Iris",
+                   "Iris.AppDir/usr/lib/iris/libpdfium.so",
+                   "Iris.AppDir/usr/lib/iris/libavcodec.so.62",
+                   "Iris.AppDir/usr/lib/iris/libavformat.so.61",
+                   "Iris.AppDir/usr/lib/iris/libavutil.so.60",
+                   "Iris.AppDir/usr/lib/iris/libswscale.so.8")
+        ffmpeg_libs = [name.rsplit("/", 1)[-1] for name in natives
+                       if module.ffmpeg_component(name) is not None]
+        self.assertEqual(set(ffmpeg_libs),
+                         {"libavcodec.so.62", "libavformat.so.61",
+                          "libavutil.so.60", "libswscale.so.8"})
+        def write_file(root, name, native=False):
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if native:
+                path.write_bytes(b"\x7fELF" + b"synthetic native bytes, NOT a release binary")
+            else:
+                path.write_text("synthetic review evidence, NOT legal approval\n", encoding="utf-8")
+            return path
+        def cargo_metadata_fixture():
+            root_id = "path+$WORKSPACE/crates/ui-shell#iris-ui-shell@0.4.0"
+            third_id = "registry+https://example.invalid/index#third@0.4.0"
+            packages = [
+                dict(id=root_id, name="iris-ui-shell", version="0.4.0", source=None,
+                     manifest_path=str(ROOT / "crates/ui-shell/Cargo.toml"),
+                     license=None, license_file=None, targets=[dict(kind=["lib"])]),
+                dict(id=third_id, name="third", version="0.4.0",
+                     source="registry+https://example.invalid/index",
+                     manifest_path="/cache/third/Cargo.toml",
+                     license="MIT OR Apache-2.0", license_file=None, targets=[dict(kind=["lib"])]),
+            ]
+            return dict(packages=packages, resolve=dict(root=None, nodes=[]), workspace_members=["iris-ui-shell"])
+        def cargo_tree_fixture():
+            return ("iris-ui-shell v0.4.0 (/workspace/crates/ui-shell)|\n"
+                    "`-- third v0.4.0 (registry+https://example.invalid/index)|\n")
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            cwd = base / "work"
+            stage = cwd / "dist" / "linux"
+            stage.mkdir(parents=True)
+            policy_spec = importlib.util.spec_from_file_location("release_policy_gate", ROOT / "scripts/release-policy.py")
+            policy_module = importlib.util.module_from_spec(policy_spec)
+            policy_spec.loader.exec_module(policy_module)
+            producer_spec = importlib.util.spec_from_file_location("posix_native_evidence_gate", ROOT / "scripts/posix-native-evidence.py")
+            producer = importlib.util.module_from_spec(producer_spec)
+            producer_spec.loader.exec_module(producer)
+            mapping = json.loads((ROOT / "packaging/native-evidence/linux-mapping.json").read_text(encoding="utf-8"))
+            for name in mapping["evidence_files"]:
+                if name.endswith("PROVENANCE.json"):
+                    continue
+                write_file(stage, name)
+            for name in natives:
+                write_file(stage, name, native=True)
+            for name in ("Iris.AppDir/AppRun", "Iris.AppDir/iris.desktop", "Iris.AppDir/iris.png",
+                         "Iris.AppDir/usr/share/applications/iris.desktop",
+                         "Iris.AppDir/usr/share/icons/hicolor/256x256/apps/iris.png",
+                         "Iris.AppDir/usr/share/doc/iris/pdfium/args.gn",
+                         "Iris.AppDir/usr/share/doc/iris/pdfium/licenses/pdfium.txt",
+                         "Iris.AppDir/usr/share/doc/iris/ffmpeg/config.h",
+                         "ffmpeg-audit.json", "Iris-linux-appdir.tar.gz", "Iris-linux-appdir.tar.gz.sha256",
+                         "iris_1.0_amd64.deb", "iris_1.0_amd64.deb.sha256"):
+                write_file(stage, name)
+            library = stage / "Iris.AppDir/usr/lib/iris/libpdfium.so"
+            library_sha256 = hashlib.sha256(library.read_bytes()).hexdigest()
+            asset = "pdfium-linux-x64.tgz"
+            asset_bytes, asset_sha256 = module.PDFIUM_ARCHIVES[asset]
+            pin = module.PDFIUM_ATTESTATION
+            provenance = {"schema": 2,
+                          "archive": {"asset": asset, "bytes": asset_bytes, "sha256": asset_sha256},
+                          "runtime": {"path": "usr/lib/iris/libpdfium.so", "sha256": library_sha256},
+                          "attestation": dict(pin, status="verified", subject_sha256=asset_sha256,
+                                              bundle_sha256=pin["pin_sha256"],
+                                              verifier_version="2.83.0", verifier_sha256="a" * 64)}
+            (stage / "Iris.AppDir/usr/share/doc/iris/pdfium/PROVENANCE.json").write_text(json.dumps(provenance), encoding="utf-8")
+            (cwd / "Cargo.lock").write_text("synthetic lock, NOT a release build\n", encoding="utf-8")
+            (cwd / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+            (cwd / "crates/ui-shell").mkdir(parents=True)
+            (cwd / "crates/ui-shell/Cargo.toml").write_text('[package]\nname = "iris-ui-shell"\n', encoding="utf-8")
+            sidecar = base / "native-evidence.json"
+            with patch.object(producer, "external_dependencies", return_value={}):
+                self.assertEqual(producer.main(["generate", "--platform", "linux", "--stage", str(stage),
+                                                "--mapping", str(ROOT / "packaging/native-evidence/linux-mapping.json"),
+                                                "--output", str(sidecar)]), 0)
+            self.assertTrue(sidecar.is_file())
+            def fake_command(self, *argv):
+                if argv[0] == "git":
+                    text = "deadbeef synthetic commit, NOT a release\n"
+                    self.add("command", argv=list(argv), status=0, text=text, truncated=False)
+                    return text
+                if argv[0] == "rustc":
+                    # NOTE: keep single host line for cargo_graph host parsing.
+                    text = "rustc 1.82.0 (synthetic)\nbinary: rustc\ncommit-hash: synthetic\ncommit-date: synthetic\nhost: " + host + "\nrelease: 1.82.0\n"
+                    self.add("command", argv=list(argv), status=0, text=text, truncated=False)
+                    return text
+                if argv[0] == "readelf":
+                    self.add("command", argv=list(argv), status=0, text="", truncated=False)
+                    return ""
+                if argv[0] == "ldd":
+                    target = argv[-1]
+                    if target.endswith("/Iris.AppDir/usr/bin/Iris"):
+                        lines = []
+                        for libname in ffmpeg_libs:
+                            libpath = (stage / "Iris.AppDir/usr/lib/iris" / libname).resolve()
+                            lines.append(libname + " => " + str(libpath) + " (0x123)\n")
+                        text = "".join(lines) + "\tlinux-vdso.so.1 (0x00007fff)\n"
+                    else:
+                        text = "\tlinux-vdso.so.1 (0x00007fff)\n"
+                    self.add("command", argv=list(argv), status=0, text=text, truncated=False)
+                    return text
+                if argv[:2] == ("dpkg-query", "-S"):
+                    self.add("command", argv=list(argv), status=0, text="", truncated=False)
+                    return ""
+                if argv[0] in ("apt-cache", "dpkg-query"):
+                    self.add("command", argv=list(argv), status=0, text="", truncated=False)
+                    return ""
+                if len(argv) == 4 and argv[2] == "probe-library":
+                    component = module.ffmpeg_component(argv[3])
+                    assert component is not None, argv[3]
+                    payload = {"library": argv[3],
+                               component + "_configuration": "--enable-shared --disable-gpl --disable-version3 --disable-nonfree",
+                               component + "_license": "LGPL version 2.1 or later"}
+                    text = json.dumps(payload)
+                    self.add("command", argv=list(argv), status=0, text=text, truncated=False)
+                    return text
+                self.add("command", argv=list(argv), status=0, text="", truncated=False)
+                return ""
+            def fake_bounded_cargo(self, argv, record_kind):
+                if record_kind == "cargo-metadata-command":
+                    data = json.dumps(cargo_metadata_fixture()).encode("utf-8")
+                    self.add(record_kind, argv=argv, status=0, truncated=False, stdout_bytes=len(data), stderr="", stderr_truncated=False)
+                    return data
+                if record_kind == "cargo-tree-command":
+                    data = cargo_tree_fixture().encode("utf-8")
+                    self.add(record_kind, argv=argv, status=0, truncated=False, stdout_bytes=len(data), stderr="", stderr_truncated=False)
+                    return data
+                raise AssertionError(record_kind)
+            def run_main(native_evidence, output):
+                with patch.object(module.Audit, "command", fake_command), patch.object(module.Audit, "_bounded_cargo", fake_bounded_cargo):
+                    with patch.object(sys, "argv", ["release-audit.py", "linux", "--output", str(output),
+                                                    "--native-evidence", str(native_evidence), "--require-native-evidence"]):
+                        return module.main()
+            old_cwd = Path.cwd()
+            os.chdir(cwd)
+            try:
+                output = cwd / "audit.json"
+                self.assertEqual(run_main(sidecar, output), 0)
+                report = json.loads(output.read_text(encoding="utf-8"))
+                self.assertEqual(report["schema"], 2)
+                self.assertEqual(report["platform"], "linux")
+                missing = [row for row in report["records"] if row["kind"] == "missing"]
+                self.assertEqual(missing, [], missing)
+                policy = policy_module.load_policy(ROOT / "scripts/release-policy.json", 65536)
+                workspace = policy_module.workspace_packages()
+                self.assertEqual(policy_module.validate(report, policy, workspace), [])
+                closures = [row for row in report["records"] if row["kind"] == "native-closure"]
+                self.assertEqual(len(closures), 1)
+                components = module.validate_closure(closures[0]["evidence"], report["records"],
+                                                     report["limits"]["max_native_files"],
+                                                     report["limits"]["max_native_components"])
+                covered = {component["artifact"]["path"] for component in components}
+                native_paths = {row["path"] for row in report["records"] if row["kind"] == "native-file"}
+                self.assertTrue(native_paths, "closure must inventory native files")
+                self.assertTrue(native_paths <= covered, "every staged native ELF must have a reviewed component")
+                probe_helper = module.Audit(argparse.Namespace(max_report_bytes=2097152, max_command_bytes=32768,
+                                                               max_native_files=256, command_seconds=5,
+                                                               platform="linux", max_metadata_bytes=8388608,
+                                                               max_cargo_packages=1024))
+                for name in natives:
+                    spelling = probe_helper.clean(str((cwd / "dist/linux" / name).resolve()))
+                    self.assertIn(spelling, covered, name)
+                settings = dict(max_report_bytes=2097152, max_command_bytes=32768, max_native_files=256,
+                                command_seconds=5, platform="linux", max_metadata_bytes=8388608,
+                                max_cargo_packages=1024, max_native_components=4096)
+                bundled = [(cwd / "dist/linux" / name).resolve() for name in natives]
+                tampered = module.Audit(argparse.Namespace(**settings))
+                tampered.records = copy.deepcopy(report["records"])
+                tampered.bundled = list(bundled)
+                closure_index = next(index for index, row in enumerate(tampered.records) if row["kind"] == "native-closure")
+                evidence = tampered.records[closure_index]["evidence"]
+                victim = next(artifact for artifact in evidence["artifacts"] if "libavcodec.so.62" in artifact["file"]["path"])
+                victim["file"]["sha256"] = "b" * 64
+                tampered.verify_bundled_native_evidence()
+                tampered_missing = [row for row in tampered.records if row["kind"] == "missing"]
+                self.assertEqual(len(tampered_missing), 1, tampered_missing)
+                self.assertEqual(tampered_missing[0]["path"], victim["file"]["path"])
+                self.assertIn("matching native-closure artifact hash", tampered_missing[0]["reason"])
+                tampered_sidecar = json.loads(sidecar.read_text(encoding="utf-8"))
+                victim_rel = "Iris.AppDir/usr/lib/iris/libavcodec.so.62"
+                victim_id = next(component["id"] for component in tampered_sidecar["components"] if component["artifact"]["path"] == victim_rel)
+                tampered_sidecar["components"] = [component for component in tampered_sidecar["components"] if component["id"] != victim_id]
+                for artifact in tampered_sidecar["artifacts"]:
+                    if artifact["file"]["path"] == victim_rel:
+                        for mode in artifact["coverage"]:
+                            if victim_id in artifact["coverage"][mode]["components"]:
+                                artifact["coverage"][mode]["components"].remove(victim_id)
+                tampered_path = base / "tampered-native-evidence.json"
+                tampered_path.write_text(json.dumps(tampered_sidecar), encoding="utf-8")
+                tampered_output = cwd / "audit-tampered.json"
+                self.assertEqual(run_main(tampered_path, tampered_output), 0)
+                tampered_report = json.loads(tampered_output.read_text(encoding="utf-8"))
+                self.assertTrue(any(row["kind"] == "native-closure" for row in tampered_report["records"]))
+                rerun_missing = [row for row in tampered_report["records"] if row["kind"] == "missing"]
+                self.assertEqual(len(rerun_missing), 1, rerun_missing)
+                self.assertTrue(rerun_missing[0]["path"].endswith("/Iris.AppDir/usr/lib/iris/libavcodec.so.62"), rerun_missing)
+                self.assertIn("reviewed native-closure coverage", rerun_missing[0]["reason"])
+            finally:
+                os.chdir(old_cwd)
+
+
 class WindowsNativeEvidencePipeline(unittest.TestCase):
     """Producer evidence -> sealed manifest -> audit closure, all offline."""
 
