@@ -30,7 +30,6 @@ audit_module = load("release_audit_contract", ROOT / "scripts/release-audit.py")
 policy_module = load("release_policy_contract", ROOT / "scripts/release-policy.py")
 from release_evidence import validate_closure  # noqa: E402
 
-STATIC_SYMBOLS = ("_lzma_code", "_lzma_end", "_lzma_stream_decoder", "_lzma_stream_buffer_decode")
 STATIC_DYLIB = "Iris.app/Contents/Frameworks/libavcodec.62.dylib"
 FFMPEG_DOCS = "Iris.app/Contents/Resources/ffmpeg/"
 MACOS_NATIVE = ("Iris.app/Contents/MacOS/Iris",
@@ -86,22 +85,27 @@ def lzma_pin(stage):
 
 
 def write_macos_static_evidence(stage):
+    """Synthetic build provenance bound to this offline stage's exact bytes."""
     pin = lzma_pin(stage)
     docs_dir = stage / FFMPEG_DOCS
-    digests_by_name = {path.name: producer.sha256(path) for path in docs_dir.iterdir()}
     evidence = dict(source=pin,
                     signature=dict(verified=True, primary_fingerprint=pin["fingerprint"],
                                    signing_fingerprint=pin["fingerprint"]),
-                    license_metadata_sha256=digests_by_name["xz-COPYING.0BSD"],
+                    license_metadata_sha256=producer.sha256(docs_dir / "xz-COPYING.0BSD"),
                     static_archive_sha256="ab" * 32, cmake="cmake version test synthetic")
-    library = producer.sha256(stage / STATIC_DYLIB)
+    (docs_dir / "liblzma-build.json").write_text(json.dumps(evidence, indent=2) + "\n",
+                                                  encoding="utf-8")
+    digests_by_name = {path.name: producer.sha256(path) for path in docs_dir.iterdir()}
+    libraries = {Path(name).name: producer.sha256(stage / name)
+                 for name in MACOS_NATIVE if "/Frameworks/" in name and name.endswith(".dylib")}
     runtime = dict(liblzma=evidence,
-                   static_libraries={Path(STATIC_DYLIB).name: dict(
-                       sha256=library, symbols=list(STATIC_SYMBOLS))})
+                   static_libraries={name: dict(sha256=sha, source_sha256=pin["sha256"],
+                                                static_archive_sha256=evidence["static_archive_sha256"])
+                                     for name, sha in libraries.items()})
     (stage / producer.RUNTIME_REPORT).write_text(json.dumps(runtime, indent=2) + "\n",
                                                  encoding="utf-8")
     build_manifest = dict(liblzma=evidence, documents=digests_by_name,
-                          staged_libraries={Path(STATIC_DYLIB).name: library})
+                          staged_libraries=libraries, libraries=libraries)
     (stage / producer.BUILD_MANIFEST).write_text(json.dumps(build_manifest, indent=2) + "\n",
                                                  encoding="utf-8")
 
@@ -169,23 +173,14 @@ def collect(stage, sidecar, manifest=None, max_components=16):
 
 
 @contextmanager
-def offline_scan(stage, symbols=STATIC_SYMBOLS, native_names=None):
-    names = {Path(STATIC_DYLIB).name} if native_names is None else set(native_names)
-
-    def tool(argv, seconds=30):
-        if list(argv[:2]) != ["nm", "-gU"]:
-            raise AssertionError("unexpected native tool call: " + str(argv))
-        if Path(argv[-1]).name not in names:
-            return ""
-        return "".join(f"0000000000001234 T {symbol}\n" for symbol in symbols)
-
+def offline_scan(stage):
+    """Keep the producer offline; the pin still binds to this synthetic stage."""
     original_pin = producer.lzma_pin
 
     def local_pin(mapping):
         return lzma_pin(stage) if stage.name == "macos" else original_pin(mapping)
 
     with patch.object(producer, "external_dependencies", return_value={}), \
-            patch.object(producer, "run_tool", side_effect=tool), \
             patch.object(producer, "lzma_pin", side_effect=local_pin):
         yield
 
@@ -219,14 +214,15 @@ class PosixNativeEvidence(TestCase):
                     self.assertEqual(row["obligations"][key]["status"], "provided")
         static = [row for row in components if row["mode"] == "static"]
         if platform == "macos":
-            self.assertEqual(len(static), 1)
-            self.assertEqual(Path(static[0]["artifact"]["path"]), stage / STATIC_DYLIB)
-            self.assertEqual(static[0]["license"]["id"], "0BSD")
-            self.assertEqual(static[0]["license"]["disposition"], "allowed")
-            self.assertEqual(static[0]["source"]["revision"],
-                             json.loads((ROOT / "packaging/macos/liblzma.json").read_text())["sha256"])
-            for key in ("notice", "source", "relinking"):
-                self.assertEqual(static[0]["obligations"][key]["status"], "provided")
+            self.assertEqual({Path(row["artifact"]["path"]) for row in static},
+                             {stage / name for name in MACOS_NATIVE if "/Frameworks/" in name})
+            for row in static:
+                self.assertEqual(row["license"]["id"], "0BSD")
+                self.assertEqual(row["license"]["disposition"], "allowed")
+                self.assertEqual(row["source"]["revision"],
+                                 json.loads((ROOT / "packaging/macos/liblzma.json").read_text())["sha256"])
+                for key in ("notice", "source", "relinking"):
+                    self.assertEqual(row["obligations"][key]["status"], "provided")
         else:
             self.assertFalse(static)
         review = json.loads((root / ("generated/" + platform + "-review.json")).read_text())
@@ -242,14 +238,17 @@ class PosixNativeEvidence(TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             stage, _, _ = self.check_stage(root, "macos")
-            other = "Iris.app/Contents/Frameworks/libswresample.4.dylib"
-            names = {Path(STATIC_DYLIB).name, Path(other).name}
-            with offline_scan(stage, native_names=names):
-                self.assertEqual(generate("macos", stage, root / "truncated.json"), 0)
-            manifest = json.loads((root / "truncated.json").read_text(encoding="utf-8"))
-            covered = {row["artifact"]["path"] for row in manifest["components"]
-                       if row["mode"] == "static"}
-            self.assertEqual(covered, {STATIC_DYLIB, other})
+            runtime_path = stage / producer.RUNTIME_REPORT
+            baseline = json.loads(runtime_path.read_text(encoding="utf-8"))
+            truncated = {Path(STATIC_DYLIB).name: baseline["static_libraries"][
+                Path(STATIC_DYLIB).name]}
+            runtime_path.write_text(json.dumps(dict(baseline, static_libraries=truncated)),
+                                    encoding="utf-8")
+            errors = io.StringIO()
+            with offline_scan(stage), redirect_stderr(errors):
+                self.assertNotEqual(generate("macos", stage, root / "rejected.json"), 0)
+            self.assertIn("static liblzma report omits a staged FFmpeg dylib", errors.getvalue())
+            self.assertFalse((root / "rejected.json").exists())
 
     def test_macos_static_liblzma_evidence_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -260,16 +259,23 @@ class PosixNativeEvidence(TestCase):
             baseline_build = json.loads(build_path.read_text(encoding="utf-8"))
             basename = Path(STATIC_DYLIB).name
 
-            def refuse(mutate, expected, symbols=STATIC_SYMBOLS):
+            def refuse(mutate, expected):
                 runtime_path.write_text(json.dumps(baseline_runtime), encoding="utf-8")
                 build_path.write_text(json.dumps(baseline_build), encoding="utf-8")
                 mutate()
                 output = root / "rejected.json"
                 errors = io.StringIO()
-                with offline_scan(stage, symbols=symbols), redirect_stderr(errors):
+                with offline_scan(stage), redirect_stderr(errors):
                     self.assertNotEqual(generate("macos", stage, output), 0)
                 self.assertIn(expected, errors.getvalue())
                 self.assertFalse(output.exists())
+
+            def edit_report(field, value, name=basename):
+                def mutate():
+                    report = json.loads(runtime_path.read_text(encoding="utf-8"))
+                    report["static_libraries"][name][field] = value
+                    runtime_path.write_text(json.dumps(report), encoding="utf-8")
+                return mutate
 
             def edit_static_evidence(field, value):
                 def mutate():
@@ -282,17 +288,24 @@ class PosixNativeEvidence(TestCase):
             refuse(lambda: runtime_path.write_text(json.dumps(dict(
                 liblzma=baseline_runtime["liblzma"], static_libraries={})), encoding="utf-8"),
                 "runtime lacks verified static library evidence")
-            refuse(lambda: runtime_path.write_text(json.dumps(dict(
-                baseline_runtime, static_libraries={basename: dict(sha256="cd" * 32,
-                symbols=list(STATIC_SYMBOLS))})), encoding="utf-8"),
-                "static liblzma bytes differ from the staged dylib")
+            refuse(edit_report("sha256", "cd" * 32),
+                   "static liblzma bytes differ from the staged dylib")
+            refuse(edit_report("source_sha256", "ee" * 64),
+                   "unreviewed static liblzma source hash")
+            refuse(edit_report("static_archive_sha256", "ff" * 64),
+                   "unreviewed static liblzma archive hash")
             refuse(edit_static_evidence("source", dict(baseline_runtime["liblzma"]["source"], version="0.0.0")),
                    "runtime liblzma evidence does not match the reviewed pin")
             refuse(lambda: build_path.write_text(json.dumps(dict(
-                baseline_build, liblzma=dict(baseline_build["liblzma"], sha256="ee" * 32))),
+                baseline_build, liblzma=dict(baseline_build["liblzma"], static_archive_sha256="11" * 32))),
                 encoding="utf-8"), "runtime and build liblzma evidence differ")
-            refuse(lambda: None, "static liblzma symbols absent from the staged dylib",
-                   symbols=("_lzma_code",))
+
+            def tamper():
+                path = stage / STATIC_DYLIB
+                path.write_bytes(path.read_bytes() + b"tampered after evidence")
+
+            refuse(tamper, "static liblzma bytes differ from the staged dylib")
+            write_file(stage, STATIC_DYLIB, native=True)
             refuse(lambda: (stage / (FFMPEG_DOCS + "xz-source.tar.xz")).unlink(),
                    "reviewed supporting evidence absent from stage")
             runtime_path.write_text(json.dumps(baseline_runtime), encoding="utf-8")
@@ -300,6 +313,22 @@ class PosixNativeEvidence(TestCase):
             write_file(stage, FFMPEG_DOCS + "xz-source.tar.xz")
             with offline_scan(stage):
                 self.assertEqual(generate("macos", stage, root / "restored.json"), 0)
+
+    def test_macos_dynamic_liblzma_dependency_is_unmapped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = make_stage(root, "macos")
+            dynamic = root / "liblzma.5.dylib"
+            dynamic.write_bytes(b"\xfe\xed\xfa\xcf synthetic dynamic liblzma")
+            errors = io.StringIO()
+            original_pin = producer.lzma_pin
+            with patch.object(producer, "lzma_pin", side_effect=lambda mapping: lzma_pin(stage)), \
+                    patch.object(producer, "external_dependencies",
+                                 return_value={dynamic: producer.binding(dynamic)}), \
+                    redirect_stderr(errors):
+                self.assertNotEqual(generate("macos", stage, root / "rejected.json"), 0)
+            self.assertIn("no reviewed component for external native file", errors.getvalue())
+            self.assertFalse((root / "rejected.json").exists())
 
     def test_linux_stage_produces_a_passing_schema2_closure(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -40,7 +40,8 @@ DISPOSITIONS = ("allowed", "review")
 MODIFICATIONS = ("unmodified", "modified")
 RUNTIME_REPORT = "Iris.app/Contents/Resources/ffmpeg-runtime.json"
 BUILD_MANIFEST = "Iris.app/Contents/Resources/ffmpeg/manifest.json"
-LZMA_SYMBOLS = ("_lzma_code", "_lzma_end", "_lzma_stream_decoder", "_lzma_stream_buffer_decode")
+FRAMEWORKS = "Iris.app/Contents/Frameworks/"
+FFMPEG_DYLIB = re.compile(r"lib(?:av|sw)[a-z0-9]+\.[0-9]+(?:\.[0-9]+)*\.dylib\Z")
 
 
 def sha256(path):
@@ -334,20 +335,17 @@ def lzma_pin(mapping):
     return pin
 
 
-def nm_symbols(path):
-    """Re-inspect the staged dylib itself; the report never proves its bytes."""
-    listing = run_tool(["nm", "-gU", str(path)])
-    symbols = set()
-    for line in listing.splitlines():
-        parts = line.split()
-        if (len(parts) >= 3 and re.fullmatch(r"[0-9a-fA-F]+", parts[0])
-                and parts[1] in "TtDdBbRrWwVvSsIiNn" and parts[-1] in LZMA_SYMBOLS):
-            symbols.add(parts[-1])
-    return sorted(symbols)
-
-
 def static_lzma_runtime(mapping, stage, staged):
-    """Bind pinned liblzma build evidence to the staged runtime and dylibs."""
+    """Bind the reviewed static liblzma build to every staged FFmpeg dylib.
+
+    FFmpeg's macOS exported-symbols list hides liblzma symbols, so symbol
+    inspection cannot prove containment. The evidence is build provenance: the
+    reviewed pin's source hash and the verified staged liblzma-build.json's
+    static archive hash, bound to the exact bytes of every staged FFmpeg dylib.
+    The report must cover the complete staged dylib set; report keys never
+    decide coverage. A dynamic liblzma dependency is refused by the native
+    dependency closure.
+    """
     pin = lzma_pin(mapping)
     runtime = read_json(stage / RUNTIME_REPORT)
     build_manifest = read_json(stage / BUILD_MANIFEST)
@@ -371,14 +369,36 @@ def static_lzma_runtime(mapping, stage, staged):
         require(staged.get(path, {}).get("sha256") == expected
                 and documents.get(filename) == expected,
                 "staged liblzma evidence differs from the reviewed pin: " + filename)
-    path = "Iris.app/Contents/Resources/ffmpeg/liblzma-build.json"
-    require(staged.get(path, {}).get("sha256") == documents.get("liblzma-build.json"),
+    build_record_path = "Iris.app/Contents/Resources/ffmpeg/liblzma-build.json"
+    require(staged.get(build_record_path, {}).get("sha256") == documents.get("liblzma-build.json")
+            and read_json(stage / build_record_path) == evidence,
             "staged liblzma build evidence differs from the build manifest")
     staged_libraries = build_manifest.get("staged_libraries")
+    build_libraries = build_manifest.get("libraries")
     libraries = runtime.get("static_libraries")
-    require(isinstance(staged_libraries, dict) and isinstance(libraries, dict) and libraries,
+    require(isinstance(staged_libraries, dict) and isinstance(build_libraries, dict)
+            and isinstance(libraries, dict) and libraries,
             "runtime lacks verified static library evidence")
-    return libraries, staged_libraries
+    names = {name[len(FRAMEWORKS):] for name in staged
+             if name.startswith(FRAMEWORKS)
+             and FFMPEG_DYLIB.fullmatch(name[len(FRAMEWORKS):]) is not None}
+    require(names and set(libraries) == names == set(staged_libraries) == set(build_libraries),
+            "static liblzma report omits a staged FFmpeg dylib")
+    verified = {}
+    for name in sorted(names):
+        path = FRAMEWORKS + name
+        entry = libraries[name]
+        require(isinstance(entry, dict)
+                and set(entry) == {"sha256", "static_archive_sha256", "source_sha256"},
+                "invalid runtime static library evidence: " + name)
+        require(entry["sha256"] == staged[path]["sha256"] == staged_libraries[name],
+                "static liblzma bytes differ from the staged dylib: " + name)
+        require(entry["source_sha256"] == pin["sha256"] == evidence["source"]["sha256"],
+                "unreviewed static liblzma source hash: " + name)
+        require(entry["static_archive_sha256"] == evidence["static_archive_sha256"],
+                "unreviewed static liblzma archive hash: " + name)
+        verified[name] = entry["sha256"]
+    return verified
 
 
 def build(args):
@@ -405,7 +425,7 @@ def build(args):
                         staged[mapping["evidence_files"][0]]["sha256"])
     rules = [(compile_rule(rule["path"]), rule) for rule in mapping["staged_rules"]]
     static_rules = any("static_component" in rule for _, rule in rules)
-    static_context = static_lzma_runtime(mapping, stage, staged) if args.platform == "macos" and static_rules else None
+    verified_static = static_lzma_runtime(mapping, stage, staged) if args.platform == "macos" and static_rules else None
     components, staged_components = [], {}
     static_count = 0
     for name, row in staged.items():
@@ -433,31 +453,16 @@ def build(args):
                 obligations=obligations))
             staged_components.setdefault(name, []).append((cid, spec["mode"]))
             if "static_component" in rule:
-                require(static_context is not None,
+                require(verified_static is not None,
                         "static native component requires staged macOS runtime evidence")
-                libraries, staged_libraries = static_context
-                basename = Path(name).name  # Runtime report keys are staged dylib basenames.
-                entry = libraries.get(basename)
-                # The staged bytes, not the report's key set, decide which dylibs
-                # contain liblzma. A truncated report must not leave a containing
-                # dylib with empty static coverage.
-                measured = nm_symbols(stage / name)
-                if len(measured) < 2:
-                    require(entry is None,
-                            "static liblzma symbols absent from the staged dylib: " + name)
-                    continue
-                if entry is not None:
-                    require(isinstance(entry, dict) and set(entry) == {"sha256", "symbols"},
-                            "invalid runtime static library evidence: " + name)
-                    symbols = entry["symbols"]
-                    require(isinstance(symbols, list) and 2 <= len(symbols) <= len(LZMA_SYMBOLS)
-                            and len(set(symbols)) == len(symbols)
-                            and set(symbols) <= set(LZMA_SYMBOLS),
-                            "unreviewed static liblzma symbols: " + name)
-                    require(measured == sorted(symbols),
-                            "static liblzma symbols differ from the staged dylib: " + name)
-                    require(entry["sha256"] == row["sha256"] == staged_libraries.get(basename),
-                            "static liblzma bytes differ from the staged dylib: " + name)
+                # The reviewed rule plus this staged file's verified hash bind
+                # the static component. The report must still have a complete,
+                # byte-matching entry: its key set decides no coverage.
+                basename = Path(name).name
+                require(basename in verified_static,
+                        "static liblzma report omits a staged dylib: " + name)
+                require(verified_static[basename] == row["sha256"],
+                        "static liblzma bytes differ from the staged dylib: " + name)
                 static_cid, static_spec = component_template(
                     rule["static_component"], mapping["components"], pins,
                     mapping["evidence_files"], name, mode="static")

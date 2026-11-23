@@ -30,9 +30,6 @@ PDF_COMPARISON = preview_report.PDF_COMPARISON
 parse_preview = preview_report.parse_preview
 validate_preview_output = preview_report.validate_preview_output
 LZMA = json.loads((ROOT / "packaging/macos/liblzma.json").read_text())
-LZMA_SYMBOLS = ('_lzma_code', '_lzma_end', '_lzma_stream_decoder', '_lzma_stream_buffer_decode')
-LZMA_SYMBOL_LINE = re.compile(r'^\s*[0-9a-fA-F]+\s+[TtDdBbRrWwVvSsIiNn]\s+(' +
-                              '|'.join(LZMA_SYMBOLS) + r')\s*$', re.M)
 MACOS_POLICY = {
     'liblzma': LZMA,
     'platform': 'macOS',
@@ -103,7 +100,7 @@ class CommandFailure(ValueError):
         self.output = output
 
 
-def run(*args, cwd=None, env=None, seconds=None, full=False):
+def run(*args, cwd=None, env=None, seconds=None):
     with tempfile.TemporaryFile() as log:
         process = subprocess.Popen([str(a) for a in args], cwd=cwd, env=env,
                                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -116,13 +113,13 @@ def run(*args, cwd=None, env=None, seconds=None, full=False):
                 raise ValueError(f"{Path(args[0]).name} exceeded command deadline") from error
             raise
         size = log.tell()
-        limit = setting('IRIS_FFMPEG_SYMBOL_BYTES', 8388608) if full else setting('IRIS_FFMPEG_COMMAND_BYTES', 32768)
-        log.seek(0 if full else max(0, size - limit))
+        limit = setting('IRIS_FFMPEG_COMMAND_BYTES', 32768)
+        log.seek(max(0, size - limit))
         text = log.read(limit).decode('utf-8', 'replace')
     if code != 0:
         raise CommandFailure(args[0], code, text)
     # Long successful build logs are discarded. Inspection commands fail on truncation.
-    if full or seconds is None:
+    if seconds is None:
         require(size <= limit, f"{Path(args[0]).name} output exceeds command budget")
     return text.strip()
 
@@ -316,20 +313,40 @@ def runtime(paths):
     return records
 
 
-def static_lzma_libraries(paths):
-    """Bind reviewed static liblzma symbols to the final staged dylib bytes.
+def static_lzma_libraries(paths, manifest):
+    """Bind reviewed static liblzma build provenance to final dylib bytes.
 
-    A dylib is only reported when `nm -gU` shows at least two canonical liblzma
-    symbols: --enable-lzma makes a runtime without them unverifiable. Names and
-    hashes only, never loader paths, enter the report. The native-evidence
-    producer independently rechecks these bytes and symbols.
+    FFmpeg's macOS exported-symbols list hides liblzma symbols, so `nm -gU`
+    cannot prove containment. The evidence is instead the reviewed build
+    record -- the pinned liblzma source hash and the static archive hash from
+    the verified staged liblzma-build.json/manifest -- bound to the exact bytes
+    of every staged FFmpeg dylib. No dynamic liblzma load command is allowed.
+    Every dylib is reported; a report key or exported symbol never decides
+    coverage. Names and hashes only, never loader paths, enter the report.
     """
+    record = manifest['liblzma']
+    source = record.get('source')
+    archive = record.get('static_archive_sha256')
+    require(isinstance(source, dict) and source.get('sha256') == LZMA['sha256']
+            and isinstance(archive, str) and re.fullmatch(r'[0-9a-f]{64}', archive) is not None,
+            'static liblzma build provenance is not the reviewed record')
+    staged = manifest['staged_libraries']
+    built = manifest['libraries']
+    names = {path.name for path in paths.values()}
+    require(names == set(staged) == set(built),
+            'unexpected static liblzma dylib coverage set')
+    # `libraries` retains the pre-signing build identity; `staged_libraries`
+    # records the final signed bytes that are checked and reported here.
     result = {}
     for path in paths.values():
-        symbols = sorted(set(LZMA_SYMBOL_LINE.findall(clean(run('nm', '-gU', path, full=True)))))
-        if len(symbols) >= 2:
-            result[path.name] = dict(sha256=digest(path), symbols=symbols)
-    require(result, 'no staged dylib contains reviewed static liblzma symbols')
+        name = path.name
+        require(staged[name] == digest(path), 'static liblzma dylib bytes changed: ' + name)
+        deps, _, _ = macho(path)
+        require(not any(re.search(r'(^|/)liblzma[.]', dep) for dep in deps),
+                'dynamic liblzma dependency in staged dylib: ' + name)
+        result[name] = dict(sha256=staged[name], source_sha256=source['sha256'],
+                            static_archive_sha256=archive)
+    require(result, 'no staged dylib bound to reviewed static liblzma build')
     return result
 
 
@@ -548,8 +565,10 @@ def check(app, sdk):
     common.signature((docs / 'signature.status').read_text())
     evidence = lzma_evidence(docs)
     require(all(manifest['liblzma'].get(k) == v for k, v in evidence.items()), 'liblzma evidence mismatch')
+    build_record = json.loads((docs / 'liblzma-build.json').read_text())
+    require(build_record == manifest['liblzma'], 'staged liblzma build record differs from manifest')
     require(digest(docs / 'source.tar.xz') == POLICY['sha256'], 'staged source mismatch')
-    static_libraries = static_lzma_libraries(paths)
+    static_libraries = static_lzma_libraries(paths, manifest)
     return dict(source_sha=os.environ.get('GITHUB_SHA', run('git', '-C', ROOT, 'rev-parse', 'HEAD')),
                 scope='Pinned macOS runtime inventory; not legal approval, latency parity or release approval.',
                 policy=manifest['policy'], signature_verified=True, tools=manifest['tools'], liblzma=manifest['liblzma'],

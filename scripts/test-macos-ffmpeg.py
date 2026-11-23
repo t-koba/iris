@@ -278,36 +278,113 @@ class CandidateContracts(unittest.TestCase):
                 self.assertEqual(evidence['static_archive_sha256'], m.digest(prefix / 'lib/liblzma.a'))
                 self.assertEqual(evidence['cmake'], 'cmake version test')
 
-    def test_static_lzma_inspection_binds_reviewed_symbols_to_final_bytes(self):
+    def test_static_lzma_provenance_binds_all_staged_dylibs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
-            codec, swresample = root / 'libavcodec.62.dylib', root / 'libswresample.5.dylib'
+            codec, resample = root / 'libavcodec.62.dylib', root / 'libswresample.5.dylib'
             codec.write_bytes(b'synthetic final codec bytes')
-            swresample.write_bytes(b'synthetic final resampler bytes')
-            calls = []
+            resample.write_bytes(b'synthetic final resampler bytes')
+            archive = 'ab' * 32
+            manifest = dict(
+                liblzma=dict(source=m.LZMA, static_archive_sha256=archive),
+                # `libraries` is the pre-signing build identity; `staged_libraries`
+                # is the hash of the bytes actually shipped and reported.
+                libraries={codec.name: '11' * 64, resample.name: '22' * 64},
+                staged_libraries={codec.name: m.digest(codec), resample.name: m.digest(resample)})
+            paths = {'avcodec': codec, 'swresample': resample}
+            deps = {codec: (['/usr/lib/libz.1.dylib'], [], '@loader_path/' + codec.name),
+                    resample: (['/usr/lib/libz.1.dylib'], [], '@loader_path/' + resample.name)}
 
-            def run(*args, **kwargs):
-                calls.append(tuple(str(arg) for arg in args))
-                self.assertEqual(args[:2], ('nm', '-gU'))
-                self.assertTrue(kwargs.get('full'), 'symbol inspection must not be truncated')
-                if Path(args[2]) == codec:
-                    return ('0000000000001234 T _lzma_code\n'
-                            '0000000000005678 T _lzma_end\n'
-                            '0000000000009abc T _unrelated_symbol\n')
-                return ''
+            def verify(arg_paths=None, arg_manifest=None, arg_deps=None, expected=None):
+                with patch.object(m, 'macho', side_effect=lambda path: (arg_deps or deps)[path]), \
+                        patch.object(m, 'run', side_effect=AssertionError('no native command required')):
+                    if expected:
+                        with self.assertRaisesRegex(ValueError, expected):
+                            m.static_lzma_libraries(arg_paths or paths, arg_manifest or manifest)
+                    else:
+                        return m.static_lzma_libraries(arg_paths or paths, arg_manifest or manifest)
 
-            with patch.object(m, 'run', side_effect=run):
-                result = m.static_lzma_libraries({'avcodec': codec, 'swresample': swresample})
-            self.assertEqual(calls, [('nm', '-gU', str(codec)), ('nm', '-gU', str(swresample))])
-            self.assertEqual(result, {codec.name: dict(sha256=m.digest(codec),
-                                                        symbols=['_lzma_code', '_lzma_end'])})
+            result = verify()
+            expected = {name: dict(sha256=manifest['staged_libraries'][name],
+                                   source_sha256=m.LZMA['sha256'],
+                                   static_archive_sha256=archive)
+                        for name in (codec.name, resample.name)}
+            self.assertEqual(result, expected)
             self.assertNotIn(str(root), json.dumps(result))
-            for listing in ('0000000000001234 T _lzma_code\n',
-                            '_lzma_code\n_lzma_end\n',
-                            '0000000000001234 T _lzma_code\n0000000000005678 U _lzma_end\n'):
-                with self.subTest(listing=listing), patch.object(m, 'run', return_value=listing):
-                    with self.assertRaisesRegex(ValueError, 'no staged dylib'):
-                        m.static_lzma_libraries({'avcodec': codec})
+            self.assertNotIn('symbols', json.dumps(result))
+
+            verify(arg_paths={'avcodec': codec},
+                   expected='unexpected static liblzma dylib coverage set')
+            bad = json.loads(json.dumps(manifest))
+            bad['liblzma']['static_archive_sha256'] = 'unreviewed archive hash'
+            verify(arg_manifest=bad, expected='static liblzma build provenance')
+            bad = json.loads(json.dumps(manifest))
+            bad['liblzma']['source'] = dict(m.LZMA, sha256='ee' * 64)
+            verify(arg_manifest=bad, expected='static liblzma build provenance')
+            dynamic = dict(deps)
+            dynamic[codec] = (['/usr/lib/liblzma.5.dylib'], [], '@loader_path/' + codec.name)
+            verify(arg_deps=dynamic, expected='dynamic liblzma dependency')
+            original = codec.read_bytes()
+            try:
+                codec.write_bytes(original + b'tampered after evidence')
+                verify(expected='static liblzma dylib bytes changed')
+            finally:
+                codec.write_bytes(original)
+            self.assertEqual(verify(), expected)
+
+    def test_check_report_binds_complete_build_provenance_and_refuses_changed_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = Path(tmp) / 'Iris.app'
+            docs = app / 'Contents/Resources/ffmpeg'
+            frameworks = app / 'Contents/Frameworks'
+            macos = app / 'Contents/MacOS'
+            docs.mkdir(parents=True)
+            frameworks.mkdir()
+            macos.mkdir()
+            (macos / 'Iris').write_text('synthetic executable')
+            (docs / 'source.tar.xz').write_text('synthetic source')
+            (docs / 'signature.status').write_text('synthetic signature')
+            (docs / 'config.h').write_text('synthetic generated config')
+            (docs / 'config_components.h').write_text('synthetic generated codecs')
+            paths = {name: frameworks / f'lib{name}.62.dylib' for name in m.POLICY['libraries']}
+            for path in paths.values():
+                path.write_bytes(b'synthetic staged dylib')
+            evidence = dict(source=m.LZMA, signature=dict(verified=True),
+                            license_metadata_sha256='ab' * 64,
+                            static_archive_sha256='cd' * 32)
+            record = dict(evidence, cmake='cmake version test')
+            (docs / 'liblzma-build.json').write_text(json.dumps(record, indent=2))
+            manifest = dict(policy=m.MACOS_POLICY, signature_verified=True, tools={}, liblzma=record,
+                            enabled_codecs=[],
+                            documents={p.name: m.digest(p) for p in docs.iterdir()},
+                            libraries={p.name: '11' * 64 for p in paths.values()},
+                            staged_libraries={p.name: m.digest(p) for p in paths.values()})
+            (docs / 'manifest.json').write_text(json.dumps(manifest))
+            pin = dict(m.POLICY, sha256=m.digest(docs / 'source.tar.xz'))
+
+            def checked():
+                with patch.object(m, 'POLICY', pin), patch.object(m, 'run', return_value='synthetic sha'), \
+                        patch.object(m, 'macho', side_effect=lambda path: (
+                            ['/usr/lib/libz.1.dylib'], [], '@loader_path/' + path.name)), \
+                        patch.object(m, 'closure', return_value=[(macos / 'Iris', 'dep', paths['avcodec'])]), \
+                        patch.object(m, 'generated_config', return_value=[]), \
+                        patch.object(m.common, 'signature'), \
+                        patch.object(m, 'lzma_evidence', return_value=evidence), \
+                        patch.object(m, 'runtime', return_value=[]):
+                    return m.check(app, Path(tmp) / 'sdk')
+
+            report = checked()
+            self.assertEqual(report['static_libraries'], {
+                path.name: dict(sha256=manifest['staged_libraries'][path.name],
+                                source_sha256=m.LZMA['sha256'],
+                                static_archive_sha256='cd' * 32) for path in paths.values()})
+            record['static_archive_sha256'] = 'ff' * 32
+            (docs / 'liblzma-build.json').write_text(json.dumps(record, indent=2))
+            stored = json.loads((docs / 'manifest.json').read_text())
+            stored['documents']['liblzma-build.json'] = m.digest(docs / 'liblzma-build.json')
+            (docs / 'manifest.json').write_text(json.dumps(stored))
+            with self.assertRaisesRegex(ValueError, 'staged liblzma build record differs from manifest'):
+                checked()
 
     def test_candidate_rejects_ambient_liblzma_and_dynamic_edge(self):
         with patch.dict(m.os.environ, dict(CPATH='/opt/homebrew/include', LIBRARY_PATH='/opt/homebrew/lib',
