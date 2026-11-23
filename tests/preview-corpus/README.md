@@ -74,6 +74,11 @@ paired because its renderer is a macOS system framework, not FFmpeg. Corpus, app
 and runtime bytes are temporary; only bounded JSON reports are uploaded under the existing
 `IRIS_FFMPEG_MAX_REPORT_BYTES` cap (266,240 bytes by default).
 
+The report's `control_drift` field records absolute median drift for the non-FFmpeg JPEG and
+CR3 controls in these sequential diagnostics. It defaults to a 10% limit, overridable with
+`IRIS_PREVIEW_CONTROL_DRIFT_PERCENT`. This is a validity diagnostic for whether control drift
+prevents attributing FFmpeg deltas, not a performance threshold, gate or parity claim.
+
 The report-only Linux FFmpeg validation runs the default-feature smoke from the
 staged AppDir against its bundled FFmpeg and PDFium runtimes. Its existing
 `linux-ffmpeg.json` includes validated corpus records and the PDFium version plus

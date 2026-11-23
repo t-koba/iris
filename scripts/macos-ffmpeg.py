@@ -617,6 +617,31 @@ def paired_preview(baseline, candidate):
     return pairs
 
 
+def control_drift(pairs):
+    """Diagnose non-FFmpeg control movement without gating or claiming parity."""
+    limit = setting('IRIS_PREVIEW_CONTROL_DRIFT_PERCENT', 10)
+    controls = [pair for pair in pairs if not pair['uses_ffmpeg']]
+    require(len(controls) >= 2, 'at least two non-FFmpeg controls required for drift diagnostic')
+    operations = []
+    for pair in controls:
+        baseline = pair['baseline_median_ns']
+        require(baseline > 0, 'control baseline median must be positive')
+        drift = round(abs(pair['candidate_median_ns'] - baseline) * 100 / baseline, 2)
+        operations.append(dict(operation=pair['operation'], drift_percent=drift))
+    maximum = max(operation['drift_percent'] for operation in operations)
+    attributable = maximum <= limit
+    interpretation = (
+        'Sequential paired diagnostic only, with no performance parity claim: non-FFmpeg control '
+        'drift is within the configured limit, but this alone does not attribute FFmpeg deltas.'
+        if attributable else
+        'Sequential paired diagnostic only, with no performance parity claim: non-FFmpeg control '
+        'drift exceeds the configured limit, which prevents attributing candidate-minus-baseline '
+        'FFmpeg deltas to FFmpeg.'
+    )
+    return dict(operations=operations, max_drift_percent=maximum, limit_percent=limit,
+                attributable=attributable, interpretation=interpretation)
+
+
 def preview_env(prefix, target, source):
     require(not target.exists(), 'preview Cargo target must be fresh')
     # Same build settings, but no ambient native discovery overrides for either runtime.
@@ -771,7 +796,9 @@ def validate(output):
             if corpus_available:
                 preview['candidate'] = parse_preview(run(candidate_smoke, corpus, env=env), source)
                 if 'baseline' in preview:
-                    preview['paired_comparisons'] = paired_preview(preview['baseline'], preview['candidate'])
+                    pairs = paired_preview(preview['baseline'], preview['candidate'])
+                    preview['paired_comparisons'] = pairs
+                    preview['control_drift'] = control_drift(pairs)
                     preview['status'] = 'passed'
             # Retain the existing additional MPEG-4/PNG candidate checks.
             for filename, options in (('video.avi', ['-t', '1', '-c:v', 'mpeg4', '-an']),

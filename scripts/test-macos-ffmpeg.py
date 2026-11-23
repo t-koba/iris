@@ -888,6 +888,68 @@ class PreviewComparison(unittest.TestCase):
         # A representative retained comparison is well below the existing cap.
         self.assertLess(len(m.report_bytes(dict(baseline=baseline, candidate=candidate, pairs=pairs))), 266240)
 
+    @staticmethod
+    def drift_pair(operation, baseline, candidate, uses_ffmpeg=False):
+        return dict(operation=operation, uses_ffmpeg=uses_ffmpeg,
+                    baseline_median_ns=baseline, candidate_median_ns=candidate)
+
+    def test_control_drift_is_attributable_for_stable_controls(self):
+        pairs = [self.drift_pair('image::extract_jpeg_thumbnail', 1000, 1005),
+                 self.drift_pair('raw::extract_cr3_thumbnail', 2000, 2020),
+                 self.drift_pair('video::extract_hevc_thumbnail', 1000, 1200, uses_ffmpeg=True)]
+        with patch.dict(m.os.environ, {}, clear=True):
+            diagnostic = m.control_drift(pairs)
+        self.assertEqual(diagnostic['operations'], [
+            dict(operation='image::extract_jpeg_thumbnail', drift_percent=0.5),
+            dict(operation='raw::extract_cr3_thumbnail', drift_percent=1.0),
+        ])
+        self.assertEqual(diagnostic['max_drift_percent'], 1.0)
+        self.assertEqual(diagnostic['limit_percent'], 10)
+        self.assertTrue(diagnostic['attributable'])
+        self.assertIn('Sequential', diagnostic['interpretation'])
+        self.assertIn('no performance parity claim', diagnostic['interpretation'])
+        self.assertNotIn('threshold', json.dumps(pairs))
+
+    def test_large_control_drift_blocks_attribution_with_explanation(self):
+        pairs = [self.drift_pair('image::extract_jpeg_thumbnail', 1000, 1100),
+                 self.drift_pair('raw::extract_cr3_thumbnail', 2000, 2400),
+                 self.drift_pair('video::extract_h264_thumbnail', 1000, 1005, uses_ffmpeg=True)]
+        with patch.dict(m.os.environ, {}, clear=True):
+            diagnostic = m.control_drift(pairs)
+        self.assertEqual(diagnostic['operations'], [
+            dict(operation='image::extract_jpeg_thumbnail', drift_percent=10.0),
+            dict(operation='raw::extract_cr3_thumbnail', drift_percent=20.0),
+        ])
+        self.assertEqual(diagnostic['max_drift_percent'], 20.0)
+        self.assertEqual(diagnostic['limit_percent'], 10)
+        self.assertFalse(diagnostic['attributable'])
+        self.assertIn('Sequential', diagnostic['interpretation'])
+        self.assertIn('no performance parity claim', diagnostic['interpretation'])
+        self.assertIn('prevents attributing', diagnostic['interpretation'])
+        self.assertIn('FFmpeg deltas', diagnostic['interpretation'])
+
+    def test_control_drift_limit_is_configurable_and_positive(self):
+        pairs = [self.drift_pair('image::extract_jpeg_thumbnail', 1000, 1100),
+                 self.drift_pair('raw::extract_cr3_thumbnail', 2000, 2400)]
+        with patch.dict(m.os.environ, IRIS_PREVIEW_CONTROL_DRIFT_PERCENT='25'):
+            diagnostic = m.control_drift(pairs)
+        self.assertEqual(diagnostic['limit_percent'], 25)
+        self.assertEqual(diagnostic['max_drift_percent'], 20.0)
+        self.assertTrue(diagnostic['attributable'])
+        for bad in ('0', '-1', 'not-a-number'):
+            with self.subTest(limit=bad), patch.dict(m.os.environ, IRIS_PREVIEW_CONTROL_DRIFT_PERCENT=bad):
+                with self.assertRaises(ValueError):
+                    m.control_drift(pairs)
+
+    def test_control_drift_requires_two_controls_with_positive_baselines(self):
+        video = self.drift_pair('video::extract_h264_thumbnail', 1000, 1200, uses_ffmpeg=True)
+        image = self.drift_pair('image::extract_jpeg_thumbnail', 1000, 1100)
+        raw = self.drift_pair('raw::extract_cr3_thumbnail', 2000, 2400)
+        for pairs in ([], [video], [video, image], [image, dict(raw, baseline_median_ns=0)],
+                      [image, dict(raw, baseline_median_ns=-1)]):
+            with self.subTest(pairs=pairs), self.assertRaises(ValueError):
+                m.control_drift(pairs)
+
     def test_pdf_renderer_and_repeated_pixel_evidence_are_required_per_platform(self):
         for platform in ('macos', 'linux'):
             self.identity['target_os'] = platform
@@ -1133,6 +1195,9 @@ class PreviewComparison(unittest.TestCase):
                 elif not failure:
                     self.assertEqual(preview['status'], 'passed')
                     self.assertEqual(len(preview['paired_comparisons']), 4)
+                    self.assertEqual(preview['control_drift']['max_drift_percent'], 0.0)
+                    self.assertTrue(preview['control_drift']['attributable'])
+                    self.assertNotIn('control_drift', json.dumps(preview['paired_comparisons']))
                 if not failure:
                     self.assertEqual(report['smoke']['corpus_correctness'], unavailable != 'fetch')
                 self.assertEqual({p.relative_to(root).as_posix() for p in root.rglob('*') if p.is_file()},
