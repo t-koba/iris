@@ -436,6 +436,64 @@ class PosixNativeEvidence(TestCase):
             self.assertEqual(before, digests(stage))
             self.assertFalse((stage / "outside.json").exists())
 
+    def test_reviewed_system_component_key_matches_longest_dotted_soname(self):
+        systems = mapping("linux")["system_components"]
+        versioned = Path("/usr/lib/x86_64-linux-gnu/libbz2.so.1.0.4")
+        self.assertEqual(producer.system_component_key(versioned, systems), "libbz2.so.1.0")
+        self.assertEqual(producer.system_component_key(Path("/lib/libz.so.1.2.13"), systems),
+                         "libz.so.1")
+        self.assertEqual(producer.system_component_key(Path("/lib/libc.so.6"), systems),
+                         "libc.so.6")
+        self.assertIsNone(producer.system_component_key(Path("/lib/libunreviewed.so.9.7"), systems))
+        shorter = dict(systems, **{"libbz2.so.1": systems["libbz2.so.1.0"]})
+        self.assertEqual(producer.system_component_key(versioned, shorter), "libbz2.so.1.0")
+        exact = dict(systems, **{"libbz2.so.1.0.4": systems["libbz2.so.1.0"]})
+        self.assertEqual(producer.system_component_key(versioned, exact), "libbz2.so.1.0.4")
+
+    def test_linux_versioned_external_dependency_stays_reviewed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage, sidecar, _ = self.check_stage(root, "linux")
+            external = root / "libbz2.so.1.0.4"
+            external.write_bytes(b"\x7fELF synthetic versioned libbz2 system bytes")
+            binding = producer.binding(external)
+            with patch.object(producer, "external_dependencies",
+                              return_value={external: binding}), \
+                    patch.object(producer, "system_package", return_value="libbz2-1.0"):
+                self.assertEqual(generate("linux", stage, sidecar), 0)
+            manifest = json.loads(sidecar.read_text(encoding="utf-8"))
+            report = collect(stage, sidecar, manifest)
+            self.assertFalse(any(row["kind"] == "missing" for row in report.records), report.records)
+            native = [row for row in report.records
+                      if row["kind"] == "native-file" and row["path"] == str(external)]
+            self.assertEqual(native, [dict(kind="native-file", path=str(external), **binding)])
+            closure = [row for row in report.records if row["kind"] == "native-closure"]
+            components = validate_closure(closure[0]["evidence"], report.records, 256, 16)
+            external_components = [row for row in components
+                                   if row["artifact"]["path"] == str(external)]
+            self.assertEqual(len(external_components), 1)
+            self.assertEqual(external_components[0]["artifact"],
+                             dict(path=str(external), sha256=binding["sha256"]))
+            self.assertEqual(external_components[0]["license"]["id"], "BSD-3-Clause")
+            self.assertEqual(external_components[0]["source"]["origin"],
+                             "reviewed OS package: libbz2-1.0")
+
+    def test_linux_versioned_external_dependency_package_mismatch_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = make_stage(root, "linux")
+            external = root / "libbz2.so.1.0.4"
+            external.write_bytes(b"\x7fELF synthetic versioned libbz2 system bytes")
+            errors = io.StringIO()
+            with patch.object(producer, "external_dependencies",
+                              return_value={external: producer.binding(external)}), \
+                    patch.object(producer, "system_package", return_value="other-package"), \
+                    redirect_stderr(errors):
+                self.assertNotEqual(generate("linux", stage, root / "rejected.json"), 0)
+            self.assertIn("external native file package differs from reviewed mapping: "
+                          + str(external), errors.getvalue())
+            self.assertFalse((root / "rejected.json").exists())
+
     def test_external_dependency_parsers_and_package_mapping(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

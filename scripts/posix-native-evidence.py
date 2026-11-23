@@ -309,6 +309,23 @@ def external_dependencies(platform, stage, staged, max_files):
     return dict(sorted(external.items(), key=lambda item: str(item[0])))
 
 
+def system_component_key(path, components):
+    """Longest reviewed soname key naming an external native file.
+
+    ldd resolves DT_NEEDED entries to versioned files such as
+    ``libbz2.so.1.0.4``, while the reviewed mapping keys that library by its
+    soname ``libbz2.so.1.0``. Only reviewed keys can match.
+    """
+    name = Path(path).name
+    if name in components:
+        return name
+    while "." in name:
+        name = name.rsplit(".", 1)[0]
+        if name in components:
+            return name
+    return None
+
+
 def system_package(path):
     owner = run_tool(["dpkg-query", "-S", str(path)])
     for line in owner.splitlines():
@@ -488,7 +505,8 @@ def build(args):
     external = external_dependencies(args.platform, stage, staged, max_files)
     external_components = {}
     for path, row in external.items():
-        rule = mapping["system_components"].get(path.name)
+        key = system_component_key(path, mapping["system_components"])
+        rule = mapping["system_components"].get(key)
         require(rule is not None, "no reviewed component for external native file: " + str(path))
         if args.platform == "linux":
             require(system_package(path) == rule["package"],
