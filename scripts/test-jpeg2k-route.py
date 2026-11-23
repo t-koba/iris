@@ -2,7 +2,8 @@
 """Registry-pin evidence for the Iris JPEG 2000 decoder route and input guard.
 
 Iris decodes JPEG 2000 with the pure-Rust `jpeg2k` / `openjp2` crates; no C
-decoder is vendored, patched or statically linked. This checks that Cargo.lock
+decoder is vendored, patched or statically linked. This checks that every
+Cargo.lock pinning jpeg2k (including the detached Windows prototype workspace)
 pins the unmodified crates.io crates by checksum, that no in-repo copy or path
 patch remains, and that the Rust TLM/SOT guard and its tests remain wired into
 CI. This is configuration evidence, not execution evidence: it does not
@@ -44,6 +45,17 @@ def patch_section():
     return match.group(1) if match else ""
 
 
+def jpeg2k_lockfiles():
+    """Every Cargo.lock pinning jpeg2k, including detached prototype workspaces."""
+    found = []
+    for path in root.rglob("Cargo.lock"):
+        if "target" in path.parts:
+            continue
+        if 'name = "jpeg2k"' in path.read_text(encoding="utf-8"):
+            found.append(path)
+    return sorted(found)
+
+
 def cached_crate(name, version):
     homes = []
     cargo_home = os.environ.get("CARGO_HOME")
@@ -83,17 +95,23 @@ class Jpeg2kRegistryRoute(unittest.TestCase):
                     f"{manifest.relative_to(root)} patches {name} to a local path",
                 )
 
-    def test_lockfile_pins_pure_rust_registry_crates(self):
-        lock_text = read("Cargo.lock")
-        self.assertNotIn('name = "openjpeg-sys"', lock_text,
-                         "C decoder is still in the lockfile")
-        for name, (version, sha256) in pinned.items():
-            block = package_block(lock_text, name)
-            self.assertIn(f'version = "{version}"', block, f"{name} version")
-            self.assertIn(f'source = "{registry_source}"', block, f"{name} source")
-            self.assertIn(f'checksum = "{sha256}"', block, f"{name} checksum")
-            self.assertNotIn("path", block, f"{name} path patch")
-        self.assertIn('"openjp2"', package_block(lock_text, "jpeg2k"))
+    def test_every_lockfile_pins_pure_rust_registry_crates(self):
+        locks = jpeg2k_lockfiles()
+        self.assertIn(root / "prototype/windows-ffmpeg/preview-smoke/Cargo.lock", locks,
+                      "detached preview-smoke lockfile is not covered")
+        self.assertGreaterEqual(len(locks), 4)
+        for lock in locks:
+            with self.subTest(lock=str(lock.relative_to(root))):
+                lock_text = lock.read_text(encoding="utf-8")
+                self.assertNotIn('name = "openjpeg-sys"', lock_text,
+                                 "C decoder is still in the lockfile")
+                for name, (version, sha256) in pinned.items():
+                    block = package_block(lock_text, name)
+                    self.assertIn(f'version = "{version}"', block, f"{name} version")
+                    self.assertIn(f'source = "{registry_source}"', block, f"{name} source")
+                    self.assertIn(f'checksum = "{sha256}"', block, f"{name} checksum")
+                    self.assertNotIn("path", block, f"{name} path patch")
+                self.assertIn('"openjp2"', package_block(lock_text, "jpeg2k"))
 
     def test_cached_crates_match_pinned_checksums(self):
         for name, (version, sha256) in pinned.items():
