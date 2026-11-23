@@ -2,6 +2,7 @@ use super::support::{
     sample_state, state_with_conflict_dialog, state_with_create_folder_dialog,
     state_with_delete_dialog, state_with_path_bar_edit, state_with_settings_dialog,
 };
+use iris_core_domain::types::metadata::MediaMetadata;
 use iris_ui_shell::messages::{
     ConflictMessage, DialogMessage, Message, PaneMessage, SettingsMessage, SidebarMessage,
 };
@@ -269,6 +270,61 @@ fn stale_preview_completion_does_not_overwrite_current_result() {
         state.preview_data,
         Some(PreviewData::Text { ref content }) if content == "fresh"
     ));
+}
+
+#[test]
+fn quick_look_reloads_visual_preview_after_metadata_only_properties_load() {
+    let mut state = sample_state();
+    let path = state
+        .active_pane()
+        .selected_indices
+        .iter()
+        .copied()
+        .next()
+        .and_then(|index| state.active_pane().entry(index))
+        .map(|entry| entry.object_ref.display_path.clone())
+        .expect("selected photo");
+
+    let _ = iris_ui_shell::update::update(&mut state, Message::TogglePreviewPanel);
+    let _ = iris_ui_shell::update::update(&mut state, Message::TogglePropertiesPanel);
+    let metadata_version = state.preview_request_version;
+    assert!(state.preview_loading);
+
+    let _ = iris_ui_shell::update::update(
+        &mut state,
+        Message::PreviewLoaded(
+            metadata_version,
+            path.clone(),
+            Some(PreviewData::Image {
+                handle: None,
+                width: Some(4000),
+                height: Some(3000),
+                media: MediaMetadata::default(),
+                exif_data: Vec::new(),
+            }),
+        ),
+    );
+    assert!(!state.preview_loading);
+    assert!(matches!(
+        state.preview_data,
+        Some(PreviewData::Image { handle: None, .. })
+    ));
+
+    let _ = iris_ui_shell::update::update(&mut state, Message::ToggleQuickLook);
+    assert!(state.quick_look_open);
+    assert!(state.preview_loading);
+    assert!(state.preview_data.is_none());
+    assert!(state.preview_request_version > metadata_version);
+    assert_eq!(state.preview_target_path.as_deref(), Some(path.as_str()));
+
+    let mut state = sample_state();
+    let _ = iris_ui_shell::update::update(&mut state, Message::ToggleQuickLook);
+    let visual_version = state.preview_request_version;
+    assert!(state.preview_loading);
+    let _ = iris_ui_shell::update::update(&mut state, Message::CloseQuickLook);
+    let _ = iris_ui_shell::update::update(&mut state, Message::ToggleQuickLook);
+    assert_eq!(state.preview_request_version, visual_version);
+    assert!(state.preview_loading);
 }
 
 fn run_transition(case: &str, mut state: iris_ui_shell::state::AppState, message: Message) {

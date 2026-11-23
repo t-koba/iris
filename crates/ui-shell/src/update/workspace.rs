@@ -198,7 +198,13 @@ pub fn handle(state: &mut AppState, message: Message) -> Task<Message> {
             if state.quick_look_open {
                 return close_quick_look(state);
             }
+            let had_visual_preview = state.preview_panel_visible;
             state.quick_look_open = true;
+            if !had_visual_preview {
+                // Properties-only loads carry no image handle; a new visual request
+                // must not reuse their path-and-stamp match.
+                clear_preview_state(state);
+            }
             return refresh_preview_for_selection(state);
         }
         Message::CloseQuickLook => {
