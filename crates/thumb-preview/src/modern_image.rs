@@ -378,15 +378,7 @@ fn decode_jpeg_xl(data: &[u8]) -> Option<DynamicImage> {
 
     let mut decoder = jxl_oxide::integration::JxlDecoder::new(Cursor::new(data)).ok()?;
     let (width, height) = decoder.dimensions();
-    if !preview_dimensions_supported(width, height) {
-        return None;
-    }
-    // `image` allocates the output buffer from total_bytes() without consulting
-    // Limits::max_alloc, and high-bit-depth pixels can need 16 bytes each. Bound
-    // that buffer explicitly, then bound jxl-oxide's own scratch allocations.
-    if decoder.total_bytes() > JXL_MAX_ALLOC_BYTES {
-        return None;
-    }
+    jxl_preallocation_allowed(width, height, decoder.total_bytes()).ok()?;
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(JXL_MAX_ALLOC_BYTES);
     decoder.set_limits(limits).ok()?;
@@ -405,9 +397,34 @@ fn decode_heic(data: &[u8]) -> Option<DynamicImage> {
 const JXR_MAX_DIMENSION: u32 = 65_535;
 const JXR_MAX_PIXELS: u64 = 128_000_000;
 
-// 1 GiB bounds both the JXL output buffer and decoder scratch allocations;
-// it applies regardless of the pixel format declared by the header.
+// 1 GiB bounds the JXL output buffer regardless of the pixel format declared
+// by the header. jxl-oxide scratch is limited separately below; neither limit
+// is a guarantee about total process memory.
 const JXL_MAX_ALLOC_BYTES: u64 = 1024 * 1024 * 1024;
+
+#[derive(Debug, PartialEq, Eq)]
+enum JxlPreallocationRejection {
+    Dimensions,
+    OutputBuffer,
+}
+
+// Keep the two header-only guards together so each can be tested with metadata
+// alone, without allocating a decoded image.
+fn jxl_preallocation_allowed(
+    width: u32,
+    height: u32,
+    total_bytes: u64,
+) -> Result<(), JxlPreallocationRejection> {
+    if !preview_dimensions_supported(width, height) {
+        return Err(JxlPreallocationRejection::Dimensions);
+    }
+    // `image` allocates the output buffer from total_bytes() without consulting
+    // Limits::max_alloc, and high-bit-depth pixels can need 16 bytes each.
+    if total_bytes > JXL_MAX_ALLOC_BYTES {
+        return Err(JxlPreallocationRejection::OutputBuffer);
+    }
+    Ok(())
+}
 
 fn preview_dimensions_supported(width: u32, height: u32) -> bool {
     width != 0
@@ -1051,6 +1068,31 @@ mod tests {
             image::ImageDecoder::total_bytes(&decoder) > JXL_MAX_ALLOC_BYTES,
             "output buffer guard must also reject this header"
         );
+    }
+
+    #[test]
+    fn jxl_byte_guard_rejects_large_output_within_dimension_caps() {
+        // Header-only input declaring 10000x10000 float RGBA. Dimensions stay
+        // inside both preview caps, but image would allocate 1.6 GiB for the
+        // output buffer, so only the total_bytes() guard can reject it.
+        let header = [0xff, 0x0a, 0x7c, 0x38, 0x21, 0xe4, 0x54, 0x02];
+        let decoder = jxl_oxide::integration::JxlDecoder::new(Cursor::new(header))
+            .expect("the crafted header is parseable");
+        let (width, height) = image::ImageDecoder::dimensions(&decoder);
+        assert!(preview_dimensions_supported(width, height));
+        assert_eq!(
+            image::ImageDecoder::color_type(&decoder),
+            image::ColorType::Rgba32F,
+            "16 bytes per pixel is the output-buffer case the guard bounds"
+        );
+        let total_bytes = image::ImageDecoder::total_bytes(&decoder);
+        assert!(total_bytes > JXL_MAX_ALLOC_BYTES);
+        assert_eq!(
+            jxl_preallocation_allowed(width, height, total_bytes),
+            Err(JxlPreallocationRejection::OutputBuffer),
+            "the byte guard must reject this header independently of dimensions"
+        );
+        assert!(decode_jpeg_xl(&header).is_none());
     }
 
     #[test]
