@@ -3733,15 +3733,12 @@ dependencies = [
 
 [[package]]
 name = "jpeg2k"
-version = "0.10.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be2982db6b9f254c9df44d89bcfdc758924d538f576d9649f5b10008150f2a60"
+checksum = "c8e4eea66cd0363fb2048d457f732a5d8a1bbbb2451e8db0bff7c4860defcafb"
 dependencies = [
- "anyhow",
  "image",
- "log",
- "openjpeg-sys",
- "thiserror 1.0.69",
+ "openjp2",
 ]
 
 [[package]]
@@ -5132,14 +5129,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "openjpeg-sys"
-version = "1.0.12"
+name = "openjp2"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92682cb92e7b01e2c020cf8ec12f3374558924bb24621df1112d8a7c93d419ef"
+checksum = "c41f2738518a4f8a8c6a9816b1b70b37511bc6f9f04d4f72230326f6abf3d489"
 dependencies = [
- "cc",
- "libc",
+ "bitflags 1.3.2",
+ "byteorder",
+ "image",
+ "log",
+ "openjp2-ctypes",
+ "smallvec",
 ]
+
+[[package]]
+name = "openjp2-ctypes"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc7650425b4f7e4c514e4a6ccaa2c26612f935d0826d2ee5426635d3844a8361"
 
 [[package]]
 name = "openssl-probe"

@@ -137,7 +137,7 @@ jobs:
           cargo test -p iris-thumb-preview --lib modern_image::tests::decodes_jpeg2000_preview --locked
           cargo test -p iris-thumb-preview --lib modern_image::tests::rejects_truncated_jpeg2000_codestream --locked
           cargo test -p iris-thumb-preview --lib modern_image::tests::tlm_ --locked
-          python3 scripts/test-openjpeg-unpatched.py
+          python3 scripts/test-jpeg2k-route.py
 
       - name: Paste compatibility facade regression
         if: matrix.os == 'ubuntu-latest'
