@@ -106,6 +106,18 @@ enforced. Linux PDFium is found beside the staged AppDir executable (under
 `usr/lib/iris`); macOS renders through CoreGraphics. These report-only checks do not
 change release runtime selection or packaging.
 
+## Parity status
+
+No retained evidence establishes preview feature or latency parity with a previously
+shipped default-feature product. The macOS paired diagnostic identifies its baseline
+as an existing Homebrew FFmpeg selection, not an approved compatible runtime. Linux
+and Windows retain single-runtime staged diagnostics without a paired latency
+baseline. The corpus exercises embedded RAW previews rather than demosaiced sensor
+data and measures crate-level extraction rather than UI latency. A same-platform
+baseline/candidate pair with exact source, runtime, input and hardware identity is
+required before any parity conclusion; until then parity remains unknown and the
+all-platform release hold stays in force.
+
 Offline contracts: `python3 scripts/test-fetch-preview-corpus.py`,
 `python3 scripts/test-macos-ffmpeg.py`, `python3 scripts/test-linux-ffmpeg.py`, and
 `cargo test -p iris-thumb-preview --example preview_corpus_smoke --locked --offline`
