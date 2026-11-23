@@ -438,19 +438,26 @@ def build(args):
                 libraries, staged_libraries = static_context
                 basename = Path(name).name  # Runtime report keys are staged dylib basenames.
                 entry = libraries.get(basename)
-                if entry is None:
-                    continue  # Only dylibs actually containing liblzma get a static component.
-                require(isinstance(entry, dict) and set(entry) == {"sha256", "symbols"},
-                        "invalid runtime static library evidence: " + name)
-                symbols = entry["symbols"]
-                require(isinstance(symbols, list) and 2 <= len(symbols) <= len(LZMA_SYMBOLS)
-                        and len(set(symbols)) == len(symbols)
-                        and set(symbols) <= set(LZMA_SYMBOLS),
-                        "unreviewed static liblzma symbols: " + name)
-                require(entry["sha256"] == row["sha256"] == staged_libraries.get(basename),
-                        "static liblzma bytes differ from the staged dylib: " + name)
-                require(nm_symbols(stage / name) == sorted(symbols),
-                        "static liblzma symbols absent from the staged dylib: " + name)
+                # The staged bytes, not the report's key set, decide which dylibs
+                # contain liblzma. A truncated report must not leave a containing
+                # dylib with empty static coverage.
+                measured = nm_symbols(stage / name)
+                if len(measured) < 2:
+                    require(entry is None,
+                            "static liblzma symbols absent from the staged dylib: " + name)
+                    continue
+                if entry is not None:
+                    require(isinstance(entry, dict) and set(entry) == {"sha256", "symbols"},
+                            "invalid runtime static library evidence: " + name)
+                    symbols = entry["symbols"]
+                    require(isinstance(symbols, list) and 2 <= len(symbols) <= len(LZMA_SYMBOLS)
+                            and len(set(symbols)) == len(symbols)
+                            and set(symbols) <= set(LZMA_SYMBOLS),
+                            "unreviewed static liblzma symbols: " + name)
+                    require(measured == sorted(symbols),
+                            "static liblzma symbols differ from the staged dylib: " + name)
+                    require(entry["sha256"] == row["sha256"] == staged_libraries.get(basename),
+                            "static liblzma bytes differ from the staged dylib: " + name)
                 static_cid, static_spec = component_template(
                     rule["static_component"], mapping["components"], pins,
                     mapping["evidence_files"], name, mode="static")

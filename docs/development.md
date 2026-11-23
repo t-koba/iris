@@ -325,9 +325,10 @@ review report を生成します。producer は stage 内の全 file を再 hash
 なければ Sidecar を書かずに失敗します。FFmpeg は review disposition の LGPL component として
 notice/source/relinking の義務を伴い、OS 提供ライブラリは review 済み mapping に載った
 license bucket だけを使います（未掲載なら拒否）。macOS では pinned な static liblzma を
-0BSD の allowed component として追加しますが、対象 dylib は runtime report の liblzma シンボルと
-`nm -gU` による staged bytes の再検査で決まり、mapping から推定しません。pin/manifest の hash が
-一致しない場合や static component が 1 つも無い場合は sidecar を書きません。
+0BSD の allowed component として追加しますが、対象 dylib は staged bytes に対する `nm -gU` の
+canonical シンボルで決まり、runtime report や mapping から推定しません。report の entry は
+同じ bytes/symbols であることを検証し、pin/manifest の hash が一致しない場合や static component が
+1 つも無い場合は sidecar を書きません。
 sidecar は `dist/<platform>` の外に置き、
 audit は `--native-evidence audit/native-evidence/<platform>.json --require-native-evidence` で
 これを要求します。未知・改ざん・欠落は producer と audit の両方で fail closed です。

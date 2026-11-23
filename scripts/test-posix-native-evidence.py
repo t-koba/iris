@@ -169,10 +169,14 @@ def collect(stage, sidecar, manifest=None, max_components=16):
 
 
 @contextmanager
-def offline_scan(stage, symbols=STATIC_SYMBOLS):
+def offline_scan(stage, symbols=STATIC_SYMBOLS, native_names=None):
+    names = {Path(STATIC_DYLIB).name} if native_names is None else set(native_names)
+
     def tool(argv, seconds=30):
         if list(argv[:2]) != ["nm", "-gU"]:
             raise AssertionError("unexpected native tool call: " + str(argv))
+        if Path(argv[-1]).name not in names:
+            return ""
         return "".join(f"0000000000001234 T {symbol}\n" for symbol in symbols)
 
     original_pin = producer.lzma_pin
@@ -233,6 +237,19 @@ class PosixNativeEvidence(TestCase):
     def test_macos_stage_produces_a_passing_schema2_closure(self):
         with tempfile.TemporaryDirectory() as directory:
             self.check_stage(Path(directory), "macos")
+
+    def test_macos_truncated_static_report_cannot_hide_coverage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage, _, _ = self.check_stage(root, "macos")
+            other = "Iris.app/Contents/Frameworks/libswresample.4.dylib"
+            names = {Path(STATIC_DYLIB).name, Path(other).name}
+            with offline_scan(stage, native_names=names):
+                self.assertEqual(generate("macos", stage, root / "truncated.json"), 0)
+            manifest = json.loads((root / "truncated.json").read_text(encoding="utf-8"))
+            covered = {row["artifact"]["path"] for row in manifest["components"]
+                       if row["mode"] == "static"}
+            self.assertEqual(covered, {STATIC_DYLIB, other})
 
     def test_macos_static_liblzma_evidence_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
