@@ -278,6 +278,37 @@ class CandidateContracts(unittest.TestCase):
                 self.assertEqual(evidence['static_archive_sha256'], m.digest(prefix / 'lib/liblzma.a'))
                 self.assertEqual(evidence['cmake'], 'cmake version test')
 
+    def test_static_lzma_inspection_binds_reviewed_symbols_to_final_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            codec, swresample = root / 'libavcodec.62.dylib', root / 'libswresample.5.dylib'
+            codec.write_bytes(b'synthetic final codec bytes')
+            swresample.write_bytes(b'synthetic final resampler bytes')
+            calls = []
+
+            def run(*args, **kwargs):
+                calls.append(tuple(str(arg) for arg in args))
+                self.assertEqual(args[:2], ('nm', '-gU'))
+                self.assertTrue(kwargs.get('full'), 'symbol inspection must not be truncated')
+                if Path(args[2]) == codec:
+                    return ('0000000000001234 T _lzma_code\n'
+                            '0000000000005678 T _lzma_end\n'
+                            '0000000000009abc T _unrelated_symbol\n')
+                return ''
+
+            with patch.object(m, 'run', side_effect=run):
+                result = m.static_lzma_libraries({'avcodec': codec, 'swresample': swresample})
+            self.assertEqual(calls, [('nm', '-gU', str(codec)), ('nm', '-gU', str(swresample))])
+            self.assertEqual(result, {codec.name: dict(sha256=m.digest(codec),
+                                                        symbols=['_lzma_code', '_lzma_end'])})
+            self.assertNotIn(str(root), json.dumps(result))
+            for listing in ('0000000000001234 T _lzma_code\n',
+                            '_lzma_code\n_lzma_end\n',
+                            '0000000000001234 T _lzma_code\n0000000000005678 U _lzma_end\n'):
+                with self.subTest(listing=listing), patch.object(m, 'run', return_value=listing):
+                    with self.assertRaisesRegex(ValueError, 'no staged dylib'):
+                        m.static_lzma_libraries({'avcodec': codec})
+
     def test_candidate_rejects_ambient_liblzma_and_dynamic_edge(self):
         with patch.dict(m.os.environ, dict(CPATH='/opt/homebrew/include', LIBRARY_PATH='/opt/homebrew/lib',
                         CFLAGS='ambient', LDFLAGS='ambient', PKG_CONFIG_PATH='ambient',

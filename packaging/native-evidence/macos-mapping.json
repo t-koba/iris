@@ -41,6 +41,28 @@
         "relinking"
       ],
       "pin": "ffmpeg"
+    },
+    "liblzma": {
+      "disposition": "allowed",
+      "evidence": [
+        "Iris.app/Contents/Resources/ffmpeg/manifest.json",
+        "Iris.app/Contents/Resources/ffmpeg/source.tar.xz",
+        "Iris.app/Contents/Resources/ffmpeg-runtime.json",
+        "Iris.app/Contents/Resources/ffmpeg/xz-COPYING.0BSD",
+        "Iris.app/Contents/Resources/ffmpeg/xz-source.tar.xz",
+        "Iris.app/Contents/Resources/ffmpeg/xz-signature.status",
+        "Iris.app/Contents/Resources/ffmpeg/liblzma-build.json"
+      ],
+      "license": "0BSD",
+      "mode": "static",
+      "modifications": "unmodified",
+      "name": "liblzma statically embedded in FFmpeg dylibs",
+      "obligations": [
+        "notice",
+        "source",
+        "relinking"
+      ],
+      "pin": "liblzma"
     }
   },
   "evidence_files": [
@@ -49,7 +71,10 @@
     "Iris.app/Contents/Resources/ffmpeg/manifest.json",
     "Iris.app/Contents/Resources/ffmpeg/source.tar.xz",
     "Iris.app/Contents/Resources/ffmpeg-runtime.json",
-    "Iris.app/Contents/Resources/ffmpeg/xz-COPYING.0BSD"
+    "Iris.app/Contents/Resources/ffmpeg/xz-COPYING.0BSD",
+    "Iris.app/Contents/Resources/ffmpeg/xz-source.tar.xz",
+    "Iris.app/Contents/Resources/ffmpeg/xz-signature.status",
+    "Iris.app/Contents/Resources/ffmpeg/liblzma-build.json"
   ],
   "pins": {
     "ffmpeg": "packaging/linux/ffmpeg.json",
@@ -67,12 +92,14 @@
     {
       "component": "ffmpeg-{basename}",
       "path": "Iris.app/Contents/Frameworks/libav*.dylib",
-      "role": "native"
+      "role": "native",
+      "static_component": "liblzma"
     },
     {
       "component": "ffmpeg-{basename}",
       "path": "Iris.app/Contents/Frameworks/libsw*.dylib",
-      "role": "native"
+      "role": "native",
+      "static_component": "liblzma"
     },
     {
       "path": "Iris.app/Contents/Resources/ffmpeg/*",

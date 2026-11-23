@@ -18,6 +18,12 @@ deliberately explicit rather than inferential:
   staged in the product.
 - The Iris executable's FFmpeg imports are recorded as a separate review
   component because the dynamic link itself is part of the shipped runtime.
+- On macOS, pinned static liblzma is an additional allowed 0BSD `static`
+  component, but only on a dylib whose staged `ffmpeg-runtime.json` reports
+  canonical liblzma symbols and whose build pin/manifest hashes bind to that
+  dylib; the producer re-runs `nm -gU` on the staged bytes. Mapping rules never
+  guess the containing dylib list, and a stage without a verified static
+  liblzma component is refused.
 - Linux PDFium gets an allowed `BSD-3-Clause` component bound to the pinned
   bblanchon release and to the staged PDFium license/provenance documents.
 - Unmapped system libraries are refused; a reviewed `system_components` entry

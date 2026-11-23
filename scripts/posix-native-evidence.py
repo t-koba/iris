@@ -38,6 +38,9 @@ MACHO = (b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe",
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 DISPOSITIONS = ("allowed", "review")
 MODIFICATIONS = ("unmodified", "modified")
+RUNTIME_REPORT = "Iris.app/Contents/Resources/ffmpeg-runtime.json"
+BUILD_MANIFEST = "Iris.app/Contents/Resources/ffmpeg/manifest.json"
+LZMA_SYMBOLS = ("_lzma_code", "_lzma_end", "_lzma_stream_decoder", "_lzma_stream_buffer_decode")
 
 
 def sha256(path):
@@ -138,8 +141,7 @@ def source_pins(mapping, platform):
     return result
 
 
-def component_template(rule, components, pins, evidence_names, name):
-    template = rule.get("component")
+def component_template(template, components, pins, evidence_names, name, mode="dynamic"):
     require(isinstance(template, str) and template in components,
             "no reviewed component rule for staged native file: " + name)
     spec = components[template]
@@ -148,11 +150,18 @@ def component_template(rule, components, pins, evidence_names, name):
     require(isinstance(spec["name"], str) and spec["name"].strip(),
             "invalid reviewed component name: " + template)
     require(spec["pin"] in pins, "unreviewed source pin for component: " + template)
-    require(spec["license"] in ("LGPL-2.1-or-later", "BSD-3-Clause")
+    licenses = ("LGPL-2.1-or-later", "BSD-3-Clause") if mode == "dynamic" else ("0BSD",)
+    require(spec["license"] in licenses
             and spec["disposition"] in DISPOSITIONS
-            and spec["mode"] == "dynamic"
+            and spec["mode"] == mode
             and spec["modifications"] in MODIFICATIONS,
             "invalid reviewed native component: " + template)
+    if mode == "static":
+        # Static mode is only for the reviewed, unmodified pinned liblzma.
+        require("{" not in template and spec["pin"] == "liblzma"
+                and spec["license"] == "0BSD" and spec["disposition"] == "allowed"
+                and spec["modifications"] == "unmodified",
+                "invalid reviewed static component: " + template)
     require(isinstance(spec["obligations"], list)
             and len(spec["obligations"]) == len(set(spec["obligations"]))
             and set(spec["obligations"]) <= set(OBLIGATIONS),
@@ -167,6 +176,8 @@ def component_template(rule, components, pins, evidence_names, name):
         cid = template.replace("{basename}", re.sub(r"[^a-z0-9._-]", "-", name.lower()))
     else:
         cid = template
+    if mode == "static":
+        cid += "-" + re.sub(r"[^a-z0-9._-]", "-", name.lower())
     require(CID.fullmatch(cid) is not None, "invalid generated component id: " + cid)
     return cid, spec
 
@@ -183,16 +194,22 @@ def review_mapping(path, platform):
             "invalid reviewed supporting evidence set")
     for name in evidence:
         safe_relative(name)
+    components = mapping["components"]
+    systems = mapping["system_components"]
     rules = mapping["staged_rules"]
     require(isinstance(rules, list) and 0 < len(rules) <= 256, "invalid staged rule set")
     for rule in rules:
-        require(isinstance(rule, dict) and set(rule) in (
+        require(isinstance(rule, dict) and set(rule) - {"static_component"} in (
             {"path", "role"}, {"path", "role", "component"}), "invalid staged rule")
         compile_rule(rule["path"])
         require(rule["role"] in ("native", "evidence", "data", "asset"),
                 "unknown stage evidence role")
-    components = mapping["components"]
-    systems = mapping["system_components"]
+        if "static_component" in rule:
+            require(rule["role"] == "native" and "component" in rule
+                    and isinstance(rule["static_component"], str)
+                    and rule["static_component"] in components
+                    and rule["static_component"] != rule["component"],
+                    "invalid reviewed static component rule")
     require(isinstance(components, dict) and isinstance(systems, dict),
             "invalid reviewed component set")
     for row in systems.values():
@@ -300,6 +317,70 @@ def system_package(path):
     raise ValueError("no Debian package owner for external native file: " + str(path))
 
 
+def lzma_pin(mapping):
+    """Read the reviewed static liblzma pin referenced by the mapping."""
+    location = mapping["pins"].get("liblzma")
+    require(isinstance(location, str) and not Path(location).is_absolute()
+            and ".." not in Path(location).parts,
+            "reviewed mapping omits the static liblzma pin")
+    pin = read_json(ROOT / location)
+    license = pin.get("license")
+    require(isinstance(license, dict) and license.get("scope") == "liblzma"
+            and license.get("spdx") == "0BSD"
+            and SHA256.fullmatch(str(license.get("sha256", ""))) is not None
+            and isinstance(pin.get("version"), str) and pin["version"]
+            and SHA256.fullmatch(str(pin.get("sha256", ""))) is not None,
+            "invalid reviewed static liblzma pin")
+    return pin
+
+
+def nm_symbols(path):
+    """Re-inspect the staged dylib itself; the report never proves its bytes."""
+    listing = run_tool(["nm", "-gU", str(path)])
+    symbols = set()
+    for line in listing.splitlines():
+        parts = line.split()
+        if (len(parts) >= 3 and re.fullmatch(r"[0-9a-fA-F]+", parts[0])
+                and parts[1] in "TtDdBbRrWwVvSsIiNn" and parts[-1] in LZMA_SYMBOLS):
+            symbols.add(parts[-1])
+    return sorted(symbols)
+
+
+def static_lzma_runtime(mapping, stage, staged):
+    """Bind pinned liblzma build evidence to the staged runtime and dylibs."""
+    pin = lzma_pin(mapping)
+    runtime = read_json(stage / RUNTIME_REPORT)
+    build_manifest = read_json(stage / BUILD_MANIFEST)
+    evidence = runtime.get("liblzma")
+    require(isinstance(evidence, dict) and evidence == build_manifest.get("liblzma"),
+            "runtime and build liblzma evidence differ")
+    signature = evidence.get("signature")
+    # The build report nests the full reviewed pin under "source" (version,
+    # source hash and license metadata); there are no redundant top-level keys.
+    require(isinstance(signature, dict) and evidence.get("source") == pin
+            and signature.get("verified") is True
+            and signature.get("primary_fingerprint") == pin.get("fingerprint")
+            and SHA256.fullmatch(str(evidence.get("license_metadata_sha256", ""))) is not None
+            and SHA256.fullmatch(str(evidence.get("static_archive_sha256", ""))) is not None,
+            "runtime liblzma evidence does not match the reviewed pin")
+    documents = build_manifest.get("documents")
+    require(isinstance(documents, dict), "build manifest lacks staged document hashes")
+    for filename, expected in (("xz-source.tar.xz", pin["sha256"]),
+                               ("xz-COPYING.0BSD", pin["license"]["sha256"])):
+        path = "Iris.app/Contents/Resources/ffmpeg/" + filename
+        require(staged.get(path, {}).get("sha256") == expected
+                and documents.get(filename) == expected,
+                "staged liblzma evidence differs from the reviewed pin: " + filename)
+    path = "Iris.app/Contents/Resources/ffmpeg/liblzma-build.json"
+    require(staged.get(path, {}).get("sha256") == documents.get("liblzma-build.json"),
+            "staged liblzma build evidence differs from the build manifest")
+    staged_libraries = build_manifest.get("staged_libraries")
+    libraries = runtime.get("static_libraries")
+    require(isinstance(staged_libraries, dict) and isinstance(libraries, dict) and libraries,
+            "runtime lacks verified static library evidence")
+    return libraries, staged_libraries
+
+
 def build(args):
     max_files = int(os.environ.get("IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES", "256"))
     max_components = int(os.environ.get("IRIS_RELEASE_AUDIT_MAX_NATIVE_COMPONENTS", "4096"))
@@ -323,7 +404,10 @@ def build(args):
     primary = reference(mapping["evidence_files"][0],
                         staged[mapping["evidence_files"][0]]["sha256"])
     rules = [(compile_rule(rule["path"]), rule) for rule in mapping["staged_rules"]]
+    static_rules = any("static_component" in rule for _, rule in rules)
+    static_context = static_lzma_runtime(mapping, stage, staged) if args.platform == "macos" and static_rules else None
     components, staged_components = [], {}
+    static_count = 0
     for name, row in staged.items():
         matches = [rule for pattern, rule in rules if pattern.fullmatch(name)]
         require(len(matches) == 1, "unmapped staged file: " + name)
@@ -332,7 +416,7 @@ def build(args):
         require(native == (rule["role"] == "native"),
                 "staged native bytes have no reviewed native rule: " + name)
         if native:
-            cid, spec = component_template(rule, mapping["components"], pins,
+            cid, spec = component_template(rule["component"], mapping["components"], pins,
                                            mapping["evidence_files"], name)
             origin, revision = pins[spec["pin"]]
             reviewed_refs = [reference(path, staged[path]["sha256"])
@@ -348,6 +432,44 @@ def build(args):
                              evidence=reviewed_refs),
                 obligations=obligations))
             staged_components.setdefault(name, []).append((cid, spec["mode"]))
+            if "static_component" in rule:
+                require(static_context is not None,
+                        "static native component requires staged macOS runtime evidence")
+                libraries, staged_libraries = static_context
+                basename = Path(name).name  # Runtime report keys are staged dylib basenames.
+                entry = libraries.get(basename)
+                if entry is None:
+                    continue  # Only dylibs actually containing liblzma get a static component.
+                require(isinstance(entry, dict) and set(entry) == {"sha256", "symbols"},
+                        "invalid runtime static library evidence: " + name)
+                symbols = entry["symbols"]
+                require(isinstance(symbols, list) and 2 <= len(symbols) <= len(LZMA_SYMBOLS)
+                        and len(set(symbols)) == len(symbols)
+                        and set(symbols) <= set(LZMA_SYMBOLS),
+                        "unreviewed static liblzma symbols: " + name)
+                require(entry["sha256"] == row["sha256"] == staged_libraries.get(basename),
+                        "static liblzma bytes differ from the staged dylib: " + name)
+                require(nm_symbols(stage / name) == sorted(symbols),
+                        "static liblzma symbols absent from the staged dylib: " + name)
+                static_cid, static_spec = component_template(
+                    rule["static_component"], mapping["components"], pins,
+                    mapping["evidence_files"], name, mode="static")
+                static_refs = [reference(path, staged[path]["sha256"])
+                               for path in static_spec["evidence"]]
+                components.append(dict(
+                    id=static_cid, artifact=reference(name, row["sha256"]), mode="static",
+                    name=static_spec["name"],
+                    source=dict(origin=pins[static_spec["pin"]][0],
+                                revision=pins[static_spec["pin"]][1], evidence=static_refs),
+                    modifications=dict(status=static_spec["modifications"], evidence=static_refs),
+                    license=dict(id=static_spec["license"], disposition=static_spec["disposition"],
+                                 evidence=static_refs),
+                    obligations={key: dict(status="provided", evidence=static_refs)
+                                 for key in OBLIGATIONS}))
+                staged_components[name].append((static_cid, "static"))
+                static_count += 1
+    if static_rules:
+        require(static_count > 0, "no static liblzma component bound to staged bytes")
     require(len({row["id"] for row in components}) == len(components),
             "duplicate reviewed native component id")
 

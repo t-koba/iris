@@ -12,8 +12,10 @@ records the XZ source pin, signature identity, source-license digests, CMake
 flags/version and static archive hash. `config.h`, `config_components.h` and
 `config.mak` retain generated configuration, with private build paths redacted.
 `Contents/Resources/ffmpeg-runtime.json` records actual libav*/libsw* version,
-configuration, license-function result and signed-library hash, the complete
-resolved Mach-O closure, and mandatory default-feature preview-corpus results.
+configuration, license-function result and signed-library hash, the
+`static_libraries` map binding canonical liblzma symbols to each containing
+dylib's sha256, the complete resolved Mach-O closure, and mandatory
+default-feature preview-corpus results.
 The outer app signature is applied afterwards; this inventory does not claim
 final main-executable hashes. Packaging rechecks the nested bytes and closure
 after signing, before archiving.
