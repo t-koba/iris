@@ -555,16 +555,24 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
                                  ("MAX_NATIVE_FILES", 256),
                                  ("COMMAND_SECONDS", 30)):
             self.assertIn(f"vars.IRIS_RELEASE_AUDIT_{setting} || {default}", workflow)
-        native_audit = "python3 scripts/release-audit.py linux --output audit/linux-native-closure.json"
-        self.assertIn(native_audit, workflow)
-        self.assertNotIn(native_audit + " --native-evidence", workflow)
-        self.assertIn("path: audit/*.json", workflow)
+        native_generate = ("python3 scripts/posix-native-evidence.py generate --platform linux "
+                           "--stage dist/linux --mapping packaging/native-evidence/linux-mapping.json "
+                           "--output audit/native-evidence/linux.json "
+                           "--report audit/native-evidence/linux-review.json")
+        native_audit = ("python3 scripts/release-audit.py linux --output audit/linux-native-closure.json "
+                        "--native-evidence audit/native-evidence/linux.json --require-native-evidence")
+        self.assertEqual(workflow.count(native_generate), 1)
+        self.assertEqual(workflow.count(native_audit), 1)
+        self.assertLess(workflow.index(native_generate), workflow.index(native_audit))
         self.assertNotIn("path: audit/linux-ffmpeg.json", workflow)
         self.assertIn('IRIS_FFMPEG_MAX_REPORT_BYTES", "266240"', (ROOT / "scripts/linux-ffmpeg.py").read_text())
         self.assertEqual(workflow.count("uses: actions/upload-artifact@"), 1)
         upload = workflow.split("uses: actions/upload-artifact@", 1)[1]
         self.assertIn("name: linux-runtime-audit", upload)
-        self.assertEqual(upload.split("path:", 1)[1].strip(), "audit/*.json")
+        self.assertEqual(upload.split("path:", 1)[1].strip(), """|
+            audit/*.json
+            audit/native-evidence/linux.json
+            audit/native-evidence/linux-review.json""")
         self.assertIn("--locked --offline", workflow)
         self.assertIn("staged == installed", workflow)
         self.assertIn('IRIS_VERIFY_PDFIUM_PROVENANCE: "0"', workflow)

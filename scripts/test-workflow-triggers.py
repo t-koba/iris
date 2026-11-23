@@ -217,6 +217,100 @@ def fuzz_long_uses_asan_compatible_target():
     )
 
 
+def workflow_step(workflow, name):
+    """Return one named step of these single-job validation workflows."""
+    start_marker = f"      - name: {name}\n"
+    start = workflow.find(start_marker)
+    if start < 0:
+        return ""
+    following = workflow.find("      - name: ", start + len(start_marker))
+    return workflow[start:] if following < 0 else workflow[start:following]
+
+
+def run_line(command):
+    """Block-scalar and inline `run:` forms of one exact command line."""
+    return (f"          {command}\n", f"        run: {command}\n")
+
+
+def has_run_line(block, command):
+    return any(candidate in block for candidate in run_line(command))
+
+
+def in_order(block, *commands):
+    positions = []
+    for command in commands:
+        found = [block.find(candidate) for candidate in run_line(command) if candidate in block]
+        positions.append(min(found) if found else -1)
+    return all(position >= 0 for position in positions) and positions == sorted(positions)
+
+
+def audit_commands(workflow):
+    return [line.strip().removeprefix("run: ") for line in workflow.splitlines()
+            if "scripts/release-audit.py" in line]
+
+
+macos_generate = (
+    "python3 scripts/posix-native-evidence.py generate --platform macos --stage dist/macos "
+    "--mapping packaging/native-evidence/macos-mapping.json "
+    "--output audit/native-evidence/macos-product.json "
+    "--report audit/native-evidence/macos-product-review.json"
+)
+macos_product_audit = (
+    "python3 scripts/release-audit.py macos --output audit/macos-product.json "
+    "--native-evidence audit/native-evidence/macos-product.json --require-native-evidence"
+)
+macos_baseline_audit = "python3 scripts/release-audit.py macos --output audit/macos.json"
+linux_generate = (
+    "python3 scripts/posix-native-evidence.py generate --platform linux --stage dist/linux "
+    "--mapping packaging/native-evidence/linux-mapping.json "
+    "--output audit/native-evidence/linux.json "
+    "--report audit/native-evidence/linux-review.json"
+)
+linux_audit = (
+    "python3 scripts/release-audit.py linux --output audit/linux-native-closure.json "
+    "--native-evidence audit/native-evidence/linux.json --require-native-evidence"
+)
+build_step = "Build verified FFmpeg and package default product locally"
+evidence_step = "Generate reviewed native evidence from pristine Linux package stage"
+audit_step = "Audit full staged Linux native closure (report only)"
+smoke_step = "Generate built-in codec clip and smoke AppDir"
+macos_product_step = workflow_step(macos, "Audit pinned production package")
+macos_baseline_step = workflow_step(macos, "Audit report-only Homebrew baseline")
+linux_upload = """        with:
+          name: linux-runtime-audit
+          if-no-files-found: error
+          path: |
+            audit/*.json
+            audit/native-evidence/linux.json
+            audit/native-evidence/linux-review.json
+"""
+audit_bounds = (
+    "      IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_REPORT_BYTES || 2097152 }}",
+    "      IRIS_RELEASE_AUDIT_MAX_COMMAND_BYTES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_COMMAND_BYTES || 32768 }}",
+    "      IRIS_RELEASE_AUDIT_MAX_METADATA_BYTES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_METADATA_BYTES || 8388608 }}",
+    "      IRIS_RELEASE_AUDIT_MAX_CARGO_PACKAGES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_CARGO_PACKAGES || 1024 }}",
+    "      IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES: ${{ vars.IRIS_RELEASE_AUDIT_MAX_NATIVE_FILES || 256 }}",
+    "      IRIS_RELEASE_AUDIT_COMMAND_SECONDS: ${{ vars.IRIS_RELEASE_AUDIT_COMMAND_SECONDS || 30 }}",
+)
+
+
+def linux_pristine_stage_order():
+    names = re.findall(r"(?m)^      - name: ([^\n]+)$", linux)
+    if not all(name in names for name in (build_step, evidence_step, audit_step, smoke_step)):
+        return False
+    build, evidence, audit, smoke = (
+        names.index(name) for name in (build_step, evidence_step, audit_step, smoke_step)
+    )
+    return (
+        evidence == build + 1
+        and audit == evidence + 1
+        and smoke > audit
+        and linux.index('cp "$CARGO_TARGET_DIR/release/examples/') > linux.index(
+            f"      - name: {audit_step}\n"
+        )
+    )
+
+
 checks = {
     "Preview corpus CI retries and delay cap keep operator overrides": all(
         f"IRIS_PREVIEW_CORPUS_RETRIES: ${{{{ vars.IRIS_PREVIEW_CORPUS_RETRIES || {retries} }}}}" in workflow
@@ -344,6 +438,8 @@ permissions:
             audit/macos.json
             audit/macos-product.json
             audit/macos-candidate.json
+            audit/native-evidence/macos-product.json
+            audit/native-evidence/macos-product-review.json
 """] and macos.count("actions/upload-artifact@") == 1 and "audit/macos-candidate.json" in macos,
     "macOS Homebrew baseline is explicitly report-only": """      - name: Audit report-only Homebrew baseline
         shell: bash
@@ -363,7 +459,8 @@ permissions:
           trap 'rm -rf dist/macos target/package-macos' EXIT
           ./scripts/package-macos-app.sh
           python3 scripts/macos-ffmpeg.py check dist/macos/Iris.app
-          python3 scripts/release-audit.py macos --output audit/macos-product.json
+          python3 scripts/posix-native-evidence.py generate --platform macos --stage dist/macos --mapping packaging/native-evidence/macos-mapping.json --output audit/native-evidence/macos-product.json --report audit/native-evidence/macos-product-review.json
+          python3 scripts/release-audit.py macos --output audit/macos-product.json --native-evidence audit/native-evidence/macos-product.json --require-native-evidence
 """ in macos,
     "macOS candidate runs after baseline failure only when its prerequisites passed": """      - name: Check candidate contracts
         id: candidate_contracts
@@ -427,6 +524,50 @@ permissions:
     "Workflow contract checks run independently of platform integration": ci_job_has(
         "workflow-contracts",
         "run: python3 scripts/test-workflow-triggers.py",
+    ),
+    "Product-CI macOS evidence comes from the exact production stage before its audit": (
+        in_order(macos_product_step, "./scripts/package-macos-app.sh",
+                 "python3 scripts/macos-ffmpeg.py check dist/macos/Iris.app",
+                 macos_generate, macos_product_audit)
+        and macos.count(macos_generate) == 1
+        and macos.count(macos_product_audit) == 1
+    ),
+    "Product-CI Homebrew baseline stays report-only": (
+        has_run_line(macos_baseline_step, macos_baseline_audit)
+        and "posix-native-evidence" not in macos_baseline_step
+        and "--require-native-evidence" not in macos_baseline_step
+    ),
+    "Product-CI Linux evidence and audit run before smoke copies": (
+        linux_pristine_stage_order()
+        and has_run_line(workflow_step(linux, evidence_step), linux_generate)
+        and has_run_line(workflow_step(linux, audit_step), linux_audit)
+        and linux.count(linux_generate) == 1
+        and linux.count(linux_audit) == 1
+    ),
+    "Product-CI retains both native-evidence sidecars and review reports": (
+        linux_upload in linux and linux.count("uses: actions/upload-artifact@") == 1
+    ),
+    "Product-CI audit lines have no bypass or bound overrides": (
+        audit_commands(macos) == [macos_baseline_audit, macos_product_audit]
+        and audit_commands(linux) == [linux_audit]
+        and not any(flag in macos + linux for flag in (
+            "--ignore", "--allow-unmapped", "--skip-native", "--max-report-bytes",
+            "--max-native-files", "--max-cargo-packages", "--max-native-components",
+        ))
+    ),
+    "Product-CI adds no package build, Release dispatch or tag": (
+        macos.count("./scripts/package-macos-app.sh") == 2
+        and linux.count("./scripts/package-linux-appdir.sh") == 1
+        and all(token not in workflow for workflow in (macos, linux) for token in (
+            "release.yml", "workflow_dispatch:", "softprops/action-gh-release",
+            "gh release", "git tag", "refs/tags/", "actions/create-release",
+        ))
+    ),
+    "Product-CI keeps audit bounds, PDFium scope and release hold": (
+        all(line in macos and line in linux for line in audit_bounds)
+        and 'IRIS_VERIFY_PDFIUM_PROVENANCE: "0"' in linux
+        and "pdfium['attestation']['status'] == 'not_attempted'" in linux
+        and "Untested by this product-CI gate: verified PDFium attestation, Windows closure, tag-only publish." in linux
     ),
     "SMB adapter fake-server regressions run separately from native container smoke": ci_job_has(
         "smb-adapter-unit",

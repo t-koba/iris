@@ -3,6 +3,7 @@ name: Linux FFmpeg validation
 # Reusable, report-only Linux runtime validation. The registered CI workflow
 # calls this only on workflow_dispatch at the caller's exact ref. Never dispatch
 # Release or retain packages, AppDirs, source bundles, or runtime libraries.
+# Untested by this product-CI gate: verified PDFium attestation, Windows closure, tag-only publish.
 on:
   workflow_call:
 
@@ -69,6 +70,12 @@ jobs:
           IRIS_PDFIUM_FETCH_RETRIES: ${{ vars.IRIS_PDFIUM_FETCH_RETRIES || 3 }}
           IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS: ${{ vars.IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS || 2 }}
         run: ./scripts/package-linux-appdir.sh
+      - name: Generate reviewed native evidence from pristine Linux package stage
+        run: python3 scripts/posix-native-evidence.py generate --platform linux --stage dist/linux --mapping packaging/native-evidence/linux-mapping.json --output audit/native-evidence/linux.json --report audit/native-evidence/linux-review.json
+      - name: Audit full staged Linux native closure (report only)
+        # Evidence is generated from the pristine stage before smoke binaries are
+        # copied in; this input check is fail-closed, not a release approval.
+        run: python3 scripts/release-audit.py linux --output audit/linux-native-closure.json --native-evidence audit/native-evidence/linux.json --require-native-evidence
       - name: Locked offline Rust checks and smoke build
         run: |
           cargo fmt --all -- --check
@@ -96,9 +103,6 @@ jobs:
           ./scripts/smoke-linux-deb.sh dist/linux/iris_*.deb dist/linux/Iris.AppDir \
             dist/linux/Iris.AppDir/usr/bin/iris-pdf-smoke \
             dist/linux/Iris.AppDir/usr/bin/iris-video-smoke "$RUNNER_TEMP/iris-video.avi"
-      - name: Audit full staged Linux native closure (report only)
-        # No reviewed manifest is supplied: the report records hashes and missing evidence, not approval.
-        run: python3 scripts/release-audit.py linux --output audit/linux-native-closure.json
       - name: Summarize bounded evidence (no packages or libraries)
         shell: bash
         run: |
@@ -152,4 +156,7 @@ jobs:
         with:
           name: linux-runtime-audit
           if-no-files-found: error
-          path: audit/*.json
+          path: |
+            audit/*.json
+            audit/native-evidence/linux.json
+            audit/native-evidence/linux-review.json

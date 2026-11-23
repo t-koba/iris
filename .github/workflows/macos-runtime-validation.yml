@@ -77,7 +77,8 @@ jobs:
           trap 'rm -rf dist/macos target/package-macos' EXIT
           ./scripts/package-macos-app.sh
           python3 scripts/macos-ffmpeg.py check dist/macos/Iris.app
-          python3 scripts/release-audit.py macos --output audit/macos-product.json
+          python3 scripts/posix-native-evidence.py generate --platform macos --stage dist/macos --mapping packaging/native-evidence/macos-mapping.json --output audit/native-evidence/macos-product.json --report audit/native-evidence/macos-product-review.json
+          python3 scripts/release-audit.py macos --output audit/macos-product.json --native-evidence audit/native-evidence/macos-product.json --require-native-evidence
       - name: Validate pinned candidate
         # Run after a baseline failure when candidate prerequisites passed;
         # never continue after cancellation or a failed candidate-contract step.
@@ -104,3 +105,5 @@ jobs:
             audit/macos.json
             audit/macos-product.json
             audit/macos-candidate.json
+            audit/native-evidence/macos-product.json
+            audit/native-evidence/macos-product-review.json
