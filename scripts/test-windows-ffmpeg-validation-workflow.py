@@ -41,6 +41,7 @@ class WorkflowContracts(unittest.TestCase):
         self.assertTrue(checks["pe_import_closure"])
         self.assertTrue(checks["staged_only_path"])
         self.assertTrue(checks["stage_binding"])
+        self.assertTrue(checks["preview_records_retained"])
         self.assertTrue(checks["system_dirs_token_scoped"])
         self.assertTrue(checks["vcpkg_empty_path_guard"])
         self.assertTrue(checks["source_bundle_staged"])
@@ -60,8 +61,9 @@ class WorkflowContracts(unittest.TestCase):
         for marker in self.mod.ATTESTATION_MARKERS:
             self.assertIn(marker, shape["required_markers"])
         self.assertEqual(shape["source_bundle_outputs"], list(self.mod.SOURCE_BUNDLE_OUTPUTS))
-        for marker in (self.mod.STAGE_MARKERS + self.mod.PE_IMPORT_MARKERS
-                       + self.mod.EVIDENCE_MARKERS + (self.mod.PATH_MARKER,)):
+        for marker in (self.mod.STAGE_MARKERS + self.mod.PREVIEW_RECORD_MARKERS
+                       + self.mod.PE_IMPORT_MARKERS + self.mod.EVIDENCE_MARKERS
+                       + (self.mod.PATH_MARKER,)):
             self.assertIn(marker, shape["required_markers"])
 
     def test_action_refs_normalizes_yaml_spelling(self):
@@ -662,6 +664,26 @@ class StagedRuntimeContracts(unittest.TestCase):
         self.assertIn(marker, self.text)
         mutated = self.text.replace(marker, "", 1)
         with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_missing_structured_preview_evidence(self):
+        # Every retained-record marker must be executable: removing any one of
+        # them must make the workflow contract fail closed.
+        for marker in self.mod.PREVIEW_RECORD_MARKERS:
+            self.assertIn(marker, self.text)
+            with self.subTest(marker=marker):
+                mutated = self.text.replace(marker, "<removed>", 1)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(mutated)
+
+    def test_rejects_preview_records_parsed_after_tail_truncation(self):
+        parse = '          $previewRecords = @()\n'
+        truncation = ('          if ($smokeOutput.Length -gt 2000) { '
+                      '$smokeOutput = $smokeOutput.Substring($smokeOutput.Length - 2000) }\n')
+        self.assertEqual(self.text.count(parse), 1)
+        self.assertEqual(self.text.count(truncation), 1)
+        mutated = self.text.replace(parse, "", 1).replace(truncation, truncation + parse, 1)
+        with self.assertRaisesRegex(ValueError, "before tail truncation"):
             self.mod.validate(mutated)
 
     def test_rejects_smoke_outside_stage(self):

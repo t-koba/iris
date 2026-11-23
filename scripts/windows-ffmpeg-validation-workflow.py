@@ -53,6 +53,29 @@ STAGE_MARKERS = (
     '"preview-smoke.json"',
 )
 
+# The staged smoke emits exactly one correctness and five latency JSON lines.
+# Retain every parsed record (not just the diagnostic tail) under a bounded
+# serialized size, and refuse a successful run with a different record shape.
+PREVIEW_RECORD_MARKERS = (
+    '$previewRecords = @()',
+    'foreach ($line in ($smokeOutput -split "`r?`n")) {',
+    '$line.StartsWith("PREVIEW_CORRECTNESS ")',
+    '$line.StartsWith("PREVIEW_LATENCY ")',
+    '$previewRecords += ($json | ConvertFrom-Json)',
+    'invalid preview record JSON in smoke output: $json',
+    '$correctnessRecords++',
+    '$latencyRecords++',
+    '$previewRecords.Count -ne 6',
+    '$correctnessRecords -ne 1',
+    '$latencyRecords -ne 5',
+    'output_tail = $smokeOutput',
+    'preview_records = $previewRecords',
+    'record_count = $previewRecords.Count',
+    '$serialized = $record | ConvertTo-Json -Depth 8 -Compress',
+    '$serialized.Length -gt 200000',
+    'preview smoke evidence exceeds 200000 characters',
+)
+
 # dumpbin must be checked for failure, and every non-system import must be
 # resolved in the stage and then queued for its own inventory.
 PE_IMPORT_MARKERS = (
@@ -347,7 +370,7 @@ REQUIRED_MARKERS = (
     'empty vcpkg path',
     '.Where({ [string]::IsNullOrWhiteSpace($_) }).Count -gt 0',
     '"status": "not_run"',
-) + ATTESTATION_MARKERS + STAGE_MARKERS + PE_IMPORT_MARKERS + EVIDENCE_MARKERS + VC_IMPORT_MARKERS + (
+) + ATTESTATION_MARKERS + STAGE_MARKERS + PREVIEW_RECORD_MARKERS + PE_IMPORT_MARKERS + EVIDENCE_MARKERS + VC_IMPORT_MARKERS + (
     CLEANUP_MARKER, PATH_MARKER,
 ) + PRODUCT_INVENTORY_MARKERS + PRODUCT_PACKAGE_MARKERS + PRODUCT_NOTICE_MARKERS + (
     PRODUCT_EVIDENCE_MARKERS + PRODUCT_CLEANUP_MARKERS + SOURCE_BUNDLE_MARKERS
@@ -798,6 +821,18 @@ def validate(text):
             < code.index(PATH_MARKER) < code.index("& $smokeExe $corpus"),
             "the smoke must bind the stage before narrowing PATH and running it")
     checks["stage_binding"] = True
+
+    for marker in PREVIEW_RECORD_MARKERS:
+        require(marker in code,
+                f"structured preview evidence marker missing from executable workflow lines: {marker}")
+    smoke_step = text.split("- name: Staged preview smoke (video, PDF, RAW)", 1)[1]
+    smoke_step = smoke_step.split("\n      - name:", 1)[0]
+    require(smoke_step.index("$previewRecords = @()")
+            < smoke_step.index("if ($smokeOutput.Length -gt 2000)")
+            < smoke_step.index("output_tail = $smokeOutput"),
+            "preview records must be parsed from full stdout before tail truncation")
+    checks["preview_records_retained"] = True
+
     require(code.index("PDFium sha256 mismatch")
             < code.index("gh attestation verify $asset --repo $pin.repo --bundle $bundle")
             < code.index("tar -xzf $asset"),

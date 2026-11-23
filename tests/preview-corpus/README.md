@@ -64,6 +64,18 @@ cross-platform comparison. The measurements have no performance threshold and do
 not establish legal approval, PDFium attestation, shipped-runtime provenance or
 release readiness. Sequential samples may reflect cache/order effects.
 
+## Windows
+
+The Windows native-preview validation workflow retains the full structured
+`PREVIEW_CORRECTNESS` and `PREVIEW_LATENCY` records from the staged default-feature
+smoke in `preview-smoke.json` under `preview_records`, alongside `record_count`
+and a bounded 2,000-character `output_tail` diagnostic; the serialized record is
+capped at 200,000 characters. A successful run must contain exactly six records
+(one correctness and five latency); malformed or missing records fail the workflow,
+and a failing smoke still writes its diagnostic record before the step throws. These
+remain crate-level diagnostics for the staged Windows runtime, not UI parity,
+platform comparison, release approval or legal/PDFium provenance verification.
+
 ## Report-only runtime validation
 
 The report-only macOS runtime validation fetches the corpus once and runs the same

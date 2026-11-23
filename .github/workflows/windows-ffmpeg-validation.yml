@@ -552,6 +552,34 @@ jobs:
             $smokeOutput = $_.Exception.Message
             $exitCode = -1
           }
+          # Parse the complete stdout before bounding the diagnostic tail, so
+          # every correctness/latency record survives even in a long run.
+          $previewRecords = @()
+          $correctnessRecords = 0
+          $latencyRecords = 0
+          foreach ($line in ($smokeOutput -split "`r?`n")) {
+            $marker = $null
+            if ($line.StartsWith("PREVIEW_CORRECTNESS ")) {
+              $marker = "PREVIEW_CORRECTNESS "
+              $correctnessRecords++
+            } elseif ($line.StartsWith("PREVIEW_LATENCY ")) {
+              $marker = "PREVIEW_LATENCY "
+              $latencyRecords++
+            }
+            if ($marker -ne $null) {
+              $json = $line.Substring($marker.Length)
+              try {
+                $previewRecords += ($json | ConvertFrom-Json)
+              } catch {
+                throw "invalid preview record JSON in smoke output: $json"
+              }
+            }
+          }
+          if ($exitCode -eq 0) {
+            if ($previewRecords.Count -ne 6 -or $correctnessRecords -ne 1 -or $latencyRecords -ne 5) {
+              throw "preview smoke records: got $($previewRecords.Count) ($correctnessRecords correctness, $latencyRecords latency), expected 6 (1 correctness, 5 latency)"
+            }
+          }
           if ($smokeOutput.Length -gt 2000) { $smokeOutput = $smokeOutput.Substring($smokeOutput.Length - 2000) }
           $status = "fail"
           if ($exitCode -eq 0) { $status = "pass" }
@@ -564,8 +592,12 @@ jobs:
             stage = $stage
             path = "stage+system"
             output_tail = $smokeOutput
+            preview_records = $previewRecords
+            record_count = $previewRecords.Count
           }
-          Set-Content -LiteralPath (Join-Path $evidenceDir "preview-smoke.json") -Value ($record | ConvertTo-Json -Depth 4 -Compress) -Encoding utf8
+          $serialized = $record | ConvertTo-Json -Depth 8 -Compress
+          if ($serialized.Length -gt 200000) { throw "preview smoke evidence exceeds 200000 characters" }
+          Set-Content -LiteralPath (Join-Path $evidenceDir "preview-smoke.json") -Value $serialized -Encoding utf8
           if ($exitCode -ne 0) { throw "installed preview smoke failed with exit code $exitCode" }
 
       - name: Assemble clean product ZIP payload
