@@ -148,6 +148,8 @@ Iris では PoC を再現しておらず、脆弱性の適用性もリリース�
 
 上流の一次情報では、160.0.8165.0（`chromium/8165`、ソースコミット `83c18af693945b735503665259b728ba7d409fd0`）が 2026-11-16 17:35 UTC に公開された不変の release です。これは修正の出荷（2026-11-12）より後にビルドされているため日付に基づく低減候補ですが、変更一覧に修正コミットは現れません。GitHub API が報告するゲート対象アセットは `pdfium-linux-x64.tgz` 3,951,977 bytes / `ba7865e16c0271daab75256790be06c26272190afe6e2a70eae0bb39bb99089c`、`pdfium-linux-arm64.tgz` 3,817,479 bytes / `338f5dcc907a20331812ae8ab01b16ff18966f4a247d790c8ad8fb49029d768b`、`pdfium-win-x64.tgz` 4,043,420 bytes / `ca7338ae7779b8b1b82f4580305c4d762d214f8df1d54b47647fe3cc75989ded`、`pdfium-attestation.json` 18,361 bytes / `a198e725074f3321c0f21a94218cafc910740e0e0c8395530198855f7a918770` です。これらは API の報告値であり、アーカイブのローカル再計算と `gh attestation verify` による検証は未実施です。ピンは変更しておらず、正確なリビジョンの CI で PDF プレビューのスモークテストが通るまで差し替えません。
 
+さらに新しい 160.0.8179.0（`chromium/8179`、ソースコミット `02feff9f75486f5caac18147db45087b6ffbbec6`）は 2026-11-23 16:51 UTC に公開された不変の release で、8165 より後にビルドされています。8165 から 8179 の変更一覧にも CVE-2026-130976 の修正コミットは現れず、日付に基づく候補のままです。GitHub API が報告するゲート対象アセットは `pdfium-linux-x64.tgz` 3,953,118 bytes / `b4766a6bf2856efbcc6c3cc7d6ae9022bdc6bb36ddc1acdd92d1f1873f773f4b`、`pdfium-linux-arm64.tgz` 3,819,293 bytes / `18bb6d568257b28d14f6c3b8bfb48caf73d4615b319ca4d43b424c2a03431d9f`、`pdfium-win-x64.tgz` 4,046,589 bytes / `836a77c9053f624839c66010cddea7b675628a36b8831d2330178bb169d241b6`、`pdfium-attestation.json` 18,083 bytes / `f9d4bb0be84c30c98b98b2550ed2f81efc4024cd172511a5e786163c9ae8deb6` です。これらも API の報告値であり、アーカイブのローカル再計算と `gh attestation verify` による検証、および正確なリビジョンの CI スモークテストは未実施です。8165 と同様にピンは変更しておらず、リリース準備が整ったという意味ではありません。
+
 ### コピーと移動
 
 1. 貼り付けやドラッグ&ドロップでファイルの一覧（保留中の操作）を作り、ジョブとして `jobstore` に保存します。
