@@ -39,6 +39,7 @@ class Audit:
         self.records = []
         self.used = 0
         self.omitted = 0
+        self.bundled = []
 
     def clean(self, text):
         # Never dump the environment, credentials, signing settings or personal paths.
@@ -548,11 +549,20 @@ class Audit:
             self.command(sys.executable, str(Path(__file__).resolve()),
                          "probe-library", str(path.resolve()))
 
-    def linux(self, roots):
+
+    def linux(self, roots, stage=None):
         self.file("/etc/os-release", text=True)
         self.command("apt-cache", "policy")
         packages = set()
+        staged_root = Path(stage).resolve() if stage is not None else None
         for path in self.closure(roots, "linux"):
+            if staged_root is not None and path.is_relative_to(staged_root):
+                # closure() already bound the exact staged bytes; dpkg cannot own
+                # files inside the release stage, and their coverage is checked
+                # against the reviewed native closure after it is generated.
+                if path not in self.bundled:
+                    self.bundled.append(path)
+                continue
             # Debian's /usr merge means the package database may use either spelling.
             spelling = str(path)
             owners = self.command("dpkg-query", "-S", spelling)
@@ -576,12 +586,59 @@ class Audit:
                              package=owner.split(":", 1)[0], owner=owner)
                     found = True
             if not found:
-                self.add("missing", path=spelling, reason="no Debian package owner; see bundled PDFium evidence if applicable")
+                self.add("missing", path=spelling, reason="no Debian package owner for external native file")
         for package in sorted(packages):
             self.command("dpkg-query", "-W", "-f=${binary:Package}\t${Version}\t${Architecture}\t${source:Package}\t${source:Version}\n", package)
             self.command("apt-cache", "policy", package)
             self.file(Path("/usr/share/doc") / package.split(":")[0] / "copyright", text=True)
         self.add("scope", note="Debian policy shows configured origins/candidate and installed version, not proof of the historical download origin. Copyright is package evidence, not a compatibility verdict. Dynamically loaded plugins outside these roots remain unknown.")
+
+    def verify_bundled_native_evidence(self):
+        """Require reviewed, byte-bound native coverage for staged ELF files."""
+        if not self.bundled:
+            return
+        closures = [row for row in self.records if row["kind"] == "native-closure"]
+        closure = closures[0].get("evidence") if len(closures) == 1 else None
+        natives = {row["path"]: row for row in self.records if row["kind"] == "native-file"}
+        for path in self.bundled:
+            spelling = self.clean(str(path))
+            native = natives.get(spelling)
+            reason = None
+            if native is None or not re.fullmatch(r"[0-9a-f]{64}", str(native.get("sha256", ""))):
+                reason = "bundled ELF lacks a byte-bound native-file hash"
+            else:
+                artifacts = closure.get("artifacts") if isinstance(closure, dict) else None
+                components = closure.get("components") if isinstance(closure, dict) else None
+                matches = [row for row in artifacts if isinstance(row, dict)
+                           and isinstance(row.get("file"), dict)
+                           and row["file"].get("path") == spelling] if isinstance(artifacts, list) else []
+                if len(matches) != 1:
+                    reason = "bundled ELF lacks one reviewed native-closure artifact"
+                elif matches[0]["file"].get("sha256") != native["sha256"]:
+                    reason = "bundled ELF lacks a matching native-closure artifact hash"
+                else:
+                    coverage = matches[0].get("coverage")
+                    bound = False
+                    if isinstance(coverage, dict) and isinstance(components, list):
+                        for mode, row in coverage.items():
+                            if not isinstance(row, dict) or not isinstance(row.get("components"), list):
+                                continue
+                            ids = {cid for cid in row["components"] if isinstance(cid, str)}
+                            if not ids:
+                                continue
+                            bound = any(
+                                isinstance(component, dict) and component.get("id") in ids
+                                and component.get("mode") == mode
+                                and isinstance(component.get("artifact"), dict)
+                                and component["artifact"].get("path") == spelling
+                                and component["artifact"].get("sha256") == native["sha256"]
+                                for component in components)
+                            if bound:
+                                break
+                    if not bound:
+                        reason = "bundled ELF lacks reviewed native-closure coverage"
+            if reason is not None:
+                self.add("missing", path=spelling, reason=reason)
 
     def closure(self, roots, platform):
         queue = list(roots)
@@ -772,7 +829,7 @@ def main():
         docs = app / "usr/share/doc/iris/pdfium"
         audit.add("provenance-check", subject="PDFium",
                   **audit.pdfium_attestation(docs, app / "usr/lib/iris/libpdfium.so"))
-        audit.linux([app / "usr/bin/Iris", app / "usr/lib/iris/libpdfium.so"])
+        audit.linux([app / "usr/bin/Iris", app / "usr/lib/iris/libpdfium.so"], stage=directory)
         if not docs.is_dir():
             audit.add("missing", path=str(docs), reason="PDFium provenance/license directory absent")
         else:
@@ -786,6 +843,8 @@ def main():
     else:
         audit.windows(directory / "Iris/Iris.exe")
     audit.native_evidence(directory, args.native_evidence)
+    if args.platform == "linux":
+        audit.verify_bundled_native_evidence()
     if args.require_native_evidence and not any(
             row["kind"] == "native-closure" for row in audit.records):
         parser.error("native evidence required but absent or invalid")

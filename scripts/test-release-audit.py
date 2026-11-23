@@ -794,6 +794,104 @@ class Reports(unittest.TestCase):
             self.assertEqual(pdfium["attestation_status"], "unknown")
 
 
+class BundledLinuxClosure(unittest.TestCase):
+    def test_staged_elfs_skip_dpkg_and_keep_external_owner_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            stage = base / "dist/linux"
+            executable = stage / "Iris.AppDir/usr/bin/Iris"
+            library = stage / "Iris.AppDir/usr/lib/iris/libavcodec.so.60"
+            external = base / "system/libgcc_s.so.1"
+            for path in (executable, library, external):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"synthetic " + path.name.encode())
+            staged = {str(executable), str(library)}
+            for owned in (True, False):
+                with self.subTest(owned=owned):
+                    report = audit()
+                    calls = []
+
+                    def command(*argv):
+                        calls.append(argv)
+                        if argv[0] == "ldd":
+                            if argv[-1] == str(executable):
+                                return (f"{library.name} => {library} (0x1)\n"
+                                        f"libgcc_s.so.1 => {external} (0x2)\n")
+                            return "linux-vdso.so.1 (0x00007fff)\n"
+                        if argv[:2] == ("dpkg-query", "-S") and owned and argv[-1] == str(external):
+                            return "libgcc-s1:amd64: " + str(external) + "\n"
+                        return ""
+
+                    with patch.object(report, "command", side_effect=command):
+                        report.linux([executable], stage=stage)
+                    self.assertEqual(report.bundled, [executable.resolve(), library.resolve()])
+                    self.assertFalse(any(argv[:2] == ("dpkg-query", "-S") and argv[-1] in staged
+                                         for argv in calls))
+                    self.assertEqual([argv[-1] for argv in calls
+                                      if argv[:2] == ("dpkg-query", "-S")], [str(external)])
+                    self.assertTrue(staged.issubset(
+                        {row["path"] for row in report.records if row["kind"] == "native-file"}))
+                    self.assertFalse(staged & {row.get("path") for row in report.records
+                                               if row["kind"] == "system-dependency"})
+                    missing = {(row.get("path"), row.get("reason")) for row in report.records
+                               if row["kind"] == "missing"}
+                    if owned:
+                        self.assertFalse(missing, report.records)
+                        self.assertEqual(next(row for row in report.records
+                                              if row["kind"] == "system-dependency"),
+                                         dict(kind="system-dependency", platform="linux",
+                                              path=str(external),
+                                              sha256=module.Audit.sha256_file(external),
+                                              package="libgcc-s1", owner="libgcc-s1:amd64"))
+                    else:
+                        self.assertEqual(missing, {(str(external),
+                                                   "no Debian package owner for external native file")})
+
+    def test_bundled_paths_require_byte_bound_reviewed_coverage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory)
+            library = stage / "libavcodec.so.60"
+            library.write_bytes(b"synthetic bundled bytes")
+            spelling, sha = str(library), module.Audit.sha256_file(library)
+            report = audit()
+            with patch.object(report, "closure", return_value=iter([library])),                     patch.object(report, "command", return_value=""):
+                report.linux([library], stage=stage)
+            self.assertEqual(report.bundled, [library.resolve()])
+            report.file(library, native=True)  # closure()'s byte-bound inventory
+            original = list(report.records)
+
+            def sidecar(digest=None, ids=("ffmpeg-avcodec",), modes=("dynamic",)):
+                return dict(schema=1, artifacts=[dict(file=dict(path=spelling,
+                                                                sha256=digest or sha),
+                                                      coverage={mode: dict(components=list(ids), evidence=[])
+                                                                for mode in modes})],
+                            components=[dict(id="ffmpeg-avcodec", mode="dynamic",
+                                             artifact=dict(path=spelling, sha256=sha), name="synthetic")])
+
+            def check(value=None):
+                fresh = audit()
+                fresh.records = copy.deepcopy(original)
+                fresh.bundled = list(report.bundled)
+                if value is not None:
+                    fresh.add("native-closure", evidence=value)
+                fresh.verify_bundled_native_evidence()
+                return [row for row in fresh.records if row["kind"] == "missing"]
+
+            valid = check(sidecar())
+            self.assertFalse(valid, valid)
+            for value, expected in (
+                    (sidecar(digest="b" * 64), "matching native-closure artifact hash"),
+                    (sidecar(ids=(), modes=()), "native-closure coverage"),
+                    (sidecar(ids=("unlisted",)), "native-closure coverage"),
+                    (dict(schema=1, artifacts=[], components=[]), "native-closure artifact"),
+                    (None, "native-closure artifact")):
+                with self.subTest(expected=expected):
+                    missing = check(value)
+                    self.assertEqual(len(missing), 1, missing)
+                    self.assertEqual(missing[0]["path"], spelling)
+                    self.assertIn(expected, missing[0]["reason"])
+
+
 class WindowsNativeEvidencePipeline(unittest.TestCase):
     """Producer evidence -> sealed manifest -> audit closure, all offline."""
 
