@@ -41,6 +41,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Workflow trigger policy regression
         if: matrix.os == 'ubuntu-latest'

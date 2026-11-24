@@ -526,6 +526,10 @@ permissions:
         "cargo test -p iris-platform-integration --lib copy::tests::new_copy_destinations_are_private_until_success_under_umask --locked",
     ),
     "Matrix runner contracts reject a forced single Ubuntu runner": matrix_runner_mutation_regression(),
+    "CI test job checkout does not persist Git credentials": (
+        "\n      - uses: actions/checkout@v7\n"
+        "        with:\n          persist-credentials: false\n"
+    ) in ci_job_block("test"),
     "Workspace tests run unconditionally in the main CI test job": workspace_tests_unconditional(),
     "Workspace-tests guard rejects a disabled Tests step": workspace_tests_mutation_regression(),
     "Workspace-tests guard rejects a gated test job": workspace_tests_job_gate_mutation_regression(),
