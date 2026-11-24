@@ -6,7 +6,8 @@ immutable chromium/8179 release asset and its attestation bundle over HTTPS,
 checks both exact size/sha256 pins, verifies the asset's GitHub provenance with
 `gh attestation verify` before any native bytes are extracted, and runs the
 already-built preview smoke against a one-off stage containing the candidate
-pdfium.dll and the caller's vcpkg FFmpeg DLL closure. It never changes a
+pdfium.dll, the caller's vcpkg FFmpeg DLL closure and the real rustc with its
+sysroot DLLs. It never changes a
 shipped pin, builds a product, publishes anything, or keeps native bytes: all
 downloads, extraction and staging live in one TemporaryDirectory.
 """
@@ -53,9 +54,11 @@ DOWNLOAD_TIMEOUT_SECONDS = 60
 DOWNLOAD_RETRY_DELAY_SECONDS = 1
 SMOKE_TIMEOUT_SECONDS = 300
 GH_TIMEOUT_SECONDS = 120
+RUSTC_TIMEOUT_SECONDS = 60
 MAX_DOWNLOAD_RETRIES = 10
 MAX_MEMBER_BYTES = 64 * 1024 * 1024
 MAX_SMOKE_DLLS = 128
+MAX_RUSTC_DLLS = 64
 MAX_SMOKE_OUTPUT_CHARS = 200_000
 LATENCY_RECORDS = 5
 MAX_EVIDENCE_BYTES = 20_000
@@ -279,7 +282,26 @@ def check_version(version_file):
     return {"major": MAJOR, "build": BUILD, "version": VERSION}
 
 
-def stage_candidate(work_dir, smoke_exe, dll_dir, candidate_dll):
+def rustc_sysroot(*, runner=subprocess.run):
+    """Probe the real rustc sysroot before the smoke PATH is narrowed."""
+    command = ["rustc", "--print", "sysroot"]
+    try:
+        result = runner(command, capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", check=False,
+                        timeout=RUSTC_TIMEOUT_SECONDS)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CandidateError("rustc sysroot probe could not run") from exc
+    require(result.returncode == 0,
+            f"rustc sysroot probe failed with exit code {result.returncode}")
+    text = result.stdout.strip()
+    require(0 < len(text) <= 4096, "rustc sysroot is empty or unbounded")
+    sysroot = Path(text)
+    require(sysroot.is_dir(), "rustc sysroot directory missing")
+    return sysroot
+
+
+def stage_candidate(work_dir, smoke_exe, dll_dir, candidate_dll, *,
+                    sysroot=None, runner=subprocess.run):
     """Stage one isolated runtime; the only PDFium DLL is the candidate."""
     smoke_exe = Path(smoke_exe)
     dll_dir = Path(dll_dir)
@@ -296,12 +318,35 @@ def stage_candidate(work_dir, smoke_exe, dll_dir, candidate_dll):
     require(not any(path.name.lower().startswith("pdfium")
                     for path in dlls),
             "caller DLL closure must not contain a production PDFium DLL")
+    # The shared smoke calls runtime_identity(), which invokes rustc. Stage the
+    # compiler and its own DLL closure from the un-narrowed caller environment.
+    sysroot = Path(sysroot) if sysroot is not None else rustc_sysroot(runner=runner)
+    rustc_bin = sysroot / "bin"
+    require(rustc_bin.is_dir(), "rustc sysroot bin directory missing")
+    rustc_exe = rustc_bin / "rustc.exe"
+    require(rustc_exe.is_file(), "rustc executable missing from sysroot bin")
+    rustc_dlls = sorted(path for path in rustc_bin.iterdir()
+                        if path.is_file() and path.suffix.lower() == ".dll")
+    require(len(rustc_dlls) <= MAX_RUSTC_DLLS,
+            "rustc sysroot DLL closure exceeds bounds")
+    require(not any(path.name.lower().startswith("pdfium")
+                    for path in rustc_dlls),
+            "rustc sysroot DLL closure must not contain a production PDFium DLL")
+    caller_names = [path.name.lower() for path in dlls]
+    rustc_names = [path.name.lower() for path in rustc_dlls]
+    require(len(set(caller_names)) == len(caller_names)
+            and len(set(rustc_names)) == len(rustc_names)
+            and not set(caller_names) & set(rustc_names),
+            "staged runtime has duplicate DLL names")
     stage = Path(work_dir) / "stage"
     stage.mkdir(parents=True)
     shutil.copy2(smoke_exe, stage / "preview_corpus_smoke.exe")
     for dll in dlls:
         shutil.copy2(dll, stage / dll.name)
     shutil.copy2(candidate_dll, stage / "pdfium.dll")
+    shutil.copy2(rustc_exe, stage / "rustc.exe")
+    for dll in rustc_dlls:
+        shutil.copy2(dll, stage / dll.name)
     return stage
 
 

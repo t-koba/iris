@@ -31,6 +31,16 @@ DEFAULT_FILES = {
 }
 
 
+def make_sysroot(root, *, dlls=()):
+    """Build a fake, platform-independent rustc sysroot toolchain."""
+    root = Path(root)
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / "rustc.exe").write_bytes(b"real-rustc")
+    for name, data in dlls:
+        (root / "bin" / name).write_bytes(data)
+    return root
+
+
 def make_archive(files=None, links=()):
     """Build a small in-memory .tgz, including deliberately unsafe members."""
     payload = io.BytesIO()
@@ -262,14 +272,82 @@ class PreviewContracts(unittest.TestCase):
             dll_dir.mkdir()
             (dll_dir / "avcodec-61.dll").write_bytes(b"a")
             (dll_dir / "avformat-61.dll").write_bytes(b"b")
-            stage = mod.stage_candidate(root / "work", smoke, dll_dir, candidate)
+            sysroot = make_sysroot(root / "sysroot",
+                                   dlls=(("rustc_driver.dll", b"driver"),))
+            stage = mod.stage_candidate(root / "work", smoke, dll_dir, candidate,
+                                        sysroot=sysroot)
             self.assertEqual(sorted(p.name for p in stage.iterdir()), [
                 "avcodec-61.dll", "avformat-61.dll", "pdfium.dll",
-                "preview_corpus_smoke.exe"])
+                "preview_corpus_smoke.exe", "rustc.exe", "rustc_driver.dll"])
             self.assertEqual((stage / "pdfium.dll").read_bytes(), b"candidate")
             (dll_dir / "pdfium.dll").write_bytes(b"production")
             with self.assertRaisesRegex(mod.CandidateError, "production PDFium"):
-                mod.stage_candidate(root / "work2", smoke, dll_dir, candidate)
+                mod.stage_candidate(root / "work2", smoke, dll_dir, candidate,
+                                    sysroot=sysroot)
+
+    def test_rustc_sysroot_probe_and_toolchain_staging(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sysroot = make_sysroot(root / "sysroot", dlls=(
+                ("rustc_driver.dll", b"driver"), ("rustc_std.dll", b"std")))
+            seen = {}
+
+            def probe(args, **kwargs):
+                seen["args"] = args
+                seen["kwargs"] = kwargs
+                return subprocess.CompletedProcess(args, 0, f"{sysroot}\n", "")
+
+            self.assertEqual(mod.rustc_sysroot(runner=probe), sysroot)
+            self.assertEqual(seen["args"], ["rustc", "--print", "sysroot"])
+            self.assertTrue(all("GH_TOKEN" not in part for part in seen["args"]))
+            smoke = root / "preview_corpus_smoke.exe"
+            smoke.write_bytes(b"smoke")
+            candidate = root / "candidate.dll"
+            candidate.write_bytes(b"candidate")
+            dll_dir = root / "vcpkg-bin"
+            dll_dir.mkdir()
+            (dll_dir / "avcodec-61.dll").write_bytes(b"a")
+            stage = mod.stage_candidate(root / "work", smoke, dll_dir, candidate,
+                                        runner=probe)
+            self.assertEqual((stage / "rustc.exe").read_bytes(), b"real-rustc")
+            self.assertEqual((stage / "rustc_driver.dll").read_bytes(), b"driver")
+            self.assertEqual((stage / "rustc_std.dll").read_bytes(), b"std")
+            self.assertEqual(sorted(p.name for p in stage.iterdir()
+                                    if p.suffix.lower() == ".dll"),
+                             ["avcodec-61.dll", "pdfium.dll", "rustc_driver.dll",
+                              "rustc_std.dll"])
+            failing = lambda args, **kwargs: subprocess.CompletedProcess(args, 4, "", "")
+            with self.assertRaisesRegex(mod.CandidateError, "probe failed"):
+                mod.rustc_sysroot(runner=failing)
+            empty = lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "  ", "")
+            with self.assertRaisesRegex(mod.CandidateError, "empty or unbounded"):
+                mod.rustc_sysroot(runner=empty)
+            (sysroot / "bin" / "rustc.exe").unlink()
+            with self.assertRaisesRegex(mod.CandidateError, "rustc executable missing"):
+                mod.stage_candidate(root / "work2", smoke, dll_dir, candidate,
+                                    sysroot=sysroot)
+
+    def test_rustc_sysroot_dll_bounds_and_duplicate_pdfium_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            smoke = root / "preview_corpus_smoke.exe"
+            smoke.write_bytes(b"smoke")
+            candidate = root / "candidate.dll"
+            candidate.write_bytes(b"candidate")
+            dll_dir = root / "vcpkg-bin"
+            dll_dir.mkdir()
+            (dll_dir / "avcodec-61.dll").write_bytes(b"a")
+            for index, (dlls, message) in enumerate((
+                (tuple((f"rustc{i}.dll", b"x")
+                       for i in range(mod.MAX_RUSTC_DLLS + 1)), "exceeds bounds"),
+                ((("pdfium.dll", b"production"),), "production PDFium"),
+                ((("avcodec-61.dll", b"collision"),), "duplicate DLL names"),
+            )):
+                sysroot = make_sysroot(root / f"sysroot-{index}", dlls=dlls)
+                with self.subTest(message=message), self.assertRaisesRegex(
+                        mod.CandidateError, message):
+                    mod.stage_candidate(root / f"work-{index}", smoke,
+                                        dll_dir, candidate, sysroot=sysroot)
 
     def test_smoke_runs_with_only_stage_and_system_path(self):
         good = json.dumps({"record": "iris.preview_correctness.v1", "passed": True})
