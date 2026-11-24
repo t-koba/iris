@@ -4,12 +4,22 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 prefix=${IRIS_FFMPEG_PREFIX:-$root/build/linux-ffmpeg}
 [[ $prefix = /* ]] || { echo 'IRIS_FFMPEG_PREFIX must be absolute' >&2; exit 1; }
-# A completed prefix is immutable and revalidated before reuse. Failed builds
-# leave no cache; the unique scratch tree is owned and removed by this invocation.
+# A completed prefix is revalidated before reuse. A cached prefix that no
+# longer matches the current runner's system identity is discarded and rebuilt
+# from the pinned, signature-verified source; custom paths are never deleted.
 if [[ -e $prefix ]]; then
-    python3 "$root/scripts/linux-ffmpeg.py" validate "$prefix"
-    exit
+    if python3 "$root/scripts/linux-ffmpeg.py" validate "$prefix"; then
+        exit
+    fi
+    if [[ $prefix != "$root/build/linux-ffmpeg" ]]; then
+        echo 'cached FFmpeg prefix failed validation at a custom path; refusing to delete it' >&2
+        exit 1
+    fi
+    echo 'cached FFmpeg prefix failed validation; rebuilding from the pinned source' >&2
+    rm -rf -- "$prefix"
 fi
+# Failed builds leave no cache; the unique scratch tree is owned and removed by
+# this invocation.
 for tool in curl gpg tar make cc nasm pkg-config python3 patchelf readelf ldd; do command -v "$tool" >/dev/null; done
 jobs=${IRIS_FFMPEG_JOBS:-2}
 [[ $jobs =~ ^[1-9][0-9]*$ ]] || exit 1

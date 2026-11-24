@@ -547,10 +547,53 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
         self.assertIn("scripts/linux-ffmpeg.py", step)
         self.assertIn("packaging/linux/ffmpeg-README.md", step)
         build = (ROOT / "scripts" / "build-linux-ffmpeg.sh").read_text()
-        self.assertIn('if [[ -e $prefix ]]; then\n    python3 "$root/scripts/linux-ffmpeg.py" validate "$prefix"\n    exit\nfi', build)
+        self.assertIn('if python3 "$root/scripts/linux-ffmpeg.py" validate "$prefix"; then\n        exit\n    fi', build)
+        self.assertIn("cached FFmpeg prefix failed validation; rebuilding from the pinned source", build)
+        self.assertIn('if [[ $prefix != "$root/build/linux-ffmpeg" ]]; then', build)
         # The cached prefix must stay outside the Cargo target tree and keep its
         # own revalidation; no gate is replaced by a bare cache hit.
         self.assertNotIn("target/linux-ffmpeg", step)
+
+    def test_invalid_cached_prefix_is_rebuilt_only_at_default_path(self):
+        # A runner image/apt change alters the system identity rechecked by
+        # validate(); the cache-managed default path must self-heal by rebuilding
+        # from signed source, while an explicitly chosen prefix is never deleted.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            shutil.copy2(ROOT / "scripts" / "build-linux-ffmpeg.sh", scripts / "build-linux-ffmpeg.sh")
+            (scripts / "linux-ffmpeg.py").write_text("import sys\nsys.exit(1)\n")
+            tools = root / "bin"
+            tools.mkdir()
+            python = tools / "python3"
+            python.write_text(f'#!/bin/sh\nexec {shutil.which("python3")} "$@"\n')
+            python.chmod(0o755)
+            # Keep only the helpers needed by path resolution and recovery;
+            # curl is absent so the rebuilt path stops before any network.
+            for helper in ("dirname", "rm"):
+                (tools / helper).symlink_to(shutil.which(helper))
+            env = {"PATH": str(tools), "HOME": str(root)}
+            bash = shutil.which("bash")
+            for name, expected in (
+                (root / "build" / "linux-ffmpeg", True),
+                (root / "custom-ffmpeg", False),
+            ):
+                with self.subTest(prefix=str(name)):
+                    name.mkdir(parents=True)
+                    (name / "sentinel").write_text("stale")
+                    result = subprocess.run(
+                        [bash, str(scripts / "build-linux-ffmpeg.sh")],
+                        env=dict(env, IRIS_FFMPEG_PREFIX=str(name)),
+                        capture_output=True, text=True, timeout=10)
+                    # No curl in PATH stops before any network after the reuse branch.
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(name.exists(), not expected)
+                    if expected:
+                        self.assertIn("rebuilding from the pinned source", result.stderr)
+                    else:
+                        self.assertIn("refusing to delete it", result.stderr)
+                        self.assertEqual((name / "sentinel").read_text(), "stale")
 
     def test_build_staging_and_workflow_contract(self):
         workflow = (ROOT / ".github/workflows/linux-ffmpeg-validation.yml").read_text()
