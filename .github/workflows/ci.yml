@@ -240,6 +240,26 @@ jobs:
           ./scripts/smoke-linux-deb.sh dist/linux/iris_*.deb dist/linux/Iris.AppDir \
             target/release/examples/pdf_thumbnail_smoke
 
+      - name: Verify date-later PDFium candidate under the production gate
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          IRIS_PDFIUM_PROFILE: "8179"
+          IRIS_VERIFY_PDFIUM_PROVENANCE: "1"
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          umask 077
+          stage=$(mktemp -d)
+          trap 'rm -rf -- "$stage"' EXIT
+          ./scripts/fetch-pdfium-runtime.sh "$stage"
+          version="$stage/usr/share/doc/iris/pdfium/VERSION"
+          provenance="$stage/usr/share/doc/iris/pdfium/PROVENANCE.json"
+          grep -qx 'MAJOR=160' "$version"
+          grep -qx 'BUILD=8179' "$version"
+          status=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["attestation"]["status"])' "$provenance")
+          [[ $status == verified ]] || { echo "PDFium candidate attestation status is $status" >&2; exit 1; }
+          # The smoke binary searches the working directory for libpdfium.so.
+          (cd "$stage/usr/lib/iris" && "$GITHUB_WORKSPACE/target/release/examples/pdf_thumbnail_smoke")
+
       - name: Minimal release build
         run: cargo build --release -p iris-ui-shell --no-default-features --features minimal --locked
 

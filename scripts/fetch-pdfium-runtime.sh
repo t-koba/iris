@@ -17,6 +17,15 @@ fetch_retry_delay=${IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS:-2}
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
+profile=${IRIS_PDFIUM_PROFILE:-8138}
+case "$profile" in
+    8138|8179) ;;
+    *)
+        echo "IRIS_PDFIUM_PROFILE must be 8138 or 8179" >&2
+        exit 1
+        ;;
+esac
+
 # Pinned from https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium%2F8138
 # (PDFium 159.0.8138.0). These are GitHub's digests for the immutable release;
 # bump the tag, source commit, asset sizes, digests, and attestation digest together.
@@ -28,6 +37,8 @@ pdfium_repo="bblanchon/pdfium-binaries"
 pdfium_signer_workflow="github.com/bblanchon/pdfium-binaries/.github/workflows/build-all.yml"
 pdfium_source_ref="refs/heads/master"
 pdfium_attestation_sha256="7526f4b934ab498d6206ac7f3d78dd4ce8e0f7d3175227ab3f4ecc255d950ad7"
+pdfium_major=159
+pdfium_build=8138
 
 for tool in curl tar sha256sum mktemp; do
     command -v "$tool" >/dev/null 2>&1 || {
@@ -53,6 +64,12 @@ case "$(uname -m)" in
         ;;
 esac
 
+# Opt-in candidate profile: overrides the defaults above before any gate runs.
+if [[ $profile == 8179 ]]; then
+    # shellcheck source=pdfium-8179-pins.sh
+    source "$repo_root/scripts/pdfium-8179-pins.sh"
+fi
+
 url="https://github.com/bblanchon/pdfium-binaries/releases/download/$pdfium_release/$asset"
 
 matches_pin() {
@@ -68,7 +85,11 @@ if [[ -n ${IRIS_PDFIUM_TARBALL:-} ]]; then
         exit 1
     fi
 else
-    cache_dir=${IRIS_PDFIUM_CACHE_DIR:-"$repo_root/target/pdfium"}
+    if [[ -n ${IRIS_PDFIUM_CACHE_DIR:-} ]]; then
+        cache_dir=$IRIS_PDFIUM_CACHE_DIR
+    else
+        cache_dir=${pdfium_cache_dir:-"$repo_root/target/pdfium"}
+    fi
     tarball="$cache_dir/$asset"
     if ! matches_pin "$tarball"; then
         mkdir -p "$cache_dir"
@@ -171,8 +192,8 @@ if [[ -L "$extract/lib/libpdfium.so" ]]; then
     echo "PDFium archive contains a symlinked library" >&2
     exit 1
 fi
-grep -qx 'MAJOR=159' "$extract/VERSION"
-grep -qx 'BUILD=8138' "$extract/VERSION"
+grep -qx "MAJOR=$pdfium_major" "$extract/VERSION"
+grep -qx "BUILD=$pdfium_build" "$extract/VERSION"
 
 lib_dir="$dest/usr/lib/iris"
 doc_dir="$dest/usr/share/doc/iris/pdfium"
