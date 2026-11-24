@@ -69,6 +69,9 @@ jobs:
       - name: Windows FFmpeg validation workflow contract
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/test-windows-ffmpeg-validation-workflow.py
+      - name: Windows PDFium 8179 candidate contract
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-windows-pdfium-candidate.py
 
       - name: Windows product package contract
         if: matrix.os == 'ubuntu-latest'
@@ -592,6 +595,8 @@ jobs:
       contents: read
       attestations: read
     uses: ./.github/workflows/windows-ffmpeg-validation.yml
+    with:
+      validate_pdfium_candidate: true
 
   windows-media-foundation-probe:
     if: github.event_name == 'workflow_dispatch'

@@ -32,6 +32,7 @@ OFFLINE_GATES = (
     "python3 scripts/windows-ffmpeg-validation-config.py",
     "python3 scripts/test-windows-ffmpeg-validation-config.py",
     "python3 scripts/test-windows-ffmpeg-validation-workflow.py",
+    "python3 scripts/test-windows-pdfium-candidate.py",
 )
 
 # One RUNNER_TEMP stage binds both release binaries, the vcpkg DLL closure and
@@ -154,6 +155,8 @@ EVIDENCE_MARKERS = (
     'report(ev / "preview-smoke.json", json.loads)',
     "pe_import_closure=closure",
     "preview_smoke=smoke",
+    'report(ev / "pdfium-8179-candidate.json", json.loads)',
+    "pdfium_8179_candidate=candidate",
     'source_bundle = report(ev / "ffmpeg-source-bundle.json", json.loads)',
     "source_bundle=source_bundle,",
 )
@@ -188,6 +191,17 @@ ATTESTATION_MARKERS = (
     "PDFium release attestation verification failed",
 )
 
+
+# The opt-in 8179 candidate runs after the production staged smoke, from one
+# helper that owns the size/SHA/attestation/native-smoke gate; the workflow must
+# never duplicate its gh command or touch a shipped pin.
+CANDIDATE_MARKERS = (
+    "- name: Verify date-later Windows PDFium candidate under the production gate",
+    "if: ${{ inputs.validate_pdfium_candidate }}",
+    "python3 scripts/windows-pdfium-candidate.py",
+    '"pdfium-8179-candidate.json"',
+    "build/validation/evidence/pdfium-8179-candidate.json",
+)
 
 # The shippable inventory is derived only from the product binary, the vcpkg
 # DLL closure and the attested PDFium DLL. Preview helpers and toolchain DLLs
@@ -370,7 +384,7 @@ REQUIRED_MARKERS = (
     'empty vcpkg path',
     '.Where({ [string]::IsNullOrWhiteSpace($_) }).Count -gt 0',
     '"status": "not_run"',
-) + ATTESTATION_MARKERS + STAGE_MARKERS + PREVIEW_RECORD_MARKERS + PE_IMPORT_MARKERS + EVIDENCE_MARKERS + VC_IMPORT_MARKERS + (
+) + ATTESTATION_MARKERS + STAGE_MARKERS + PREVIEW_RECORD_MARKERS + PE_IMPORT_MARKERS + EVIDENCE_MARKERS + VC_IMPORT_MARKERS + CANDIDATE_MARKERS + (
     CLEANUP_MARKER, PATH_MARKER,
 ) + PRODUCT_INVENTORY_MARKERS + PRODUCT_PACKAGE_MARKERS + PRODUCT_NOTICE_MARKERS + (
     PRODUCT_EVIDENCE_MARKERS + PRODUCT_CLEANUP_MARKERS + SOURCE_BUNDLE_MARKERS
@@ -387,6 +401,7 @@ ALLOWED_ACTIONS = frozenset((
 ))
 UPLOAD_ACTION_PREFIX = "actions/upload-artifact@"
 UPLOAD_EXPORT_INPUT = "inputs.export_release_assets"
+CANDIDATE_INPUT = "inputs.validate_pdfium_candidate"
 EXPORT_ARTIFACT_NAME = "windows-release-assets"
 EXPORT_ASSET_BASENAMES = (
     "Iris-windows.zip",
@@ -629,8 +644,8 @@ def upload_step_records(text):
     return records
 
 
-def export_input_declared(text):
-    """Require workflow_call.inputs to declare the boolean export switch."""
+def boolean_input_declared(text, name):
+    """Require workflow_call.inputs to declare a boolean switch defaulting to false."""
     lines = text.splitlines()
     for idx, line in enumerate(lines):
         if not re.match(r"^\s*workflow_call:\s*$", line):
@@ -651,7 +666,7 @@ def export_input_declared(text):
             entry = lines[j]
             if entry.strip() and indent_of(entry) <= inputs_ind:
                 break
-            if not re.match(r"^\s*export_release_assets:\s*$", entry):
+            if not re.match(rf"^\s*{re.escape(name)}:\s*$", entry):
                 continue
             decl_ind = indent_of(entry)
             fields = {}
@@ -673,9 +688,13 @@ def validate(text):
     triggers = re.findall(r"^  ([a-z_]+):", trigger_block, re.MULTILINE)
     checks["reusable_only"] = triggers == ["workflow_call"]
     require(checks["reusable_only"], "workflow must be workflow_call only")
-    checks["export_input_declared"] = export_input_declared(trigger_block)
+    checks["export_input_declared"] = boolean_input_declared(trigger_block, "export_release_assets")
     require(checks["export_input_declared"],
             "workflow_call must declare export_release_assets as boolean defaulting to false")
+    checks["candidate_input_declared"] = boolean_input_declared(
+        trigger_block, "validate_pdfium_candidate")
+    require(checks["candidate_input_declared"],
+            "workflow_call must declare validate_pdfium_candidate as boolean defaulting to false")
 
     # Flow-style step mappings are not used by this workflow. Rejecting them
     # keeps every step in the block form the structural checks below can see.
@@ -825,6 +844,19 @@ def validate(text):
     for marker in PREVIEW_RECORD_MARKERS:
         require(marker in code,
                 f"structured preview evidence marker missing from executable workflow lines: {marker}")
+    for marker in CANDIDATE_MARKERS:
+        require(marker in code,
+                f"PDFium candidate gate marker missing from executable workflow lines: {marker}")
+    require(code.count("gh attestation verify") == 1,
+            "the production attestation step must own the only gh attestation verify command")
+    require(code.index("- name: Staged preview smoke (video, PDF, RAW)")
+            < code.index(CANDIDATE_MARKERS[0])
+            < code.index("- name: Assemble clean product ZIP payload"),
+            "the opt-in candidate gate must follow the staged preview smoke")
+    checks["candidate_gate_after_smoke"] = True
+    require(CANDIDATE_INPUT in code,
+            "the opt-in candidate gate must be guarded by validate_pdfium_candidate")
+    checks["candidate_gate_ci_only"] = True
     smoke_step = text.split("- name: Staged preview smoke (video, PDF, RAW)", 1)[1]
     smoke_step = smoke_step.split("\n      - name:", 1)[0]
     require(smoke_step.index("$previewRecords = @()")
@@ -1085,7 +1117,8 @@ def main():
             required_markers=list(REQUIRED_MARKERS), forbidden_markers=list(FORBIDDEN_MARKERS),
             allowed_actions=sorted(ALLOWED_ACTIONS), flow_steps_allowed=False,
             upload_count=3, evidence_upload_count=1, export_upload_count=2,
-            export_input=UPLOAD_EXPORT_INPUT, export_artifact_name=EXPORT_ARTIFACT_NAME,
+            export_input=UPLOAD_EXPORT_INPUT, candidate_input=CANDIDATE_INPUT,
+            export_artifact_name=EXPORT_ARTIFACT_NAME,
             export_asset_basenames=list(EXPORT_ASSET_BASENAMES),
             export_artifact_root=EXPORT_ARTIFACT_ROOT,
             native_evidence_artifact_name=NATIVE_EVIDENCE_ARTIFACT_NAME,

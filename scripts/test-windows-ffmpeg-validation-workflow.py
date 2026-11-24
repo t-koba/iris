@@ -35,6 +35,8 @@ class WorkflowContracts(unittest.TestCase):
         self.assertTrue(checks["native_evidence_bounded"])
         self.assertTrue(checks["native_evidence_json_only"])
         self.assertTrue(checks["export_input_declared"])
+        self.assertTrue(checks["candidate_input_declared"])
+        self.assertTrue(checks["candidate_gate_ci_only"])
         self.assertTrue(checks["export_assets_bounded"])
         self.assertTrue(checks["export_flat_root"])
         self.assertTrue(checks["evidence_json_only"])
@@ -61,6 +63,7 @@ class WorkflowContracts(unittest.TestCase):
         for marker in self.mod.ATTESTATION_MARKERS:
             self.assertIn(marker, shape["required_markers"])
         self.assertEqual(shape["source_bundle_outputs"], list(self.mod.SOURCE_BUNDLE_OUTPUTS))
+        self.assertEqual(shape["candidate_input"], "inputs.validate_pdfium_candidate")
         for marker in (self.mod.STAGE_MARKERS + self.mod.PREVIEW_RECORD_MARKERS
                        + self.mod.PE_IMPORT_MARKERS + self.mod.EVIDENCE_MARKERS
                        + (self.mod.PATH_MARKER,)):
@@ -116,6 +119,23 @@ class FailClosedContracts(unittest.TestCase):
         mutated = self.text.replace(verify + "\n", "", 1).replace(
             extract, extract + verify + "\n", 1)
         with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_unguarded_candidate_gate(self):
+        marker = "if: ${{ inputs.validate_pdfium_candidate }}"
+        self.assertEqual(self.text.count(marker), 1)
+        mutated = self.text.replace(marker + "\n", "", 1)
+        with self.assertRaisesRegex(ValueError, "validate_pdfium_candidate"):
+            self.mod.validate(mutated)
+
+    def test_rejects_missing_candidate_switch(self):
+        mutated = self.text.replace(
+            "      validate_pdfium_candidate:\n"
+            "        description: \"Run the opt-in, non-shipped 8179 PDFium candidate gate\"\n"
+            "        required: false\n"
+            "        type: boolean\n"
+            "        default: false\n", "", 1)
+        with self.assertRaisesRegex(ValueError, "validate_pdfium_candidate"):
             self.mod.validate(mutated)
 
     def test_rejects_dispatch_trigger(self):

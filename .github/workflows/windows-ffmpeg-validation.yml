@@ -16,6 +16,11 @@ on:
         required: false
         type: boolean
         default: false
+      validate_pdfium_candidate:
+        description: "Run the opt-in, non-shipped 8179 PDFium candidate gate"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -70,6 +75,9 @@ jobs:
       - name: Windows FFmpeg validation workflow contract
         shell: bash
         run: python3 scripts/test-windows-ffmpeg-validation-workflow.py
+      - name: Windows PDFium 8179 candidate contract
+        shell: bash
+        run: python3 scripts/test-windows-pdfium-candidate.py
 
       # Pinned vcpkg source checkout; fail closed on HEAD drift before building.
       - name: Checkout pinned vcpkg source
@@ -600,6 +608,31 @@ jobs:
           Set-Content -LiteralPath (Join-Path $evidenceDir "preview-smoke.json") -Value $serialized -Encoding utf8
           if ($exitCode -ne 0) { throw "installed preview smoke failed with exit code $exitCode" }
 
+      - name: Verify date-later Windows PDFium candidate under the production gate
+        if: ${{ inputs.validate_pdfium_candidate }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          # The helper owns the exact size/SHA/attestation gates, the safe
+          # extraction and the isolated native preview smoke. No second build,
+          # package build, publishing action or gh invocation belongs here.
+          $smokeExe = Join-Path $env:GITHUB_WORKSPACE "target/release/examples/preview_corpus_smoke.exe"
+          $dllRoot = Join-Path $env:VCPKG_INSTALLED_DIR "x64-windows-iris-dynamic"
+          $dllDir = Join-Path $dllRoot "bin"
+          $corpus = Join-Path $env:RUNNER_TEMP "iris-preview-corpus"
+          $evidence = Join-Path $env:IRIS_VALIDATION_EVIDENCE "pdfium-8179-candidate.json"
+          foreach ($input in @($smokeExe, $dllDir, $corpus, $evidence)) {
+            if ([string]::IsNullOrWhiteSpace($input)) { throw "candidate gate input not bound" }
+          }
+          if (!(Test-Path -LiteralPath $smokeExe -PathType Leaf)) { throw "already-built smoke exe missing: $smokeExe" }
+          if (!(Test-Path -LiteralPath $dllDir -PathType Container)) { throw "vcpkg DLL directory missing: $dllDir" }
+          if (!(Test-Path -LiteralPath $corpus -PathType Container)) { throw "already-fetched preview corpus missing: $corpus" }
+          New-Item -ItemType Directory -Force -Path $env:IRIS_VALIDATION_EVIDENCE | Out-Null
+          python3 scripts/windows-pdfium-candidate.py --smoke-exe $smokeExe --dll-dir $dllDir --corpus $corpus --evidence $evidence
+          if ($LASTEXITCODE -ne 0) { throw "date-later Windows PDFium candidate gate failed" }
+
       - name: Assemble clean product ZIP payload
         shell: pwsh
         run: |
@@ -812,11 +845,13 @@ jobs:
           inputs = report(ev / "validation-inputs.json", json.loads)
           closure = report(ev / "pe-import-closure.json", json.loads)
           smoke = report(ev / "preview-smoke.json", json.loads)
+          candidate = report(ev / "pdfium-8179-candidate.json", json.loads)
           package = report(ev / "product-package-rehearsal.json", json.loads)
           release_package = report(ev / "release-package-rehearsal.json", json.loads)
           source_bundle = report(ev / "ffmpeg-source-bundle.json", json.loads)
           out = dict(validation_inputs=inputs, pe_import_closure=closure,
-                     preview_smoke=smoke, product_package_rehearsal=package,
+                     preview_smoke=smoke, pdfium_8179_candidate=candidate,
+                     product_package_rehearsal=package,
                      source_bundle=source_bundle,
                      release_package_rehearsal=release_package,
                      release_promotion=False, native_runtime_retained=False)
@@ -846,6 +881,7 @@ jobs:
             build/validation/evidence/windows-validation.json
             build/validation/evidence/pe-import-closure.json
             build/validation/evidence/preview-smoke.json
+            build/validation/evidence/pdfium-8179-candidate.json
             build/validation/evidence/product-package-rehearsal.json
             build/validation/evidence/release-package-rehearsal.json
             build/validation/evidence/product-inventory.json

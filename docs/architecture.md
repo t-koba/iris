@@ -152,6 +152,8 @@ Iris では PoC を再現しておらず、脆弱性の適用性もリリース�
 
 正確なリビジョンの CI は、`IRIS_PDFIUM_PROFILE=8179` のオプトイン staging 経路で 160.0.8179 候補を取得し、本番と同じサイズ・SHA-256・attestation（`gh attestation verify`）ゲートと、ステージしたライブラリを使うネイティブ PDF プレビューのスモークテストで検証します。出荷ピンは `chromium/8138` のままで、この検証は脆弱性の適用性、旧ビルドとの同等性（parity）、リリース準備の完了を意味するものではありません。
 
+Windows x64 でも、CI の Windows ランナー呼び出しに限り `scripts/windows-pdfium-candidate.py` によるオプトイン検証を行います。このヘルパーは 4,046,589 bytes / sha256 `836a77c9053f624839c66010cddea7b675628a36b8831d2330178bb169d241b6` のアセットと 18,083 bytes / sha256 `f9d4bb0be84c30c98b98b2550ed2f81efc4024cd172511a5e786163c9ae8deb6` の attestation バンドルに対して本番と同じサイズ・SHA-256・`gh attestation verify` ゲートを通し、隔離した候補ディレクトリでビルド済み `preview_corpus_smoke.exe` を使うネイティブ PDF プレビューのスモークテストを実行します。出荷ピンは `chromium/8138` のままで、これは日付に基づく候補の検証であり、脆弱性の適用性、旧ビルドとの同等性（parity）、リリース準備の完了を意味するものではありません。
+
 ### コピーと移動
 
 1. 貼り付けやドラッグ&ドロップでファイルの一覧（保留中の操作）を作り、ジョブとして `jobstore` に保存します。
