@@ -98,6 +98,13 @@ jobs:
         with:
           shared-key: ${{ matrix.os }}-cargo
 
+      - name: Restore validated Linux FFmpeg runtime
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/cache@v4
+        with:
+          path: build/linux-ffmpeg
+          key: ${{ runner.os }}-iris-ffmpeg-${{ hashFiles('packaging/linux/ffmpeg.json', 'scripts/build-linux-ffmpeg.sh', 'scripts/linux-ffmpeg.py', 'packaging/linux/ffmpeg-README.md') }}
+
       - name: Install system dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: |

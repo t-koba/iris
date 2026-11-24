@@ -535,6 +535,23 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
             self.assertIn("uses: Swatinem/rust-cache@v2", workflow)
         self.assertIn("/build/", (ROOT / ".gitignore").read_text().splitlines())
 
+    def test_ci_reuses_only_the_validated_ffmpeg_prefix(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        step = ci.split("      - name: Restore validated Linux FFmpeg runtime\n", 1)[1]
+        step = step.split("      - name: Install system dependencies (Ubuntu)", 1)[0]
+        self.assertIn("        if: matrix.os == 'ubuntu-latest'\n", step)
+        self.assertIn("        uses: actions/cache@v4\n", step)
+        self.assertIn("          path: build/linux-ffmpeg\n", step)
+        self.assertIn("packaging/linux/ffmpeg.json", step)
+        self.assertIn("scripts/build-linux-ffmpeg.sh", step)
+        self.assertIn("scripts/linux-ffmpeg.py", step)
+        self.assertIn("packaging/linux/ffmpeg-README.md", step)
+        build = (ROOT / "scripts" / "build-linux-ffmpeg.sh").read_text()
+        self.assertIn('if [[ -e $prefix ]]; then\n    python3 "$root/scripts/linux-ffmpeg.py" validate "$prefix"\n    exit\nfi', build)
+        # The cached prefix must stay outside the Cargo target tree and keep its
+        # own revalidation; no gate is replaced by a bare cache hit.
+        self.assertNotIn("target/linux-ffmpeg", step)
+
     def test_build_staging_and_workflow_contract(self):
         workflow = (ROOT / ".github/workflows/linux-ffmpeg-validation.yml").read_text()
         # This reusable workflow has one call trigger and one bounded JSON upload.
