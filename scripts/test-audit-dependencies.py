@@ -26,7 +26,16 @@ from pathlib import Path
 with Path(os.environ["SHIM_LOG"]).open("a", encoding="utf-8") as stream:
     stream.write(json.dumps([Path(sys.argv[0]).name, *sys.argv[1:]]) + "\\n")
 if sys.argv[1:2] == ["tree"]:
-    sys.stderr.write(os.environ.get("SHIM_TREE_OUTPUT", ""))
+    output = os.environ.get("SHIM_TREE_OUTPUT", "")
+    colored = (os.environ.get("CARGO_TERM_COLOR") == "always"
+               or os.environ.get("SHIM_TREE_FORCE_COLOR") == "1")
+    if colored:
+        esc = chr(27)
+        output = output.replace(
+            "error:", esc + "[1m" + esc + "[91merror" + esc + "[0m:", 1)
+        output = output.replace(
+            "help:", esc + "[1m" + esc + "[94mhelp" + esc + "[0m:", 1)
+    sys.stderr.write(output)
     raise SystemExit(int(os.environ.get("SHIM_TREE_STATUS", "1")))
 if sys.argv[1:2] == ["audit"]:
     raise SystemExit(0)
@@ -51,7 +60,7 @@ def install_shim(directory, name, source):
     path.chmod(0o755)
 
 
-def run_case(label, output, status, *, succeeds, audits, diagnostics=()):
+def run_case(label, output, status, *, succeeds, audits, diagnostics=(), force_color=False):
     with tempfile.TemporaryDirectory() as temporary:
         work = Path(temporary)
         bin_dir = work / "bin"
@@ -69,7 +78,9 @@ def run_case(label, output, status, *, succeeds, audits, diagnostics=()):
             SHIM_LOG=str(log),
             SHIM_TREE_OUTPUT=output,
             SHIM_TREE_STATUS=str(status),
+            SHIM_TREE_FORCE_COLOR="1" if force_color else "0",
             SHIM_LOCKS="\n".join(LOCKS) + "\n",
+            CARGO_TERM_COLOR="always",
         )
         result = subprocess.run(
             ["bash", str(SCRIPT)], cwd=work, env=env, encoding="utf-8",
@@ -124,6 +135,10 @@ def main():
         "absence not on the first line", "warning: stale lockfile\n" + ABSENCE,
         101, succeeds=False, audits=[],
         diagnostics=("cargo tree could not confirm that rsa is absent", "warning: stale lockfile"),
+    )
+    run_case(
+        "colored absence is rejected", ABSENCE, 101, succeeds=False, audits=[], force_color=True,
+        diagnostics=("cargo tree could not confirm that rsa is absent", "package ID specification"),
     )
     print("dependency audit guard regressions passed")
 

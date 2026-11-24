@@ -4,7 +4,9 @@ set -euo pipefail
 # RUSTSEC-2023-0071 is attached to russh's optional RSA implementation. Iris
 # deliberately keeps that feature out of the default dependency graph; fail if
 # it ever becomes reachable before applying the narrowly scoped audit ignore.
-if tree_output=$(cargo tree --workspace --locked --offline -e features -i rsa 2>&1); then
+# The workflow sets CARGO_TERM_COLOR=always; force uncolored diagnostics for
+# this query so the absence signature below is byte-stable in CI.
+if tree_output=$(CARGO_TERM_COLOR=never cargo tree --workspace --locked --offline -e features -i rsa 2>&1); then
   echo "the vulnerable rsa crate is enabled in the default workspace graph" >&2
   printf '%s\n' "$tree_output" >&2
   exit 1
