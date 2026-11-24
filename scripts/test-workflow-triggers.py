@@ -276,6 +276,14 @@ audit_step = "Audit full staged Linux native closure (report only)"
 smoke_step = "Generate built-in codec clip and smoke AppDir"
 macos_product_step = workflow_step(macos, "Audit pinned production package")
 macos_baseline_step = workflow_step(macos, "Audit report-only Homebrew baseline")
+ci_triggers = ci.split("on:\n", 1)[1].split("\nconcurrency:", 1)[0]
+pdfium_candidate_step = ci_step_block(
+    "Verify date-later PDFium candidate under the production gate", "test"
+)
+pdfium_candidate_gate = (
+    "        if: matrix.os == 'ubuntu-latest' && github.event_name == 'workflow_dispatch' "
+    "&& inputs.validate_pdfium_candidate\n"
+)
 linux_upload = """        with:
           name: linux-runtime-audit
           if-no-files-found: error
@@ -581,6 +589,48 @@ permissions:
         fuzz_long_uses_asan_compatible_target(),
     "CI manual, pull-request, and scheduled triggers": all(
         trigger in ci for trigger in ("  workflow_dispatch:\n", "  pull_request:\n", "  schedule:\n")
+    ),
+    "CI dispatch input opts in to the unshipped PDFium candidate": ci_triggers == """  push:
+    branches-ignore:
+      - mizu
+    tags:
+      - '**'
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      validate_pdfium_candidate:
+        description: Validate the unshipped PDFium 8179 candidate under the production gate
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 3 * * 1"
+""",
+    "Unshipped PDFium candidate step runs only on explicit dispatch opt-in": (
+        pdfium_candidate_gate in pdfium_candidate_step
+        and 'IRIS_PDFIUM_PROFILE: "8179"' in pdfium_candidate_step
+        and all(
+            "        if: matrix.os == 'ubuntu-latest'\n" in ci_step_block(step, "test")
+            for step in (
+                "Package Linux AppDir and Debian installer",
+                "Build PDFium smoke test",
+                "Clean-installed Debian PDFium thumbnail smoke",
+            )
+        )
+    ),
+    "PDFium attestation credential is unset before the native smoke": (
+        in_order(
+            pdfium_candidate_step,
+            './scripts/fetch-pdfium-runtime.sh "$stage"',
+            '[[ $status == verified ]] || { echo "PDFium candidate attestation status is $status" >&2; exit 1; }',
+            "unset GH_TOKEN GITHUB_TOKEN",
+            'export IRIS_PDFIUM_REQUIRE_LIBRARY="$library"',
+            '(cd "$stage/usr/lib/iris" && "$GITHUB_WORKSPACE/target/release/examples/pdf_thumbnail_smoke") > "$output"',
+        )
+        and all(snippet in pdfium_candidate_step for snippet in (
+            "if len(records) != 1:",
+            'if record.get("required") is not True:',
+            "if recorded != required:",
+        ))
     ),
     "CI invokes Windows native validation only on manual dispatch": """  windows-ffmpeg-validation:
     if: github.event_name == 'workflow_dispatch'

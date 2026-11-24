@@ -8,6 +8,11 @@ on:
       - '**'
   pull_request:
   workflow_dispatch:
+    inputs:
+      validate_pdfium_candidate:
+        description: Validate the unshipped PDFium 8179 candidate under the production gate
+        type: boolean
+        default: false
   schedule:
     - cron: "17 3 * * 1"
 
@@ -244,7 +249,7 @@ jobs:
             target/release/examples/pdf_thumbnail_smoke
 
       - name: Verify date-later PDFium candidate under the production gate
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && github.event_name == 'workflow_dispatch' && inputs.validate_pdfium_candidate
         env:
           IRIS_PDFIUM_PROFILE: "8179"
           IRIS_VERIFY_PDFIUM_PROVENANCE: "1"
@@ -260,6 +265,7 @@ jobs:
           grep -qx 'BUILD=8179' "$version"
           status=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["attestation"]["status"])' "$provenance")
           [[ $status == verified ]] || { echo "PDFium candidate attestation status is $status" >&2; exit 1; }
+          unset GH_TOKEN GITHUB_TOKEN
           # Bind only the staged library, then attribute the runtime record to it.
           library=$(realpath "$stage/usr/lib/iris/libpdfium.so")
           export IRIS_PDFIUM_REQUIRE_LIBRARY="$library"
