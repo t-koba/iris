@@ -239,14 +239,21 @@ class AttestationContracts(unittest.TestCase):
 
 
 class PreviewContracts(unittest.TestCase):
+    @staticmethod
+    def runtime_line(path, required=True):
+        return ("PREVIEW_PDFIUM_RUNTIME "
+                + json.dumps({"path": str(path), "required": required}) + "\n")
+
     def test_strict_correctness_record_parsing(self):
         good = json.dumps({"record": "iris.preview_correctness.v1", "passed": True})
         latency = json.dumps({"record": "iris.preview_latency.v1", "passed": True})
+        staged = Path(tempfile.gettempdir()) / "iris-pdfium-staged.dll"
+        runtime = self.runtime_line(staged)
         valid = ("noise\nPREVIEW_CORRECTNESS " + good + "\n"
-                 + ("PREVIEW_LATENCY " + latency + "\n") * 5)
-        self.assertEqual(mod.parse_preview_records(valid), {
+                 + ("PREVIEW_LATENCY " + latency + "\n") * 5 + runtime)
+        self.assertEqual(mod.parse_preview_records(valid, staged), {
             "status": "pass", "passed": True, "correctness_records": 1,
-            "latency_records": 5})
+            "latency_records": 5, "runtime_records": 1})
         for output in (
             "",
             f"PREVIEW_CORRECTNESS {good}\nPREVIEW_CORRECTNESS {good}\n",
@@ -259,7 +266,29 @@ class PreviewContracts(unittest.TestCase):
             + (f"PREVIEW_LATENCY {latency}\n" * 4),
         ):
             with self.subTest(output=output), self.assertRaises(mod.CandidateError):
-                mod.parse_preview_records(output)
+                mod.parse_preview_records(output + runtime, staged)
+
+    def test_runtime_record_must_match_staged_library_exactly_once(self):
+        good = json.dumps({"record": "iris.preview_correctness.v1", "passed": True})
+        latency = json.dumps({"record": "iris.preview_latency.v1", "passed": True})
+        base = (f"PREVIEW_CORRECTNESS {good}\n"
+                + (f"PREVIEW_LATENCY {latency}\n" * 5))
+        staged = Path(tempfile.gettempdir()) / "iris-pdfium-staged.dll"
+        other = Path(tempfile.gettempdir()) / "iris-pdfium-not-staged.dll"
+        matching = self.runtime_line(staged)
+        self.assertEqual(
+            mod.parse_preview_records(base + matching, staged)["runtime_records"], 1)
+        oversized = Path(tempfile.gettempdir()) / ("x" * (mod.MAX_RUNTIME_PATH_CHARS + 1))
+        for record, message in (
+            (self.runtime_line(other), "not the staged candidate"),
+            (self.runtime_line(staged, required=False), "did not require"),
+            (self.runtime_line(oversized), "no bounded library path"),
+            ("", "got 0"),
+            (matching * 2, "got 2"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                    mod.CandidateError, message):
+                mod.parse_preview_records(base + record, staged)
 
     def test_candidate_stage_never_contains_production_pdfium(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -369,16 +398,25 @@ class PreviewContracts(unittest.TestCase):
                 seen["path"] = kwargs["env"]["PATH"].split(os.pathsep)
                 latency = json.dumps({"record": "iris.preview_latency.v1"})
                 output = (f"PREVIEW_CORRECTNESS {good}\n"
-                          + (f"PREVIEW_LATENCY {latency}\n" * 5))
+                          + (f"PREVIEW_LATENCY {latency}\n" * 5)
+                          + self.runtime_line(stage / "pdfium.dll"))
                 return subprocess.CompletedProcess(args, 0, output, "")
 
             with patch.dict(os.environ, {"SystemRoot": str(system_root),
-                                         "Path": "/bogus/windows-path"}, clear=False):
+                                         "Path": "/bogus/windows-path",
+                                         mod.RUNTIME_ENV.upper(): "/outside/pdfium.dll"},
+                            clear=False):
                 dirs = mod.windows_system_path()
                 preview = mod.run_smoke(stage, corpus, dirs, runner=runner)
             resolved_stage = stage.resolve()
             resolved_corpus = corpus.resolve()
             self.assertEqual(preview["status"], "pass")
+            self.assertEqual(preview["runtime_records"], 1)
+            self.assertEqual(seen["env"][mod.RUNTIME_ENV],
+                             str(resolved_stage / "pdfium.dll"))
+            self.assertEqual([key for key in seen["env"]
+                              if key.upper() == mod.RUNTIME_ENV.upper()], [mod.RUNTIME_ENV])
+            self.assertNotIn("/outside/pdfium.dll", seen["env"].values())
             self.assertEqual(seen["args"], [str(resolved_stage / "preview_corpus_smoke.exe"),
                                             str(resolved_corpus)])
             self.assertEqual(seen["cwd"], str(resolved_stage))

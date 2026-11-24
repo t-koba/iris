@@ -62,6 +62,8 @@ MAX_RUSTC_DLLS = 64
 MAX_SMOKE_OUTPUT_CHARS = 200_000
 SMOKE_ERROR_TAIL_CHARS = 2000
 LATENCY_RECORDS = 5
+RUNTIME_ENV = "IRIS_PDFIUM_REQUIRE_LIBRARY"
+MAX_RUNTIME_PATH_CHARS = 4096
 MAX_EVIDENCE_BYTES = 20_000
 SCOPE_NOTE = (
     "version-candidate validation only; no security-fix claim, no "
@@ -369,9 +371,10 @@ def windows_system_path():
     return directories
 
 
-def parse_preview_records(output):
-    """Accept exactly one passing PREVIEW_CORRECTNESS record and five latency records."""
+def parse_preview_records(output, required_library):
+    """Require one correctness record, five latency records and the staged runtime."""
     records = []
+    runtimes = []
     latency = 0
     for line in output.splitlines():
         if line.startswith("PREVIEW_CORRECTNESS "):
@@ -381,6 +384,9 @@ def parse_preview_records(output):
             payload = line[len("PREVIEW_LATENCY "):]
             kind = "PREVIEW_LATENCY"
             latency += 1
+        elif line.startswith("PREVIEW_PDFIUM_RUNTIME "):
+            payload = line[len("PREVIEW_PDFIUM_RUNTIME "):]
+            kind = "PREVIEW_PDFIUM_RUNTIME"
         else:
             continue
         try:
@@ -390,14 +396,27 @@ def parse_preview_records(output):
         require(isinstance(record, dict), f"invalid {kind} record shape")
         if kind == "PREVIEW_CORRECTNESS":
             records.append(record)
+        elif kind == "PREVIEW_PDFIUM_RUNTIME":
+            runtimes.append(record)
     require(len(records) == 1,
             f"expected exactly one PREVIEW_CORRECTNESS record, got {len(records)}")
     require(records[0].get("passed") is True,
             "PREVIEW_CORRECTNESS record did not pass")
     require(latency == LATENCY_RECORDS,
             f"expected {LATENCY_RECORDS} PREVIEW_LATENCY records, got {latency}")
+    require(len(runtimes) == 1,
+            f"expected exactly one PREVIEW_PDFIUM_RUNTIME record, got {len(runtimes)}")
+    runtime = runtimes[0]
+    require(runtime.get("required") is True,
+            "PREVIEW_PDFIUM_RUNTIME record did not require the staged library")
+    runtime_path = runtime.get("path")
+    require(isinstance(runtime_path, str) and 0 < len(runtime_path) <= MAX_RUNTIME_PATH_CHARS,
+            "PREVIEW_PDFIUM_RUNTIME record has no bounded library path")
+    require(Path(runtime_path).is_absolute(), "PDFium runtime path is not absolute")
+    require(Path(runtime_path).resolve() == Path(required_library).resolve(),
+            "PDFium runtime library is not the staged candidate")
     return {"status": "pass", "passed": True, "correctness_records": 1,
-            "latency_records": latency}
+            "latency_records": latency, "runtime_records": 1}
 
 
 def smoke_output_tail(stdout, stderr):
@@ -414,8 +433,10 @@ def run_smoke(stage, corpus, system_dirs, *, runner=subprocess.run):
     # otherwise a duplicate entry could reintroduce build or vcpkg directories.
     # The attestation token is not needed by the smoke and must never reach it.
     env = {key: value for key, value in os.environ.items()
-           if key.upper() not in ("PATH", "GH_TOKEN")}
+           if key.upper() not in ("PATH", "GH_TOKEN", RUNTIME_ENV.upper())}
     env["PATH"] = os.pathsep.join([str(stage)] + [str(path) for path in system_dirs])
+    required_library = stage / "pdfium.dll"
+    env[RUNTIME_ENV] = str(required_library)
     try:
         result = runner([str(stage / "preview_corpus_smoke.exe"), str(corpus)],
                         cwd=str(stage), env=env, capture_output=True, text=True,
@@ -428,7 +449,7 @@ def run_smoke(stage, corpus, system_dirs, *, runner=subprocess.run):
     require(result.returncode == 0,
             f"preview smoke failed with exit code {result.returncode}: "
             f"stdout/stderr tail: {smoke_output_tail(result.stdout, result.stderr)}")
-    return parse_preview_records(result.stdout)
+    return parse_preview_records(result.stdout, required_library)
 
 
 def write_evidence(path, asset_pin, attestation_pin, attestation, version, preview):

@@ -308,6 +308,18 @@ where
     Ok(report)
 }
 
+/// Attribute the bound PDFium library for opt-in candidate gates; no token is printed.
+fn print_pdfium_runtime() {
+    let required =
+        std::env::var_os("IRIS_PDFIUM_REQUIRE_LIBRARY").is_some_and(|value| !value.is_empty());
+    if let Some(path) = pdf::loaded_pdfium_library() {
+        println!(
+            "PREVIEW_PDFIUM_RUNTIME {}",
+            serde_json::json!({"path": path.to_string_lossy(), "required": required})
+        );
+    }
+}
+
 fn pdf_runtime() -> serde_json::Value {
     if cfg!(target_os = "macos") {
         serde_json::json!({"renderer": "CoreGraphics", "runtime": "macOS system framework"})
@@ -442,6 +454,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         start,
         true,
     );
+    print_pdfium_runtime();
 
     // Decode the correctness baseline once, outside all timed intervals.
     let pdf_pixels =

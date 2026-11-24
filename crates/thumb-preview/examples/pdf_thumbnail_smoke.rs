@@ -35,6 +35,18 @@ fn build_pdf() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// Attribute the bound PDFium library for opt-in candidate gates; no token is printed.
+fn print_pdfium_runtime() {
+    let required =
+        std::env::var_os("IRIS_PDFIUM_REQUIRE_LIBRARY").is_some_and(|value| !value.is_empty());
+    if let Some(path) = iris_thumb_preview::pdf::loaded_pdfium_library() {
+        println!(
+            "PREVIEW_PDFIUM_RUNTIME {}",
+            serde_json::json!({"path": path.to_string_lossy(), "required": required})
+        );
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pdf = build_pdf();
     let path = std::env::temp_dir().join(format!("iris-pdf-smoke-{}.pdf", std::process::id()));
@@ -42,6 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let thumbnail = iris_thumb_preview::pdf::extract_pdf_thumbnail(&path, 256);
     let _ = std::fs::remove_file(&path);
+    print_pdfium_runtime();
 
     let thumbnail = thumbnail.ok_or(
         "PDF thumbnail extraction failed; is the packaged PDFium runtime present and compatible?",

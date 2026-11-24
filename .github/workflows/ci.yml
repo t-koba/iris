@@ -260,8 +260,39 @@ jobs:
           grep -qx 'BUILD=8179' "$version"
           status=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["attestation"]["status"])' "$provenance")
           [[ $status == verified ]] || { echo "PDFium candidate attestation status is $status" >&2; exit 1; }
-          # The smoke binary searches the working directory for libpdfium.so.
-          (cd "$stage/usr/lib/iris" && "$GITHUB_WORKSPACE/target/release/examples/pdf_thumbnail_smoke")
+          # Bind only the staged library, then attribute the runtime record to it.
+          library=$(realpath "$stage/usr/lib/iris/libpdfium.so")
+          export IRIS_PDFIUM_REQUIRE_LIBRARY="$library"
+          output="$stage/smoke-output.txt"
+          (cd "$stage/usr/lib/iris" && "$GITHUB_WORKSPACE/target/release/examples/pdf_thumbnail_smoke") > "$output"
+          cat "$output"
+          python3 - "$library" "$output" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          required = Path(sys.argv[1]).resolve(strict=True)
+          text = Path(sys.argv[2]).read_text(encoding="utf-8")
+          if len(text.encode("utf-8")) > 20_000:
+              raise SystemExit("PDFium smoke output exceeds the evidence bound")
+          records = [json.loads(line.split(" ", 1)[1]) for line in text.splitlines()
+                     if line.startswith("PREVIEW_PDFIUM_RUNTIME ")]
+          if len(records) != 1:
+              raise SystemExit(f"expected one PREVIEW_PDFIUM_RUNTIME record, got {len(records)}")
+          record = records[0]
+          if record.get("required") is not True:
+              raise SystemExit("PDFium runtime record is missing the opt-in gate")
+          path = record.get("path")
+          if not isinstance(path, str) or not path:
+              raise SystemExit("PDFium runtime record has no library path")
+          try:
+              recorded = Path(path).resolve(strict=True)
+          except OSError:
+              raise SystemExit("PDFium runtime library path does not exist")
+          if recorded != required:
+              raise SystemExit("PDFium runtime library is not the staged candidate")
+          print(f"PDFium runtime attributed to {required}")
+          PY
 
       - name: Minimal release build
         run: cargo build --release -p iris-ui-shell --no-default-features --features minimal --locked

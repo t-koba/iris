@@ -29,6 +29,20 @@ pub fn pdf_page_count(_file_path: &Path) -> Option<u32> {
     None
 }
 
+/// Path of the local PDFium library actually bound by this process, when known.
+///
+/// There is no dynamically loaded PDFium on macOS or without the `pdf` feature.
+pub fn loaded_pdfium_library() -> Option<&'static Path> {
+    #[cfg(all(feature = "pdf", not(target_os = "macos")))]
+    {
+        platform::loaded_pdfium_library()
+    }
+    #[cfg(any(not(feature = "pdf"), target_os = "macos"))]
+    {
+        None
+    }
+}
+
 #[cfg(feature = "pdf")]
 pub const fn supports_pdf_thumbnails() -> bool {
     true
@@ -228,36 +242,93 @@ mod platform {
         dirs
     }
 
+    /// Opt-in gate naming the provenance-verified local library a candidate smoke must bind.
+    const REQUIRED_LIBRARY_ENV: &str = "IRIS_PDFIUM_REQUIRE_LIBRARY";
+
+    /// Records the local library path used for the one binding in this process.
+    static LOADED_LIBRARY: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+    /// A candidate is allowed only when both paths resolve to the same file.
+    fn canonicalized_library_matches(candidate: &Path, required: &Path) -> bool {
+        match (
+            std::fs::canonicalize(candidate),
+            std::fs::canonicalize(required),
+        ) {
+            (Ok(candidate), Ok(required)) => candidate == required,
+            _ => false,
+        }
+    }
+
+    /// Read-only view of the local library bound by the loader, for candidate smokes.
+    pub fn loaded_pdfium_library() -> Option<&'static Path> {
+        LOADED_LIBRARY.get().and_then(Option::as_deref)
+    }
+
     /// Binds pdfium once per process.
     ///
     /// `Pdfium::default()` panics when the shared library is missing, and the release profile
     /// aborts on panic, so binding goes through the fallible API. pdfium is optional at run time:
-    /// without it PDFs simply get no thumbnail. The library next to the executable wins, then the
-    /// installation prefix's `lib/iris` directory used by Linux packages, then the working
-    /// directory, then the system search path.
+    /// without it PDFs simply get no thumbnail. Unless `IRIS_PDFIUM_REQUIRE_LIBRARY` is set, the
+    /// library next to the executable wins, then the installation prefix's `lib/iris` directory
+    /// used by Linux packages, then the working directory, then the system search path. The gate
+    /// limits binding to the named local library, with no system fallback and no binding at all
+    /// if either path cannot be canonicalized.
     fn pdfium() -> Option<&'static Pdfium> {
         static PDFIUM: OnceLock<Option<Pdfium>> = OnceLock::new();
         PDFIUM
             .get_or_init(|| {
                 let exe = std::env::current_exe().ok();
-                let dirs = pdfium_dirs(exe.as_deref(), std::env::current_dir().ok());
-                let local_candidates = dirs
+                let candidates = pdfium_dirs(exe.as_deref(), std::env::current_dir().ok())
                     .into_iter()
                     .map(|dir| Pdfium::pdfium_platform_library_name_at_path(&dir));
-                let bindings = local_candidates
-                    .filter(|candidate| candidate.is_file())
-                    .find_map(|candidate| Pdfium::bind_to_library(candidate).ok())
-                    .map(Ok)
-                    .unwrap_or_else(Pdfium::bind_to_system_library);
-                match bindings {
-                    Ok(bindings) => Some(Pdfium::new(bindings)),
-                    Err(error) => {
-                        tracing::info!(
-                            "pdfium is unavailable; PDF thumbnails are disabled: {error}"
-                        );
-                        None
+                let required = std::env::var_os(REQUIRED_LIBRARY_ENV)
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from);
+
+                let (bindings, local_path) = if let Some(required) = required.as_deref() {
+                    let bound = candidates
+                        .filter(|candidate| canonicalized_library_matches(candidate, required))
+                        .find_map(|candidate| {
+                            Pdfium::bind_to_library(&candidate)
+                                .ok()
+                                .map(|bindings| (bindings, candidate))
+                        });
+                    match bound {
+                        Some((bindings, path)) => (bindings, Some(path)),
+                        None => {
+                            tracing::info!(
+                                "pdfium is unavailable; required library {:?} was not bound",
+                                required
+                            );
+                            let _ = LOADED_LIBRARY.set(None);
+                            return None;
+                        }
                     }
-                }
+                } else {
+                    let bound =
+                        candidates
+                            .filter(|candidate| candidate.is_file())
+                            .find_map(|candidate| {
+                                Pdfium::bind_to_library(&candidate)
+                                    .ok()
+                                    .map(|bindings| (bindings, candidate))
+                            });
+                    match bound {
+                        Some((bindings, path)) => (bindings, Some(path)),
+                        None => match Pdfium::bind_to_system_library() {
+                            Ok(bindings) => (bindings, None),
+                            Err(error) => {
+                                tracing::info!(
+                                    "pdfium is unavailable; PDF thumbnails are disabled: {error}"
+                                );
+                                let _ = LOADED_LIBRARY.set(None);
+                                return None;
+                            }
+                        },
+                    }
+                };
+                let _ = LOADED_LIBRARY.set(local_path);
+                Some(Pdfium::new(bindings))
             })
             .as_ref()
     }
@@ -310,7 +381,7 @@ mod platform {
 
     #[cfg(test)]
     mod tests {
-        use super::pdfium_dirs;
+        use super::{canonicalized_library_matches, pdfium_dirs};
         use std::path::{Path, PathBuf};
 
         #[test]
@@ -332,6 +403,22 @@ mod platform {
         #[test]
         fn search_order_without_executable_or_working_directory_is_empty() {
             assert!(pdfium_dirs(None, None).is_empty());
+        }
+
+        #[test]
+        fn required_library_match_denies_unresolvable_paths() {
+            let dir = std::env::temp_dir();
+            let required = dir.join(format!("iris-pdfium-required-{}", std::process::id()));
+            let other = dir.join(format!("iris-pdfium-other-{}", std::process::id()));
+            let missing = dir.join(format!("iris-pdfium-missing-{}", std::process::id()));
+            std::fs::write(&required, b"library").unwrap();
+            std::fs::write(&other, b"library").unwrap();
+            assert!(canonicalized_library_matches(&required, &required));
+            assert!(!canonicalized_library_matches(&other, &required));
+            assert!(!canonicalized_library_matches(&missing, &required));
+            assert!(!canonicalized_library_matches(&required, &missing));
+            std::fs::remove_file(&required).unwrap();
+            std::fs::remove_file(&other).unwrap();
         }
     }
 }
