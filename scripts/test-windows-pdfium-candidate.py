@@ -206,20 +206,26 @@ class AttestationContracts(unittest.TestCase):
             seen["env"] = kwargs["env"]
             return subprocess.CompletedProcess(args, 0, "", "")
 
-        with patch.dict(os.environ, {"GH_TOKEN": "sentinel-token",
-                                     "gh_token": "stale-token"}, clear=False):
-            result = mod.verify_attestation("asset.tgz", "bundle.json", runner=runner)
-            self.assertEqual(result["status"], "verified")
+        consistent_env = {"GH_TOKEN": "sentinel-token",
+                          "gh_token": "sentinel-token"}
+        result = mod.verify_attestation("asset.tgz", "bundle.json", runner=runner,
+                                        environ=consistent_env)
+        self.assertEqual(result["status"], "verified")
+        conflicting_env = {"GH_TOKEN": "sentinel-token",
+                           "gh_token": "stale-token"}
+        with self.assertRaisesRegex(mod.CandidateError, "consistent"):
+            mod.verify_attestation("asset.tgz", "bundle.json", runner=runner,
+                                   environ=conflicting_env)
         self.assertEqual(seen["args"], mod.gh_command("asset.tgz", "bundle.json"))
         self.assertEqual(seen["env"]["GH_TOKEN"], "sentinel-token")
         self.assertTrue(all("sentinel-token" not in part for part in seen["args"]))
-        with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(mod.CandidateError, "GH_TOKEN"):
-                mod.verify_attestation("asset.tgz", "bundle.json", runner=runner)
-        with patch.dict(os.environ, {"GH_TOKEN": "sentinel-token"}, clear=False):
-            failing = lambda args, **kwargs: subprocess.CompletedProcess(args, 1, "", "")
-            with self.assertRaisesRegex(mod.CandidateError, "exit code 1"):
-                mod.verify_attestation("asset.tgz", "bundle.json", runner=failing)
+        with self.assertRaisesRegex(mod.CandidateError, "GH_TOKEN"):
+            mod.verify_attestation("asset.tgz", "bundle.json", runner=runner,
+                                   environ={})
+        failing = lambda args, **kwargs: subprocess.CompletedProcess(args, 1, "", "")
+        with self.assertRaisesRegex(mod.CandidateError, "exit code 1"):
+            mod.verify_attestation("asset.tgz", "bundle.json", runner=failing,
+                                   environ={"GH_TOKEN": "sentinel-token"})
 
 
 class PreviewContracts(unittest.TestCase):
@@ -292,13 +298,15 @@ class PreviewContracts(unittest.TestCase):
                                          "Path": "/bogus/windows-path"}, clear=False):
                 dirs = mod.windows_system_path()
                 preview = mod.run_smoke(stage, corpus, dirs, runner=runner)
+            resolved_stage = stage.resolve()
+            resolved_corpus = corpus.resolve()
             self.assertEqual(preview["status"], "pass")
-            self.assertEqual(seen["args"], [str(stage / "preview_corpus_smoke.exe"),
-                                            str(corpus)])
-            self.assertEqual(seen["cwd"], str(stage))
-            self.assertEqual(seen["path"], [str(stage)] + [str(p) for p in dirs])
+            self.assertEqual(seen["args"], [str(resolved_stage / "preview_corpus_smoke.exe"),
+                                            str(resolved_corpus)])
+            self.assertEqual(seen["cwd"], str(resolved_stage))
+            self.assertEqual(seen["path"], [str(resolved_stage)] + [str(p) for p in dirs])
             self.assertNotIn("Path", seen["env"])
-            self.assertTrue(all(str(root) in part for part in seen["path"][1:]))
+            self.assertTrue(all(Path(part) in dirs for part in seen["path"][1:]))
             failing = lambda args, **kwargs: subprocess.CompletedProcess(args, 9, "", "")
             with self.assertRaisesRegex(mod.CandidateError, "exit code 9"):
                 mod.run_smoke(stage, corpus, dirs, runner=failing)

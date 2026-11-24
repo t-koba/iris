@@ -164,14 +164,18 @@ def gh_command(asset, bundle):
     ]
 
 
-def verify_attestation(asset, bundle, *, runner=subprocess.run):
+def verify_attestation(asset, bundle, *, runner=subprocess.run, environ=None):
     """Bind the exact asset to the pinned bundle and upstream identity."""
-    token = next((value.strip() for key, value in os.environ.items()
-                  if key.upper() == "GH_TOKEN"), "")
-    require(token, "GH_TOKEN is required for PDFium candidate attestation")
+    environ = os.environ if environ is None else environ
+    token_values = [value.strip() for key, value in environ.items()
+                    if key.upper() == "GH_TOKEN"]
+    require(token_values, "GH_TOKEN is required for PDFium candidate attestation")
+    token = environ.get("GH_TOKEN", token_values[0]).strip()
+    require(token and all(value == token for value in token_values),
+            "GH_TOKEN spellings must carry one consistent value")
     # Windows environment names are case-insensitive; drop every spelling so
     # the verifier sees exactly one GH_TOKEN value.
-    env = {key: value for key, value in os.environ.items()
+    env = {key: value for key, value in environ.items()
            if key.upper() != "GH_TOKEN"}
     env["GH_TOKEN"] = token
     command = gh_command(asset, bundle)
