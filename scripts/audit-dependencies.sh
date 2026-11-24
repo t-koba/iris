@@ -4,10 +4,29 @@ set -euo pipefail
 # RUSTSEC-2023-0071 is attached to russh's optional RSA implementation. Iris
 # deliberately keeps that feature out of the default dependency graph; fail if
 # it ever becomes reachable before applying the narrowly scoped audit ignore.
-if cargo tree --workspace --locked --offline -e features -i rsa >/dev/null 2>&1; then
+if tree_output=$(cargo tree --workspace --locked --offline -e features -i rsa 2>&1); then
   echo "the vulnerable rsa crate is enabled in the default workspace graph" >&2
-  cargo tree --workspace --locked --offline -e features -i rsa >&2
+  printf '%s\n' "$tree_output" >&2
   exit 1
+fi
+
+# Cargo reports an absent package with an exact first error line followed by
+# help text. Any other result -- including a second error or a resolution
+# diagnostic -- means the query itself failed and must not become an ignore.
+absence_error='error: package ID specification `rsa` did not match any packages'
+unexpected_tree_result() {
+  echo "cargo tree could not confirm that rsa is absent; refusing to ignore RUSTSEC-2023-0071" >&2
+  printf '%s\n' "$tree_output" >&2
+  exit 1
+}
+if [[ "${tree_output%%$'\n'*}" != "$absence_error" ]]; then
+  unexpected_tree_result
+fi
+if ! printf '%s\n' "$tree_output" | awk '
+    NR > 1 && $0 != "" && $0 !~ /^[[:space:]]*help:/ { extra = 1 }
+    END { exit extra ? 1 : 0 }
+  '; then
+  unexpected_tree_result
 fi
 
 # Isolated workspaces (fuzz targets and the Windows prototype) have their own
