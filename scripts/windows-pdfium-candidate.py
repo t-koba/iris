@@ -64,8 +64,8 @@ SMOKE_ERROR_TAIL_CHARS = 2000
 LATENCY_RECORDS = 5
 MAX_EVIDENCE_BYTES = 20_000
 SCOPE_NOTE = (
-    "date-based candidate validation only; no exploitability, parity or "
-    "release-readiness claim"
+    "version-candidate validation only; no security-fix claim, no "
+    "exploitability, parity or release-readiness claim"
 )
 
 
