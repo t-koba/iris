@@ -60,6 +60,7 @@ MAX_MEMBER_BYTES = 64 * 1024 * 1024
 MAX_SMOKE_DLLS = 128
 MAX_RUSTC_DLLS = 64
 MAX_SMOKE_OUTPUT_CHARS = 200_000
+SMOKE_ERROR_TAIL_CHARS = 2000
 LATENCY_RECORDS = 5
 MAX_EVIDENCE_BYTES = 20_000
 SCOPE_NOTE = (
@@ -399,6 +400,11 @@ def parse_preview_records(output):
             "latency_records": latency}
 
 
+def smoke_output_tail(stdout, stderr):
+    """Return the last bounded slice of the smoke's combined output."""
+    return f"{stdout}\n{stderr}"[-SMOKE_ERROR_TAIL_CHARS:]
+
+
 def run_smoke(stage, corpus, system_dirs, *, runner=subprocess.run):
     """Run the staged smoke with PATH limited to the stage and system dirs."""
     stage = Path(stage).resolve()
@@ -406,8 +412,9 @@ def run_smoke(stage, corpus, system_dirs, *, runner=subprocess.run):
     require(corpus.is_dir(), "already-fetched preview corpus missing")
     # Windows treats Path/PATH as the same variable; keep only one spelling,
     # otherwise a duplicate entry could reintroduce build or vcpkg directories.
+    # The attestation token is not needed by the smoke and must never reach it.
     env = {key: value for key, value in os.environ.items()
-           if key.upper() != "PATH"}
+           if key.upper() not in ("PATH", "GH_TOKEN")}
     env["PATH"] = os.pathsep.join([str(stage)] + [str(path) for path in system_dirs])
     try:
         result = runner([str(stage / "preview_corpus_smoke.exe"), str(corpus)],
@@ -419,7 +426,8 @@ def run_smoke(stage, corpus, system_dirs, *, runner=subprocess.run):
     require(len(result.stdout) + len(result.stderr) <= MAX_SMOKE_OUTPUT_CHARS,
             "preview smoke output exceeds the evidence bound")
     require(result.returncode == 0,
-            f"preview smoke failed with exit code {result.returncode}")
+            f"preview smoke failed with exit code {result.returncode}: "
+            f"stdout/stderr tail: {smoke_output_tail(result.stdout, result.stderr)}")
     return parse_preview_records(result.stdout)
 
 

@@ -389,6 +389,42 @@ class PreviewContracts(unittest.TestCase):
             with self.assertRaisesRegex(mod.CandidateError, "exit code 9"):
                 mod.run_smoke(stage, corpus, dirs, runner=failing)
 
+    def test_smoke_failure_error_has_bounded_output_tail(self):
+        tail_marker = "TAIL-MARKER-" + "z" * 100
+        stdout = "PREFIX-" + "a" * 3000
+        stderr = "b" * 4000 + tail_marker
+        seen = {}
+
+        def runner(args, **kwargs):
+            seen["env"] = kwargs["env"]
+            return subprocess.CompletedProcess(args, 7, stdout, stderr)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = root / "stage"
+            stage.mkdir()
+            corpus = root / "corpus"
+            corpus.mkdir()
+            system_dir = root / "System32"
+            system_dir.mkdir()
+            with patch.dict(os.environ, {"GH_TOKEN": "sentinel-token",
+                                         "gh_token": "sentinel-token"}, clear=False):
+                with self.assertRaises(mod.CandidateError) as raised:
+                    mod.run_smoke(stage, corpus, [system_dir], runner=runner)
+            message = str(raised.exception)
+            self.assertIn("exit code 7", message)
+            self.assertIn(tail_marker, message)
+            self.assertNotIn("PREFIX-", message)
+            self.assertLessEqual(
+                len(message.split("stdout/stderr tail: ", 1)[1]),
+                mod.SMOKE_ERROR_TAIL_CHARS)
+            self.assertNotIn("sentinel-token", message)
+            self.assertTrue(all(key.upper() != "GH_TOKEN" for key in seen["env"]))
+            oversized = lambda args, **kwargs: subprocess.CompletedProcess(
+                args, 1, "x" * (mod.MAX_SMOKE_OUTPUT_CHARS + 1), "")
+            with self.assertRaisesRegex(mod.CandidateError, "evidence bound"):
+                mod.run_smoke(stage, corpus, [system_dir], runner=oversized)
+
     def test_bounded_evidence_records_gate_result(self):
         asset = {"name": mod.ASSET, "bytes": mod.ASSET_BYTES,
                  "sha256": mod.ASSET_SHA256}
