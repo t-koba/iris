@@ -10,4 +10,20 @@ if cargo tree --workspace --locked --offline -e features -i rsa >/dev/null 2>&1;
   exit 1
 fi
 
-cargo audit --ignore RUSTSEC-2023-0071
+# Isolated workspaces (fuzz targets and the Windows prototype) have their own
+# lockfiles; audit every tracked lock so a stale pin cannot hide there. The
+# narrow rsa ignore above applies only to the default workspace graph.
+mapfile -t lockfiles < <(git ls-files '*Cargo.lock')
+if ((${#lockfiles[@]} == 0)); then
+  echo "no tracked Cargo.lock files found" >&2
+  exit 1
+fi
+
+for lock in "${lockfiles[@]}"; do
+  echo "auditing $lock"
+  if [[ "$lock" == "Cargo.lock" ]]; then
+    cargo audit --file "$lock" --ignore RUSTSEC-2023-0071
+  else
+    cargo audit --file "$lock"
+  fi
+done
