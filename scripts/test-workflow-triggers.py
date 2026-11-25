@@ -15,6 +15,8 @@ macos = (root / ".github/workflows/macos-runtime-validation.yml").read_text(enco
 media_probe = (root / ".github/workflows/windows-media-foundation-probe.yml").read_text(encoding="utf-8")
 win_validation = (root / ".github/workflows/windows-ffmpeg-validation.yml").read_text(encoding="utf-8")
 release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+release_macos_job = release.split("  package-macos:\n", 1)[1].split("\n  package-linux:\n", 1)[0]
+release_publish = release.split("  publish:\n", 1)[1]
 fuzz_long = (root / ".github/workflows/fuzz-long.yml").read_text(encoding="utf-8")
 macos_call = "uses: ./.github/workflows/macos-runtime-validation.yml"
 bootstrap_timeout = (
@@ -249,6 +251,16 @@ def audit_commands(workflow):
             if "scripts/release-audit.py" in line]
 
 
+installer_verify = ("python3 scripts/macos-installer-trust.py verify --pkg dist/macos/Iris-macos.pkg "
+                    "--output audit/macos-installer-trust.json")
+installer_check = ("python3 scripts/macos-installer-trust.py check --pkg dist/release/Iris-macos.pkg "
+                   "--evidence audit/macos/macos-installer-trust.json")
+installer_secrets = (
+    "          IRIS_MACOS_INSTALLER_IDENTITY: ${{ github.event_name == 'push' && secrets.IRIS_MACOS_INSTALLER_IDENTITY || '' }}\n",
+    "          IRIS_MACOS_INSTALLER_NOTARY_PROFILE: ${{ github.event_name == 'push' && secrets.IRIS_MACOS_INSTALLER_NOTARY_PROFILE || '' }}\n",
+)
+
+
 macos_generate = (
     "python3 scripts/posix-native-evidence.py generate --platform macos --stage dist/macos "
     "--mapping packaging/native-evidence/macos-mapping.json "
@@ -320,6 +332,27 @@ def linux_pristine_stage_order():
 
 
 checks = {
+    "Final macOS installer trust runs before publication and is offline-tested": (
+        release.count(installer_verify) == 1 and release.count(installer_check) == 1
+        and all(line in release for line in installer_secrets)
+        and all(line in workflow_step(release_macos_job, "Package macOS app")
+                for line in installer_secrets)
+        and all(line in release_macos_job for line in installer_secrets)
+        and all(line not in release_publish for line in installer_secrets)
+        and "        run: python3 scripts/test-macos-installer-trust.py\n" in release
+        and "        if: ${{ github.event_name == 'push' }}\n"
+        in workflow_step(release_macos_job, "Verify final macOS installer trust")
+        and release_macos_job.index("      - name: Verify macOS artifact\n")
+        < release_macos_job.index("      - name: Verify final macOS installer trust\n")
+        < release_macos_job.index("      - name: Retain macos audit evidence\n")
+        and "            audit/macos-installer-trust.json\n"
+        in workflow_step(release_macos_job, "Retain macos audit evidence")
+        and release_publish.index("      - name: Download staged release assets\n")
+        < release_publish.index("      - name: Gate publication on release policy (not legal approval)\n")
+        < release_publish.index("      - name: Gate publication on final macOS installer trust\n")
+        < release_publish.index("      - name: Verify complete release set\n")
+        < release_publish.index("      - name: Publish complete release\n")
+    ),
     "Preview corpus CI retries and delay cap keep operator overrides": all(
         f"IRIS_PREVIEW_CORPUS_RETRIES: ${{{{ vars.IRIS_PREVIEW_CORPUS_RETRIES || {retries} }}}}" in workflow
         and f"IRIS_PREVIEW_CORPUS_MAX_RETRY_DELAY_SECONDS: ${{{{ vars.IRIS_PREVIEW_CORPUS_MAX_RETRY_DELAY_SECONDS || {cap} }}}}" in workflow

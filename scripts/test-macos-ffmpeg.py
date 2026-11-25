@@ -683,9 +683,17 @@ class ProductRuntime(unittest.TestCase):
         self.assertIn('"$baseline" == 1 && "${IRIS_MACOS_REPORT_ONLY:-}" == 1', shell)
         self.assertIn('"$sign_identity" == - && -z "$notary_profile"', shell)
         steps = ['macos-ffmpeg.py" product', 'codesign "${codesign_args[@]}"',
-                 'macos-ffmpeg.py" check', 'ditto -c', 'notarytool submit', 'stapler staple', 'pkgbuild --component']
+                 'macos-ffmpeg.py" check', 'ditto -c', 'notarytool submit', 'stapler staple',
+                 'pkgbuild --component', 'productsign --sign "$installer_identity" "$pkg_path"',
+                 'notarytool submit "$pkg_path" --keychain-profile "$installer_notary_profile" --wait',
+                 'stapler staple "$pkg_path"']
         self.assertEqual(sorted(shell.index(step) for step in steps), [shell.index(step) for step in steps])
         self.assertNotIn('--deep', shell.split('codesign_args=(')[1].split(')')[0])
+        self.assertIn('installer_identity="${IRIS_MACOS_INSTALLER_IDENTITY:-}"', shell)
+        self.assertIn('installer_notary_profile="${IRIS_MACOS_INSTALLER_NOTARY_PROFILE:-$notary_profile}"', shell)
+        self.assertIn('"$installer_identity" == "-" || -z "$installer_notary_profile"', shell)
+        self.assertIn('created $pkg_path (signed and notarized installer)', shell)
+        self.assertIn('created $pkg_path (unsigned installer; not notarized)', shell)
 
     def test_signing_rebinds_only_verified_bytes_and_fails_closed(self):
         for identity, failure in (('-', None), ('Developer ID synthetic', None),

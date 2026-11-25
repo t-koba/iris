@@ -152,9 +152,11 @@ fuzz 用のクレートは各 `fuzz/` ディレクトリで同じ操作をしま
 
 | OS | コマンド | できるもの |
 |---|---|---|
-| macOS | `./scripts/package-macos-app.sh` | pinned FFmpeg/liblzma をビルドした `Iris.app` と ZIP/PKG（[runtime/source/notice](../packaging/macos/ffmpeg-README.md) 同梱）。`IRIS_MACOS_SIGN_IDENTITY` と `IRIS_MACOS_NOTARY_PROFILE` を設定すると署名と公証も行う |
+| macOS | `./scripts/package-macos-app.sh` | pinned FFmpeg/liblzma をビルドした `Iris.app` と ZIP/PKG（[runtime/source/notice](../packaging/macos/ffmpeg-README.md) 同梱）。`IRIS_MACOS_SIGN_IDENTITY` と `IRIS_MACOS_NOTARY_PROFILE` でアプリを、`IRIS_MACOS_INSTALLER_IDENTITY` と `IRIS_MACOS_INSTALLER_NOTARY_PROFILE` で PKG を署名・公証する |
 | Linux | `./scripts/package-linux-appdir.sh` | `Iris.AppDir`（`appimagetool` があれば AppImage にできる） |
 | Windows | `./scripts/package-windows.ps1` | ビルドせず、検証済みの product stage から `Iris.exe` を含む zip を作成。`IRIS_PRODUCT_STAGE` / `IRIS_PRODUCT_INVENTORY` / `IRIS_PRODUCT_ZIP` / `IRIS_RELEASE_OUTPUT_DIR` が必須。リリース workflow は検証済みの asset をダウンロードして同じスクリプトの成果物をそのまま stage する |
+
+macOS の外側の `Iris-macos.pkg` は `IRIS_MACOS_INSTALLER_IDENTITY` に Developer ID Installer を設定したときだけ `productsign` で署名し、`IRIS_MACOS_INSTALLER_NOTARY_PROFILE`（未設定なら `IRIS_MACOS_NOTARY_PROFILE`）で公証・staple します。未設定なら PKG は署名なし・未公証のままです。`scripts/macos-installer-trust.py verify` は macOS 上で `pkgutil --check-signature`、`xcrun stapler validate`、`spctl -a -vvv -t install` を実行し、証明書名・keychain profile・パスを除いた `audit/macos-installer-trust.json` を残します。公開ジョブは `release-policy.py` の直後に `check` でダウンロード済み PKG のサイズ・SHA-256 と証拠を照合し、検証済みインストーラの信頼がなければ Release を公開しません。
 
 Windows のリリースでは、ZIP とライセンス関連の検証に加えて、インストーラの smoke で
 `Iris-windows-setup.exe` を空のディレクトリにインストールし、インストール済みファイルを export 済み
@@ -184,7 +186,7 @@ status は `not_attempted` です。タグ push の `main` 到達性・バージ
 
 実行の Actions artifacts に `release-macos` / `release-linux` / `release-windows` と、
 別名の `audit-macos` / `audit-linux` / `audit-windows`（JSON）が残ります。
-公開ジョブは `release-*` のみ取得します。監査は検証失敗時にも可能な範囲で実行します。
+公開ジョブは `release-*` と各 OS の audit artifact を取得して照合します。監査は検証失敗時にも可能な範囲で実行します。
 監査追加はリリース公開やライセンス・脆弱性対応の承認ではありません。
 
 - macOS: staged `Iris.app` の実行ファイル・dylib の SHA-256 と `otool` load commands、

@@ -50,6 +50,9 @@ jobs:
       - name: Validate POSIX native-evidence producer offline
         timeout-minutes: 1
         run: python scripts/test-posix-native-evidence.py
+      - name: Validate macOS installer trust gate offline
+        timeout-minutes: 1
+        run: python3 scripts/test-macos-installer-trust.py
 
       - name: Resolve package source and workspace version
         id: source
@@ -129,6 +132,8 @@ jobs:
         env:
           IRIS_MACOS_SIGN_IDENTITY: ${{ github.event_name == 'push' && secrets.IRIS_MACOS_SIGN_IDENTITY || '-' }}
           IRIS_MACOS_NOTARY_PROFILE: ${{ github.event_name == 'push' && secrets.IRIS_MACOS_NOTARY_PROFILE || '' }}
+          IRIS_MACOS_INSTALLER_IDENTITY: ${{ github.event_name == 'push' && secrets.IRIS_MACOS_INSTALLER_IDENTITY || '' }}
+          IRIS_MACOS_INSTALLER_NOTARY_PROFILE: ${{ github.event_name == 'push' && secrets.IRIS_MACOS_INSTALLER_NOTARY_PROFILE || '' }}
           IRIS_MACOS_DEPLOYMENT_TARGET: ${{ env.IRIS_MACOS_DEPLOYMENT_TARGET }}
         run: ./scripts/package-macos-app.sh
       - name: Verify macOS artifact
@@ -143,6 +148,9 @@ jobs:
           codesign --verify --deep --strict --verbose=2 dist/macos/Iris.app
           pkgutil --payload-files dist/macos/Iris-macos.pkg > "$RUNNER_TEMP/iris-pkg-payload.txt"
           grep -E '(^|/)Iris\.app/Contents/MacOS/Iris$' "$RUNNER_TEMP/iris-pkg-payload.txt"
+      - name: Verify final macOS installer trust
+        if: ${{ github.event_name == 'push' }}
+        run: python3 scripts/macos-installer-trust.py verify --pkg dist/macos/Iris-macos.pkg --output audit/macos-installer-trust.json
       - name: Generate macOS checksums
         run: |
           cd dist/macos
@@ -182,6 +190,7 @@ jobs:
           if-no-files-found: error
           path: |
             audit/macos.json
+            audit/macos-installer-trust.json
             audit/native-evidence/macos.json
             audit/native-evidence/macos-review.json
 
@@ -531,16 +540,18 @@ jobs:
         with:
           name: audit-windows
           path: audit/windows
-      - name: Gate publication on release policy (not legal approval)
-        run: >-
-          python scripts/release-policy.py
-          audit/macos/macos.json audit/linux/linux.json audit/windows/windows.json
       - name: Download staged release assets
         uses: actions/download-artifact@v4
         with:
           pattern: release-*
           merge-multiple: true
           path: dist/release
+      - name: Gate publication on release policy (not legal approval)
+        run: >-
+          python scripts/release-policy.py
+          audit/macos/macos.json audit/linux/linux.json audit/windows/windows.json
+      - name: Gate publication on final macOS installer trust
+        run: python3 scripts/macos-installer-trust.py check --pkg dist/release/Iris-macos.pkg --evidence audit/macos/macos-installer-trust.json
       - name: Verify complete release set
         shell: bash
         env:

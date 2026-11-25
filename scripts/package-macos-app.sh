@@ -15,6 +15,8 @@ frameworks_dir="$contents_dir/Frameworks"
 build_variant="${IRIS_BUILD_VARIANT:-product}"
 sign_identity="${IRIS_MACOS_SIGN_IDENTITY:--}"
 notary_profile="${IRIS_MACOS_NOTARY_PROFILE:-}"
+installer_identity="${IRIS_MACOS_INSTALLER_IDENTITY:-}"
+installer_notary_profile="${IRIS_MACOS_INSTALLER_NOTARY_PROFILE:-$notary_profile}"
 deployment_target="${IRIS_MACOS_DEPLOYMENT_TARGET:-14.0}"
 export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
 baseline="${IRIS_MACOS_FFMPEG_BASELINE:-}"
@@ -23,13 +25,15 @@ if [[ -n "$baseline" ]]; then
     # Homebrew is allowed only in the isolated comparison, never a release.
     [[ "$baseline" == 1 && "${IRIS_MACOS_REPORT_ONLY:-}" == 1 &&
        -z "$candidate" && "$build_variant" == product &&
-       "$sign_identity" == - && -z "$notary_profile" ]] || exit 1
+       "$sign_identity" == - && -z "$notary_profile" &&
+       -z "$installer_identity" && -z "$installer_notary_profile" ]] || exit 1
 fi
 if [[ -n "$candidate" ]]; then
     # Isolated report-only path: never alter release runtime selection or reuse
     # a Cargo target that may contain system-FFmpeg build-script results.
     [[ "${IRIS_MACOS_REPORT_ONLY:-}" == 1 && "$build_variant" == product &&
-       "$sign_identity" == - && -z "$notary_profile" && -n "${CARGO_TARGET_DIR:-}" &&
+       "$sign_identity" == - && -z "$notary_profile" &&
+       -z "$installer_identity" && -z "$installer_notary_profile" && -n "${CARGO_TARGET_DIR:-}" &&
        "$FFMPEG_DIR" == "$candidate" && "$PKG_CONFIG_PATH" == "$candidate/lib/pkgconfig" &&
        "$PKG_CONFIG_LIBDIR" == "$candidate/lib/pkgconfig" ]] || exit 1
     target_dir="$CARGO_TARGET_DIR"
@@ -39,6 +43,12 @@ version=$(sed -n '/^\[workspace.package\]$/,/^\[/{s/^version = "\([^" ]*\)".*/\1
 if [[ -z "$version" ]]; then
     echo "missing root Cargo workspace package version" >&2
     exit 1
+fi
+if [[ -n "$installer_identity" ]]; then
+    if [[ "$installer_identity" == "-" || -z "$installer_notary_profile" ]]; then
+        echo "IRIS_MACOS_INSTALLER_IDENTITY requires a Developer ID Installer identity and IRIS_MACOS_INSTALLER_NOTARY_PROFILE" >&2
+        exit 1
+    fi
 fi
 
 typeset -A bundled_dylibs
@@ -233,8 +243,8 @@ if [[ -n "$notary_profile" ]]; then
 fi
 
 # Package the final signed (and, when configured, stapled) app without changing it.
-# This installer is unsigned: an app-signing identity is not an installer identity,
-# and the ZIP notarization above does not notarize the installer.
+# An app-signing identity is not an installer identity, and ZIP notarization above
+# does not notarize the installer; an explicit installer identity covers both.
 rm -f "$pkg_path"
 pkgbuild --component "$app_root" \
     --install-location /Applications \
@@ -242,6 +252,18 @@ pkgbuild --component "$app_root" \
     --version "$version" \
     "$pkg_path"
 
+if [[ -n "$installer_identity" ]]; then
+    signed_pkg_path="$repo_root/dist/macos/Iris-macos.pkg.productsign.tmp"
+    trap 'rm -f "$signed_pkg_path"' EXIT
+    rm -f "$signed_pkg_path"
+    productsign --sign "$installer_identity" "$pkg_path" "$signed_pkg_path"
+    mv -f "$signed_pkg_path" "$pkg_path"
+    xcrun notarytool submit "$pkg_path" --keychain-profile "$installer_notary_profile" --wait
+    xcrun stapler staple "$pkg_path"
+    echo "created $pkg_path (signed and notarized installer)"
+else
+    echo "created $pkg_path (unsigned installer; not notarized)"
+fi
+
 echo "created $app_root"
 echo "created $zip_path"
-echo "created $pkg_path (unsigned installer; not notarized)"
