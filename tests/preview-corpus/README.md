@@ -140,15 +140,44 @@ fixtures for both revisions, keep the exact source and runner identities in the
 report, and preserve the release hold until every platform and media type is
 accounted for.
 
-The six pinned fixtures contain no JPEG 2000 input (`jp2`, `j2k` or `jpx`), and
-the smoke emits no JPEG 2000 record. The `gray-1x1.jp2` file under
-`crates/thumb-preview/tests/fixtures` is a unit-test asset and is not part of
-this corpus. Consequently the paired corpus above cannot validate the
-`jpeg2k 0.10.1` to `0.11.0` decoder migration, and the rebuilt reference must
-not be described as covering the full corpus until a pinned JPEG 2000 fixture
-and a matched smoke record exist for both revisions. The release hold remains.
+The six pinned fixtures still contain no JPEG 2000 input (`jp2`, `j2k` or
+`jpx`), and `fixtures.json` is unchanged. The separate overlay is generated,
+never stored in the repository. `examples/generate_j2k_fixture.rs` builds a
+256x256 RGB image with `Rgb([x as u8, y as u8, 128])`, encodes it with the
+explicit `Iris paired J2K fixture v1` COM marker, and fails closed unless the
+JP2 is exactly 393 bytes with SHA-256
+`e44d3480025d87433287c64775c0486cc2e6f7369c6df5b8a249d89f6d2a2caa`; the output
+file is opened with `create_new`. The `gray-1x1.jp2` file under
+`crates/thumb-preview/tests/fixtures` remains a unit-test asset outside this
+overlay.
+
+`examples/j2k_corpus_smoke.rs` is shared by both source revisions through
+`image_generic::extract_image_thumbnail_from_bytes` (128-pixel limit, JPEG
+preference). It verifies the pin, requires nonuniform 128x128 JPEG output, and
+emits one `PREVIEW_CORRECTNESS` and one `PREVIEW_LATENCY` record with the input
+pin, output dimensions/bytes/decoded RGB digest, timing statistics and
+source/toolchain/runner identity. The opt-in paired-source report stages
+detached worktrees for `12fb51a0ba07c299ea4e9b08890a895797148e11` and an exact
+candidate SHA, copies the harness into the baseline worktree as an untracked
+example, generates the JP2 once from the candidate generator, and runs both
+revisions' pinned corpus and J2K smokes on the same inputs:
+
+```sh
+python3 scripts/parity_source_compare.py \
+  --candidate <full-commit-sha> --corpus "$parent/corpus" \
+  --output "$parent/parity-source.json" --warmups 2 --samples 21
+```
+
+The bounded JSON (at most 266,240 bytes) retains the full records, source and
+`Cargo.lock` digests, harness/fixture pins, paired median deltas and a
+fail-closed input/operation/identity/output comparison. Baseline dependencies
+may require network unless the caller sets `CARGO_NET_OFFLINE` and both
+dependency sets are already cached; worktrees are removed even on failure. This
+is report-only: it makes no parity claim, measures crate-level extraction rather
+than UI latency, changes no release gate, and leaves the release hold in force.
 
 Offline contracts: `python3 scripts/test-fetch-preview-corpus.py`,
+`python3 scripts/test-parity-source-compare.py`,
 `python3 scripts/test-macos-ffmpeg.py`, `python3 scripts/test-linux-ffmpeg.py`, and
 `cargo test -p iris-thumb-preview --example preview_corpus_smoke --locked --offline`
 (with default-feature native build dependencies).
