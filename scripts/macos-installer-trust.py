@@ -38,7 +38,9 @@ TRUSTED_TIMESTAMP = re.compile(r"^Signed with a trusted timestamp\b", re.IGNOREC
 INSTALLER_CHAIN = re.compile(r"^\d+\.\s*Developer ID Installer:", re.IGNORECASE)
 NEGATIVE_LINE = re.compile(r"^(?:Status|Notarization):", re.IGNORECASE)
 BAD_STATUS = re.compile(
-    r"\b(?:unsigned|unnotarized|not notarized|rejected|self-signed)\b", re.IGNORECASE)
+    r"\b(?:unsigned|unnotarized|not notarized|rejected|self-signed|no signature"
+    r"|signed by (?:an? )?untrusted certificate"
+    r"|signed by a certificate that has since expired)\b", re.IGNORECASE)
 ACCEPTED_VERDICT = re.compile(r"(?:^|:)\s*accepted(?:\s|$)", re.IGNORECASE)
 
 
@@ -90,8 +92,10 @@ def run_tool(argv):
     return result.returncode == 0, text, truncated
 
 
-def parse_pkgutil(text):
-    """True only for a notarized, timestamped Developer ID Installer signature."""
+def parse_pkgutil(success, text):
+    """True only for a successful notarized, timestamped Developer ID Installer check."""
+    if not success:
+        return False
     signed = notarized = timestamped = installer = False
     for line in text.splitlines():
         stripped = line.strip()
@@ -159,7 +163,7 @@ def verify(args):
     gate_ok, gate_text, gate_truncated = run_tool(
         ["spctl", "-a", "-vvv", "-t", "install", str(pkg)])
     statuses = {
-        "pkgutil_status": parse_pkgutil(signature_text),
+        "pkgutil_status": parse_pkgutil(signature_ok, signature_text),
         "stapler_status": parse_stapler(staple_ok, staple_text),
         "gatekeeper_status": parse_gatekeeper(gate_ok, gate_text),
     }
