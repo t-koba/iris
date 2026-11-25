@@ -132,13 +132,21 @@ fetch script bytes (SHA-256
 preview smoke differs only by the later `PREVIEW_PDFIUM_RUNTIME` attribution line.
 Its `Cargo.lock` resolves `jpeg2k 0.10.1` with `openjpeg-sys` instead of the
 candidate's pure-Rust `jpeg2k 0.11.0`. That makes it a candidate reference for a
-paired, same-runner comparison of the full corpus, not parity evidence by itself:
+paired, same-runner comparison of the pinned corpus, not parity evidence by itself:
 it was never a shipped release, its dependencies are not in the local offline
 cache, and no paired coverage or latency record from that revision has been
 retained. The paired run must stage the same native runtimes and
 fixtures for both revisions, keep the exact source and runner identities in the
 report, and preserve the release hold until every platform and media type is
 accounted for.
+
+The six pinned fixtures contain no JPEG 2000 input (`jp2`, `j2k` or `jpx`), and
+the smoke emits no JPEG 2000 record. The `gray-1x1.jp2` file under
+`crates/thumb-preview/tests/fixtures` is a unit-test asset and is not part of
+this corpus. Consequently the paired corpus above cannot validate the
+`jpeg2k 0.10.1` to `0.11.0` decoder migration, and the rebuilt reference must
+not be described as covering the full corpus until a pinned JPEG 2000 fixture
+and a matched smoke record exist for both revisions. The release hold remains.
 
 Offline contracts: `python3 scripts/test-fetch-preview-corpus.py`,
 `python3 scripts/test-macos-ffmpeg.py`, `python3 scripts/test-linux-ffmpeg.py`, and
