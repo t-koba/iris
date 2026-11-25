@@ -21,28 +21,40 @@ spec = importlib.util.spec_from_file_location("macos_installer_trust", SCRIPT)
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
-PKGUTIL_OK = """Package: dev.tk.iris.pkg
-Status: signed by a developer certificate that Apple notarized
-Certificate Chain:
- 1. Developer ID Installer: Example Corp (ABCDE12345)
-    Expires: 2030-01-01
+PKGUTIL_MODERN = """Package: Iris-macos.pkg
+    Status: signed by a developer certificate issued by Apple for distribution
+    Notarization: trusted by the Apple notary service
+    Signed with a trusted timestamp on: 2026-01-02 03:04:05 +0000
+    Certificate Chain:
+     1. Developer ID Installer: Example Corp (ABCDE12345)
+        Expires: 2030-01-01
+        SHA1 Fingerprint: 0000000000000000000000000000000000000000
 """
-PKGUTIL_EQUIVALENT = """Status: signed by a developer certificate notarized by Apple
+PKGUTIL_LEGACY = """Status: signed by a developer certificate that Apple notarized
+Notarization: trusted by the Apple notary service
+Signed with a trusted timestamp
+ 1. Developer ID Installer: Example Corp (ABCDE12345)
+"""
+PKGUTIL_LEGACY_EQUIVALENT = """Status: signed by a developer certificate notarized by Apple
+Notarization: trusted by the Apple notary service
+Signed with a trusted timestamp
  1. Developer ID Installer: Example Corp (ABCDE12345)
 """
 STAPLER_OK = "Processing: Iris-macos.pkg\nThe validate action worked!\n"
-GATE_OK = "Iris-macos.pkg: accepted\nsource=Notarized Developer ID\n"
+GATE_MODERN = ("Iris-macos.pkg: accepted source=Notarized Developer ID "
+               "origin=Developer ID Installer: Example Corp (ABCDE12345)\n")
+GATE_LEGACY = "Iris-macos.pkg: accepted\nsource=Notarized Developer ID\n"
 
 
 def evidence(pkg, **overrides):
-    pkgutil = m.parse_pkgutil(PKGUTIL_OK)
+    pkgutil = m.parse_pkgutil(PKGUTIL_MODERN)
     stapler = m.parse_stapler(True, STAPLER_OK)
-    gatekeeper = m.parse_gatekeeper(True, GATE_OK)
+    gatekeeper = m.parse_gatekeeper(True, GATE_MODERN)
     record = dict(schema=1, artifact=pkg.name, bytes=pkg.stat().st_size,
                   sha256=m.sha256_file(pkg), pkgutil_status=pkgutil,
                   stapler_status=stapler, gatekeeper_status=gatekeeper,
-                  pkgutil_text=PKGUTIL_OK, stapler_text=STAPLER_OK,
-                  gatekeeper_text=GATE_OK, verified=True, note="synthetic accepted evidence")
+                  pkgutil_text=PKGUTIL_MODERN, stapler_text=STAPLER_OK,
+                  gatekeeper_text=GATE_MODERN, verified=True, note="synthetic accepted evidence")
     record.update(overrides)
     return record
 
@@ -56,28 +68,49 @@ def invoke_check(pkg, evidence_path):
 
 
 class Parsers(unittest.TestCase):
-    def test_pkgutil_requires_notarized_developer_id_installer(self):
-        for text in (PKGUTIL_OK, PKGUTIL_EQUIVALENT):
+    def test_pkgutil_accepts_modern_and_legacy_transcripts(self):
+        for text in (PKGUTIL_MODERN, PKGUTIL_LEGACY, PKGUTIL_LEGACY_EQUIVALENT):
             with self.subTest(text=text):
                 self.assertTrue(m.parse_pkgutil(text))
-        for text in (
-            "Status: unsigned\n",
-            "Status: signed by a developer certificate without notarization\n"
-            " 1. Developer ID Installer: Example Corp (ABCDE12345)\n",
-            "Status: signed by a developer certificate that Apple notarized\n",
-            "Status: signed by a developer certificate that Apple notarized\n"
-            " 1. Developer ID Application: Example Corp (ABCDE12345)\n",
-            "Status: signed by a developer certificate that Apple notarized but not stapled\n",
-            "",
+
+    def test_pkgutil_rejects_missing_notarization_timestamp_installer_and_rejected(self):
+        no_notarization = PKGUTIL_MODERN.replace(
+            "    Notarization: trusted by the Apple notary service\n", "")
+        no_timestamp = "\n".join(line for line in PKGUTIL_MODERN.splitlines()
+                                  if "trusted timestamp" not in line) + "\n"
+        application_chain = PKGUTIL_MODERN.replace(
+            "Developer ID Installer:", "Developer ID Application:")
+        rejected_notarization = PKGUTIL_MODERN.replace(
+            "Notarization: trusted by the Apple notary service",
+            "Notarization: rejected by Apple")
+        for name, text in (
+            ("unsigned", "Status: unsigned\n"),
+            ("unnotarized status", "Status: signed by a developer certificate "
+             "without notarization\n 1. Developer ID Installer: Example Corp "
+             "(ABCDE12345)\n"),
+            ("missing notarization line", no_notarization),
+            ("notarization without status", PKGUTIL_MODERN.replace(
+                "Status: signed by a developer certificate issued by Apple "
+                "for distribution\n", "")),
+            ("missing trusted timestamp", no_timestamp),
+            ("missing Developer ID Installer", application_chain),
+            ("rejected notarization", rejected_notarization),
+            ("legacy status without markers", "Status: signed by a developer "
+             "certificate that Apple notarized\n"),
+            ("empty", ""),
         ):
-            with self.subTest(text=text):
+            with self.subTest(case=name):
                 self.assertFalse(m.parse_pkgutil(text))
 
-    def test_gatekeeper_requires_explicit_accepted_verdict(self):
-        self.assertTrue(m.parse_gatekeeper(True, GATE_OK))
-        self.assertTrue(m.parse_gatekeeper(True, "accepted\n"))
+    def test_gatekeeper_accepts_modern_verdict_with_extra_fields(self):
+        for text in (GATE_MODERN, GATE_LEGACY, "accepted\n"):
+            with self.subTest(text=text):
+                self.assertTrue(m.parse_gatekeeper(True, text))
+
+    def test_gatekeeper_rejects_rejected_unknown_and_empty_output(self):
         for success, text in (
-            (False, GATE_OK), (True, "Iris-macos.pkg: rejected\n"),
+            (False, GATE_MODERN),
+            (True, "Iris-macos.pkg: rejected source=No usable signature\n"),
             (True, "Iris-macos.pkg: not accepted\nsource=Unnotarized Developer ID\n"),
             (True, "source=Notarized Developer ID\n"), (True, ""),
         ):
@@ -131,8 +164,8 @@ class Producer(unittest.TestCase):
             pkg = Path(tmp) / "Iris-macos.pkg"
             pkg.write_bytes(b"synthetic installer bytes")
             output = Path(tmp) / "audit" / "trust.json"
-            outputs = ((True, PKGUTIL_OK, False), (True, STAPLER_OK, False),
-                       (True, GATE_OK, False))
+            outputs = ((True, PKGUTIL_MODERN, False), (True, STAPLER_OK, False),
+                       (True, GATE_MODERN, False))
             with patch.object(m, "PLATFORM", "darwin"), patch.object(
                     m, "run_tool", side_effect=outputs):
                 self.assertEqual(m.main(["verify", "--pkg", str(pkg),
@@ -160,7 +193,7 @@ class Producer(unittest.TestCase):
             output = Path(tmp) / "trust.json"
             unsigned = "Status: unsigned\n"
             outputs = ((True, unsigned, False), (True, STAPLER_OK, False),
-                       (True, GATE_OK, False))
+                       (True, GATE_MODERN, False))
             with patch.object(m, "PLATFORM", "darwin"), patch.object(
                     m, "run_tool", side_effect=outputs):
                 self.assertEqual(m.main(["verify", "--pkg", str(pkg),
@@ -168,6 +201,24 @@ class Producer(unittest.TestCase):
             record = json.loads(output.read_text())
             self.assertFalse(record["pkgutil_status"])
             self.assertFalse(record["verified"])
+
+    def test_synthetic_verify_blocks_installer_without_trusted_timestamp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = Path(tmp) / "Iris-macos.pkg"
+            pkg.write_bytes(b"synthetic installer bytes")
+            output = Path(tmp) / "trust.json"
+            no_timestamp = "\n".join(line for line in PKGUTIL_MODERN.splitlines()
+                                      if "trusted timestamp" not in line) + "\n"
+            outputs = ((True, no_timestamp, False), (True, STAPLER_OK, False),
+                       (True, GATE_MODERN, False))
+            with patch.object(m, "PLATFORM", "darwin"), patch.object(
+                    m, "run_tool", side_effect=outputs):
+                self.assertEqual(m.main(["verify", "--pkg", str(pkg),
+                                         "--output", str(output)]), 1)
+            record = json.loads(output.read_text())
+            self.assertFalse(record["pkgutil_status"])
+            self.assertFalse(record["verified"])
+            self.assertEqual(invoke_check(pkg, output)[0], 1)
             self.assertIn("BLOCKED", invoke_check(pkg, output)[1])
 
 

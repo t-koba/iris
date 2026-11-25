@@ -28,10 +28,18 @@ TEXT_FIELDS = ("pkgutil_text", "stapler_text", "gatekeeper_text")
 FIELDS = frozenset(("schema", "artifact", "bytes", "sha256", "verified", "note")
                    + STATUS_FIELDS + TEXT_FIELDS)
 NOTARIZED_STATUS = re.compile(
-    r"Status:\s*signed by a developer certificate (?:that Apple notarized|notarized by Apple)",
+    r"Status:\s*signed by a developer certificate (?:issued by Apple for distribution"
+    r"|that Apple notarized|notarized by Apple)",
     re.IGNORECASE,
 )
-BAD_STATUS = re.compile(r"\b(?:unsigned|unnotarized|not notarized|self-signed)\b", re.IGNORECASE)
+NOTARIZATION_LINE = re.compile(
+    r"Notarization:\s*trusted by the Apple notary service", re.IGNORECASE)
+TRUSTED_TIMESTAMP = re.compile(r"^Signed with a trusted timestamp\b", re.IGNORECASE)
+INSTALLER_CHAIN = re.compile(r"^\d+\.\s*Developer ID Installer:", re.IGNORECASE)
+NEGATIVE_LINE = re.compile(r"^(?:Status|Notarization):", re.IGNORECASE)
+BAD_STATUS = re.compile(
+    r"\b(?:unsigned|unnotarized|not notarized|rejected|self-signed)\b", re.IGNORECASE)
+ACCEPTED_VERDICT = re.compile(r"(?:^|:)\s*accepted(?:\s|$)", re.IGNORECASE)
 
 
 def clean(text):
@@ -83,17 +91,21 @@ def run_tool(argv):
 
 
 def parse_pkgutil(text):
-    """True only for a notarized Developer ID Installer status line."""
-    notarized = installer = False
+    """True only for a notarized, timestamped Developer ID Installer signature."""
+    signed = notarized = timestamped = installer = False
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.lower().startswith("status:") and BAD_STATUS.search(stripped):
+        if NEGATIVE_LINE.match(stripped) and BAD_STATUS.search(stripped):
             return False
         if NOTARIZED_STATUS.fullmatch(stripped):
+            signed = True
+        if NOTARIZATION_LINE.fullmatch(stripped):
             notarized = True
-        if "Developer ID Installer" in stripped:
+        if TRUSTED_TIMESTAMP.match(stripped):
+            timestamped = True
+        if INSTALLER_CHAIN.match(stripped):
             installer = True
-    return notarized and installer
+    return signed and notarized and timestamped and installer
 
 
 def parse_stapler(success, text):
@@ -109,7 +121,7 @@ def parse_gatekeeper(success, text):
     lines = [line.strip() for line in text.splitlines()]
     if any("rejected" in line.lower() or "not accepted" in line.lower() for line in lines):
         return False
-    return any(re.search(r"(?:^|:)\s*accepted\s*$", line, re.IGNORECASE) for line in lines)
+    return any(ACCEPTED_VERDICT.search(line) for line in lines)
 
 
 def sha256_file(path):

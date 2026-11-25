@@ -212,9 +212,14 @@ if [[ "$build_variant" != product || -n "$baseline" ]]; then
     done
 fi
 
-codesign_args=(--force --sign "$sign_identity" --timestamp=none)
-if [[ "$sign_identity" != "-" ]]; then
-    codesign_args+=(--options runtime)
+codesign_args=(--force --sign "$sign_identity")
+if [[ "$sign_identity" == "-" ]]; then
+    # Ad-hoc/report-only paths stay byte-identical and need no remote timestamp.
+    codesign_args+=(--timestamp=none)
+else
+    # Developer ID signatures need a secure timestamp and hardened runtime so
+    # notarytool can accept the ZIP and the signed installer.
+    codesign_args+=(--options runtime --timestamp)
 fi
 if [[ "$build_variant" != product || -n "$baseline" ]]; then
     codesign_args+=(--deep)

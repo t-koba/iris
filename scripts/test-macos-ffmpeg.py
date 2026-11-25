@@ -695,6 +695,25 @@ class ProductRuntime(unittest.TestCase):
         self.assertIn('created $pkg_path (signed and notarized installer)', shell)
         self.assertIn('created $pkg_path (unsigned installer; not notarized)', shell)
 
+    def test_developer_id_signing_uses_secure_timestamp_for_both_notarizations(self):
+        shell = (ROOT / 'scripts/package-macos-app.sh').read_text()
+        args = shell.split('codesign_args=(', 1)[1].split(
+            '\ncodesign "${codesign_args[@]}"', 1)[0]
+        self.assertIn('if [[ "$sign_identity" == "-" ]]', args)
+        self.assertIn('codesign_args+=(--timestamp=none)', args)
+        self.assertIn('codesign_args+=(--options runtime --timestamp)', args)
+        self.assertLess(args.index('--timestamp=none'),
+                        args.index('--options runtime --timestamp'))
+        zip_notary = ('xcrun notarytool submit "$zip_path" '
+                      '--keychain-profile "$notary_profile" --wait')
+        pkg_notary = ('xcrun notarytool submit "$pkg_path" '
+                      '--keychain-profile "$installer_notary_profile" --wait')
+        self.assertIn(zip_notary, shell)
+        self.assertIn(pkg_notary, shell)
+        self.assertLess(shell.index('codesign "${codesign_args[@]}"'), shell.index(zip_notary))
+        self.assertLess(shell.index('productsign --sign "$installer_identity"'),
+                        shell.index(pkg_notary))
+
     def test_signing_rebinds_only_verified_bytes_and_fails_closed(self):
         for identity, failure in (('-', None), ('Developer ID synthetic', None),
                                   ('-', 'tamper'), ('-', 'sign'), ('-', 'verify')):

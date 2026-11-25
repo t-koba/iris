@@ -50,7 +50,7 @@ macOS 以外で PDF をプレビューするには、実行時に PDFium 共有�
 - `Iris-macos.zip`: 展開して `Iris.app` を `/Applications` に移動します。
 - `Iris-macos.pkg`: インストーラを実行すると `Iris.app` が `/Applications` にインストールされます。
 
-macOS 14 以降が必要です。コード署名 ID が設定されていないビルドではアプリは ad-hoc 署名になり、公証は notary profile が設定された場合に限られます。`.pkg` インストーラ自体は署名・公証されません。Gatekeeper の警告が出ないことは保証されないため、配布時の署名状況を確認してください。
+macOS 14 以降が必要です。コード署名 ID が設定されていないビルドではアプリは ad-hoc 署名になり、公証は notary profile が設定された場合に限られます。`IRIS_MACOS_SIGN_IDENTITY` と `IRIS_MACOS_NOTARY_PROFILE` を設定したリリースビルドでは、Developer ID 署名と secure timestamp でアプリ ZIP を公証します。`.pkg` は既定では署名・公証されませんが、`IRIS_MACOS_INSTALLER_IDENTITY` と `IRIS_MACOS_INSTALLER_NOTARY_PROFILE` を設定すると Developer ID Installer で署名・公証します。リリース公開では、最終 `.pkg` の署名・公証・Gatekeeper 受け入れを macOS 上で検証した証拠をダウンロード済みバイトと照合する trust gate を通過する必要があり、検証できない場合は公開をブロックします。
 
 ### Linux
 
