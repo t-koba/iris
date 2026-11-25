@@ -121,6 +121,25 @@ pair with exact source, runtime, input and hardware identity is required before 
 parity conclusion; until then parity remains unknown and the all-platform release
 hold stays in force.
 
+A defensible rebuilt reference is available in source history even though no shipped
+baseline was found. Commit `12fb51a0ba07c299ea4e9b08890a895797148e11`
+(2026-11-23, "Reload visual preview when Quick Look opens from Properties") is the
+parent of the pure-Rust JPEG 2000 migration `7d0b311`. It pins the same
+`tests/preview-corpus/fixtures.json` bytes (SHA-256
+`349e9b98e5a959bf0915493e631b58e8927dd574d31349a97031fc3cdf635dd1`) and the same
+fetch script bytes (SHA-256
+`8ad5eab2099d7bd7358d3b9e1448a330fe7c271a6efb4c3212270a9347d8d2b3`); its
+preview smoke differs only by the later `PREVIEW_PDFIUM_RUNTIME` attribution line.
+Its `Cargo.lock` resolves `jpeg2k 0.10.1` with `openjpeg-sys` instead of the
+candidate's pure-Rust `jpeg2k 0.11.0`. That makes it a candidate reference for a
+paired, same-runner comparison of the full corpus, not parity evidence by itself:
+it was never a shipped release, its dependencies are not in the local offline
+cache, and no paired coverage or latency record from that revision has been
+retained. The paired run must stage the same native runtimes and
+fixtures for both revisions, keep the exact source and runner identities in the
+report, and preserve the release hold until every platform and media type is
+accounted for.
+
 Offline contracts: `python3 scripts/test-fetch-preview-corpus.py`,
 `python3 scripts/test-macos-ffmpeg.py`, `python3 scripts/test-linux-ffmpeg.py`, and
 `cargo test -p iris-thumb-preview --example preview_corpus_smoke --locked --offline`
