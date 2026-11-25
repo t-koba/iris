@@ -165,6 +165,15 @@ def source_example(candidate, repo, name):
     return path
 
 
+def install_example(source, checkout, name):
+    """Stage a shared example without copying a file onto itself."""
+    require(source.is_file(), f'missing shared example {name}')
+    destination = checkout / EXAMPLES / name
+    if source.resolve() != destination.resolve():
+        shutil.copy2(source, destination)
+    require(destination.is_file(), f'{checkout} has no {name} example')
+
+
 @contextmanager
 def worktree(repo, sha, scratch, name):
     path = scratch / name
@@ -210,11 +219,10 @@ def compare(args):
         harness = source_example(candidate, repo, HARNESS)
         generator = source_example(candidate, repo, GENERATOR)
         harness_sha = digest(harness)
-        # Both examples are untracked in the worktrees: neither revision is edited.
+        # Examples absent from either revision are staged as untracked files.
         for checkout in (baseline, candidate):
-            shutil.copy2(harness, checkout / EXAMPLES / HARNESS)
-            if not (checkout / EXAMPLES / GENERATOR).is_file():
-                shutil.copy2(generator, checkout / EXAMPLES / GENERATOR)
+            install_example(harness, checkout, HARNESS)
+            install_example(generator, checkout, GENERATOR)
         require(digest(baseline / 'tests/preview-corpus/fixtures.json')
                 == digest(candidate / 'tests/preview-corpus/fixtures.json'),
                 'paired revisions pin different corpus manifests')

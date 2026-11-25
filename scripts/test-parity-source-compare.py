@@ -5,6 +5,7 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -120,6 +121,32 @@ class ParitySourceCompareTests(unittest.TestCase):
         changed = section(ident=identity(rustc='rustc 0'))
         with self.assertRaises(ValueError):
             m.paired_records(section(), changed, 'J2K')
+
+    def test_install_example_skips_same_file_and_stages_other_checkout(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            candidate = root / 'candidate'
+            baseline = root / 'baseline'
+            generator = root / 'repo'
+            for checkout in (candidate, baseline):
+                (checkout / m.EXAMPLES).mkdir(parents=True)
+            harness = candidate / m.EXAMPLES / m.HARNESS
+            harness.write_text('shared harness\n', encoding='utf-8')
+            source = generator / m.EXAMPLES / m.GENERATOR
+            source.parent.mkdir(parents=True)
+            source.write_text('generator\n', encoding='utf-8')
+            m.install_example(harness, candidate, m.HARNESS)
+            m.install_example(source, candidate, m.GENERATOR)
+            m.install_example(harness, baseline, m.HARNESS)
+            m.install_example(source, baseline, m.GENERATOR)
+            self.assertEqual((baseline / m.EXAMPLES / m.HARNESS).read_text(),
+                             harness.read_text())
+            self.assertEqual((candidate / m.EXAMPLES / m.GENERATOR).read_text(),
+                             source.read_text())
+            self.assertEqual((baseline / m.EXAMPLES / m.GENERATOR).read_text(),
+                             source.read_text())
+            with self.assertRaises(ValueError):
+                m.install_example(root / 'missing.rs', baseline, 'missing.rs')
 
     def test_report_cap_and_claim(self):
         report = dict(schema=m.PARITY_CLAIM, pin=m.FIXTURE_SHA256, size=m.FIXTURE_SIZE)
