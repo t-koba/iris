@@ -184,6 +184,25 @@ class ReleaseParityTests(unittest.TestCase):
         self.assert_rejected()
         self.save("linux", make_report("linux"))
 
+    def test_rejects_pdfium_attribution_removed_from_both_sides(self):
+        for platform in ("linux", "windows"):
+            with self.subTest(platform=platform):
+                report = copy.deepcopy(self.reports[platform])
+                for side in ("baseline", "candidate"):
+                    report[side]["corpus"].pop("pdfium_runtime", None)
+                paired, paired_j2k, unpaired = m.pairing_plan(
+                    report["baseline"], report["candidate"])
+                self.assertEqual(unpaired, [])
+                report["paired_latency"] = paired
+                report["paired_j2k"] = paired_j2k
+                report["unpaired"] = unpaired
+                self.save(platform, report)
+                result = self.assert_rejected()
+                self.assertIn(
+                    "baseline corpus has no loaded PDFium library attribution",
+                    result.stderr)
+                self.save(platform, make_report(platform))
+
     def test_accepts_macos_without_pdfium_attribution(self):
         report = self.reports["macos"]
         self.assertNotIn("pdfium_runtime", report["baseline"]["corpus"])
