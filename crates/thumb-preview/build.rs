@@ -1,8 +1,8 @@
 //! Compile-time binding for preview identity: Cargo profile and effective opt-level.
 //!
 //! Build-script `OPT_LEVEL` sees profile overrides but not a raw `-C opt-level`
-//! in RUSTFLAGS, so such overrides are rejected instead of letting a build claim
-//! settings it was not compiled with.
+//! or `-O` shorthand in RUSTFLAGS, so such overrides are rejected instead of
+//! letting a build claim settings it was not compiled with.
 
 use std::env;
 
@@ -25,19 +25,20 @@ fn codegen_opt_level_override(flags: &str) -> bool {
         .split(|c: char| c.is_whitespace() || c == '\u{1f}')
         .filter(|token| !token.is_empty())
         .collect();
-    tokens.iter().enumerate().any(|(index, token)| {
-        let payload = token
-            .strip_prefix("-C")
-            .or_else(|| token.strip_prefix("--codegen"))
-            .map(|rest| rest.strip_prefix('=').unwrap_or(rest));
-        match payload {
-            Some("") => tokens
-                .get(index + 1)
-                .is_some_and(|next| next.starts_with("opt-level")),
-            Some(rest) => rest.starts_with("opt-level"),
-            None => false,
-        }
-    })
+    tokens.contains(&"-O")
+        || tokens.iter().enumerate().any(|(index, token)| {
+            let payload = token
+                .strip_prefix("-C")
+                .or_else(|| token.strip_prefix("--codegen"))
+                .map(|rest| rest.strip_prefix('=').unwrap_or(rest));
+            match payload {
+                Some("") => tokens
+                    .get(index + 1)
+                    .is_some_and(|next| next.starts_with("opt-level")),
+                Some(rest) => rest.starts_with("opt-level"),
+                None => false,
+            }
+        })
 }
 
 fn rustflags() -> Vec<(String, String)> {
@@ -116,6 +117,9 @@ mod tests {
             "-Clto=thin -Copt-level=1",
             "-Clto=thin\u{1f}--codegen\u{1f}opt-level=2",
             "-Clto=thin\\x1f-Copt-level=z",
+            "-O",
+            "-Clto=thin -O",
+            "-Clto=thin\\x1f-O",
         ] {
             assert!(
                 codegen_opt_level_override(flags),

@@ -498,6 +498,9 @@ class BuildScriptContractTests(unittest.TestCase):
             rejected = self.build(crate, '3', '-C opt-level=z')
             self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
             self.assertIn('opt-level', rejected.stderr)
+            shorthand = self.build(crate, '1', '-O')
+            self.assertNotEqual(shorthand.returncode, 0, shorthand.stdout)
+            self.assertIn('overrides opt-level', shorthand.stderr)
 
     def test_real_smokes_bind_identity_to_compiled_settings(self):
         """Reverting either smoke to runtime-env identity must fail this suite."""
