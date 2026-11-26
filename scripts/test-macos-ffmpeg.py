@@ -635,7 +635,7 @@ Load command 2
 
     def test_prepare_builds_and_validates_a_fresh_pinned_prefix(self):
         with tempfile.TemporaryDirectory() as tmp:
-            prefix = Path(tmp) / 'runtime'
+            prefix = (Path(tmp) / 'runtime').resolve()
             records = [{'library': 'libavcodec.62.dylib', 'version': [62, 28, 103]}]
             manifest = dict(policy=m.MACOS_POLICY, signature_verified=True,
                             libraries={'libavcodec.62.dylib': '11' * 32}, runtime=records)
