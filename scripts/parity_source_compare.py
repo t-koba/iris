@@ -26,6 +26,7 @@ EXAMPLES = Path("crates/thumb-preview/examples")
 CORPUS_HARNESS = "preview_corpus_smoke.rs"
 HARNESS = "j2k_corpus_smoke.rs"
 GENERATOR = "generate_j2k_fixture.rs"
+BUILD_SCRIPT = Path("crates/thumb-preview/build.rs")
 STAGED_EXAMPLES = (CORPUS_HARNESS, HARNESS, GENERATOR)
 FIXTURE = "paired-j2k.jp2"
 FIXTURE_SHA256 = "e44d3480025d87433287c64775c0486cc2e6f7369c6df5b8a249d89f6d2a2caa"
@@ -235,30 +236,40 @@ def report_bytes(report):
     return data
 
 
-def source_example(candidate, repo, name):
+def source_file(candidate, repo, relative):
     """Prefer the candidate checkout; allow an uncommitted candidate working tree."""
-    path = candidate / EXAMPLES / name
+    path = candidate / relative
     if not path.is_file():
-        path = repo / EXAMPLES / name
-    require(path.is_file(), f'candidate has no {name} example')
+        path = repo / relative
+    require(path.is_file(), f'candidate has no {relative}')
     return path
 
 
-def install_example(source, checkout, name):
-    """Stage a shared example without copying a file onto itself."""
-    require(source.is_file(), f'missing shared example {name}')
-    destination = checkout / EXAMPLES / name
+def install_file(source, checkout, relative):
+    """Stage a shared file without copying it onto itself."""
+    require(source.is_file(), f'missing shared file {relative}')
+    destination = checkout / relative
     if source.resolve() != destination.resolve():
         shutil.copy2(source, destination)
-    require(destination.is_file(), f'{checkout} has no {name} example')
+    require(destination.is_file(), f'{checkout} has no {relative}')
+
+
+def source_example(candidate, repo, name):
+    return source_file(candidate, repo, EXAMPLES / name)
+
+
+def install_example(source, checkout, name):
+    install_file(source, checkout, EXAMPLES / name)
 
 
 def stage_common_examples(repo, baseline, candidate):
-    """Share the candidate's v2 corpus, J2K and generator examples on both sides."""
+    """Share the candidate's v2 examples and build script on both sides."""
     sources = {name: source_example(candidate, repo, name) for name in STAGED_EXAMPLES}
+    sources[str(BUILD_SCRIPT)] = source_file(candidate, repo, BUILD_SCRIPT)
     for checkout in (baseline, candidate):
-        for name, source in sources.items():
-            install_example(source, checkout, name)
+        for name in STAGED_EXAMPLES:
+            install_example(sources[name], checkout, name)
+        install_file(sources[str(BUILD_SCRIPT)], checkout, BUILD_SCRIPT)
     return sources
 
 
@@ -307,6 +318,7 @@ def compare(args):
         sources = stage_common_examples(repo, baseline, candidate)
         harness = sources[HARNESS]
         harness_sha = digest(harness)
+        build_script_sha = digest(sources[str(BUILD_SCRIPT)])
         require(digest(baseline / 'tests/preview-corpus/fixtures.json')
                 == digest(candidate / 'tests/preview-corpus/fixtures.json'),
                 'paired revisions pin different corpus manifests')
@@ -334,6 +346,7 @@ def compare(args):
             cargo_lock_sha256=dict(baseline=digest(baseline / 'Cargo.lock'),
                                    candidate=digest(candidate / 'Cargo.lock')),
             harness_sha256=harness_sha,
+            build_script_sha256=build_script_sha,
             fixture_pin=dict(filename=FIXTURE, sha256=FIXTURE_SHA256, size_bytes=FIXTURE_SIZE),
             baseline=reports['baseline'], candidate=reports['candidate'],
             paired_latency=paired_corpus, paired_j2k=paired_j2k, unpaired=unpaired,

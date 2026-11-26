@@ -53,7 +53,9 @@ checked against their pinned sizes and hashes. The smoke emits one
 CR3, H.264, HEVC and PDF extraction, with configured warmups and sample counts plus
 min/median/p90/median-absolute-deviation/max nanoseconds. Each record includes the
 fixture digest, source/run, Cargo.lock, compiler, target/features, runner and CPU
-identity. PDF timings explicitly identify CoreGraphics on macOS or dynamically
+identity; `build_profile` and `release_opt_level` come from compile-time values
+emitted by `crates/thumb-preview/build.rs` from Cargo's `PROFILE` and `OPT_LEVEL`,
+not from runtime environment variables. PDF timings explicitly identify CoreGraphics on macOS or dynamically
 loaded PDFium on Linux. Every PDF warmup and measured JPEG is decoded to RGB and
 compared with the correctness baseline after timing; the baseline pixel digest
 binds the correctness and timing records.
@@ -131,8 +133,8 @@ fetch script bytes (SHA-256
 `8ad5eab2099d7bd7358d3b9e1448a330fe7c271a6efb4c3212270a9347d8d2b3`); its
 preview smoke predates the v2 identity schema (`iris.preview_identity.v2`) and
 the later `PREVIEW_PDFIUM_RUNTIME` attribution line. The paired-source verifier
-therefore stages the candidate's corpus smoke, J2K smoke and fixture generator
-into both detached worktrees; both sides emit v2 identities, so `paired_latency`
+therefore stages the candidate's corpus smoke, J2K smoke, fixture generator and
+preview `build.rs` into both detached worktrees; both sides emit v2 identities, so `paired_latency`
 and `paired_j2k` are produced on the same runner with the same harness and native
 runtime recorded in each pair. Those medians are a legitimate same-runner source
 comparison of the jpeg2k migration, not proof of shipped-release parity. The
@@ -167,8 +169,8 @@ emits one `PREVIEW_CORRECTNESS` and one `PREVIEW_LATENCY` record with the input
 pin, output dimensions/bytes/decoded RGB digest, timing statistics and
 source/toolchain/runner identity. The opt-in paired-source report stages
 detached worktrees for `12fb51a0ba07c299ea4e9b08890a895797148e11` and an exact
-candidate SHA, copies the harness into the baseline worktree as an untracked
-example, generates the JP2 once from the candidate generator, and runs both
+candidate SHA, stages the candidate examples and `build.rs` into both worktrees
+as untracked files, generates the JP2 once from the candidate generator, and runs both
 revisions' pinned corpus and J2K smokes on the same inputs:
 
 ```sh
@@ -178,8 +180,11 @@ python3 scripts/parity_source_compare.py \
 ```
 
 The bounded JSON (at most 266,240 bytes) retains the full records, source and
-`Cargo.lock` digests, harness/fixture pins, paired median deltas and a
-fail-closed input/operation/identity/output comparison. Baseline dependencies
+`Cargo.lock` digests, harness/fixture pins, `build_script_sha256`, paired median
+deltas and a fail-closed input/operation/identity/output comparison. The release
+verifier recomputes that build-script digest from the repository and rejects a
+report whose value differs; the build script itself fails closed if RUSTFLAGS
+carries an `opt-level` codegen override that `OPT_LEVEL` cannot see. Baseline dependencies
 may require network unless the caller sets `CARGO_NET_OFFLINE` and both
 dependency sets are already cached; worktrees are removed even on failure. This
 is report-only: it makes no parity claim, measures crate-level extraction rather

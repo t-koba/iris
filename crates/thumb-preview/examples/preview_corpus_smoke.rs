@@ -69,6 +69,16 @@ fn check(
     thumb
 }
 
+fn compiled_build_settings() -> Result<(&'static str, Option<&'static str>), Box<dyn Error>> {
+    let profile = option_env!("IRIS_BUILD_PROFILE")
+        .filter(|value| !value.is_empty())
+        .ok_or("IRIS_BUILD_PROFILE was not compiled into the smoke")?;
+    let opt_level = option_env!("IRIS_BUILD_OPT_LEVEL")
+        .filter(|value| !value.is_empty())
+        .ok_or("IRIS_BUILD_OPT_LEVEL was not compiled into the smoke")?;
+    Ok((profile, (profile == "release").then_some(opt_level)))
+}
+
 fn digest_hex(digest: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -192,6 +202,7 @@ fn runtime_identity() -> Result<serde_json::Value, Box<dyn Error>> {
     let rustc = String::from_utf8(rustc.stdout)?.trim().to_owned();
     let lockfile = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock");
     let lockfile_digest = digest_hex(&Sha256::digest(fs::read(lockfile)?));
+    let (build_profile, release_opt_level) = compiled_build_settings()?;
     Ok(serde_json::json!({
         "identity_schema": "iris.preview_identity.v2",
         "source_revision": std::env::var("GITHUB_SHA").ok(),
@@ -209,12 +220,8 @@ fn runtime_identity() -> Result<serde_json::Value, Box<dyn Error>> {
         "runner_image_version": std::env::var("ImageVersion").ok(),
         "cpu_model": cpu_model(),
         "available_parallelism": std::thread::available_parallelism().ok().map(|n| n.get()),
-        "build_profile": if cfg!(debug_assertions) { "debug" } else { "release" },
-        "release_opt_level": if cfg!(debug_assertions) {
-            None
-        } else {
-            Some(std::env::var("CARGO_PROFILE_RELEASE_OPT_LEVEL").unwrap_or_else(|_| "3".into()))
-        },
+        "build_profile": build_profile,
+        "release_opt_level": release_opt_level,
         "features": {
             "video": cfg!(feature = "video"),
             "pdf": cfg!(feature = "pdf"),

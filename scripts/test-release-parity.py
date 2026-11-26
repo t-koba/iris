@@ -26,6 +26,7 @@ RUN_ID = "123456789"
 PIXELS = "22" * 32
 HARNESS_DIGEST = hashlib.sha256(
     (ROOT / "crates" / "thumb-preview" / "examples" / m.HARNESS).read_bytes()).hexdigest()
+BUILD_SCRIPT_DIGEST = hashlib.sha256((ROOT / m.BUILD_SCRIPT).read_bytes()).hexdigest()
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7"
 SETUP_PYTHON = "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6"
 UPLOAD = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4"
@@ -96,6 +97,7 @@ def make_report(platform, candidate=CANDIDATE, baseline=m.BASELINE_SHA, run_id=R
         parity_claim=m.PARITY_CLAIM,
         source_revision=dict(baseline=baseline, candidate=candidate),
         harness_sha256=HARNESS_DIGEST,
+        build_script_sha256=BUILD_SCRIPT_DIGEST,
         fixture_pin=dict(filename=m.FIXTURE, sha256=m.FIXTURE_SHA256,
                          size_bytes=m.FIXTURE_SIZE),
         baseline=section(platform, baseline, operations, baseline_median, run_id),
@@ -121,6 +123,9 @@ class ReleaseParityTests(unittest.TestCase):
         examples.mkdir(parents=True)
         shutil.copyfile(ROOT / "crates" / "thumb-preview" / "examples" / m.HARNESS,
                         examples / m.HARNESS)
+        script = self.repo / m.BUILD_SCRIPT
+        script.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / m.BUILD_SCRIPT, script)
         self.reports = {platform: make_report(platform) for platform in m.PLATFORMS}
         for platform, report in self.reports.items():
             self.save(platform, report)
@@ -281,12 +286,53 @@ class ReleaseParityTests(unittest.TestCase):
         result = self.assert_rejected()
         self.assertIn("operation set mismatch", result.stderr)
 
+    def test_rejects_invalid_compiled_build_identity(self):
+        for profile, level in (("release", None), ("release", "9"), ("debug", "3"),
+                               (None, "3")):
+            with self.subTest(profile=profile, level=level):
+                report = copy.deepcopy(self.reports["linux"])
+                for side in ("baseline", "candidate"):
+                    for name in ("corpus", "j2k"):
+                        section = report[side][name]
+                        for record in [section["correctness"], *section["timings"]]:
+                            record["identity"]["build_profile"] = profile
+                            record["identity"]["release_opt_level"] = level
+                self.save("linux", resummarize(report))
+                result = self.assert_rejected()
+                self.assertTrue("invalid build profile" in result.stderr
+                                or "invalid release_opt_level" in result.stderr, result.stderr)
+
     def test_rejects_wrong_harness_digest(self):
         report = copy.deepcopy(self.reports["linux"])
         report["harness_sha256"] = "0" * 64
         self.save("linux", report)
         result = self.assert_rejected()
         self.assertIn("harness digest mismatch", result.stderr)
+
+    def test_rejects_tampered_build_script_digest(self):
+        report = copy.deepcopy(self.reports["linux"])
+        report["build_script_sha256"] = "0" * 64
+        self.save("linux", report)
+        result = self.assert_rejected()
+        self.assertIn("build script digest mismatch", result.stderr)
+
+    def test_rejects_stale_build_script_binding_after_repo_change(self):
+        (self.repo / m.BUILD_SCRIPT).write_text("fn main() {}\n", encoding="utf-8")
+        result = self.assert_rejected()
+        self.assertIn("build script digest mismatch", result.stderr)
+
+    def test_rejects_opt_level_drift_even_with_matching_build_script_digest(self):
+        script = self.repo / m.BUILD_SCRIPT
+        script.write_text("fn main() {}\n", encoding="utf-8")
+        report = copy.deepcopy(self.reports["linux"])
+        report["build_script_sha256"] = hashlib.sha256(script.read_bytes()).hexdigest()
+        for name in ("corpus", "j2k"):
+            section = report["candidate"][name]
+            for record in [section["correctness"], *section["timings"]]:
+                record["identity"]["release_opt_level"] = "2"
+        self.save("linux", report)
+        result = self.assert_rejected()
+        self.assertIn("identity mismatch", result.stderr)
 
     def test_rejects_wrong_warmup_and_sample_count(self):
         for field, value in (("warmup_iterations", 1), ("sample_count", 20)):

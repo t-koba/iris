@@ -16,8 +16,9 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from parity_source_compare import (  # noqa: E402
-    BASELINE_SHA, FIXTURE, FIXTURE_SHA256, FIXTURE_SIZE, HARNESS, IDENTITY_SCHEMA,
-    J2K_OPERATION, PARITY_CLAIM, PREVIEW_OPERATIONS, pairing_plan, require,
+    BASELINE_SHA, BUILD_SCRIPT, FIXTURE, FIXTURE_SHA256, FIXTURE_SIZE, HARNESS,
+    IDENTITY_SCHEMA, J2K_OPERATION, PARITY_CLAIM, PREVIEW_OPERATIONS, pairing_plan,
+    require,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -128,6 +129,13 @@ def check_identities(report, policy, platform, expected, label, run_ids):
                 require(type(identity) is dict, f"{label}: invalid {side} {name} identity")
                 require(identity.get("identity_schema") == IDENTITY_SCHEMA,
                         f"{label}: {side} {name} identity schema mismatch")
+                profile, level = identity.get("build_profile"), identity.get("release_opt_level")
+                require(profile in ("debug", "release"),
+                        f"{label}: {side} {name} invalid build profile")
+                require((profile == "debug" and level is None)
+                        or (profile == "release" and type(level) is str
+                            and level in ("0", "1", "2", "3", "s", "z")),
+                        f"{label}: {side} {name} invalid release_opt_level")
                 require(identity.get("source_revision") == revision,
                         f"{label}: {side} {name} source_revision mismatch")
                 require(identity.get("target_os") == spec["target_os"]
@@ -185,7 +193,8 @@ def check_pairs(pairs, maps, section_name, policy, label):
                     f"{label}: {side} {operation} paired median does not match source")
 
 
-def validate_report(report, path, platform, expected, harness_digest, policy, run_ids):
+def validate_report(report, path, platform, expected, harness_digest, build_script_digest,
+                   policy, run_ids):
     label = f"{platform} report {path}"
     require(report.get("schema") == REPORT_SCHEMA, f"{label}: unexpected schema")
     require(report.get("parity_claim") == PARITY_CLAIM, f"{label}: unexpected parity_claim")
@@ -200,6 +209,8 @@ def validate_report(report, path, platform, expected, harness_digest, policy, ru
             and pin["size_bytes"] == FIXTURE_SIZE, f"{label}: fixture pin mismatch")
     require(report.get("harness_sha256") == harness_digest,
             f"{label}: harness digest mismatch")
+    require(report.get("build_script_sha256") == build_script_digest,
+            f"{label}: build script digest mismatch")
 
     try:
         paired, paired_j2k, unpaired = pairing_plan(report.get("baseline"),
@@ -246,11 +257,14 @@ def main():
         harness_path = args.repo / "crates" / "thumb-preview" / "examples" / HARNESS
         require(harness_path.is_file(), "repo has no pinned J2K harness")
         harness_digest = hashlib.sha256(harness_path.read_bytes()).hexdigest()
+        build_script_path = args.repo / BUILD_SCRIPT
+        require(build_script_path.is_file(), "repo has no preview build script")
+        build_script_digest = hashlib.sha256(build_script_path.read_bytes()).hexdigest()
         run_ids = set()
         for platform, path in zip(PLATFORMS, args.reports):
             report = load_report(Path(path), policy["max_report_bytes"], platform)
             validate_report(report, path, platform, args.expected_sha, harness_digest,
-                            policy, run_ids)
+                            build_script_digest, policy, run_ids)
         require(len(run_ids) == 1, "reports come from different workflow runs")
     except Exception as error:
         parser.exit(1, f"release parity verification failed: {error}\n")

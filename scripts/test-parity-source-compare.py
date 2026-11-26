@@ -4,7 +4,10 @@
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -175,6 +178,25 @@ class ParitySourceCompareTests(unittest.TestCase):
         for payload in bad_streams:
             with self.subTest(payload=payload), self.assertRaises(ValueError):
                 m.parse_records(payload, {m.J2K_OPERATION}, 'synthetic')
+
+    def test_paired_records_reject_release_opt_level_drift(self):
+        baseline = section(ident=identity(release_opt_level="3"))
+        for level in ("2", "z", None):
+            with self.subTest(level=level, record="correctness"):
+                with self.assertRaises(ValueError):
+                    m.paired_records(baseline, section(ident=identity(release_opt_level=level)),
+                                     "J2K")
+            drifted = section()
+            drifted["timings"][0]["identity"]["release_opt_level"] = level
+            with self.subTest(level=level, record="timing"), self.assertRaises(ValueError):
+                m.paired_records(baseline, drifted, "J2K")
+        self.assertFalse(m.identity_pair(identity(), identity(release_opt_level="z")))
+        reports = dict(
+            baseline=dict(corpus=baseline, j2k=baseline),
+            candidate=dict(corpus=section(ident=identity(release_opt_level="2")), j2k=section()),
+        )
+        with self.assertRaises(ValueError):
+            m.pairing_plan(reports["baseline"], reports["candidate"])
 
     def test_paired_records_rejects_build_and_runtime_drift(self):
         baseline = section(pdfium_runtime=pdfium_runtime())
@@ -356,16 +378,82 @@ class ParitySourceCompareTests(unittest.TestCase):
                 path = source_repo / m.EXAMPLES / name
                 path.write_text(name, encoding='utf-8')
                 sources[name] = path
+            build_source = source_repo / m.BUILD_SCRIPT
+            build_source.write_text('build script\n', encoding='utf-8')
             staged = m.stage_common_examples(source_repo, baseline, candidate)
-            self.assertEqual(set(staged), set(m.STAGED_EXAMPLES))
+            self.assertEqual(set(staged), set(m.STAGED_EXAMPLES) | {str(m.BUILD_SCRIPT)})
             for name in m.STAGED_EXAMPLES:
                 expected = sources[name].read_bytes()
                 for checkout in (baseline, candidate):
                     target = checkout / m.EXAMPLES / name
                     self.assertTrue(target.is_file(), f'{checkout} missing {name}')
                     self.assertEqual(target.read_bytes(), expected)
+            for checkout in (baseline, candidate):
+                target = checkout / m.BUILD_SCRIPT
+                self.assertTrue(target.is_file(), f'{checkout} missing build script')
+                self.assertEqual(target.read_bytes(), build_source.read_bytes())
         self.assertIn(m.CORPUS_HARNESS, m.STAGED_EXAMPLES)
         self.assertNotIn('tests/preview-corpus', m.CORPUS_HARNESS)
+
+
+class BuildScriptContractTests(unittest.TestCase):
+    def test_rust_unit_tests_guard_rustflags_forms(self):
+        rustc = shutil.which('rustc')
+        self.assertIsNotNone(rustc, 'rustc is required to run build.rs unit tests')
+        with tempfile.TemporaryDirectory(prefix='iris-build-script-tests-') as temporary:
+            binary = Path(temporary) / 'build_script_tests'
+            compiled = subprocess.run(
+                [rustc, '--edition', '2021', '--test', '-o', str(binary),
+                 str(ROOT / m.BUILD_SCRIPT)],
+                capture_output=True, text=True, check=False, timeout=120)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run([str(binary)], capture_output=True, text=True,
+                                    check=False, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('test result: ok', result.stdout + result.stderr)
+
+    def test_compile_time_opt_levels_are_distinct_and_overrides_fail_closed(self):
+        cargo = shutil.which('cargo')
+        self.assertIsNotNone(cargo, 'cargo is required for the compile-time identity test')
+        with tempfile.TemporaryDirectory(prefix='iris-preview-build-') as temporary:
+            root = Path(temporary)
+            crate = root / 'tiny'
+            (crate / 'src').mkdir(parents=True)
+            (crate / 'Cargo.toml').write_text(
+                '[package]\nname = "tiny"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\n',
+                encoding='utf-8')
+            shutil.copyfile(ROOT / m.BUILD_SCRIPT, crate / 'build.rs')
+            (crate / 'src' / 'main.rs').write_text(
+                'fn main() {\n'
+                '    let profile = option_env!("IRIS_BUILD_PROFILE").unwrap_or("<missing>");\n'
+                '    let opt = option_env!("IRIS_BUILD_OPT_LEVEL").unwrap_or("<missing>");\n'
+                '    let release = if profile == "release" { opt } else { "none" };\n'
+                '    println!("{profile}|{release}");\n'
+                '}\n', encoding='utf-8')
+            env = {key: value for key, value in os.environ.items()
+                   if key not in ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS')
+                   and not (key.startswith('CARGO_TARGET_') and key.endswith('_RUSTFLAGS'))}
+            env['CARGO_NET_OFFLINE'] = 'true'
+
+            def build(level, flags=None):
+                settings = dict(env,
+                                CARGO_TARGET_DIR=str(root / f'target-{level}-{flags is not None}'),
+                                CARGO_PROFILE_RELEASE_OPT_LEVEL=level)
+                if flags is not None:
+                    settings['RUSTFLAGS'] = flags
+                return subprocess.run([cargo, 'run', '--offline', '--quiet', '--release'],
+                                      cwd=crate, env=settings, capture_output=True, text=True,
+                                      check=False, timeout=180)
+
+            first, second = build('1'), build('2')
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(first.stdout.strip(), 'release|1')
+            self.assertEqual(second.stdout.strip(), 'release|2')
+            self.assertNotEqual(first.stdout, second.stdout)
+            rejected = build('3', '-C opt-level=z')
+            self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
+            self.assertIn('opt-level', rejected.stderr)
 
 
 if __name__ == '__main__':
