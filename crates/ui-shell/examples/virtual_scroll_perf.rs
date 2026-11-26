@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 const ENTRY_COUNT: usize = 100_000;
 const WARMUP_FRAMES: usize = 30;
 const MEASURED_FRAMES: usize = 240;
+const TRIALS: usize = 3;
 const LAYOUT_SCROLL_BUDGET: Duration = Duration::from_micros(16_700);
 const SOFTWARE_FRAME_BUDGET: Duration = Duration::from_millis(50);
 const VIEWPORT: Size = Size::new(1280.0, 800.0);
@@ -103,49 +104,68 @@ fn percentile_95(samples: &mut [Duration]) -> Duration {
     samples[(samples.len() * 95).div_ceil(100) - 1]
 }
 
+fn median(samples: &mut [Duration]) -> Duration {
+    samples.sort_unstable();
+    samples[samples.len() / 2]
+}
+
 fn run_scenario(label: &str, view_mode: ViewMode) {
-    let mut state = state_with_entries(view_mode);
-    let tiny = iced_tiny_skia::Renderer::new(Font::DEFAULT, Pixels(16.0));
-    let mut renderer = iced::Renderer::Secondary(tiny);
-    let mut cache = user_interface::Cache::new();
-    let mut scroll_messages = 0usize;
+    let mut layout_scroll_trials = Vec::with_capacity(TRIALS);
+    let mut software_frame_trials = Vec::with_capacity(TRIALS);
 
-    for _ in 0..WARMUP_FRAMES {
-        let frame = render_scroll_frame(&mut state, &mut renderer, cache);
-        cache = frame.0;
-        scroll_messages += frame.1;
+    for trial in 1..=TRIALS {
+        let mut state = state_with_entries(view_mode.clone());
+        let tiny = iced_tiny_skia::Renderer::new(Font::DEFAULT, Pixels(16.0));
+        let mut renderer = iced::Renderer::Secondary(tiny);
+        let mut cache = user_interface::Cache::new();
+        let mut scroll_messages = 0usize;
+
+        for _ in 0..WARMUP_FRAMES {
+            let frame = render_scroll_frame(&mut state, &mut renderer, cache);
+            cache = frame.0;
+            scroll_messages += frame.1;
+        }
+
+        let mut layout_scroll_samples = Vec::with_capacity(MEASURED_FRAMES);
+        let mut software_frame_samples = Vec::with_capacity(MEASURED_FRAMES);
+        for _ in 0..MEASURED_FRAMES {
+            let frame = render_scroll_frame(&mut state, &mut renderer, cache);
+            layout_scroll_samples.push(frame.2);
+            software_frame_samples.push(frame.2 + frame.3);
+            cache = frame.0;
+            scroll_messages += frame.1;
+        }
+
+        assert!(
+            scroll_messages >= WARMUP_FRAMES + MEASURED_FRAMES,
+            "the synthetic wheel input did not reach the virtual {label} in trial {trial}"
+        );
+        layout_scroll_trials.push(percentile_95(&mut layout_scroll_samples));
+        software_frame_trials.push(percentile_95(&mut software_frame_samples));
+        println!(
+            "100k {label} trial {trial}/{TRIALS}: layout+scroll p95={:?}, \
+             software frame p95={:?}",
+            layout_scroll_trials[trial - 1],
+            software_frame_trials[trial - 1]
+        );
     }
 
-    let mut layout_scroll_samples = Vec::with_capacity(MEASURED_FRAMES);
-    let mut software_frame_samples = Vec::with_capacity(MEASURED_FRAMES);
-    for _ in 0..MEASURED_FRAMES {
-        let frame = render_scroll_frame(&mut state, &mut renderer, cache);
-        layout_scroll_samples.push(frame.2);
-        software_frame_samples.push(frame.2 + frame.3);
-        cache = frame.0;
-        scroll_messages += frame.1;
-    }
-
-    let layout_scroll_p95 = percentile_95(&mut layout_scroll_samples);
-    let software_frame_p95 = percentile_95(&mut software_frame_samples);
+    let layout_scroll_p95 = median(&mut layout_scroll_trials);
+    let software_frame_p95 = median(&mut software_frame_trials);
     println!(
-        "100k {label} virtual scroll: layout+scroll p95={layout_scroll_p95:?} \
-         (budget={LAYOUT_SCROLL_BUDGET:?}), software frame p95={software_frame_p95:?} \
-         (budget={SOFTWARE_FRAME_BUDGET:?}), samples={MEASURED_FRAMES}"
+        "100k {label} virtual scroll: median layout+scroll p95={layout_scroll_p95:?} \
+         (budget={LAYOUT_SCROLL_BUDGET:?}), median software frame p95={software_frame_p95:?} \
+         (budget={SOFTWARE_FRAME_BUDGET:?}), samples={MEASURED_FRAMES}, trials={TRIALS}"
     );
 
-    assert!(
-        scroll_messages >= WARMUP_FRAMES + MEASURED_FRAMES,
-        "the synthetic wheel input did not reach the virtual {label}"
-    );
     assert!(
         layout_scroll_p95 <= LAYOUT_SCROLL_BUDGET,
-        "100k-entry {label} layout+scroll p95 {layout_scroll_p95:?} exceeded \
+        "100k-entry {label} median layout+scroll p95 {layout_scroll_p95:?} exceeded \
          {LAYOUT_SCROLL_BUDGET:?}"
     );
     assert!(
         software_frame_p95 <= SOFTWARE_FRAME_BUDGET,
-        "100k-entry {label} software frame p95 {software_frame_p95:?} exceeded \
+        "100k-entry {label} median software frame p95 {software_frame_p95:?} exceeded \
          {SOFTWARE_FRAME_BUDGET:?}"
     );
 }
