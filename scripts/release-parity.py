@@ -139,6 +139,17 @@ def check_identities(report, policy, platform, expected, label, run_ids):
                 run_ids.add(run_id)
 
 
+def check_pdfium_attribution(report, platform, label):
+    """Non-macOS corpus timings must name the PDFium library actually loaded."""
+    if platform == "macos":
+        return
+    for side in ("baseline", "candidate"):
+        runtime = section_of(report, side, "corpus", label).get("pdfium_runtime")
+        require(type(runtime) is dict and type(runtime.get("path")) is str
+                and runtime["path"].strip(),
+                f"{label}: {side} corpus has no loaded PDFium library attribution")
+
+
 def check_pairs(pairs, maps, section_name, policy, label):
     require(type(pairs) is list and pairs and all(type(pair) is dict for pair in pairs),
             f"{label}: missing {section_name} pairs")
@@ -209,6 +220,7 @@ def validate_report(report, path, platform, expected, harness_digest, policy, ru
             f"{label}: paired_latency operation set mismatch")
 
     check_identities(report, policy, platform, expected, label, run_ids)
+    check_pdfium_attribution(report, platform, label)
     maps = {}
     for name in ("corpus", "j2k"):
         maps[name] = {}

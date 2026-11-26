@@ -68,15 +68,18 @@ def timing(operation, platform, revision, median, run_id=RUN_ID, warmups=2, samp
 
 
 def section(platform, revision, operations, median, run_id=RUN_ID, warmups=2, samples=21):
-    return dict(
+    result = dict(
         correctness=dict(record="iris.preview_correctness.v1", passed=True,
                          fixtures=[dict(filename=m.FIXTURE, sha256=m.FIXTURE_SHA256,
                                         size_bytes=m.FIXTURE_SIZE, output=output())],
                          identity=identity(platform, revision, run_id)),
         timings=[timing(op, platform, revision, median, run_id, warmups, samples)
                  for op in operations],
-        pdfium_runtime=dict(path="/opt/pdfium/libpdfium.so", required=True),
     )
+    # macOS renders PDFs through CoreGraphics; the smoke emits no PDFium line.
+    if platform != "macos":
+        result["pdfium_runtime"] = dict(path="/opt/pdfium/libpdfium.so", required=True)
+    return result
 
 
 def resummarize(report):
@@ -166,6 +169,27 @@ class ReleaseParityTests(unittest.TestCase):
         self.assert_rejected()
         self.save("linux", make_report("linux"))
         self.assert_rejected(expected=OTHER_SHA)
+
+    def test_rejects_missing_pdfium_attribution_on_native_platforms(self):
+        for platform in ("linux", "windows"):
+            with self.subTest(platform=platform):
+                report = copy.deepcopy(self.reports[platform])
+                report["baseline"]["corpus"].pop("pdfium_runtime", None)
+                self.save(platform, report)
+                self.assert_rejected()
+                self.save(platform, make_report(platform))
+        report = copy.deepcopy(self.reports["linux"])
+        report["candidate"]["corpus"]["pdfium_runtime"] = dict(path="  ", required=True)
+        self.save("linux", report)
+        self.assert_rejected()
+        self.save("linux", make_report("linux"))
+
+    def test_accepts_macos_without_pdfium_attribution(self):
+        report = self.reports["macos"]
+        self.assertNotIn("pdfium_runtime", report["baseline"]["corpus"])
+        self.assertNotIn("pdfium_runtime", report["candidate"]["corpus"])
+        result = self.gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_rejects_wrong_baseline(self):
         report = copy.deepcopy(self.reports["linux"])

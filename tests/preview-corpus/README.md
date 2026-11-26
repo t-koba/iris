@@ -183,15 +183,16 @@ fail-closed input/operation/identity/output comparison. Baseline dependencies
 may require network unless the caller sets `CARGO_NET_OFFLINE` and both
 dependency sets are already cached; worktrees are removed even on failure. This
 is report-only: it makes no parity claim, measures crate-level extraction rather
-than UI latency, changes no release gate, and leaves the release hold in force.
+than UI latency, makes no parity claim by itself, and leaves the release hold in
+force.
 
 `scripts/parity_source_compare.py` remains report-only and never satisfies a release
 prerequisite on its own. Publication uses the separate `scripts/release-parity.py`
 verifier, which requires all three same-platform linux/macos/windows pairs, zero
-unpaired sections, exact source/revision/harness binding and no candidate median
-slowdown. An unpaired diagnostic such as the legacy-schema corpus baseline above
-therefore cannot discharge the release gate; it only records why parity remains
-unknown.
+unpaired sections, exact source/revision/harness binding, PDFium library attribution
+on Linux and Windows, and no candidate median slowdown. A shared-v2 report produced
+by the pinned producer can discharge that gate only when all those conditions hold;
+an unpaired diagnostic records why parity remains unknown instead.
 
 Offline contracts: `python3 scripts/test-fetch-preview-corpus.py`,
 `python3 scripts/test-parity-source-compare.py`,
