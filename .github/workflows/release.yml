@@ -33,13 +33,13 @@ jobs:
       source_sha: ${{ steps.source.outputs.sha }}
       version: ${{ steps.source.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
       - name: Validate release audit contract
@@ -111,17 +111,17 @@ jobs:
       IRIS_PREVIEW_LATENCY_SAMPLES: ${{ vars.IRIS_PREVIEW_LATENCY_SAMPLES || 21 }}
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release-preflight.outputs.source_sha }}
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: release-macos-cargo
           cache-targets: false
@@ -178,7 +178,7 @@ jobs:
             shasum -a 256 -c "$file.sha256"
           done
       - name: Stage macOS release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-macos
           if-no-files-found: error
@@ -203,7 +203,7 @@ jobs:
         run: python scripts/release-audit.py macos --output audit/macos.json --native-evidence audit/native-evidence/macos.json --require-native-evidence
       - name: Retain macos audit evidence
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: audit-macos
           if-no-files-found: error
@@ -227,17 +227,17 @@ jobs:
     outputs:
       deb-arch: ${{ steps.deb.outputs.arch }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release-preflight.outputs.source_sha }}
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: release-linux-cargo
       - name: Install system dependencies
@@ -313,7 +313,7 @@ jobs:
             sha256sum -c "$file.sha256"
           done
       - name: Stage Linux release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-linux
           if-no-files-found: error
@@ -338,7 +338,7 @@ jobs:
         run: python scripts/release-audit.py linux --output audit/linux.json --native-evidence audit/native-evidence/linux.json --require-native-evidence
       - name: Retain linux audit evidence
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: audit-linux
           if-no-files-found: error
@@ -362,20 +362,20 @@ jobs:
       IRIS_RELEASE_VERSION: ${{ needs.release-preflight.outputs.version }}
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release-preflight.outputs.source_sha }}
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
       - name: Download verified Windows release assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: windows-release-assets
           path: verified/windows
       - name: Download reviewed Windows native evidence
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: windows-native-evidence
           path: verified/windows-native-evidence
@@ -425,10 +425,10 @@ jobs:
           Copy-Item -LiteralPath $zipPath -Destination "dist/windows/Iris-windows.zip" -Force
           Copy-Item -LiteralPath $setupPath -Destination "dist/windows/Iris-windows-setup.exe" -Force
           Expand-Archive -LiteralPath "dist/windows/Iris-windows.zip" -DestinationPath "dist/windows/Iris" -Force
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: release-windows-cargo
       - name: Fetch locked Rust inputs before offline audit
@@ -495,7 +495,7 @@ jobs:
             Pop-Location
           }
       - name: Stage Windows release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-windows
           if-no-files-found: error
@@ -522,7 +522,7 @@ jobs:
         run: python scripts/release-audit.py windows --output audit/windows.json --native-evidence verified/windows-native-evidence/windows-native-closure.json --require-native-evidence
       - name: Retain windows audit evidence
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: audit-windows
           if-no-files-found: error
@@ -537,30 +537,30 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
       - name: Download macOS audit evidence
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: audit-macos
           path: audit/macos
       - name: Download Linux audit evidence
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: audit-linux
           path: audit/linux
       - name: Download Windows audit evidence
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: audit-windows
           path: audit/windows
       - name: Download staged release assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: release-*
           merge-multiple: true
@@ -595,7 +595,7 @@ jobs:
             sha256sum -c "$file.sha256"
           done
       - name: Publish complete release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           fail_on_unmatched_files: true
           files: dist/release/*

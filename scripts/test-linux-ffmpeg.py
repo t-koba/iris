@@ -531,8 +531,12 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         release = (ROOT / ".github/workflows/release.yml").read_text()
         release_linux = release.split("  package-linux:", 1)[1].split("  package-windows:", 1)[0]
-        for workflow in (ci, release_linux):
-            self.assertIn("uses: Swatinem/rust-cache@v2", workflow)
+        self.assertIn("uses: Swatinem/rust-cache@v2", ci)
+        # The release workflow pins third-party actions to exact commits.
+        self.assertIn(
+            "uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2",
+            release_linux,
+        )
         self.assertIn("/build/", (ROOT / ".gitignore").read_text().splitlines())
 
     def test_ci_reuses_only_the_validated_ffmpeg_prefix(self):

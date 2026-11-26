@@ -314,6 +314,30 @@ audit_bounds = (
 )
 
 
+def release_actions_are_pinned():
+    """External release actions must be commit SHAs annotated with their ref."""
+    uses_lines = [line for line in release.splitlines() if "uses:" in line]
+    if not uses_lines:
+        return False
+    external = 0
+    for line in uses_lines:
+        m = re.fullmatch(
+            r"\s+(?:- )?uses: (?P<ref>[^\s#]+)(?: # (?P<comment>[^\s#]+))?\s*", line
+        )
+        if not m:
+            return False
+        ref, comment = m.group("ref"), m.group("comment")
+        if ref.startswith("./"):
+            # Local reusable workflow has no external ref to pin.
+            continue
+        external += 1
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}", ref):
+            return False
+        if not re.fullmatch(r"(?:v[0-9]+(?:\.[0-9]+)*|master|main)", comment or ""):
+            return False
+    return external > 0
+
+
 def linux_pristine_stage_order():
     names = re.findall(r"(?m)^      - name: ([^\n]+)$", linux)
     if not all(name in names for name in (build_step, evidence_step, audit_step, smoke_step)):
@@ -533,6 +557,7 @@ permissions:
             "Fuzz smoke",
         )
     ),
+    "Release workflow pins external actions to commit SHAs": release_actions_are_pinned(),
     "Release tags are checked against main before package jobs": (
         "          fetch-depth: 0\n" in release
         and main_tag_guard in release
