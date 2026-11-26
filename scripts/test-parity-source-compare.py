@@ -396,7 +396,51 @@ class ParitySourceCompareTests(unittest.TestCase):
         self.assertNotIn('tests/preview-corpus', m.CORPUS_HARNESS)
 
 
+def compiled_settings_function(example):
+    """Extract the real compiled-build-settings helper from a smoke example."""
+    source = (ROOT / m.EXAMPLES / example).read_text(encoding='utf-8')
+    marker = 'fn compiled_build_settings()'
+    begin = source.find(marker)
+    m.require(begin >= 0, f'{example} has no compiled_build_settings helper')
+    opening = source.index('{', begin)
+    depth = 0
+    for index in range(opening, len(source)):
+        if source[index] == '{':
+            depth += 1
+        elif source[index] == '}':
+            depth -= 1
+            if depth == 0:
+                return source[begin:index + 1]
+    raise ValueError(f'{example} has an unterminated compiled_build_settings helper')
+
+
 class BuildScriptContractTests(unittest.TestCase):
+    def prepare_crate(self, temporary, main_source):
+        crate = Path(temporary) / 'tiny'
+        (crate / 'src').mkdir(parents=True)
+        (crate / 'Cargo.toml').write_text(
+            '[package]\nname = "tiny"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\n',
+            encoding='utf-8')
+        shutil.copyfile(ROOT / m.BUILD_SCRIPT, crate / 'build.rs')
+        (crate / 'src' / 'main.rs').write_text(main_source, encoding='utf-8')
+        return crate
+
+    def build(self, crate, level, flags=None):
+        cargo = shutil.which('cargo')
+        self.assertIsNotNone(cargo, 'cargo is required for the compile-time identity test')
+        env = {key: value for key, value in os.environ.items()
+               if key not in ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS')
+               and not (key.startswith('CARGO_TARGET_') and key.endswith('_RUSTFLAGS'))}
+        env['CARGO_NET_OFFLINE'] = 'true'
+        settings = dict(env,
+                        CARGO_TARGET_DIR=str(crate.parent / f'target-{level}-{flags is not None}'),
+                        CARGO_PROFILE_RELEASE_OPT_LEVEL=level)
+        if flags is not None:
+            settings['RUSTFLAGS'] = flags
+        return subprocess.run([cargo, 'run', '--offline', '--quiet', '--release'],
+                              cwd=crate, env=settings, capture_output=True, text=True,
+                              check=False, timeout=180)
+
     def test_rust_unit_tests_guard_rustflags_forms(self):
         rustc = shutil.which('rustc')
         self.assertIsNotNone(rustc, 'rustc is required to run build.rs unit tests')
@@ -413,47 +457,51 @@ class BuildScriptContractTests(unittest.TestCase):
             self.assertIn('test result: ok', result.stdout + result.stderr)
 
     def test_compile_time_opt_levels_are_distinct_and_overrides_fail_closed(self):
-        cargo = shutil.which('cargo')
-        self.assertIsNotNone(cargo, 'cargo is required for the compile-time identity test')
         with tempfile.TemporaryDirectory(prefix='iris-preview-build-') as temporary:
-            root = Path(temporary)
-            crate = root / 'tiny'
-            (crate / 'src').mkdir(parents=True)
-            (crate / 'Cargo.toml').write_text(
-                '[package]\nname = "tiny"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\n',
-                encoding='utf-8')
-            shutil.copyfile(ROOT / m.BUILD_SCRIPT, crate / 'build.rs')
-            (crate / 'src' / 'main.rs').write_text(
+            crate = self.prepare_crate(
+                temporary,
                 'fn main() {\n'
                 '    let profile = option_env!("IRIS_BUILD_PROFILE").unwrap_or("<missing>");\n'
                 '    let opt = option_env!("IRIS_BUILD_OPT_LEVEL").unwrap_or("<missing>");\n'
                 '    let release = if profile == "release" { opt } else { "none" };\n'
                 '    println!("{profile}|{release}");\n'
-                '}\n', encoding='utf-8')
-            env = {key: value for key, value in os.environ.items()
-                   if key not in ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS')
-                   and not (key.startswith('CARGO_TARGET_') and key.endswith('_RUSTFLAGS'))}
-            env['CARGO_NET_OFFLINE'] = 'true'
-
-            def build(level, flags=None):
-                settings = dict(env,
-                                CARGO_TARGET_DIR=str(root / f'target-{level}-{flags is not None}'),
-                                CARGO_PROFILE_RELEASE_OPT_LEVEL=level)
-                if flags is not None:
-                    settings['RUSTFLAGS'] = flags
-                return subprocess.run([cargo, 'run', '--offline', '--quiet', '--release'],
-                                      cwd=crate, env=settings, capture_output=True, text=True,
-                                      check=False, timeout=180)
-
-            first, second = build('1'), build('2')
+                '}\n')
+            first, second = self.build(crate, '1'), self.build(crate, '2')
             self.assertEqual(first.returncode, 0, first.stderr)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertEqual(first.stdout.strip(), 'release|1')
             self.assertEqual(second.stdout.strip(), 'release|2')
             self.assertNotEqual(first.stdout, second.stdout)
-            rejected = build('3', '-C opt-level=z')
+            rejected = self.build(crate, '3', '-C opt-level=z')
             self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
             self.assertIn('opt-level', rejected.stderr)
+
+    def test_real_smokes_bind_identity_to_compiled_settings(self):
+        """Reverting either smoke to runtime-env identity must fail this suite."""
+        for example in (m.CORPUS_HARNESS, m.HARNESS):
+            with self.subTest(example=example):
+                source = (ROOT / m.EXAMPLES / example).read_text(encoding='utf-8')
+                self.assertNotIn(
+                    'std::env::var("CARGO_PROFILE_RELEASE_OPT_LEVEL")', source)
+                self.assertIn('"build_profile": build_profile', source)
+                self.assertIn('"release_opt_level": release_opt_level', source)
+                helper = compiled_settings_function(example)
+                self.assertIn('option_env!("IRIS_BUILD_PROFILE")', helper)
+                self.assertIn('option_env!("IRIS_BUILD_OPT_LEVEL")', helper)
+                with tempfile.TemporaryDirectory(prefix='iris-smoke-identity-') as temporary:
+                    crate = self.prepare_crate(
+                        temporary,
+                        'use std::error::Error;\n' + helper + '\n'
+                        'fn main() {\n'
+                        '    let (profile, level) = compiled_build_settings().unwrap();\n'
+                        '    println!("{profile}|{level:?}");\n'
+                        '}\n')
+                    outputs = []
+                    for level in ('1', '2'):
+                        result = self.build(crate, level)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        outputs.append(result.stdout.strip())
+                    self.assertEqual(outputs, ['release|Some("1")', 'release|Some("2")'])
 
 
 if __name__ == '__main__':
