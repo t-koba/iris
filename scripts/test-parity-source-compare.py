@@ -207,16 +207,37 @@ class ParitySourceCompareTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.pairing_plan(reports["baseline"], reports["candidate"])
 
+    def test_staged_pdfium_library_binds_the_required_smoke_path(self):
+        name = m.pdfium_library_name()
+        with tempfile.TemporaryDirectory(prefix='iris-pdfium-staging-') as temporary:
+            root = Path(temporary)
+            source = root / 'verified' / name
+            source.parent.mkdir()
+            source.write_bytes(b'verified pdfium bytes')
+            checkout = root / 'worktree'
+            checkout.mkdir()
+            staged = m.stage_pdfium_library(source, checkout, 'synthetic')
+            self.assertEqual(staged, (checkout / name).resolve())
+            self.assertEqual(staged.read_bytes(), source.read_bytes())
+            env = m.cargo_env('a' * 40, 2, 21, staged)
+            self.assertEqual(env[m.PDFIUM_REQUIRE_ENV], str(staged.resolve()))
+            with self.assertRaises(ValueError):
+                m.stage_pdfium_library(root / 'absent' / name, checkout, 'synthetic')
+
     def test_paired_records_rejects_build_and_runtime_drift(self):
-        baseline = section(pdfium_runtime=pdfium_runtime())
-        m.paired_records(baseline, section(pdfium_runtime=pdfium_runtime()), 'J2K')
+        name = m.pdfium_library_name()
+        baseline = section(pdfium_runtime=pdfium_runtime(path=f'/baseline/{name}'))
+        other_worktree = section(pdfium_runtime=pdfium_runtime(path=f'/candidate/{name}'))
+        m.paired_records(baseline, other_worktree, 'J2K')
         for change in ({'build_profile': 'debug'}, {'release_opt_level': 'z'},
                        {'features': dict(video=False, pdf=True, raw_full=False)}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 m.paired_records(baseline, section(ident=identity(**change),
-                                                   pdfium_runtime=pdfium_runtime()), 'J2K')
-        for runtime in (pdfium_runtime(path='/other/libpdfium.so'),
-                        pdfium_runtime(required=False), None):
+                                                   pdfium_runtime=pdfium_runtime(
+                                                       path=f'/candidate/{name}')), 'J2K')
+        wrong_name = 'wrong-library.so'
+        for runtime in (pdfium_runtime(path=f'/candidate/{wrong_name}'),
+                        pdfium_runtime(path=f'/candidate/{name}', required=False), None):
             with self.subTest(runtime=runtime), self.assertRaises(ValueError):
                 m.paired_records(baseline, section(pdfium_runtime=runtime), 'J2K')
         with self.assertRaises(ValueError):

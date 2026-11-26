@@ -19,6 +19,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +30,10 @@ HARNESS = "j2k_corpus_smoke.rs"
 GENERATOR = "generate_j2k_fixture.rs"
 BUILD_SCRIPT = Path("crates/thumb-preview/build.rs")
 STAGED_EXAMPLES = (CORPUS_HARNESS, HARNESS, GENERATOR)
+PDFIUM_REQUIRE_ENV = "IRIS_PDFIUM_REQUIRE_LIBRARY"
+PDFIUM_LIBRARY_NAMES = {
+    "linux": "libpdfium.so", "darwin": "libpdfium.so", "win32": "pdfium.dll",
+}
 FIXTURE = "paired-j2k.jp2"
 FIXTURE_SHA256 = "e44d3480025d87433287c64775c0486cc2e6f7369c6df5b8a249d89f6d2a2caa"
 FIXTURE_SIZE = 393
@@ -267,6 +272,48 @@ def identity_pair(baseline, candidate):
     return all(baseline.get(key) == candidate.get(key) for key in IDENTITY_KEYS)
 
 
+def pdfium_library_name():
+    """Platform-specific filename of the PDFium library staged for smokes."""
+    return PDFIUM_LIBRARY_NAMES[sys.platform]
+
+
+def stage_pdfium_library(source, checkout, label):
+    """Copy the verified runtime into a worktree and return its exact path.
+
+    The smoke's required-library gate accepts only a local candidate that
+    canonicalizes to this file, so its runtime line identifies the staged bytes
+    rather than a system search-path library.
+    """
+    source = Path(source).resolve()
+    name = pdfium_library_name()
+    require(source.is_file() and source.name == name,
+            f"{label}: staged PDFium library must be a local {name} file")
+    target = (Path(checkout) / name).resolve()
+    shutil.copyfile(source, target)
+    require(target.is_file() and digest(source) == digest(target),
+            f"{label}: staged PDFium copy does not match the verified library")
+    return target
+
+
+def pdfium_runtime_pair(baseline, candidate, label):
+    """Pair runtime identity while allowing one staged file per worktree."""
+    if baseline is None or candidate is None:
+        require(baseline == candidate, f'{label}: pdfium runtime mismatch')
+        return
+    require(type(baseline) is dict and type(candidate) is dict,
+            f'{label}: invalid pdfium runtime record')
+    for runtime in (baseline, candidate):
+        require(set(runtime) == {'path', 'required'},
+                f'{label}: invalid pdfium runtime record')
+        require(type(runtime['path']) is str and runtime['path'].strip(),
+                f'{label}: invalid pdfium runtime path')
+        require(runtime['required'] is True,
+                f'{label}: pdfium smoke did not require the staged library')
+    require(Path(baseline['path']).name == Path(candidate['path']).name
+            and Path(baseline['path']).name in PDFIUM_LIBRARY_NAMES.values(),
+            f'{label}: pdfium runtime mismatch')
+
+
 def compare_output(baseline, candidate, label):
     for key in ('width', 'height', 'decoded_rgb_sha256'):
         # Records without a pixel digest (for example passthrough outputs) are
@@ -278,8 +325,8 @@ def paired_records(baseline, candidate, label):
     """Fail closed instead of comparing records from different experiments."""
     require(identity_pair(baseline['correctness']['identity'],
                           candidate['correctness']['identity']), f'{label}: identity mismatch')
-    require(baseline.get('pdfium_runtime') == candidate.get('pdfium_runtime'),
-            f'{label}: pdfium runtime mismatch')
+    pdfium_runtime_pair(baseline.get('pdfium_runtime'),
+                        candidate.get('pdfium_runtime'), label)
     left = {item['filename']: item for item in baseline['correctness']['fixtures']}
     right = {item['filename']: item for item in candidate['correctness']['fixtures']}
     require(set(left) == set(right), f'{label}: input set mismatch')
@@ -433,10 +480,12 @@ def worktree(repo, sha, scratch, name):
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
 
-def cargo_env(sha, warmups, samples):
+def cargo_env(sha, warmups, samples, pdfium_library=None):
     env = os.environ.copy()
     env.update(IRIS_PREVIEW_LATENCY_WARMUPS=str(warmups),
                IRIS_PREVIEW_LATENCY_SAMPLES=str(samples), GITHUB_SHA=sha)
+    if pdfium_library is not None:
+        env[PDFIUM_REQUIRE_ENV] = str(Path(pdfium_library).resolve())
     return env
 
 
@@ -476,8 +525,12 @@ def compare(args):
         reports = {}
         for name, checkout, sha in (('baseline', baseline, args.baseline),
                                     ('candidate', candidate, args.candidate)):
-            env = cargo_env(sha, args.warmups, args.samples)
+            library = (stage_pdfium_library(args.pdfium_library, checkout,
+                                            f'{name} PDFium staging')
+                       if args.pdfium_library is not None else None)
+            env = cargo_env(sha, args.warmups, args.samples, library)
             reports[name] = dict(
+                worktree=str(checkout.resolve()),
                 corpus=smoke(checkout, CORPUS_HARNESS, corpus, env, f'{name} corpus smoke'),
                 j2k=smoke(checkout, HARNESS, fixture, env, f'{name} J2K smoke'),
             )
@@ -511,6 +564,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--warmups', type=int, default=2)
     parser.add_argument('--samples', type=int, default=21)
+    parser.add_argument('--pdfium-library', type=Path, default=None,
+                        help='verified PDFium library staged into both worktrees')
     args = parser.parse_args()
     try:
         print(f'wrote {compare(args)} (report-only; release hold unchanged)')

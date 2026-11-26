@@ -150,14 +150,26 @@ def check_identities(report, policy, platform, expected, label, run_ids):
 
 
 def check_pdfium_attribution(report, platform, label):
-    """Non-macOS corpus timings must name the PDFium library actually loaded."""
+    """Non-macOS corpus timings must name the exact verified staged library."""
     if platform == "macos":
         return
+    filename = {"linux": "libpdfium.so", "windows": "pdfium.dll"}[platform]
     for side in ("baseline", "candidate"):
         runtime = section_of(report, side, "corpus", label).get("pdfium_runtime")
         require(type(runtime) is dict and type(runtime.get("path")) is str
                 and runtime["path"].strip(),
                 f"{label}: {side} corpus has no loaded PDFium library attribution")
+        require(runtime.get("required") is True,
+                f"{label}: {side} corpus did not require the staged PDFium library")
+        path = Path(runtime["path"])
+        require(path.name == filename,
+                f"{label}: {side} corpus loaded an unexpected PDFium filename")
+        side_report = report.get(side)
+        worktree = side_report.get("worktree") if type(side_report) is dict else None
+        require(type(worktree) is str and worktree.strip(),
+                f"{label}: {side} worktree identity is missing")
+        require(path.resolve().parent == Path(worktree).resolve(),
+                f"{label}: {side} corpus PDFium path is not the staged worktree library")
 
 
 def check_pinned_ffmpeg_runtime(report, platform, label, pinned):

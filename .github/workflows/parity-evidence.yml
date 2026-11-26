@@ -74,7 +74,7 @@ jobs:
         shell: bash
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
-        run: python3 scripts/parity_source_compare.py --repo . --candidate "$SOURCE_SHA" --corpus "$RUNNER_TEMP/iris-preview-corpus" --output audit/parity/linux.json
+        run: python3 scripts/parity_source_compare.py --repo . --candidate "$SOURCE_SHA" --corpus "$RUNNER_TEMP/iris-preview-corpus" --pdfium-library "$RUNNER_TEMP/iris-pdfium-stage/usr/lib/iris/libpdfium.so" --output audit/parity/linux.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: parity-linux
@@ -344,7 +344,7 @@ jobs:
         shell: bash
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
-        run: python3 scripts/parity_source_compare.py --repo . --candidate "$SOURCE_SHA" --corpus "$RUNNER_TEMP/iris-preview-corpus" --output audit/parity/windows.json
+        run: python3 scripts/parity_source_compare.py --repo . --candidate "$SOURCE_SHA" --corpus "$RUNNER_TEMP/iris-preview-corpus" --pdfium-library "$IRIS_VALIDATION_PDFIUM_RUNTIME/pdfium.dll" --output audit/parity/windows.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: parity-windows

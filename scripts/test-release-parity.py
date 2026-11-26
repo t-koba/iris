@@ -29,6 +29,8 @@ CORPUS_MANIFEST = json.loads(
 HARNESS_DIGEST = hashlib.sha256(
     (ROOT / "crates" / "thumb-preview" / "examples" / m.HARNESS).read_bytes()).hexdigest()
 BUILD_SCRIPT_DIGEST = hashlib.sha256((ROOT / m.BUILD_SCRIPT).read_bytes()).hexdigest()
+WORKTREES = {"baseline": "/tmp/iris-parity-source-baseline",
+             "candidate": "/tmp/iris-parity-source-candidate"}
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7"
 SETUP_PYTHON = "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6"
 UPLOAD = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4"
@@ -100,7 +102,12 @@ def timing(operation, platform, revision, median, run_id=RUN_ID, warmups=2, samp
     )
 
 
-def section(platform, revision, operations, median, run_id=RUN_ID, warmups=2, samples=21):
+def pdfium_filename(platform):
+    return "libpdfium.so" if platform == "linux" else "pdfium.dll"
+
+
+def section(platform, revision, operations, median, run_id=RUN_ID, warmups=2, samples=21,
+            worktree=None):
     corpus = set(operations) == set(m.PREVIEW_OPERATIONS)
     fixtures = corpus_fixtures() if corpus else [j2k_fixture()]
     first_pin = next(entry for entry in CORPUS_MANIFEST['files']
@@ -116,7 +123,9 @@ def section(platform, revision, operations, median, run_id=RUN_ID, warmups=2, sa
     )
     # macOS renders PDFs through CoreGraphics; the smoke emits no PDFium line.
     if platform != "macos":
-        result["pdfium_runtime"] = dict(path="/opt/pdfium/libpdfium.so", required=True)
+        directory = worktree or f"/opt/pdfium"
+        result["pdfium_runtime"] = dict(
+            path=str(Path(directory) / pdfium_filename(platform)), required=True)
     return result
 
 
@@ -137,16 +146,22 @@ def make_report(platform, candidate=CANDIDATE, baseline=m.BASELINE_SHA, run_id=R
         build_script_sha256=BUILD_SCRIPT_DIGEST,
         fixture_pin=dict(filename=m.FIXTURE, sha256=m.FIXTURE_SHA256,
                          size_bytes=m.FIXTURE_SIZE),
-        baseline=section(platform, baseline, operations, baseline_median, run_id),
-        candidate=section(platform, candidate, operations, candidate_median, run_id),
+        baseline=section(platform, baseline, operations, baseline_median, run_id,
+                         worktree=WORKTREES["baseline"]),
+        candidate=section(platform, candidate, operations, candidate_median, run_id,
+                          worktree=WORKTREES["candidate"]),
     )
     report["baseline_j2k"] = section(platform, baseline, [m.J2K_OPERATION],
-                                    baseline_median, run_id)
+                                    baseline_median, run_id,
+                                    worktree=WORKTREES["baseline"])
     report["candidate_j2k"] = section(platform, candidate, [m.J2K_OPERATION],
-                                     candidate_median, run_id)
+                                     candidate_median, run_id,
+                                     worktree=WORKTREES["candidate"])
     # pairing_plan() expects corpus and J2K under each source revision.
-    report["baseline"] = dict(corpus=report["baseline"], j2k=report.pop("baseline_j2k"))
-    report["candidate"] = dict(corpus=report["candidate"], j2k=report.pop("candidate_j2k"))
+    report["baseline"] = dict(worktree=WORKTREES["baseline"],
+                              corpus=report["baseline"], j2k=report.pop("baseline_j2k"))
+    report["candidate"] = dict(worktree=WORKTREES["candidate"],
+                               corpus=report["candidate"], j2k=report.pop("candidate_j2k"))
     return resummarize(report)
 
 
@@ -191,6 +206,34 @@ class ReleaseParityTests(unittest.TestCase):
         result = self.gate()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("linux, macos and windows", result.stdout)
+
+    def test_rejects_unstaged_or_wrong_pdfium_attribution(self):
+        original = copy.deepcopy(self.reports["linux"])
+        filename = pdfium_filename("linux")
+
+        def mutate(report, kind):
+            if kind == "missing":
+                for side in ("baseline", "candidate"):
+                    report[side]["corpus"].pop("pdfium_runtime", None)
+            elif kind == "wrong_directory":
+                for side in ("baseline", "candidate"):
+                    report[side]["corpus"]["pdfium_runtime"]["path"] = (
+                        f"/opt/wrong/{filename}")
+            elif kind == "wrong_filename":
+                report["candidate"]["corpus"]["pdfium_runtime"]["path"] = (
+                    "/tmp/iris-parity-source-candidate/pdfium.dll")
+            elif kind == "not_required":
+                report["candidate"]["corpus"]["pdfium_runtime"]["required"] = False
+            else:
+                report["candidate"].pop("worktree")
+
+        for kind in ("missing", "wrong_directory", "wrong_filename", "not_required",
+                     "missing_worktree"):
+            with self.subTest(kind=kind):
+                report = copy.deepcopy(original)
+                mutate(report, kind)
+                self.save("linux", report)
+                self.assert_rejected()
 
     def test_fixture_complete_reports_fit_the_report_budget(self):
         budget = json.loads(POLICY.read_text(encoding="utf-8"))["max_report_bytes"]
@@ -614,14 +657,18 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertIn("        shell: bash\n        env:\n"
                           "          SOURCE_SHA: ${{ inputs.source_sha }}\n", block)
             platform = job.removeprefix("parity-")
+            pdfium_flag = {
+                "linux": ' --pdfium-library "$RUNNER_TEMP/iris-pdfium-stage/usr/lib/iris/libpdfium.so"',
+                "windows": ' --pdfium-library "$IRIS_VALIDATION_PDFIUM_RUNTIME/pdfium.dll"',
+            }.get(platform, "")
             self.assertIn(
-                f'--corpus "$RUNNER_TEMP/iris-preview-corpus" '
+                f'--corpus "$RUNNER_TEMP/iris-preview-corpus"{pdfium_flag} '
                 f'--output audit/parity/{platform}.json\n', block)
             self.assertIn('--candidate "$SOURCE_SHA"', block)
             self.assertIn(
                 f'        run: python3 scripts/parity_source_compare.py --repo . '
-                f'--candidate "$SOURCE_SHA" --corpus "$RUNNER_TEMP/iris-preview-corpus" '
-                f'--output audit/parity/{platform}.json\n', block)
+                f'--candidate "$SOURCE_SHA" --corpus "$RUNNER_TEMP/iris-preview-corpus"'
+                f'{pdfium_flag} --output audit/parity/{platform}.json\n', block)
             if platform == "linux":
                 self.assertIn("sudo apt-get install -y", block)
                 for package in ("pkg-config", "clang", "nasm"):
@@ -633,10 +680,14 @@ class WorkflowContractTests(unittest.TestCase):
                 self.assertIn("./scripts/fetch-pdfium-runtime.sh", block)
                 self.assertIn("libpdfium.so", block)
                 self.assertIn("IRIS_VERIFY_PDFIUM_PROVENANCE", block)
+                self.assertIn(
+                    '--pdfium-library "$RUNNER_TEMP/iris-pdfium-stage/usr/lib/iris/'
+                    'libpdfium.so"', block)
                 self.assertIn("shared-key: parity-linux-cargo", block)
             elif platform == "macos":
                 self.assertIn("brew install pkg-config gnupg nasm cmake", block)
                 self.assertNotIn("brew install ffmpeg", block)
+                self.assertNotIn("--pdfium-library", block)
                 self.assertIn("python3 scripts/test-macos-ffmpeg.py", block)
                 self.assertIn("IRIS_FFMPEG_JOBS:", block)
                 self.assertIn("shared-key: parity-macos-cargo", block)
@@ -651,6 +702,8 @@ class WorkflowContractTests(unittest.TestCase):
                 self.assertIn("gh attestation verify", block)
                 self.assertIn("chromium/8138", block)
                 self.assertIn("IRIS_VALIDATION_PDFIUM_RUNTIME", block)
+                self.assertIn(
+                    '--pdfium-library "$IRIS_VALIDATION_PDFIUM_RUNTIME/pdfium.dll"', block)
                 self.assertIn("shared-key: parity-windows-cargo", block)
             self.assertIn(f"      - uses: {UPLOAD}\n", block)
             self.assertIn(f"          name: parity-{platform}\n"
