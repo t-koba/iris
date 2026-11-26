@@ -158,6 +158,8 @@ fuzz 用のクレートは各 `fuzz/` ディレクトリで同じ操作をしま
 
 macOS の外側の `Iris-macos.pkg` は `IRIS_MACOS_INSTALLER_IDENTITY` に Developer ID Installer を設定したときだけ `productsign` で署名し、`IRIS_MACOS_INSTALLER_NOTARY_PROFILE`（未設定なら `IRIS_MACOS_NOTARY_PROFILE`）で公証・staple します。未設定なら PKG は署名なし・未公証のままです。`scripts/macos-installer-trust.py verify` は macOS 上で `pkgutil --check-signature`、`xcrun stapler validate`、`spctl -a -vvv -t install` を実行し、証明書名・keychain profile・パスを除いた `audit/macos-installer-trust.json` を残します。公開ジョブは `release-policy.py` の直後に `check` でダウンロード済み PKG のサイズ・SHA-256 と証拠を照合し、検証済みインストーラの信頼がなければ Release を公開しません。
 
+タグ push の `package-macos` は `scripts/macos-signing-provision.py` で一時 keychain を作り、base64 の `.p12` を import してから `notarytool store-credentials` でアプリ用と installer 用の profile を保存します。operator secret は `IRIS_MACOS_SIGNING_P12_BASE64`、`IRIS_MACOS_SIGNING_P12_PASSWORD`、`IRIS_MACOS_KEYCHAIN_PASSWORD`、`IRIS_MACOS_APPLE_ID`、`IRIS_MACOS_TEAM_ID`、`IRIS_MACOS_APP_PASSWORD` です。値は repo・ログ・証拠に書き込まず、2 つの profile 名が同じでも構いません。不足していればタグのパッケージングは失敗し、trust gate は緩められません。`workflow_dispatch` は署名なしのままです。
+
 Windows のリリースでは、ZIP とライセンス関連の検証に加えて、インストーラの smoke で
 `Iris-windows-setup.exe` を空のディレクトリにインストールし、インストール済みファイルを export 済み
 `product-inventory.json` と名前・サイズ・SHA-256 で照合します（`scripts/windows-installed-smoke.py`）。

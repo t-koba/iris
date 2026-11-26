@@ -53,6 +53,9 @@ jobs:
       - name: Validate macOS installer trust gate offline
         timeout-minutes: 1
         run: python3 scripts/test-macos-installer-trust.py
+      - name: Validate macOS signing credential provisioning offline
+        timeout-minutes: 1
+        run: python3 scripts/test-macos-signing-provision.py
 
       - name: Resolve package source and workspace version
         id: source
@@ -128,8 +131,24 @@ jobs:
         run: cargo fetch --locked
       - name: Validate pinned macOS runtime contracts
         run: python3 scripts/test-macos-ffmpeg.py
+      - name: Provision macOS signing credentials
+        if: github.event_name == 'push'
+        env:
+          IRIS_MACOS_SIGN_IDENTITY: ${{ secrets.IRIS_MACOS_SIGN_IDENTITY }}
+          IRIS_MACOS_INSTALLER_IDENTITY: ${{ secrets.IRIS_MACOS_INSTALLER_IDENTITY }}
+          IRIS_MACOS_NOTARY_PROFILE: ${{ secrets.IRIS_MACOS_NOTARY_PROFILE }}
+          IRIS_MACOS_INSTALLER_NOTARY_PROFILE: ${{ secrets.IRIS_MACOS_INSTALLER_NOTARY_PROFILE }}
+          IRIS_MACOS_SIGNING_P12_BASE64: ${{ secrets.IRIS_MACOS_SIGNING_P12_BASE64 }}
+          IRIS_MACOS_SIGNING_P12_PASSWORD: ${{ secrets.IRIS_MACOS_SIGNING_P12_PASSWORD }}
+          IRIS_MACOS_KEYCHAIN_PASSWORD: ${{ secrets.IRIS_MACOS_KEYCHAIN_PASSWORD }}
+          IRIS_MACOS_APPLE_ID: ${{ secrets.IRIS_MACOS_APPLE_ID }}
+          IRIS_MACOS_TEAM_ID: ${{ secrets.IRIS_MACOS_TEAM_ID }}
+          IRIS_MACOS_APP_PASSWORD: ${{ secrets.IRIS_MACOS_APP_PASSWORD }}
+          IRIS_MACOS_KEYCHAIN_PATH: ${{ runner.temp }}/iris-signing.keychain-db
+        run: python3 scripts/macos-signing-provision.py
       - name: Package macOS app
         env:
+          IRIS_MACOS_KEYCHAIN_PATH: ${{ runner.temp }}/iris-signing.keychain-db
           IRIS_MACOS_SIGN_IDENTITY: ${{ github.event_name == 'push' && secrets.IRIS_MACOS_SIGN_IDENTITY || '-' }}
           IRIS_MACOS_NOTARY_PROFILE: ${{ github.event_name == 'push' && secrets.IRIS_MACOS_NOTARY_PROFILE || '' }}
           IRIS_MACOS_INSTALLER_IDENTITY: ${{ github.event_name == 'push' && secrets.IRIS_MACOS_INSTALLER_IDENTITY || '' }}

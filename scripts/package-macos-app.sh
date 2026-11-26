@@ -17,6 +17,10 @@ sign_identity="${IRIS_MACOS_SIGN_IDENTITY:--}"
 notary_profile="${IRIS_MACOS_NOTARY_PROFILE:-}"
 installer_identity="${IRIS_MACOS_INSTALLER_IDENTITY:-}"
 installer_notary_profile="${IRIS_MACOS_INSTALLER_NOTARY_PROFILE:-$notary_profile}"
+notary_keychain_args=()
+if [[ -n "${IRIS_MACOS_KEYCHAIN_PATH:-}" ]]; then
+    notary_keychain_args=(--keychain "$IRIS_MACOS_KEYCHAIN_PATH")
+fi
 deployment_target="${IRIS_MACOS_DEPLOYMENT_TARGET:-14.0}"
 export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
 baseline="${IRIS_MACOS_FFMPEG_BASELINE:-}"
@@ -241,7 +245,7 @@ if [[ -n "$notary_profile" ]]; then
         exit 1
     fi
 
-    xcrun notarytool submit "$zip_path" --keychain-profile "$notary_profile" --wait
+    xcrun notarytool submit "$zip_path" --keychain-profile "$notary_profile" --wait "${notary_keychain_args[@]}"
     xcrun stapler staple "$app_root"
     rm -f "$zip_path"
     ditto -c -k --sequesterRsrc --keepParent "$app_root" "$zip_path"
@@ -263,7 +267,7 @@ if [[ -n "$installer_identity" ]]; then
     rm -f "$signed_pkg_path"
     productsign --sign "$installer_identity" "$pkg_path" "$signed_pkg_path"
     mv -f "$signed_pkg_path" "$pkg_path"
-    xcrun notarytool submit "$pkg_path" --keychain-profile "$installer_notary_profile" --wait
+    xcrun notarytool submit "$pkg_path" --keychain-profile "$installer_notary_profile" --wait "${notary_keychain_args[@]}"
     xcrun stapler staple "$pkg_path"
     echo "created $pkg_path (signed and notarized installer)"
 else
