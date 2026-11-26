@@ -40,6 +40,7 @@ PREVIEW_OPERATIONS = {
 IDENTITY_KEYS = (
     "rustc", "target_os", "target_arch", "runner_name", "runner_os", "runner_arch",
     "runner_image_os", "runner_image_version", "cpu_model", "available_parallelism",
+    "build_profile", "release_opt_level", "features",
 )
 MAX_COMMAND_BYTES = 65536
 MAX_ERROR_BYTES = 4096
@@ -84,9 +85,17 @@ def run(command, cwd, env, label):
 
 
 def parse_records(text, operations, label):
-    """Accept exactly one correctness record and the expected latency set."""
-    correctness, timings = [], []
+    """Accept exactly one correctness record, the latency set and an optional runtime."""
+    correctness, timings, runtimes = [], [], []
     for line in text.splitlines():
+        if line.startswith('PREVIEW_PDFIUM_RUNTIME '):
+            record = json.loads(line[len('PREVIEW_PDFIUM_RUNTIME '):])
+            require(type(record) is dict and set(record) == {'path', 'required'}
+                    and type(record['path']) is str and type(record['required']) is bool,
+                    f'{label}: invalid pdfium runtime record')
+            require(not runtimes, f'{label}: duplicate pdfium runtime record')
+            runtimes.append(record)
+            continue
         for marker, records, record_type in (
             ('PREVIEW_CORRECTNESS ', correctness, 'iris.preview_correctness.v1'),
             ('PREVIEW_LATENCY ', timings, 'iris.preview_latency.v1'),
@@ -99,7 +108,8 @@ def parse_records(text, operations, label):
     require({item['operation'] for item in timings} == set(operations)
             and len(timings) == len(operations), f'{label}: latency operation set mismatch')
     require(all(item['passed'] is True for item in correctness), f'{label}: correctness failed')
-    return dict(correctness=correctness[0], timings=timings)
+    return dict(correctness=correctness[0], timings=timings,
+                pdfium_runtime=runtimes[0] if runtimes else None)
 
 
 def identity_pair(baseline, candidate):
@@ -118,6 +128,8 @@ def paired_records(baseline, candidate, label):
     """Fail closed instead of comparing records from different experiments."""
     require(identity_pair(baseline['correctness']['identity'],
                           candidate['correctness']['identity']), f'{label}: identity mismatch')
+    require(baseline.get('pdfium_runtime') == candidate.get('pdfium_runtime'),
+            f'{label}: pdfium runtime mismatch')
     left = {item['filename']: item for item in baseline['correctness']['fixtures']}
     right = {item['filename']: item for item in candidate['correctness']['fixtures']}
     require(set(left) == set(right), f'{label}: input set mismatch')
@@ -134,6 +146,9 @@ def paired_records(baseline, candidate, label):
     for operation in sorted(before):
         first, second = before[operation], after[operation]
         require(first['input'] == second['input'], f'{label}: {operation} input mismatch')
+        require(type(first.get('uses_ffmpeg')) is bool and type(second.get('uses_ffmpeg')) is bool
+                and first['uses_ffmpeg'] == second['uses_ffmpeg'],
+                f'{label}: {operation} uses_ffmpeg mismatch')
         require(identity_pair(first['identity'], second['identity']),
                 f'{label}: {operation} identity mismatch')
         compare_output(first['output'], second['output'], f'{label}: {operation}')

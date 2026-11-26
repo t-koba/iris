@@ -23,6 +23,9 @@ def identity(**changes):
         target_arch="x86_64", runner_name="runner", runner_os="Linux",
         runner_arch="X64", runner_image_os="ubuntu24", runner_image_version="1",
         cpu_model="cpu", available_parallelism=4,
+        build_profile="release", release_opt_level="3",
+        features=dict(video=True, pdf=True, raw_full=False),
+        cargo_lock_sha256="11" * 32,
     )
     base.update(changes)
     return base
@@ -41,21 +44,32 @@ def timing(operation, median=100, filename="paired-j2k.jp2"):
                             min=90, median=median, p90=120, median_absolute_deviation=5, max=130))
 
 
-def section(median=100, ident=None, pixels=PIXELS, filename="paired-j2k.jp2"):
-    return dict(
+def section(median=100, ident=None, pixels=PIXELS, filename="paired-j2k.jp2",
+            pdfium_runtime=None):
+    result = dict(
         correctness=dict(record="iris.preview_correctness.v1", passed=True,
                          fixtures=[dict(filename=filename, sha256=m.FIXTURE_SHA256,
                                         size_bytes=m.FIXTURE_SIZE, output=output(pixels=pixels))],
                          identity=ident or identity()),
         timings=[timing(m.J2K_OPERATION, median, filename)],
     )
+    if pdfium_runtime is not None:
+        result['pdfium_runtime'] = pdfium_runtime
+    return result
+
+
+def pdfium_runtime(path="/opt/pdfium/libpdfium.so", required=True):
+    return dict(path=path, required=required)
 
 
 def text(section):
-    return '\n'.join([
+    lines = [
         'PREVIEW_CORRECTNESS ' + json.dumps(section['correctness']),
         'PREVIEW_LATENCY ' + json.dumps(section['timings'][0]),
-    ]) + '\n'
+    ]
+    if section.get('pdfium_runtime') is not None:
+        lines.append('PREVIEW_PDFIUM_RUNTIME ' + json.dumps(section['pdfium_runtime']))
+    return '\n'.join(lines) + '\n'
 
 
 class ParitySourceCompareTests(unittest.TestCase):
@@ -112,7 +126,7 @@ class ParitySourceCompareTests(unittest.TestCase):
 
     def test_identity_pair_ignores_source_but_checks_runner_cpu_and_rustc(self):
         baseline = identity()
-        candidate = identity(source_revision="b" * 40)
+        candidate = identity(source_revision="b" * 40, cargo_lock_sha256="22" * 32)
         self.assertTrue(m.identity_pair(baseline, candidate))
         for change in ({'rustc': 'rustc 1.98'}, {'cpu_model': 'other cpu'},
                        {'runner_name': 'other runner'}, {'target_arch': 'aarch64'}):
@@ -121,6 +135,63 @@ class ParitySourceCompareTests(unittest.TestCase):
         changed = section(ident=identity(rustc='rustc 0'))
         with self.assertRaises(ValueError):
             m.paired_records(section(), changed, 'J2K')
+
+    def test_parse_records_validates_single_pdfium_runtime_marker(self):
+        base = text(section())
+        good = base + 'PREVIEW_PDFIUM_RUNTIME ' + json.dumps(pdfium_runtime()) + '\n'
+        parsed = m.parse_records(good, {m.J2K_OPERATION}, 'synthetic')
+        self.assertEqual(parsed['pdfium_runtime'], pdfium_runtime())
+        self.assertIsNone(m.parse_records(base, {m.J2K_OPERATION}, 'synthetic')['pdfium_runtime'])
+
+        def stream(*payloads):
+            return base + ''.join('PREVIEW_PDFIUM_RUNTIME ' + payload + '\n'
+                                  for payload in payloads)
+
+        marker = json.dumps(pdfium_runtime())
+        bad_streams = [
+            stream(marker, marker),
+            stream('{bad json}'),
+            stream(json.dumps({"path": 1, "required": True})),
+            stream(json.dumps({"path": "/opt/pdfium/libpdfium.so", "required": "true"})),
+            stream(json.dumps({"path": "/opt/pdfium/libpdfium.so", "required": 1})),
+            stream(json.dumps({"path": "/opt/pdfium/libpdfium.so"})),
+            stream(json.dumps({"path": "/opt/pdfium/libpdfium.so", "required": True,
+                               "extra": 1})),
+            stream(json.dumps(["/opt/pdfium/libpdfium.so", True])),
+        ]
+        for payload in bad_streams:
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                m.parse_records(payload, {m.J2K_OPERATION}, 'synthetic')
+
+    def test_paired_records_rejects_build_and_runtime_drift(self):
+        baseline = section(pdfium_runtime=pdfium_runtime())
+        m.paired_records(baseline, section(pdfium_runtime=pdfium_runtime()), 'J2K')
+        for change in ({'build_profile': 'debug'}, {'release_opt_level': 'z'},
+                       {'features': dict(video=False, pdf=True, raw_full=False)}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                m.paired_records(baseline, section(ident=identity(**change),
+                                                   pdfium_runtime=pdfium_runtime()), 'J2K')
+        for runtime in (pdfium_runtime(path='/other/libpdfium.so'),
+                        pdfium_runtime(required=False), None):
+            with self.subTest(runtime=runtime), self.assertRaises(ValueError):
+                m.paired_records(baseline, section(pdfium_runtime=runtime), 'J2K')
+        with self.assertRaises(ValueError):
+            m.paired_records(section(), baseline, 'J2K')
+
+    def test_paired_records_rejects_uses_ffmpeg_drift(self):
+        baseline = section()
+        for changed in (True, None, "false", 1):
+            candidate = section()
+            candidate['timings'][0]['uses_ffmpeg'] = changed
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                m.paired_records(baseline, candidate, 'J2K')
+        ffmpeg = section()
+        ffmpeg['timings'][0]['uses_ffmpeg'] = True
+        with self.assertRaises(ValueError):
+            m.paired_records(baseline, ffmpeg, 'J2K')
+        both_ffmpeg = section()
+        both_ffmpeg['timings'][0]['uses_ffmpeg'] = True
+        m.paired_records(ffmpeg, both_ffmpeg, 'J2K')
 
     def test_install_example_skips_same_file_and_stages_other_checkout(self):
         with tempfile.TemporaryDirectory() as scratch:

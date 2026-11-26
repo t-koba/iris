@@ -104,6 +104,17 @@ fn identity() -> Result<serde_json::Value, Box<dyn Error>> {
         "runner_image_version": std::env::var("ImageVersion").ok(),
         "cpu_model": cpu_model(),
         "available_parallelism": std::thread::available_parallelism().ok().map(|n| n.get()),
+        "build_profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+        "release_opt_level": if cfg!(debug_assertions) {
+            None
+        } else {
+            Some(std::env::var("CARGO_PROFILE_RELEASE_OPT_LEVEL").unwrap_or_else(|_| "3".into()))
+        },
+        "features": {
+            "video": cfg!(feature = "video"),
+            "pdf": cfg!(feature = "pdf"),
+            "raw_full": cfg!(feature = "raw-full"),
+        },
     }))
 }
 
