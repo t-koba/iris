@@ -427,3 +427,5 @@ synthetic positive regression は到達可能な PASS を確認するだけで�
 | `ci.yml` | push・プルリクエスト・週 1 回 | 整形、lint、依存の監査、ビルド、バイナリサイズの上限、テスト、SFTP / SMB の結合テスト、fuzz の短時間実行。CI の Windows ビルドは minimal 構成だが、リリースは検証済み product stage を使用 |
 | `release.yml` | `main` 上の version 一致 `v<version>` タグ / 選択した run ref での手動監査 | 3 OS のパッケージ・チェックサムと別 artifact の監査レポート。Windows は検証用 reusable workflow の成果物を検証して stage し、インストール済みペイロードを product inventory と照合。Release 公開はタグ push のみ |
 | `fuzz-long.yml` | 週 1 回 | fuzz を長時間実行 |
+
+`ci.yml` の `workflow-contracts` は、checksum を検証した固定版 actionlint 1.7.12 で `.github/workflows/` を検査します。指摘は JSON Lines にして `.github/actionlint-baseline.jsonl` と並べ替えて比較し、追加・解消のどちらも差分として失敗します。

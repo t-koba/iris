@@ -355,6 +355,55 @@ def linux_pristine_stage_order():
     )
 
 
+def pinned_actionlint_contract():
+    """The workflow-contracts job pins actionlint and diffs a sorted baseline."""
+    job = ci_job_block("workflow-contracts")
+    install = ci_step_block("Install pinned actionlint 1.7.12", "workflow-contracts")
+    lint = ci_step_block("Validate workflows with actionlint", "workflow-contracts")
+    compare = ci_step_block("Compare actionlint findings with baseline", "workflow-contracts")
+    upload = ci_step_block("Upload actionlint findings on baseline mismatch", "workflow-contracts")
+    if not all((job, install, lint, compare, upload)):
+        return False
+    markers = (
+        "      - uses: actions/checkout@v7\n",
+        "      - name: Install pinned actionlint 1.7.12\n",
+        "      - name: Validate workflows with actionlint\n",
+        "      - name: Compare actionlint findings with baseline\n",
+        "      - name: Upload actionlint findings on baseline mismatch\n",
+    )
+    positions = [job.find(marker) for marker in markers]
+    if any(position < 0 for position in positions) or positions != sorted(positions):
+        return False
+    checksums_sha256 = "433028cf0ba3c42163ea1a668dedce30fcdbe84fe912b1a5e288c006eab8a4f5"
+    tarball_sha256 = "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+    tarball = "actionlint_1.7.12_linux_amd64.tar.gz"
+    return (
+        "releases/download/v1.7.12" in install
+        and "actionlint_1.7.12_checksums.txt" in install
+        and tarball in install
+        and checksums_sha256 in install
+        and tarball_sha256 in install
+        and f"{tarball_sha256}  {tarball}" in install
+        and "sha256sum -c -" in install
+        and '"1.7.12"' in install
+        and '"installed by downloading from release page"' in install
+        and "-version" in install
+        and "-shellcheck= -pyflakes=" in lint
+        and "-format '{{range $err := .}}{{json $err}}{{end}}'" in lint
+        and '> "$RUNNER_TEMP/actionlint-findings.jsonl" || status=$?' in lint
+        and ".github/workflows" not in lint
+        and "status >= 2" in lint
+        and "-ignore" not in job
+        and ".github/actionlint-baseline.jsonl" in compare
+        and compare.count("LC_ALL=C sort ") == 2
+        and 'diff -u "$RUNNER_TEMP/actionlint-baseline.sorted.jsonl" "$RUNNER_TEMP/actionlint-findings.sorted.jsonl"' in compare
+        and "uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4\n" in upload
+        and "if: failure()\n" in upload
+        and "name: actionlint-findings\n" in upload
+        and "path: ${{ runner.temp }}/actionlint-findings.jsonl\n" in upload
+    )
+
+
 checks = {
     "Final macOS installer trust runs before publication and is offline-tested": (
         release.count(installer_verify) == 1 and release.count(installer_check) == 1
@@ -595,6 +644,7 @@ permissions:
         "workflow-contracts",
         "run: python3 scripts/test-workflow-triggers.py",
     ),
+    "Pinned actionlint findings are baseline-compared without ignored rules": pinned_actionlint_contract(),
     "Product-CI macOS evidence comes from the exact production stage before its audit": (
         in_order(macos_product_step, "./scripts/package-macos-app.sh",
                  "python3 scripts/macos-ffmpeg.py check dist/macos/Iris.app",

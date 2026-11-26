@@ -586,6 +586,72 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Install pinned actionlint 1.7.12
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_url="https://github.com/rhysd/actionlint/releases/download/v1.7.12"
+          checksums_file="$RUNNER_TEMP/actionlint_1.7.12_checksums.txt"
+          tarball_file="$RUNNER_TEMP/actionlint_1.7.12_linux_amd64.tar.gz"
+          checksums_sha256="433028cf0ba3c42163ea1a668dedce30fcdbe84fe912b1a5e288c006eab8a4f5"
+
+          curl -fsSL "$release_url/actionlint_1.7.12_checksums.txt" -o "$checksums_file"
+          actual="$(sha256sum "$checksums_file" | cut -d ' ' -f 1)"
+          if [[ "$actual" != "$checksums_sha256" ]]; then
+            echo "actionlint checksums file SHA-256 mismatch: $actual" >&2
+            exit 1
+          fi
+
+          curl -fsSL "$release_url/actionlint_1.7.12_linux_amd64.tar.gz" -o "$tarball_file"
+          expected_line="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint_1.7.12_linux_amd64.tar.gz"
+          if ! grep -Fxq "$expected_line" "$checksums_file"; then
+            echo "actionlint checksums file lacks the exact pinned tarball line" >&2
+            exit 1
+          fi
+          (
+            cd "$RUNNER_TEMP"
+            printf '%s\n' "$expected_line" | sha256sum -c -
+          )
+          tar -xzf "$tarball_file" -C "$RUNNER_TEMP" actionlint
+          chmod +x "$RUNNER_TEMP/actionlint"
+          installed="$("$RUNNER_TEMP/actionlint" -version)"
+          mapfile -t version_lines <<< "$installed"
+          if [[ "${version_lines[0]:-}" != "1.7.12" || "${version_lines[1]:-}" != "installed by downloading from release page" ]]; then
+            echo "unexpected actionlint release version: $installed" >&2
+            exit 1
+          fi
+
+      - name: Validate workflows with actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          "$RUNNER_TEMP/actionlint" -shellcheck= -pyflakes= \
+            -format '{{range $err := .}}{{json $err}}{{end}}' \
+            > "$RUNNER_TEMP/actionlint-findings.jsonl" || status=$?
+          if (( status >= 2 )); then
+            echo "actionlint execution failed with status $status" >&2
+            exit "$status"
+          fi
+
+      - name: Compare actionlint findings with baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          LC_ALL=C sort "$RUNNER_TEMP/actionlint-findings.jsonl" > "$RUNNER_TEMP/actionlint-findings.sorted.jsonl"
+          LC_ALL=C sort .github/actionlint-baseline.jsonl > "$RUNNER_TEMP/actionlint-baseline.sorted.jsonl"
+          if ! diff -u "$RUNNER_TEMP/actionlint-baseline.sorted.jsonl" "$RUNNER_TEMP/actionlint-findings.sorted.jsonl"; then
+            echo "actionlint findings differ from .github/actionlint-baseline.jsonl; update the baseline intentionally" >&2
+            exit 1
+          fi
+
+      - name: Upload actionlint findings on baseline mismatch
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: actionlint-findings
+          path: ${{ runner.temp }}/actionlint-findings.jsonl
+
       - name: Workflow contract regressions
         run: python3 scripts/test-workflow-triggers.py
 
