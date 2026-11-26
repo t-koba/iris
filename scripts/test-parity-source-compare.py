@@ -25,6 +25,8 @@ def identity(**changes):
         cpu_model="cpu", available_parallelism=4,
         build_profile="release", release_opt_level="3",
         features=dict(video=True, pdf=True, raw_full=False),
+        ffmpeg_runtime=dict(codec_version=618100, format_version=618100,
+                            util_version=591100),
         cargo_lock_sha256="11" * 32,
     )
     base.update(changes)
@@ -177,6 +179,28 @@ class ParitySourceCompareTests(unittest.TestCase):
                 m.paired_records(baseline, section(pdfium_runtime=runtime), 'J2K')
         with self.assertRaises(ValueError):
             m.paired_records(section(), baseline, 'J2K')
+
+    def test_paired_records_rejects_ffmpeg_runtime_drift(self):
+        baseline = section()
+        m.paired_records(baseline, section(), 'J2K')
+        bumped = dict(codec_version=618101, format_version=618100,
+                      util_version=591100)
+        with self.subTest(change='codec_version bump'):
+            with self.assertRaises(ValueError):
+                m.paired_records(baseline, section(ident=identity(ffmpeg_runtime=bumped)),
+                                 'J2K')
+            drifted = section()
+            drifted['timings'][0]['identity'] = identity(ffmpeg_runtime=bumped)
+            with self.assertRaises(ValueError):
+                m.paired_records(baseline, drifted, 'J2K')
+        for runtime in (dict(codec_version=618100, format_version=618200,
+                             util_version=591100),
+                        dict(codec_version=618100, format_version=618100,
+                             util_version=591200),
+                        None):
+            with self.subTest(runtime=runtime), self.assertRaises(ValueError):
+                m.paired_records(baseline, section(ident=identity(ffmpeg_runtime=runtime)),
+                                 'J2K')
 
     def test_paired_records_rejects_uses_ffmpeg_drift(self):
         baseline = section()

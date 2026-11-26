@@ -40,7 +40,7 @@ PREVIEW_OPERATIONS = {
 IDENTITY_KEYS = (
     "rustc", "target_os", "target_arch", "runner_name", "runner_os", "runner_arch",
     "runner_image_os", "runner_image_version", "cpu_model", "available_parallelism",
-    "build_profile", "release_opt_level", "features",
+    "build_profile", "release_opt_level", "features", "ffmpeg_runtime",
 )
 MAX_COMMAND_BYTES = 65536
 MAX_ERROR_BYTES = 4096

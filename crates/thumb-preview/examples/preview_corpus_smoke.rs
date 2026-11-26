@@ -167,6 +167,20 @@ fn cpu_model() -> Option<String> {
     None
 }
 
+#[cfg(feature = "video")]
+fn ffmpeg_runtime() -> serde_json::Value {
+    serde_json::json!({
+        "codec_version": ffmpeg_next::codec::version(),
+        "format_version": ffmpeg_next::format::version(),
+        "util_version": ffmpeg_next::util::version(),
+    })
+}
+
+#[cfg(not(feature = "video"))]
+fn ffmpeg_runtime() -> serde_json::Value {
+    serde_json::Value::Null
+}
+
 fn runtime_identity() -> Result<serde_json::Value, Box<dyn Error>> {
     let rustc = Command::new("rustc")
         .arg("--version")
@@ -205,6 +219,7 @@ fn runtime_identity() -> Result<serde_json::Value, Box<dyn Error>> {
             "pdf": cfg!(feature = "pdf"),
             "raw_full": cfg!(feature = "raw-full"),
         },
+        "ffmpeg_runtime": ffmpeg_runtime(),
         "jpeg_cr3_runtime": "Iris Rust preview code; dependency versions are bound by cargo_lock_sha256; FFmpeg and PDFium are not invoked by these two operations"
     }))
 }
