@@ -4,10 +4,11 @@
 The workflow is reusable (workflow_call only) and report-only by default; a
 release caller may opt into a bounded native asset export. It never promotes a
 release itself. This module is the single source of truth for its fail-closed shape:
-exact-SHA checkout, all offline gates, pinned vcpkg HEAD assertion, verified
-source acquisition, derived overlay, stock bindings, PDFium attestation, PE
-import inventory, clean-install preview smoke, bounded JSON evidence and
-cleanup of native bytes. It performs no build and no network access.
+exact-SHA checkout and immutable third-party action refs, all offline gates,
+pinned vcpkg HEAD assertion, verified source acquisition, derived overlay,
+stock bindings, PDFium attestation, PE import inventory, clean-install preview
+smoke, bounded JSON evidence and cleanup of native bytes. It performs no build
+and no network access.
 """
 
 import argparse
@@ -390,14 +391,15 @@ REQUIRED_MARKERS = (
     PRODUCT_EVIDENCE_MARKERS + PRODUCT_CLEANUP_MARKERS + SOURCE_BUNDLE_MARKERS
 ) + PRODUCT_ZIP_MARKERS + RELEASE_PACKAGE_MARKERS
 
-# Only these actions may appear in the validation workflow. A closed allowlist
-# fails closed on any new or renamed action (including a differently spelled
-# upload action) instead of trying to enumerate every upload syntax.
+# Only these exact action refs may appear in the validation workflow. The
+# trailing `# version` text on a `uses:` line is documentation, not part of the
+# ref; GitHub executes the immutable SHA. Mutable tags and branch names are
+# forbidden on the release path, so the closed allowlist names SHAs only.
 ALLOWED_ACTIONS = frozenset((
-    "actions/checkout@v4",
-    "ilammy/msvc-dev-cmd@v1",
-    "dtolnay/rust-toolchain@master",
-    "actions/upload-artifact@v4",
+    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756",
+    "dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc",
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
 ))
 UPLOAD_ACTION_PREFIX = "actions/upload-artifact@"
 UPLOAD_EXPORT_INPUT = "inputs.export_release_assets"
@@ -443,6 +445,12 @@ def home_forbidden(line):
 YAML_ESCAPE_RE = re.compile(r"\\(?:u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|x[0-9a-fA-F]{2})")
 
 FORBIDDEN_MARKERS = (
+    # Mutable refs previously used on this path stay forbidden even when the
+    # ref parser is bypassed by a future YAML spelling.
+    "actions/checkout@v4",
+    "ilammy/msvc-dev-cmd@v1",
+    "dtolnay/rust-toolchain@master",
+    "actions/upload-artifact@v4",
     "workflow_dispatch:",
     "  pull_request:",
     "  push:",

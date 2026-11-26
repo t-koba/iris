@@ -48,7 +48,7 @@ jobs:
       IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS: "60"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -81,7 +81,7 @@ jobs:
 
       # Pinned vcpkg source checkout; fail closed on HEAD drift before building.
       - name: Checkout pinned vcpkg source
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: microsoft/vcpkg
           ref: b8dfe957ec8b5c0ef5c4b31eea594b8486af744f
@@ -113,7 +113,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "vcpkg --version failed" }
 
       - name: Set up MSVC developer environment (x64)
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
           arch: x64
 
@@ -122,7 +122,7 @@ jobs:
         run: |
           "VCPKG_ROOT=$env:IRIS_VALIDATION_VCPKG_ROOT" >> $env:GITHUB_ENV
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.97.1
           components: rustfmt, clippy
@@ -797,7 +797,7 @@ jobs:
 
       - name: Upload verified release assets for release packaging
         if: ${{ inputs.export_release_assets }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-release-assets
           if-no-files-found: error
@@ -811,7 +811,7 @@ jobs:
 
       - name: Upload reviewed Windows native evidence
         if: ${{ inputs.export_release_assets }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-native-evidence
           if-no-files-found: error
@@ -872,7 +872,7 @@ jobs:
 
       - name: Retain bounded JSON evidence only
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-native-validation-evidence
           if-no-files-found: error

@@ -11,6 +11,27 @@ import unittest
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 
+# The version suffix is documentation; GitHub resolves the immutable SHA.
+PINNED_CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7"
+PINNED_MSVC = ("ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 "
+               "# v1.13.0")
+PINNED_TOOLCHAIN = ("dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc "
+                    "# master")
+PINNED_UPLOAD = ("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 "
+                 "# v4")
+PINNED_ACTION_REFS = (PINNED_CHECKOUT, PINNED_MSVC, PINNED_TOOLCHAIN, PINNED_UPLOAD)
+MUTABLE_ACTION_REFS = (
+    "actions/checkout@v4",
+    "ilammy/msvc-dev-cmd@v1",
+    "dtolnay/rust-toolchain@master",
+    "actions/upload-artifact@v4",
+)
+
+
+def ref_of(uses_line):
+    """The executable ref on a `uses:` line, excluding its version comment."""
+    return uses_line.split(" #", 1)[0]
+
 
 def load():
     spec = importlib.util.spec_from_file_location(
@@ -59,7 +80,9 @@ class WorkflowContracts(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         shape = json.loads(r.stdout)
         self.assertEqual(shape["triggers"], ["workflow_call"])
-        self.assertIn("actions/upload-artifact@v4", shape["allowed_actions"])
+        self.assertEqual(
+            set(shape["allowed_actions"]), {ref_of(ref) for ref in PINNED_ACTION_REFS})
+        self.assertTrue(set(MUTABLE_ACTION_REFS) <= set(shape["forbidden_markers"]))
         for marker in self.mod.ATTESTATION_MARKERS:
             self.assertIn(marker, shape["required_markers"])
         self.assertEqual(shape["source_bundle_outputs"], list(self.mod.SOURCE_BUNDLE_OUTPUTS))
@@ -71,14 +94,16 @@ class WorkflowContracts(unittest.TestCase):
 
     def test_action_refs_normalizes_yaml_spelling(self):
         mod = self.mod
+        upload = ref_of(PINNED_UPLOAD)
+        checkout = ref_of(PINNED_CHECKOUT)
         cases = (
-            ("        uses: actions/upload-artifact@v4", "actions/upload-artifact@v4"),
-            ("        uses:  actions/upload-artifact@v4", "actions/upload-artifact@v4"),
-            ('        uses: "actions/upload-artifact@v4"', "actions/upload-artifact@v4"),
-            ("        uses: 'actions/upload-artifact@v4'", "actions/upload-artifact@v4"),
-            ("      - uses: actions/checkout@v4 # pinned", "actions/checkout@v4"),
-            ("      - { name: X, uses: actions/upload-artifact@v4, "
-             "with: { path: target/debug/Iris.exe } }", "actions/upload-artifact@v4"),
+            (f"        uses: {upload}", upload),
+            (f"        uses:  {upload}", upload),
+            (f'        uses: "{upload}"', upload),
+            (f"        uses: '{upload}'", upload),
+            (f"      - uses: {PINNED_CHECKOUT}", checkout),
+            (f"      - {{ name: X, uses: {upload}, "
+             "with: { path: target/debug/Iris.exe } }", upload),
             ("      - uses: ./.github/actions/exfiltrate", "./.github/actions/exfiltrate"),
             ("        uses: /abs/local/action", "/abs/local/action"),
             ("        uses: docker://alpine:3.8", "docker://alpine:3.8"),
@@ -86,6 +111,43 @@ class WorkflowContracts(unittest.TestCase):
         for line, expected in cases:
             with self.subTest(line=line):
                 self.assertEqual(mod.action_refs(line), [expected])
+
+    def test_uses_only_pinned_action_refs(self):
+        checks = self.mod.validate(self.text)
+        self.assertEqual(checks["actions"], [
+            ref_of(PINNED_CHECKOUT), ref_of(PINNED_CHECKOUT),
+            ref_of(PINNED_MSVC), ref_of(PINNED_TOOLCHAIN),
+            ref_of(PINNED_UPLOAD), ref_of(PINNED_UPLOAD), ref_of(PINNED_UPLOAD),
+        ])
+        for ref in PINNED_ACTION_REFS:
+            self.assertIn(ref, self.text)
+
+    def test_rejects_mutable_action_refs(self):
+        # Tag and branch refs are not valid on the release path, in any YAML
+        # spelling, even when the rest of the step is otherwise well-formed.
+        for ref in MUTABLE_ACTION_REFS:
+            with self.subTest(ref=ref):
+                mutated = self.text.replace(
+                    "      - name: Assemble bounded evidence manifest",
+                    f"      - uses: {ref}\n"
+                    "      - name: Assemble bounded evidence manifest", 1)
+                with self.assertRaisesRegex(ValueError, "forbidden marker present"):
+                    self.mod.validate(mutated)
+
+        # Replacing an existing pinned step with its former mutable spelling
+        # must fail closed too, including for the three upload steps.
+        replacements = (
+            (f"      - uses: {PINNED_CHECKOUT}\n", "      - uses: actions/checkout@v4\n"),
+            (f"        uses: {PINNED_CHECKOUT}\n", "        uses: actions/checkout@v4\n"),
+            (f"        uses: {PINNED_MSVC}\n", "        uses: ilammy/msvc-dev-cmd@v1\n"),
+            (f"      - uses: {PINNED_TOOLCHAIN}\n", "      - uses: dtolnay/rust-toolchain@master\n"),
+            (f"        uses: {PINNED_UPLOAD}\n", "        uses: actions/upload-artifact@v4\n"),
+        )
+        for old, new in replacements:
+            with self.subTest(replacement=new.strip()):
+                mutated = self.text.replace(old, new, 1)
+                with self.assertRaisesRegex(ValueError, "forbidden marker present"):
+                    self.mod.validate(mutated)
 
     def test_contract_rejects_flow_style_steps(self):
         import json, subprocess
@@ -266,7 +328,7 @@ class FailClosedContracts(unittest.TestCase):
         mutated = self.text.replace(
             "      - name: Retain bounded JSON evidence only\n",
             "      - name: Ship native binary\n"
-            "        uses: actions/upload-artifact@v4\n"
+            "        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n"
             "        with:\n"
             "          name: native\n"
             "          path: target/debug/Iris.exe\n"
@@ -278,7 +340,7 @@ class FailClosedContracts(unittest.TestCase):
         mutated = self.text.replace(
             "      - name: Retain bounded JSON evidence only\n",
             "      - name: Ship native binary\n"
-            "        uses: &u actions/upload-artifact@v4\n"
+            "        uses: &u actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n"
             "        with:\n"
             "          name: native\n"
             "          path: target/debug/Iris.exe\n"
@@ -289,7 +351,7 @@ class FailClosedContracts(unittest.TestCase):
     def test_rejects_flow_style_binary_upload_second_step(self):
         mutated = self.text.replace(
             "      - name: Retain bounded JSON evidence only\n",
-            "      - { name: Ship native binary, uses: actions/upload-artifact@v4, "
+            "      - { name: Ship native binary, uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02, "
             "with: { name: native, path: target/debug/Iris.exe } }\n"
             "      - name: Retain bounded JSON evidence only\n", 1)
         with self.assertRaises(ValueError):
@@ -307,7 +369,7 @@ class FailClosedContracts(unittest.TestCase):
         mutated = self.text.replace(
             "      - name: Retain bounded JSON evidence only\n",
             "      - name: Ship native binary\n"
-            "        uses:  actions/upload-artifact@v4\n"
+            "        uses:  actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n"
             "        with:\n"
             "          name: native\n"
             "          path: target/debug/Iris.exe\n"
@@ -319,7 +381,7 @@ class FailClosedContracts(unittest.TestCase):
         mutated = self.text.replace(
             "      - name: Retain bounded JSON evidence only\n",
             '      - name: Ship native binary\n'
-            '        uses: "actions/upload-artifact@v4"\n'
+            '        uses: "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"\n'
             '        with:\n'
             '          name: native\n'
             '          path: target/debug/Iris.exe\n'
@@ -331,7 +393,7 @@ class FailClosedContracts(unittest.TestCase):
         mutated = self.text.replace(
             "      - name: Retain bounded JSON evidence only\n",
             "      - name: Ship native binary\n"
-            "        uses: 'actions/upload-artifact@v4'\n"
+            "        uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'\n"
             "        with:\n"
             "          name: native\n"
             "          path: target/debug/Iris.exe\n"
@@ -354,14 +416,14 @@ class FailClosedContracts(unittest.TestCase):
         # same mapping key at runtime but has no literal `uses` token to scan.
         variants = (
             "      - name: Anchor step\n"
-            "        &k uses: actions/checkout@v4\n"
+            "        &k uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
             "      - name: Exfil secrets\n"
             "        *k : ./.github/actions/exfiltrate\n",
-            "      - &k uses: actions/checkout@v4\n"
+            "      - &k uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
             "      - *k : ./.github/actions/exfiltrate\n",
-            "      - &$k uses: actions/checkout@v4\n"
+            "      - &$k uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
             "      - *$k : ./.github/actions/exfiltrate\n",
-            "        &/k uses: actions/checkout@v4\n"
+            "        &/k uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
             "        */k : ./.github/actions/exfiltrate\n",
             "        !!str uses: ./.github/actions/exfiltrate\n",
         )
@@ -465,7 +527,7 @@ class FailClosedContracts(unittest.TestCase):
             "        uses\n        : ./.github/actions/exfiltrate\n",
             "        uses: ./.github/actions/exfiltrate\n",
             '        "\\u0075ses": ./.github/actions/exfiltrate\n',
-            '        "\\u0075ses": actions/upload-artifact@v4\n',
+            '        "\\u0075ses": actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\n',
         )
         for variant in variants:
             with self.subTest(variant=variant):

@@ -461,7 +461,7 @@ checks = {
     and len(re.findall(r"run: python scripts/release-audit\.py ", release)) == 3,
     "Windows release consumes reviewed native-stage evidence end to end": (
         "        if: ${{ inputs.export_release_assets }}\n"
-        "        uses: actions/upload-artifact@v4\n"
+        "        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4\n"
         "        with:\n"
         "          name: windows-native-evidence\n" in win_validation
         and "python3 scripts/windows-native-evidence.py prepare" in win_validation
@@ -761,7 +761,7 @@ permissions:
         trigger not in win_validation
         for trigger in ("  workflow_dispatch:", "  pull_request:", "  push:")
     ),
-    "Windows native validation checks out the caller's exact SHA": """      - uses: actions/checkout@v4
+    "Windows native validation checks out the caller's exact SHA": """      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
