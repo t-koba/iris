@@ -505,18 +505,19 @@ class WorkflowContractTests(unittest.TestCase):
                 f'--output audit/parity/{platform}.json\n', block)
             if platform == "linux":
                 self.assertIn("sudo apt-get install -y", block)
+                for package in ("pkg-config", "clang", "nasm"):
+                    self.assertIn(package, block, f"linux misses build package {package}")
                 for package in ("libavcodec-dev", "libavformat-dev", "libavutil-dev",
                                 "libavfilter-dev", "libavdevice-dev",
-                                "libswscale-dev", "libswresample-dev",
-                                "pkg-config", "clang", "nasm"):
-                    self.assertIn(package, block, f"linux misses native package {package}")
+                                "libswscale-dev", "libswresample-dev"):
+                    self.assertNotIn(package, block, f"linux installs system FFmpeg {package}")
                 self.assertIn("./scripts/fetch-pdfium-runtime.sh", block)
                 self.assertIn("libpdfium.so", block)
                 self.assertIn("IRIS_VERIFY_PDFIUM_PROVENANCE", block)
                 self.assertIn("shared-key: parity-linux-cargo", block)
             elif platform == "macos":
                 self.assertIn("brew install pkg-config gnupg nasm cmake", block)
-                self.assertIn("brew install ffmpeg", block)
+                self.assertNotIn("brew install ffmpeg", block)
                 self.assertIn("python3 scripts/test-macos-ffmpeg.py", block)
                 self.assertIn("IRIS_FFMPEG_JOBS:", block)
                 self.assertIn("shared-key: parity-macos-cargo", block)
@@ -540,6 +541,29 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(self.evidence.count("          name: parity-"), 3)
         self.assertEqual(self.evidence.count("python3 scripts/parity_source_compare.py"), 3)
         self.assertEqual(self.evidence.count("python3 scripts/fetch-preview-corpus.py --output"), 3)
+
+    def test_paired_evidence_jobs_provision_the_pinned_runtime(self):
+        linux = self.job_block(self.evidence, 'parity-linux')
+        macos = self.job_block(self.evidence, 'parity-macos')
+        for needle in ('IRIS_FFMPEG_PREFIX: ${{ github.workspace }}/build/linux-ffmpeg\n',
+                       'FFMPEG_DIR: ${{ github.workspace }}/build/linux-ffmpeg\n',
+                       'PKG_CONFIG_PATH: ${{ github.workspace }}/build/linux-ffmpeg/lib/pkgconfig\n',
+                       'PKG_CONFIG_LIBDIR: ${{ github.workspace }}/build/linux-ffmpeg/lib/pkgconfig\n',
+                       'LD_LIBRARY_PATH: ${{ github.workspace }}/build/linux-ffmpeg/lib\n',
+                       './scripts/build-linux-ffmpeg.sh\n',
+                       'python3 scripts/linux-ffmpeg.py validate "$IRIS_FFMPEG_PREFIX"\n'):
+            self.assertIn(needle, linux, f'linux parity misses {needle!r}')
+        self.assertNotIn('libavcodec-dev', linux)
+        self.assertIn('python3 scripts/macos-ffmpeg.py prepare "$prefix"\n', macos)
+        for needle in ('echo "FFMPEG_DIR=$prefix"\n',
+                       'echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig"\n',
+                       'echo "PKG_CONFIG_LIBDIR=$prefix/lib/pkgconfig"\n',
+                       'echo "DYLD_LIBRARY_PATH=$prefix/lib',
+                       'test "$(pkg-config --variable=prefix libavcodec)" = "$prefix"\n'):
+            self.assertIn(needle, macos, f'macOS parity misses {needle!r}')
+        self.assertNotIn('brew install ffmpeg', macos)
+        windows = self.job_block(self.evidence, 'parity-windows')
+        self.assertIn('python3 scripts/windows-ffmpeg-overlay.py derive', windows)
 
     def test_each_parity_job_fetches_bytes_into_its_corpus_directory(self):
         jobs = ["parity-linux", "parity-macos", "parity-windows"]

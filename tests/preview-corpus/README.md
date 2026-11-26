@@ -195,9 +195,18 @@ force.
 prerequisite on its own. Publication uses the separate `scripts/release-parity.py`
 verifier, which requires all three same-platform linux/macos/windows pairs, zero
 unpaired sections, exact source/revision/harness binding, PDFium library attribution
-on Linux and Windows, and no candidate median slowdown. A shared-v2 report produced
-by the pinned producer can discharge that gate only when all those conditions hold;
-an unpaired diagnostic records why parity remains unknown instead.
+on Linux and Windows, and no candidate median slowdown. FFmpeg-bearing identities
+(corpus correctness and every `uses_ffmpeg` timing) additionally record codec ABI,
+configure flags and license; the verifier derives the expected values from
+`packaging/linux/ffmpeg.json` and rejects a pair even when both sides used the same
+system runtime. The paired evidence workflow builds that pinned runtime on Linux
+(`scripts/build-linux-ffmpeg.sh` plus `linux-ffmpeg.py validate`) and macOS
+(`macos-ffmpeg.py prepare`) and binds both worktrees to it with `FFMPEG_DIR`,
+pkg-config paths and the matching dynamic-library search path; Windows keeps its
+pinned vcpkg overlay. A shared-v2 report produced by the pinned producer can
+discharge that gate only when all those conditions hold; an unpaired diagnostic
+records why parity remains unknown instead. None of this is a release or parity
+claim by itself, and release readiness remains undecided.
 
 Offline contracts: `python3 scripts/test-fetch-preview-corpus.py`,
 `python3 scripts/test-parity-source-compare.py`,

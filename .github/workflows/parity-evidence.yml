@@ -25,6 +25,15 @@ jobs:
       IRIS_PREVIEW_LATENCY_SAMPLES: ${{ vars.IRIS_PREVIEW_LATENCY_SAMPLES || 21 }}
       IRIS_PDFIUM_FETCH_RETRIES: ${{ vars.IRIS_PDFIUM_FETCH_RETRIES || 3 }}
       IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS: ${{ vars.IRIS_PDFIUM_FETCH_RETRY_DELAY_SECONDS || 2 }}
+      IRIS_FFMPEG_JOBS: ${{ vars.IRIS_FFMPEG_JOBS || 2 }}
+      IRIS_FFMPEG_FETCH_SECONDS: ${{ vars.IRIS_FFMPEG_FETCH_SECONDS || 300 }}
+      IRIS_FFMPEG_FETCH_RETRIES: ${{ vars.IRIS_FFMPEG_FETCH_RETRIES || 1 }}
+      IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS: ${{ vars.IRIS_FFMPEG_FETCH_RETRY_DELAY_SECONDS || 2 }}
+      IRIS_FFMPEG_PREFIX: ${{ github.workspace }}/build/linux-ffmpeg
+      FFMPEG_DIR: ${{ github.workspace }}/build/linux-ffmpeg
+      PKG_CONFIG_PATH: ${{ github.workspace }}/build/linux-ffmpeg/lib/pkgconfig
+      PKG_CONFIG_LIBDIR: ${{ github.workspace }}/build/linux-ffmpeg/lib/pkgconfig
+      LD_LIBRARY_PATH: ${{ github.workspace }}/build/linux-ffmpeg/lib
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -40,12 +49,17 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: parity-linux-cargo
-      - name: Install system dependencies (apt FFmpeg dev plus product build tools)
+      - name: Install product build tools (no system FFmpeg)
         run: |
           sudo apt-get update
-          sudo apt-get install -y zsh pkg-config clang dpkg-dev build-essential nasm patchelf curl gnupg zlib1g-dev libbz2-dev liblzma-dev libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev
+          sudo apt-get install -y zsh pkg-config clang dpkg-dev build-essential nasm patchelf curl gnupg zlib1g-dev libbz2-dev liblzma-dev
       - name: Fetch locked Rust inputs before offline parity runs
         run: cargo fetch --locked
+      - name: Build and validate pinned FFmpeg runtime for Linux parity smoke
+        run: |
+          ./scripts/build-linux-ffmpeg.sh
+          python3 scripts/linux-ffmpeg.py validate "$IRIS_FFMPEG_PREFIX"
+          test "$(pkg-config --variable=prefix libavcodec)" = "$IRIS_FFMPEG_PREFIX"
       - name: Stage pinned PDFium runtime for Linux parity smoke
         env:
           IRIS_VERIFY_PDFIUM_PROVENANCE: "0"
@@ -105,12 +119,22 @@ jobs:
           cache-targets: false
       - name: Install system dependencies
         run: brew install pkg-config gnupg nasm cmake
-      - name: Install Homebrew FFmpeg baseline for paired comparison
-        run: brew install ffmpeg
       - name: Fetch locked Rust inputs before offline parity runs
         run: cargo fetch --locked
       - name: Validate pinned macOS runtime contracts
         run: python3 scripts/test-macos-ffmpeg.py
+      - name: Build pinned FFmpeg runtime for macOS parity smoke
+        shell: bash
+        run: |
+          prefix="$RUNNER_TEMP/iris-ffmpeg-pinned"
+          python3 scripts/macos-ffmpeg.py prepare "$prefix"
+          {
+            echo "FFMPEG_DIR=$prefix"
+            echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig"
+            echo "PKG_CONFIG_LIBDIR=$prefix/lib/pkgconfig"
+            echo "DYLD_LIBRARY_PATH=$prefix/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          } >> "$GITHUB_ENV"
+          test "$(pkg-config --variable=prefix libavcodec)" = "$prefix"
       - name: Fetch preview corpus bytes
         run: python3 scripts/fetch-preview-corpus.py --output "$RUNNER_TEMP/iris-preview-corpus"
       - name: Produce macOS paired-source parity report
