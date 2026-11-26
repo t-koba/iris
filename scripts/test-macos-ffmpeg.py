@@ -881,8 +881,9 @@ class PreviewComparison(unittest.TestCase):
             'source_revision', 'workflow_run_id', 'cargo_lock_sha256', 'rustc', 'target_arch',
             'runner_name', 'runner_os', 'runner_arch', 'runner_image_os', 'runner_image_version',
             'cpu_model', 'available_parallelism', 'release_opt_level', 'crate', 'crate_version'), 'synthetic')
-        self.identity.update(target_os='macos', build_profile='release',
-                             features=dict(video=True, pdf=True, raw_full=True))
+        self.identity.update(identity_schema=m.PREVIEW_IDENTITY_SCHEMA, target_os='macos',
+                             build_profile='release', features=dict(video=True, pdf=True, raw_full=True),
+                             ffmpeg_runtime=dict(codec_version=1, format_version=1, util_version=1))
         pins = json.loads((ROOT / 'tests/preview-corpus/fixtures.json').read_text())['files']
         self.correct = dict(record='iris.preview_correctness.v1', passed=True, identity=self.identity,
                             fixtures=[dict(filename=p['filename'], sha256=p['sha256'], size_bytes=p['size'],
@@ -1057,6 +1058,7 @@ class PreviewComparison(unittest.TestCase):
             (self.timings[0]['timing'], 'median', -1),
             (self.timings[0]['timing'], 'max', float('nan')),
             (self.timings[0]['timing'], 'max', 1 << 64),
+            (self.identity, 'identity_schema', 'other-schema'),
             (self.identity, 'source_revision', 'other-source'),
             (self.identity, 'cpu_model', None),
             (self.identity['features'], 'video', False),
@@ -1072,11 +1074,11 @@ class PreviewComparison(unittest.TestCase):
         baseline = self.parsed()
         # These records can each be valid independently, but not paired.
         for key in self.identity:
-            if key in ('target_os', 'build_profile', 'features', 'source_revision'):
-                continue  # Independently rejected above; source is also checked below.
+            if key in ('target_os', 'build_profile', 'features', 'source_revision', 'ffmpeg_runtime'):
+                continue  # Independently rejected above; FFmpeg is the candidate variable.
             old = self.identity[key]
             self.identity[key] = 'different'
-            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'identity mismatch'):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'mismatch'):
                 m.paired_preview(baseline, self.parsed())
             self.identity[key] = old
         import copy
@@ -1091,6 +1093,23 @@ class PreviewComparison(unittest.TestCase):
         candidate = copy.deepcopy(baseline)
         candidate['timings'][0]['operation'] = 'other'
         with self.assertRaises(ValueError):
+            m.paired_preview(baseline, candidate)
+
+    def test_pair_records_ffmpeg_runtime_as_the_candidate_variable(self):
+        import copy
+        baseline = self.parsed()
+        candidate = copy.deepcopy(baseline)
+        changed = dict(codec_version=2, format_version=2, util_version=2)
+        candidate['correctness']['identity']['ffmpeg_runtime'] = changed
+        for timing in candidate['timings']:
+            timing['identity']['ffmpeg_runtime'] = changed
+        pairs = m.paired_preview(baseline, candidate)
+        self.assertEqual(len(pairs), 4)
+        self.assertTrue(all(p['baseline_ffmpeg_runtime']['codec_version'] == 1 for p in pairs))
+        self.assertTrue(all(p['candidate_ffmpeg_runtime'] == changed for p in pairs))
+        # Other drift still fails closed even when the FFmpeg runtime differs.
+        candidate['correctness']['identity']['cpu_model'] = 'other-cpu'
+        with self.assertRaisesRegex(ValueError, 'identity mismatch'):
             m.paired_preview(baseline, candidate)
 
     def test_existing_report_cap_and_nonfinite_rejection(self):

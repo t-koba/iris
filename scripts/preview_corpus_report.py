@@ -26,6 +26,7 @@ PDF_VALIDATION = (
     'decoded RGB equality to correctness baseline on every warmup/sample; validation excluded from timing'
 )
 PDF_COMPARISON = 'renderer-specific diagnostic only; not an FFmpeg effect or cross-platform comparison'
+PREVIEW_IDENTITY_SCHEMA = 'iris.preview_identity.v2'
 
 
 def require(ok, message):
@@ -56,12 +57,15 @@ def parse_preview(text, source, target_os='macos'):
             'preview correctness failed')
     identity = correct['identity']
     required_identity = (
-        'source_revision', 'workflow_run_id', 'cargo_lock_sha256', 'rustc', 'target_os', 'target_arch',
+        'identity_schema', 'source_revision', 'workflow_run_id', 'cargo_lock_sha256', 'rustc', 'target_os',
+        'target_arch',
         'runner_name', 'runner_os', 'runner_arch', 'runner_image_os', 'runner_image_version', 'cpu_model',
         'available_parallelism', 'build_profile', 'release_opt_level', 'crate', 'crate_version',
     )
     for key in required_identity:
         require(identity.get(key) not in (None, ''), f'missing preview identity: {key}')
+    require('ffmpeg_runtime' in identity, 'missing preview identity: ffmpeg_runtime')
+    require(identity['identity_schema'] == PREVIEW_IDENTITY_SCHEMA, 'preview identity schema mismatch')
     require(identity['source_revision'] == source and identity['target_os'] == target_os
             and identity['features'] == dict(video=True, pdf=True, raw_full=True)
             and identity['build_profile'] == 'release', 'preview source/features/profile mismatch')

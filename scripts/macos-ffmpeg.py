@@ -27,6 +27,7 @@ PREVIEW_OPERATIONS = preview_report.PREVIEW_OPERATIONS
 PDF_RUNTIMES = preview_report.PDF_RUNTIMES
 PDF_VALIDATION = preview_report.PDF_VALIDATION
 PDF_COMPARISON = preview_report.PDF_COMPARISON
+PREVIEW_IDENTITY_SCHEMA = preview_report.PREVIEW_IDENTITY_SCHEMA
 parse_preview = preview_report.parse_preview
 validate_preview_output = preview_report.validate_preview_output
 LZMA = json.loads((ROOT / "packaging/macos/liblzma.json").read_text())
@@ -585,10 +586,25 @@ def report_bytes(report):
     return data
 
 
+def comparable_preview_identity(identity):
+    """Identity shared by both runs; FFmpeg is the variable under test here."""
+    require(identity.get('identity_schema') == PREVIEW_IDENTITY_SCHEMA,
+            'paired preview identity schema mismatch')
+    return {key: value for key, value in identity.items() if key != 'ffmpeg_runtime'}
+
+
 def paired_preview(baseline, candidate):
-    """Fail closed instead of comparing measurements from differing experiments."""
+    """Fail closed on experiment drift; record the FFmpeg runtime difference.
+
+    This native validation deliberately compares the Homebrew runtime with the staged
+    candidate, so ffmpeg_runtime is the experimental variable, not a pairing key. Every
+    other build/runner/source identity dimension must still match exactly. Parity reports
+    that compare source revisions with a constant runtime are paired separately and reject
+    FFmpeg drift in scripts/parity_source_compare.py.
+    """
     left, right = baseline['correctness'], candidate['correctness']
-    require(left['identity'] == right['identity'], 'paired preview identity mismatch')
+    require(comparable_preview_identity(left['identity']) ==
+            comparable_preview_identity(right['identity']), 'paired preview identity mismatch')
     require(sorted(left['fixtures'], key=lambda f: f['filename']) ==
             sorted(right['fixtures'], key=lambda f: f['filename']), 'paired preview correctness mismatch')
     left = {t['operation']: t for t in baseline['timings']}
@@ -601,8 +617,11 @@ def paired_preview(baseline, candidate):
         if operation == 'pdf::extract_pdf_thumbnail':
             continue
         candidate_record = right[operation]
-        for key in ('input', 'identity', 'uses_ffmpeg'):
+        for key in ('input', 'uses_ffmpeg'):
             require(baseline_record[key] == candidate_record[key], f'paired preview {key} mismatch')
+        require(comparable_preview_identity(baseline_record['identity']) ==
+                comparable_preview_identity(candidate_record['identity']),
+                'paired preview identity mismatch')
         for key in ('format', 'width', 'height', 'source'):
             require(baseline_record['output'][key] == candidate_record['output'][key],
                     'paired preview output mismatch')
@@ -612,6 +631,8 @@ def paired_preview(baseline, candidate):
         b, c = baseline_record['timing']['median'], candidate_record['timing']['median']
         pairs.append(dict(operation=operation, input=baseline_record['input'],
                           uses_ffmpeg=baseline_record['uses_ffmpeg'],
+                          baseline_ffmpeg_runtime=baseline_record['identity']['ffmpeg_runtime'],
+                          candidate_ffmpeg_runtime=candidate_record['identity']['ffmpeg_runtime'],
                           output_dimensions=[baseline_record['output'][k] for k in ('width', 'height')],
                           baseline_median_ns=b, candidate_median_ns=c, candidate_minus_baseline_ns=c-b))
     return pairs
@@ -762,7 +783,7 @@ def validate(output):
             REDACTIONS[str(sdk)] = '<sdk>'
             source = os.environ.get('GITHUB_SHA') or run('git', '-C', ROOT, 'rev-parse', 'HEAD')
             corpus = work / 'corpus'
-            preview = dict(scope='Paired sequential JPEG/CR3/video crate-level diagnostics; PDF is a separate renderer-specific diagnostic, not an FFmpeg effect or cross-platform comparison; no threshold, parity claim or legal approval.',
+            preview = dict(scope='Paired sequential JPEG/CR3/video crate-level diagnostics; PDF is a separate renderer-specific diagnostic, not an FFmpeg effect or cross-platform comparison; FFmpeg runtime is the recorded candidate variable, not a pairing key; no threshold, parity claim or legal approval.',
                            baseline_runtime='Existing Homebrew FFmpeg selection (not a compatible-runtime approval)',
                            candidate_runtime='Pinned prefix, smoke executed against staged native closure', status='unavailable')
             report['preview'] = preview
