@@ -29,6 +29,8 @@ HARNESS_DIGEST = hashlib.sha256(
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7"
 SETUP_PYTHON = "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6"
 UPLOAD = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4"
+RUST_TOOLCHAIN = "dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master"
+RUST_CACHE = "Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2"
 
 
 def identity(platform, revision, run_id=RUN_ID):
@@ -304,11 +306,16 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("        required: true\n        type: string\n", self.evidence)
         self.assertIn("permissions:\n  contents: read\n", self.evidence)
         self.assertNotIn("publish", self.evidence)
+        self.assertNotIn("--corpus tests/preview-corpus", self.evidence)
+        self.assertNotIn("package-linux-appdir.sh", self.evidence)
+        self.assertNotIn("package-macos-app.sh", self.evidence)
+        self.assertNotIn("softprops/action-gh-release", self.evidence)
+        self.assertNotIn("workflow_dispatch", self.evidence)
         runners = dict(**{"parity-linux": "ubuntu-latest", "parity-macos": "macos-latest",
                           "parity-windows": "windows-latest"})
         for job, runner in runners.items():
             block = self.job_block(self.evidence, job)
-            self.assertTrue(block)
+            self.assertTrue(block, f"missing job {job}")
             self.assertIn(f"    runs-on: {runner}\n    timeout-minutes: 90\n", block)
             self.assertIn(f"      - uses: {CHECKOUT}\n", block)
             self.assertIn("          ref: ${{ inputs.source_sha }}\n"
@@ -316,19 +323,89 @@ class WorkflowContractTests(unittest.TestCase):
                           "          persist-credentials: false\n", block)
             self.assertIn(f"      - uses: {SETUP_PYTHON}\n", block)
             self.assertIn("          python-version: '3.13'\n", block)
+            self.assertIn(f"      - uses: {RUST_TOOLCHAIN}\n", block)
+            self.assertIn("          toolchain: 1.97.1\n", block)
+            self.assertIn(f"      - uses: {RUST_CACHE}\n", block)
+            self.assertIn("cargo fetch --locked", block)
+            for needle in ("IRIS_PREVIEW_CORPUS_MAX_BYTES:",
+                           "IRIS_PREVIEW_CORPUS_TIMEOUT_SECONDS:",
+                           "IRIS_PREVIEW_CORPUS_RETRIES:",
+                           "IRIS_PREVIEW_CORPUS_RETRY_DELAY_SECONDS:",
+                           "IRIS_PREVIEW_LATENCY_WARMUPS:",
+                           "IRIS_PREVIEW_LATENCY_SAMPLES:"):
+                self.assertIn(needle, block, f"{job} misses corpus/latency env {needle}")
+            self.assertIn("IRIS_PREVIEW_CORPUS_MAX_BYTES: ${{ vars.IRIS_PREVIEW_CORPUS_MAX_BYTES", block)
+            self.assertIn("        run: python3 scripts/fetch-preview-corpus.py --output", block)
+            self.assertNotIn("--corpus tests/preview-corpus", block)
             self.assertIn("        shell: bash\n        env:\n"
                           "          SOURCE_SHA: ${{ inputs.source_sha }}\n", block)
             platform = job.removeprefix("parity-")
             self.assertIn(
-                '        run: python3 scripts/parity_source_compare.py --repo . '
-                '--candidate "$SOURCE_SHA" --corpus tests/preview-corpus '
+                f'--corpus "$RUNNER_TEMP/iris-preview-corpus" '
                 f'--output audit/parity/{platform}.json\n', block)
+            self.assertIn('--candidate "$SOURCE_SHA"', block)
+            self.assertIn(
+                f'        run: python3 scripts/parity_source_compare.py --repo . '
+                f'--candidate "$SOURCE_SHA" --corpus "$RUNNER_TEMP/iris-preview-corpus" '
+                f'--output audit/parity/{platform}.json\n', block)
+            if platform == "linux":
+                self.assertIn("sudo apt-get install -y", block)
+                for package in ("libavcodec-dev", "libavformat-dev", "libavutil-dev",
+                                "libavfilter-dev", "libavdevice-dev",
+                                "libswscale-dev", "libswresample-dev",
+                                "pkg-config", "clang", "nasm"):
+                    self.assertIn(package, block, f"linux misses native package {package}")
+                self.assertIn("./scripts/fetch-pdfium-runtime.sh", block)
+                self.assertIn("libpdfium.so", block)
+                self.assertIn("IRIS_VERIFY_PDFIUM_PROVENANCE", block)
+                self.assertIn("shared-key: parity-linux-cargo", block)
+            elif platform == "macos":
+                self.assertIn("brew install pkg-config gnupg nasm cmake", block)
+                self.assertIn("brew install ffmpeg", block)
+                self.assertIn("python3 scripts/test-macos-ffmpeg.py", block)
+                self.assertIn("IRIS_FFMPEG_JOBS:", block)
+                self.assertIn("shared-key: parity-macos-cargo", block)
+            else:
+                self.assertIn("microsoft/vcpkg", block)
+                self.assertIn("b8dfe957ec8b5c0ef5c4b31eea594b8486af744f", block)
+                self.assertIn("ilammy/msvc-dev-cmd@v1", block)
+                self.assertIn("vcpkg.exe", block)
+                self.assertIn("VCPKG_TARGET_TRIPLET: x64-windows-iris-dynamic", block)
+                self.assertIn("windows-ffmpeg-source.py", block)
+                self.assertIn("windows-ffmpeg-overlay.py", block)
+                self.assertIn("gh attestation verify", block)
+                self.assertIn("chromium/8138", block)
+                self.assertIn("IRIS_VALIDATION_PDFIUM_RUNTIME", block)
+                self.assertIn("shared-key: parity-windows-cargo", block)
             self.assertIn(f"      - uses: {UPLOAD}\n", block)
             self.assertIn(f"          name: parity-{platform}\n"
                           f"          path: audit/parity/{platform}.json\n"
                           "          if-no-files-found: error\n", block)
         self.assertEqual(self.evidence.count("uses: actions/upload-artifact@"), 3)
         self.assertEqual(self.evidence.count("          name: parity-"), 3)
+        self.assertEqual(self.evidence.count("python3 scripts/parity_source_compare.py"), 3)
+        self.assertEqual(self.evidence.count("python3 scripts/fetch-preview-corpus.py --output"), 3)
+
+    def test_each_parity_job_fetches_bytes_into_its_corpus_directory(self):
+        jobs = ["parity-linux", "parity-macos", "parity-windows"]
+        self.assertEqual(len(jobs), 3)
+        for job in jobs[:10]:
+            block = self.job_block(self.evidence, job)
+            self.assertTrue(block, f"missing job {job}")
+            fetches = re.findall(
+                r'python3 scripts/fetch-preview-corpus\.py --output "?([^"\s\n]+)"?', block)
+            smokes = re.findall(
+                r'python3 scripts/parity_source_compare\.py[^\n]*?--corpus "?([^"\s\n]+)"?', block)
+            self.assertEqual(len(fetches), 1, f"{job} must fetch corpus bytes once")
+            self.assertEqual(len(smokes), 1, f"{job} must run the parity smoke once")
+            fetch_dir, corpus_dir = fetches[0].rstrip('"'), smokes[0].rstrip('"')
+            for value in (fetch_dir, corpus_dir):
+                self.assertLessEqual(len(value), 256, f"{job} corpus path is unbounded")
+                self.assertNotIn("tests/preview-corpus", value, f"{job} uses manifest-only corpus")
+            self.assertEqual(fetch_dir, corpus_dir,
+                             f"{job} must pass its fetched bytes as --corpus, not a manifest")
+            self.assertIn("RUNNER_TEMP", fetch_dir, f"{job} corpus must be job-local")
+            self.assertIn("iris-preview-corpus", fetch_dir, f"{job} corpus must be a fresh dir")
 
 
 if __name__ == "__main__":
