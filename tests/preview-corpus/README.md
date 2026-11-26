@@ -198,8 +198,9 @@ unpaired sections, exact source/revision/harness binding, PDFium library attribu
 on Linux and Windows, and no candidate median slowdown. FFmpeg-bearing identities
 (corpus correctness and every `uses_ffmpeg` timing) additionally record codec ABI,
 configure flags and license; the verifier derives the expected values from
-`packaging/linux/ffmpeg.json` and rejects a pair even when both sides used the same
-system runtime. The paired evidence workflow builds that pinned runtime on Linux
+`packaging/linux/ffmpeg.json` for the POSIX builds and checks the pinned vcpkg
+MSVC/LGPL invariants on Windows, rejecting a pair even when both sides used the
+same system runtime. The paired evidence workflow builds that pinned runtime on Linux
 (`scripts/build-linux-ffmpeg.sh` plus `linux-ffmpeg.py validate`) and macOS
 (`macos-ffmpeg.py prepare`) and binds both worktrees to it with `FFMPEG_DIR`,
 pkg-config paths and the matching dynamic-library search path; Windows keeps its

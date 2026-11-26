@@ -56,6 +56,16 @@ SHA_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 PARITY_CLAIM = "none; report-only diagnostic, release hold unchanged"
 FFMPEG_POLICY = Path("packaging/linux/ffmpeg.json")
 PINNED_FFMPEG_LICENSE = "LGPL version 2.1 or later"
+# Windows uses the pinned vcpkg port, whose MSVC/platform flags necessarily differ
+# from the Linux/macOS upstream recipe. Require the same ABI/license and the
+# pinned port's safety invariants instead of the POSIX configure string.
+WINDOWS_FFMPEG_REQUIRED_FLAGS = (
+    "--disable-ffmpeg", "--disable-autodetect", "--enable-w32threads",
+    "--toolchain=msvc", "--target-os=win32",
+)
+WINDOWS_FFMPEG_FORBIDDEN_FLAGS = (
+    "--enable-gpl", "--enable-version3", "--enable-nonfree", "--enable-ffmpeg",
+)
 
 
 def require(ok, message):

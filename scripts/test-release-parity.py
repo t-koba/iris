@@ -33,6 +33,13 @@ UPLOAD = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4"
 RUST_TOOLCHAIN = "dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master"
 RUST_CACHE = "Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2"
 PINNED_FFMPEG = m.pinned_ffmpeg_identity()
+VCPKG_FFMPEG_FLAGS = (
+    "--toolchain=msvc --enable-pic --disable-doc --enable-runtime-cpudetect "
+    "--disable-autodetect --target-os=win32 --enable-w32threads --enable-d3d11va "
+    "--enable-d3d12va --enable-dxva2 --enable-mediafoundation --disable-ffmpeg "
+    "--disable-ffplay --disable-ffprobe --enable-avcodec --enable-avdevice "
+    "--enable-avformat --enable-avfilter --enable-swresample --enable-swscale"
+)
 
 
 def identity(platform, revision, run_id=RUN_ID):
@@ -48,8 +55,9 @@ def identity(platform, revision, run_id=RUN_ID):
         ffmpeg_runtime=dict(
             codec_version=PINNED_FFMPEG['codec_version'], format_version=618100,
             util_version=591100,
-            configuration='--prefix=/pinned/ffmpeg --libdir=/pinned/ffmpeg/lib '
-                          + PINNED_FFMPEG['configuration'],
+            configuration=(VCPKG_FFMPEG_FLAGS if platform == 'windows' else
+                           '--prefix=/pinned/ffmpeg --libdir=/pinned/ffmpeg/lib '
+                           + PINNED_FFMPEG['configuration']),
             license=PINNED_FFMPEG['license']),
         cargo_lock_sha256="11" * 32,
     )
@@ -180,6 +188,34 @@ class ReleaseParityTests(unittest.TestCase):
         result = self.gate()
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_accepts_pinned_vcpkg_flags_on_windows(self):
+        """The pinned Windows port uses different flags, but the same ABI and license."""
+        self.assertIn('--toolchain=msvc', VCPKG_FFMPEG_FLAGS)
+        self.assertNotIn(PINNED_FFMPEG['configuration'], VCPKG_FFMPEG_FLAGS)
+        result = self.gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejects_posix_flags_on_windows(self):
+        report = copy.deepcopy(self.reports['windows'])
+        for side in ('baseline', 'candidate'):
+            for record in [report[side]['corpus']['correctness'],
+                           *report[side]['corpus']['timings']]:
+                record['identity']['ffmpeg_runtime']['configuration'] = (
+                    PINNED_FFMPEG['configuration'])
+        self.save('windows', report)
+        result = self.assert_rejected()
+        self.assertIn('pinned vcpkg FFmpeg flags mismatch', result.stderr)
+
+    def test_rejects_forbidden_vcpkg_flags_on_windows(self):
+        report = copy.deepcopy(self.reports['windows'])
+        for side in ('baseline', 'candidate'):
+            for record in [report[side]['corpus']['correctness'],
+                           *report[side]['corpus']['timings']]:
+                record['identity']['ffmpeg_runtime']['configuration'] += ' --enable-gpl'
+        self.save('windows', report)
+        result = self.assert_rejected()
+        self.assertIn('pinned vcpkg FFmpeg flags mismatch', result.stderr)
+
     def test_rejects_system_ffmpeg_runtime_on_both_sides(self):
         """A matching pair is still invalid when neither side uses the pin."""
         for field, value in (
@@ -210,6 +246,16 @@ class ReleaseParityTests(unittest.TestCase):
                     record['identity']['ffmpeg_runtime'][field] = value
                 self.save('linux', report)
                 self.assert_rejected()
+
+    def test_rejects_ffmpeg_runtime_drift_in_timing_only(self):
+        report = copy.deepcopy(self.reports['linux'])
+        for side in ('baseline', 'candidate'):
+            for record in report[side]['corpus']['timings']:
+                if record['uses_ffmpeg']:
+                    record['identity']['ffmpeg_runtime']['configuration'] += ' --enable-gpl'
+        self.save('linux', report)
+        result = self.assert_rejected()
+        self.assertIn('pinned FFmpeg configuration mismatch', result.stderr)
 
     def test_rejects_missing_ffmpeg_runtime_identity(self):
         report = copy.deepcopy(self.reports['linux'])

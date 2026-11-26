@@ -12,12 +12,14 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shlex
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from parity_source_compare import (  # noqa: E402
     BASELINE_SHA, BUILD_SCRIPT, FIXTURE, FIXTURE_SHA256, FIXTURE_SIZE, HARNESS,
-    IDENTITY_SCHEMA, J2K_OPERATION, PARITY_CLAIM, PREVIEW_OPERATIONS, ffmpeg_configuration,
+    IDENTITY_SCHEMA, J2K_OPERATION, PARITY_CLAIM, PREVIEW_OPERATIONS,
+    WINDOWS_FFMPEG_FORBIDDEN_FLAGS, WINDOWS_FFMPEG_REQUIRED_FLAGS, ffmpeg_configuration,
     pairing_plan, pinned_ffmpeg_identity, require,
 )
 
@@ -158,12 +160,14 @@ def check_pdfium_attribution(report, platform, label):
                 f"{label}: {side} corpus has no loaded PDFium library attribution")
 
 
-def check_pinned_ffmpeg_runtime(report, label, pinned):
+def check_pinned_ffmpeg_runtime(report, platform, label, pinned):
     """FFmpeg-bearing corpus records must report the pinned bundled runtime.
 
     A system runtime can agree with itself on both sides of a pair, so strict
     pairing alone is not enough: the recorded ABI, configure flags and license
-    must also match the FFmpeg pin used by the production packages.
+    must also match the FFmpeg pin used by the production packages. POSIX builds
+    use one upstream configure recipe; Windows uses the pinned vcpkg port and is
+    checked against its invariant MSVC/LGPL flags.
     """
     for side in ('baseline', 'candidate'):
         corpus = section_of(report, side, 'corpus', label)
@@ -179,11 +183,17 @@ def check_pinned_ffmpeg_runtime(report, label, pinned):
             require(type(version) is int and version == pinned['codec_version'],
                     f'{label}: {side} pinned FFmpeg codec_version mismatch')
             try:
-                configuration = ffmpeg_configuration(runtime.get('configuration'))
+                flags = shlex.split(ffmpeg_configuration(runtime.get('configuration')))
             except ValueError as error:
                 raise ValueError(f'{label}: {side} {error}') from error
-            require(configuration == pinned['configuration'],
-                    f'{label}: {side} pinned FFmpeg configuration mismatch')
+            if platform == 'windows':
+                missing = [flag for flag in WINDOWS_FFMPEG_REQUIRED_FLAGS if flag not in flags]
+                forbidden = [flag for flag in WINDOWS_FFMPEG_FORBIDDEN_FLAGS if flag in flags]
+                require(not missing and not forbidden,
+                        f'{label}: {side} pinned vcpkg FFmpeg flags mismatch')
+            else:
+                require(' '.join(flags) == pinned['configuration'],
+                        f'{label}: {side} pinned FFmpeg configuration mismatch')
             require(runtime.get('license') == pinned['license'],
                     f'{label}: {side} pinned FFmpeg license mismatch')
 
@@ -261,7 +271,7 @@ def validate_report(report, path, platform, expected, harness_digest, build_scri
             f"{label}: paired_latency operation set mismatch")
 
     check_identities(report, policy, platform, expected, label, run_ids)
-    check_pinned_ffmpeg_runtime(report, label, pinned)
+    check_pinned_ffmpeg_runtime(report, platform, label, pinned)
     check_pdfium_attribution(report, platform, label)
     maps = {}
     for name in ("corpus", "j2k"):
