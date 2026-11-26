@@ -19,6 +19,7 @@ PIXELS = "22" * 32
 
 def identity(**changes):
     base = dict(
+        identity_schema=m.IDENTITY_SCHEMA,
         source_revision="a" * 40, rustc="rustc 1.97.1", target_os="linux",
         target_arch="x86_64", runner_name="runner", runner_os="Linux",
         runner_arch="X64", runner_image_os="ubuntu24", runner_image_version="1",
@@ -31,6 +32,16 @@ def identity(**changes):
     )
     base.update(changes)
     return base
+
+
+def legacy_section(median=100, pixels=PIXELS, filename="paired-j2k.jp2",
+                   pdfium_runtime=None):
+    """Baseline section lacking the v2 identity schema and FFmpeg runtime."""
+    result = section(median, None, pixels, filename, pdfium_runtime)
+    for record in [result["correctness"]] + result["timings"]:
+        record["identity"].pop("identity_schema", None)
+        record["identity"].pop("ffmpeg_runtime", None)
+    return result
 
 
 def output(width=128, height=128, pixels=PIXELS):
@@ -201,6 +212,84 @@ class ParitySourceCompareTests(unittest.TestCase):
             with self.subTest(runtime=runtime), self.assertRaises(ValueError):
                 m.paired_records(baseline, section(ident=identity(ffmpeg_runtime=runtime)),
                                  'J2K')
+
+    def test_pairing_plan_marks_legacy_schema_unpaired(self):
+        baseline = dict(corpus=legacy_section(), j2k=legacy_section())
+        candidate = dict(corpus=section(), j2k=section())
+        paired_corpus, paired_j2k, unpaired = m.pairing_plan(baseline, candidate)
+        self.assertEqual(paired_corpus, [])
+        self.assertIsNone(paired_j2k)
+        self.assertEqual(len(unpaired), 2)
+        self.assertEqual({entry["section"] for entry in unpaired}, {"corpus", "J2K"})
+        for entry in unpaired:
+            self.assertIn("no paired median is emitted", entry["reason"])
+        self.assertFalse(m.identity_schema_matches(baseline["corpus"],
+                                                    candidate["corpus"]))
+        self.assertFalse(m.identity_schema_matches(baseline["j2k"],
+                                                    candidate["j2k"]))
+        # Direct strict pairing still fails closed for the mixed-schema pair.
+        with self.assertRaises(ValueError):
+            m.paired_records(baseline["j2k"], candidate["j2k"], "J2K")
+
+    def test_pairing_plan_decides_sections_independently(self):
+        baseline = dict(corpus=legacy_section(), j2k=section(100))
+        candidate = dict(corpus=section(100), j2k=section(130))
+        paired_corpus, paired_j2k, unpaired = m.pairing_plan(baseline, candidate)
+        self.assertEqual(paired_corpus, [])
+        self.assertEqual(paired_j2k['baseline_median_ns'], 100)
+        self.assertEqual(paired_j2k['candidate_median_ns'], 130)
+        self.assertEqual([entry["section"] for entry in unpaired], ["corpus"])
+
+    def test_pairing_plan_pairs_matching_v2(self):
+        baseline = dict(corpus=section(100), j2k=section(100))
+        candidate = dict(corpus=section(130), j2k=section(130))
+        paired_corpus, paired_j2k, unpaired = m.pairing_plan(baseline, candidate)
+        self.assertEqual(unpaired, [])
+        self.assertEqual(len(paired_corpus), 1)
+        self.assertEqual(paired_corpus[0]["baseline_median_ns"], 100)
+        self.assertEqual(paired_corpus[0]["candidate_median_ns"], 130)
+        self.assertEqual(paired_j2k["baseline_median_ns"], 100)
+        self.assertEqual(paired_j2k["candidate_median_ns"], 130)
+        self.assertTrue(m.identity_schema_matches(baseline["corpus"],
+                                                   candidate["corpus"]))
+        self.assertTrue(m.identity_schema_matches(baseline["j2k"],
+                                                   candidate["j2k"]))
+        # J2K smoke has no PDFium runtime line; schema match must not require it.
+        self.assertIsNone(baseline["j2k"].get("pdfium_runtime"))
+        self.assertIsNone(candidate["j2k"].get("pdfium_runtime"))
+
+    def test_paired_records_rejects_identity_schema_drift(self):
+        baseline = section()
+        for schema in ("iris.preview_identity.v1", None):
+            changed = copy.deepcopy(baseline)
+            if schema is None:
+                del changed["correctness"]["identity"]["identity_schema"]
+            else:
+                changed["correctness"]["identity"]["identity_schema"] = schema
+            with self.subTest(schema=schema), self.assertRaises(ValueError):
+                m.paired_records(baseline, changed, "J2K")
+            drifted = copy.deepcopy(baseline)
+            if schema is None:
+                del drifted["timings"][0]["identity"]["identity_schema"]
+            else:
+                drifted["timings"][0]["identity"]["identity_schema"] = schema
+            with self.subTest(schema=schema), self.assertRaises(ValueError):
+                m.paired_records(baseline, drifted, "J2K")
+        self.assertFalse(m.identity_pair(identity(),
+                                         identity(identity_schema="other")))
+        legacy = legacy_section()["correctness"]["identity"]
+        self.assertFalse(m.identity_pair(legacy, identity()))
+
+    def test_pairing_plan_keeps_pdfium_gate_for_v2(self):
+        baseline = section(pdfium_runtime=pdfium_runtime())
+        candidate = section()
+        with self.assertRaises(ValueError):
+            m.paired_records(baseline, candidate, "J2K")
+        reports_baseline = dict(corpus=section(pdfium_runtime=pdfium_runtime()),
+                                j2k=section())
+        reports_candidate = dict(corpus=section(), j2k=section())
+        with self.assertRaises(ValueError):
+            m.pairing_plan(reports_baseline, reports_candidate)
 
     def test_paired_records_rejects_uses_ffmpeg_drift(self):
         baseline = section()

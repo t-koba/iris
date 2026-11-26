@@ -37,10 +37,12 @@ PREVIEW_OPERATIONS = {
     "pdf::extract_pdf_thumbnail",
 }
 # Source revision and Cargo.lock legitimately differ; runner/toolchain identity must not.
+IDENTITY_SCHEMA = "iris.preview_identity.v2"
 IDENTITY_KEYS = (
-    "rustc", "target_os", "target_arch", "runner_name", "runner_os", "runner_arch",
-    "runner_image_os", "runner_image_version", "cpu_model", "available_parallelism",
-    "build_profile", "release_opt_level", "features", "ffmpeg_runtime",
+    "identity_schema", "rustc", "target_os", "target_arch", "runner_name", "runner_os",
+    "runner_arch", "runner_image_os", "runner_image_version", "cpu_model",
+    "available_parallelism", "build_profile", "release_opt_level", "features",
+    "ffmpeg_runtime",
 )
 MAX_COMMAND_BYTES = 65536
 MAX_ERROR_BYTES = 4096
@@ -114,6 +116,8 @@ def parse_records(text, operations, label):
 
 def identity_pair(baseline, candidate):
     """Runner, CPU and toolchain identity must match; source revision need not."""
+    if baseline.get("identity_schema") != candidate.get("identity_schema"):
+        return False
     return all(baseline.get(key) == candidate.get(key) for key in IDENTITY_KEYS)
 
 
@@ -163,6 +167,64 @@ def paired_records(baseline, candidate, label):
                           baseline_median_ns=b, candidate_median_ns=c,
                           candidate_minus_baseline_ns=c - b))
     return pairs
+
+
+def identity_schema_matches(baseline_section, candidate_section):
+    """True only when both sections use the v2 preview identity schema.
+
+    The correctness identity and every timing identity on both sides must carry
+    ``identity_schema == IDENTITY_SCHEMA``. PDFium runtime lines are not required
+    here (the J2K smoke has none); strict pdfium_runtime equality stays inside
+    paired_records().
+    """
+    for section in (baseline_section, candidate_section):
+        if not isinstance(section, dict):
+            return False
+        correctness = section.get("correctness")
+        if not isinstance(correctness, dict):
+            return False
+        identity = correctness.get("identity")
+        if not isinstance(identity, dict):
+            return False
+        if identity.get("identity_schema") != IDENTITY_SCHEMA:
+            return False
+        timings = section.get("timings")
+        if not isinstance(timings, list) or not timings:
+            return False
+        for item in timings:
+            if not isinstance(item, dict):
+                return False
+            timing_identity = item.get("identity")
+            if not isinstance(timing_identity, dict):
+                return False
+            if timing_identity.get("identity_schema") != IDENTITY_SCHEMA:
+                return False
+    return True
+
+
+def pairing_plan(baseline, candidate):
+    """Split paired medians from legacy-schema comparisons.
+
+    Returns ``(paired_corpus, paired_j2k, unpaired)``. Each section is decided
+    independently: a schema-incompatible pair emits no paired median and gets a
+    bounded reason, while a matching v2 pair still uses the strict
+    paired_records() gate, which is never swallowed here.
+    """
+    baseline = baseline if isinstance(baseline, dict) else {}
+    candidate = candidate if isinstance(candidate, dict) else {}
+    unpaired = []
+    paired_corpus, paired_j2k = [], None
+    if identity_schema_matches(baseline.get("corpus"), candidate.get("corpus")):
+        paired_corpus = paired_records(baseline["corpus"], candidate["corpus"], "corpus")
+    else:
+        unpaired.append(dict(section="corpus",
+                             reason="identity schema mismatch: no paired median is emitted"))
+    if identity_schema_matches(baseline.get("j2k"), candidate.get("j2k")):
+        paired_j2k = paired_records(baseline["j2k"], candidate["j2k"], "J2K")[0]
+    else:
+        unpaired.append(dict(section="J2K",
+                             reason="identity schema mismatch: no paired median is emitted"))
+    return paired_corpus, paired_j2k, unpaired
 
 
 def report_bytes(report):
@@ -257,10 +319,8 @@ def compare(args):
                 corpus=smoke(checkout, 'preview_corpus_smoke', corpus, env, f'{name} corpus smoke'),
                 j2k=smoke(checkout, HARNESS, fixture, env, f'{name} J2K smoke'),
             )
-        paired_corpus = paired_records(reports['baseline']['corpus'],
-                                       reports['candidate']['corpus'], 'corpus')
-        paired_j2k = paired_records(reports['baseline']['j2k'],
-                                    reports['candidate']['j2k'], 'J2K')[0]
+        paired_corpus, paired_j2k, unpaired = pairing_plan(reports['baseline'],
+                                                            reports['candidate'])
         report = dict(
             schema='iris.parity_source_compare.v1', parity_claim=PARITY_CLAIM,
             source_revision=dict(baseline=args.baseline, candidate=args.candidate),
@@ -269,7 +329,7 @@ def compare(args):
             harness_sha256=harness_sha,
             fixture_pin=dict(filename=FIXTURE, sha256=FIXTURE_SHA256, size_bytes=FIXTURE_SIZE),
             baseline=reports['baseline'], candidate=reports['candidate'],
-            paired_latency=paired_corpus, paired_j2k=paired_j2k,
+            paired_latency=paired_corpus, paired_j2k=paired_j2k, unpaired=unpaired,
             cargo_net_offline=os.environ.get('CARGO_NET_OFFLINE'),
             limits='Same-runner, sequential, crate-level source diagnostic; no UI latency, '
                    'release-gate, platform or feature-parity claim.',

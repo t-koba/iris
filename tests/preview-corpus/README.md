@@ -129,7 +129,15 @@ parent of the pure-Rust JPEG 2000 migration `7d0b311`. It pins the same
 `349e9b98e5a959bf0915493e631b58e8927dd574d31349a97031fc3cdf635dd1`) and the same
 fetch script bytes (SHA-256
 `8ad5eab2099d7bd7358d3b9e1448a330fe7c271a6efb4c3212270a9347d8d2b3`); its
-preview smoke differs only by the later `PREVIEW_PDFIUM_RUNTIME` attribution line.
+preview smoke predates the v2 identity schema (`iris.preview_identity.v2`) and
+the later `PREVIEW_PDFIUM_RUNTIME` attribution line. The pinned baseline therefore
+lacks `identity_schema` (and the `ffmpeg_runtime` identity binding) in its corpus
+records, so the paired-source report marks only the corpus comparison unpaired and
+emits no `paired_latency` medians for it. The J2K smoke is staged from the candidate
+into both detached worktrees, so both J2K records use the v2 schema and `paired_j2k`
+is emitted; that median is a legitimate same-runner comparison of the jpeg2k
+migration, not parity evidence. This is report-only with no release claim, and the
+release hold remains.
 Its `Cargo.lock` resolves `jpeg2k 0.10.1` with `openjpeg-sys` instead of the
 candidate's pure-Rust `jpeg2k 0.11.0`. That makes it a candidate reference for a
 paired, same-runner comparison of the pinned corpus, not parity evidence by itself:

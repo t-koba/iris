@@ -193,6 +193,7 @@ fn runtime_identity() -> Result<serde_json::Value, Box<dyn Error>> {
     let lockfile = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock");
     let lockfile_digest = digest_hex(&Sha256::digest(fs::read(lockfile)?));
     Ok(serde_json::json!({
+        "identity_schema": "iris.preview_identity.v2",
         "source_revision": std::env::var("GITHUB_SHA").ok(),
         "workflow_run_id": std::env::var("GITHUB_RUN_ID").ok(),
         "crate": env!("CARGO_PKG_NAME"),

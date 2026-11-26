@@ -93,6 +93,7 @@ fn identity() -> Result<serde_json::Value, Box<dyn Error>> {
         return Err("rustc --version --verbose did not succeed".into());
     }
     Ok(serde_json::json!({
+        "identity_schema": "iris.preview_identity.v2",
         "source_revision": std::env::var("GITHUB_SHA").ok(),
         "rustc": String::from_utf8(rustc.stdout)?.trim().to_owned(),
         "target_os": std::env::consts::OS,
