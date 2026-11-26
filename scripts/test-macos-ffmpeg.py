@@ -715,7 +715,7 @@ class ProductRuntime(unittest.TestCase):
                         shell.index(pkg_notary))
 
     def test_signing_rebinds_only_verified_bytes_and_fails_closed(self):
-        for identity, failure in (('-', None), ('Developer ID synthetic', None),
+        for identity, failure in (('-', None), ('', None), ('Developer ID synthetic', None),
                                   ('-', 'tamper'), ('-', 'sign'), ('-', 'verify')):
             with self.subTest(identity=identity, failure=failure), tempfile.TemporaryDirectory() as tmp:
                 app = Path(tmp)
@@ -744,7 +744,14 @@ class ProductRuntime(unittest.TestCase):
                     else:
                         m.sign_runtime(app, identity)
                         self.assertEqual(json.loads(manifest.read_text())['staged_libraries'], {lib.name: m.digest(lib)})
-                        self.assertEqual('--options' in command.call_args_list[0].args, identity != '-')
+                        sign_args = command.call_args_list[0].args
+                        if identity in ('-', ''):
+                            self.assertEqual(sign_args, ('codesign', '--force', '--sign', identity,
+                                                         '--timestamp=none', lib))
+                        else:
+                            self.assertEqual(sign_args, ('codesign', '--force', '--sign', identity,
+                                                         '--options', 'runtime', '--timestamp', lib))
+                        self.assertEqual(command.call_args_list[1].args, ('codesign', '--verify', '--strict', lib))
 
     def test_product_requires_corpus_staged_closure_and_audit_and_cleans_scratch(self):
         for failure in (None, 'build', 'closure', 'fetch', 'smoke', 'sign', 'audit', 'interrupt'):

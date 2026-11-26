@@ -691,9 +691,10 @@ def sign_runtime(app, identity):
             'runtime changed before signing')
     for name in manifest['staged_libraries']:
         path = frameworks / name
-        args = ['codesign', '--force', '--sign', identity, '--timestamp=none']
-        if identity != '-':
-            args += ['--options', 'runtime']
+        if identity in ('-', ''):
+            args = ['codesign', '--force', '--sign', identity, '--timestamp=none']
+        else:
+            args = ['codesign', '--force', '--sign', identity, '--options', 'runtime', '--timestamp']
         run(*args, path)
         run('codesign', '--verify', '--strict', path)
         manifest['staged_libraries'][name] = digest(path)
