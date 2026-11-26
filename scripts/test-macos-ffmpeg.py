@@ -633,6 +633,63 @@ Load command 2
                         m.runtime({'avcodec': path})
                     values[key] = good
 
+    def test_prepare_builds_and_validates_a_fresh_pinned_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp) / 'runtime'
+            records = [{'library': 'libavcodec.62.dylib', 'version': [62, 28, 103]}]
+            manifest = dict(policy=m.MACOS_POLICY, signature_verified=True,
+                            libraries={'libavcodec.62.dylib': '11' * 32}, runtime=records)
+
+            def fake_build(path, sdk):
+                self.assertEqual(path, prefix)
+                self.assertEqual(sdk, Path('/sdk').resolve())
+                docs = path / 'share/iris-ffmpeg'
+                docs.mkdir(parents=True)
+                (docs / 'manifest.json').write_text(json.dumps(manifest))
+
+            with patch.object(m.sys, 'platform', 'darwin'), patch.dict(m.os.environ, {}, clear=True), \
+                    patch.object(m, 'run', return_value='/sdk') as run, \
+                    patch.object(m, 'build', side_effect=fake_build) as build, \
+                    patch.object(m, 'libraries', return_value={'avcodec': prefix / 'lib/libavcodec.dylib'}), \
+                    patch.object(m, 'runtime', return_value=records):
+                result = m.prepare(prefix)
+            self.assertEqual(result['configuration_records'], 1)
+            self.assertTrue(result['signature_verified'])
+            run.assert_called_once_with('xcrun', '--sdk', 'macosx', '--show-sdk-path')
+            build.assert_called_once_with(prefix, Path('/sdk').resolve())
+
+    def test_prepare_refuses_ambient_dyld_reuse_and_runtime_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp) / 'runtime'
+            with patch.object(m.sys, 'platform', 'darwin'), \
+                    patch.dict(m.os.environ, {'DYLD_LIBRARY_PATH': '/homebrew/lib'}), \
+                    patch.object(m, 'build') as build:
+                with self.assertRaisesRegex(ValueError, 'ambient DYLD overrides'):
+                    m.prepare(prefix)
+                build.assert_not_called()
+            prefix.mkdir()
+            with patch.object(m.sys, 'platform', 'darwin'), patch.dict(m.os.environ, {}, clear=True), \
+                    patch.object(m, 'build') as build:
+                with self.assertRaisesRegex(ValueError, 'must be fresh'):
+                    m.prepare(prefix)
+                build.assert_not_called()
+            prefix.rmdir()
+            manifest = dict(policy=m.MACOS_POLICY, signature_verified=True,
+                            libraries={}, runtime=[{'library': 'libavcodec.62.dylib'}])
+
+            def fake_build(path, sdk):
+                docs = path / 'share/iris-ffmpeg'
+                docs.mkdir(parents=True)
+                (docs / 'manifest.json').write_text(json.dumps(manifest))
+
+            with patch.object(m.sys, 'platform', 'darwin'), patch.dict(m.os.environ, {}, clear=True), \
+                    patch.object(m, 'run', return_value='/sdk'), \
+                    patch.object(m, 'build', side_effect=fake_build), \
+                    patch.object(m, 'libraries', return_value={}), \
+                    patch.object(m, 'runtime', return_value=[{'library': 'other.dylib'}]):
+                with self.assertRaisesRegex(ValueError, 'runtime identity changed'):
+                    m.prepare(prefix)
+
     def test_report_only_workflow_keeps_current_and_candidate_json_only(self):
         workflow = (ROOT / '.github/workflows/macos-runtime-validation.yml').read_text()
         # Historical Homebrew comparison remains explicitly report-only.

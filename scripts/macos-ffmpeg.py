@@ -766,6 +766,29 @@ def product(app, sdk):
         (app / 'Contents/Resources/ffmpeg-runtime.json').write_text(report_bytes(report))
 
 
+def prepare(prefix):
+    """Build and validate a fresh pinned prefix for paired parity evidence.
+
+    This intentionally stops before staging an app or signing anything: callers
+    bind FFMPEG_DIR/PKG_CONFIG and runtime loading to this exact prefix.
+    """
+    require(sys.platform == 'darwin', 'native macOS required')
+    require(not any(k.startswith('DYLD_') for k in os.environ), 'ambient DYLD overrides forbidden')
+    prefix = Path(prefix).resolve()
+    require(prefix.parent.is_dir(), 'prefix parent must exist')
+    require(not prefix.exists(), 'candidate prefix must be fresh (no native cache reuse)')
+    sdk = Path(run('xcrun', '--sdk', 'macosx', '--show-sdk-path')).resolve()
+    REDACTIONS[str(sdk)] = '<sdk>'
+    build(prefix, sdk)
+    manifest = json.loads((prefix / 'share/iris-ffmpeg/manifest.json').read_text())
+    require(manifest['policy'] == MACOS_POLICY and manifest['signature_verified'] is True,
+            'pinned prefix policy mismatch')
+    records = runtime(libraries(prefix))
+    require(manifest['runtime'] == records, 'pinned prefix runtime identity changed')
+    return dict(prefix=str(prefix), libraries=sorted(manifest['libraries']),
+                configuration_records=len(records), signature_verified=True)
+
+
 def validate(output):
     require(sys.platform == 'darwin', 'native macOS required')
     require(not any(k.startswith('DYLD_') for k in os.environ), 'ambient DYLD overrides forbidden')
@@ -868,7 +891,10 @@ if __name__ == '__main__':
         elif sys.argv[1] == 'stage' and len(sys.argv) == 4:
             stage(Path(sys.argv[2]).resolve(), Path(sys.argv[3]).resolve(),
                   Path(run('xcrun', '--sdk', 'macosx', '--show-sdk-path')).resolve())
+        elif sys.argv[1] == 'prepare' and len(sys.argv) == 3:
+            prepare(Path(sys.argv[2]))
         else:
-            raise ValueError('expected validate OUTPUT, stage PREFIX APP, product APP or check APP')
+            raise ValueError('expected prepare PREFIX, validate OUTPUT, stage PREFIX APP, '
+                             'product APP or check APP')
     except Exception as error:
         sys.exit(clean(str(error)))
