@@ -183,6 +183,8 @@ fn ffmpeg_runtime() -> serde_json::Value {
         "codec_version": ffmpeg_next::codec::version(),
         "format_version": ffmpeg_next::format::version(),
         "util_version": ffmpeg_next::util::version(),
+        "configuration": ffmpeg_next::codec::configuration(),
+        "license": ffmpeg_next::codec::license(),
     })
 }
 
