@@ -24,6 +24,8 @@ CANDIDATE = "b" * 40
 OTHER_SHA = "c" * 40
 RUN_ID = "123456789"
 PIXELS = "22" * 32
+CORPUS_MANIFEST = json.loads(
+    (ROOT / "tests" / "preview-corpus" / "fixtures.json").read_text(encoding="utf-8"))
 HARNESS_DIGEST = hashlib.sha256(
     (ROOT / "crates" / "thumb-preview" / "examples" / m.HARNESS).read_bytes()).hexdigest()
 BUILD_SCRIPT_DIGEST = hashlib.sha256((ROOT / m.BUILD_SCRIPT).read_bytes()).hexdigest()
@@ -68,12 +70,29 @@ def output():
                 source="FullDecode", decoded_rgb_sha256=PIXELS)
 
 
-def timing(operation, platform, revision, median, run_id=RUN_ID, warmups=2, samples=21):
+def fixture_pin(filename, sha256, size_bytes):
+    return dict(filename=filename, sha256=sha256, size_bytes=size_bytes)
+
+
+def corpus_fixtures():
+    """Correctness records for every input in the verifier's pinned manifest."""
+    return [dict(fixture_pin(entry["filename"], entry["sha256"], entry["size"]),
+                 output=output())
+            for entry in CORPUS_MANIFEST["files"]]
+
+
+def j2k_fixture():
+    return dict(fixture_pin(m.FIXTURE, m.FIXTURE_SHA256, m.FIXTURE_SIZE),
+                output=output())
+
+
+def timing(operation, platform, revision, median, run_id=RUN_ID, warmups=2, samples=21,
+           input_pin=None):
+    input_pin = input_pin or fixture_pin(m.FIXTURE, m.FIXTURE_SHA256, m.FIXTURE_SIZE)
     return dict(
         record="iris.preview_latency.v1", operation=operation,
         uses_ffmpeg=operation.startswith("video::"),
-        input=dict(filename=m.FIXTURE, sha256=m.FIXTURE_SHA256,
-                   size_bytes=m.FIXTURE_SIZE),
+        input=copy.deepcopy(input_pin),
         output=output(), identity=identity(platform, revision, run_id),
         timing=dict(unit="nanoseconds", warmup_iterations=warmups,
                     sample_count=samples, min=70, median=median,
@@ -82,13 +101,18 @@ def timing(operation, platform, revision, median, run_id=RUN_ID, warmups=2, samp
 
 
 def section(platform, revision, operations, median, run_id=RUN_ID, warmups=2, samples=21):
+    corpus = set(operations) == set(m.PREVIEW_OPERATIONS)
+    fixtures = corpus_fixtures() if corpus else [j2k_fixture()]
+    first_pin = next(entry for entry in CORPUS_MANIFEST['files']
+                     if entry['filename'] == 'landscape.jpg') if corpus else None
+    timing_pin = (fixture_pin(first_pin['filename'], first_pin['sha256'], first_pin['size'])
+                  if corpus else fixture_pin(m.FIXTURE, m.FIXTURE_SHA256, m.FIXTURE_SIZE))
     result = dict(
         correctness=dict(record="iris.preview_correctness.v1", passed=True,
-                         fixtures=[dict(filename=m.FIXTURE, sha256=m.FIXTURE_SHA256,
-                                        size_bytes=m.FIXTURE_SIZE, output=output())],
+                         fixtures=fixtures,
                          identity=identity(platform, revision, run_id)),
-        timings=[timing(op, platform, revision, median, run_id, warmups, samples)
-                 for op in operations],
+        timings=[timing(op, platform, revision, median, run_id, warmups, samples,
+                        timing_pin) for op in operations],
     )
     # macOS renders PDFs through CoreGraphics; the smoke emits no PDFium line.
     if platform != "macos":
@@ -167,6 +191,16 @@ class ReleaseParityTests(unittest.TestCase):
         result = self.gate()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("linux, macos and windows", result.stdout)
+
+    def test_fixture_complete_reports_fit_the_report_budget(self):
+        budget = json.loads(POLICY.read_text(encoding="utf-8"))["max_report_bytes"]
+        for report in self.reports.values():
+            for side in ("baseline", "candidate"):
+                self.assertEqual(len(report[side]["corpus"]["correctness"]["fixtures"]),
+                                 len(CORPUS_MANIFEST["files"]))
+        for platform, report in self.reports.items():
+            payload = json.dumps(report, indent=2, sort_keys=True) + "\n"
+            self.assertLessEqual(len(payload.encode("utf-8")), budget, platform)
 
     def test_accepts_pinned_baseline_shape_with_shared_corpus_harness(self):
         source_spec = importlib.util.spec_from_file_location(
@@ -352,6 +386,45 @@ class ReleaseParityTests(unittest.TestCase):
         self.save("linux", resummarize(report))
         result = self.assert_rejected()
         self.assertIn("candidate slowdown", result.stderr)
+
+    def test_rejects_false_correctness_on_both_sides(self):
+        """Agreed failure on both sides cannot pass the consumer boundary."""
+        for name in ("corpus", "j2k"):
+            with self.subTest(section=name):
+                report = copy.deepcopy(self.reports["linux"])
+                for side in ("baseline", "candidate"):
+                    report[side][name]["correctness"]["passed"] = False
+                self.save("linux", resummarize(report))
+                result = self.assert_rejected()
+                self.assertIn("correctness.passed must be true", result.stderr)
+
+    def test_rejects_empty_corpus_fixture_coverage_on_both_sides(self):
+        report = copy.deepcopy(self.reports["linux"])
+        for side in ("baseline", "candidate"):
+            report[side]["corpus"]["correctness"]["fixtures"] = []
+        self.save("linux", resummarize(report))
+        result = self.assert_rejected()
+        self.assertIn("fixture coverage", result.stderr)
+
+    def test_rejects_wrong_pinned_fixture_on_both_sides(self):
+        for name in ("corpus", "j2k"):
+            for field, value in (("sha256", "00" * 32), ("size_bytes", 1)):
+                with self.subTest(section=name, field=field):
+                    report = copy.deepcopy(self.reports["linux"])
+                    for side in ("baseline", "candidate"):
+                        report[side][name]["correctness"]["fixtures"][0][field] = value
+                    self.save("linux", resummarize(report))
+                    result = self.assert_rejected()
+                    self.assertIn("fixture pin mismatch", result.stderr)
+
+    def test_rejects_unpinned_timing_input_on_both_sides(self):
+        report = copy.deepcopy(self.reports['linux'])
+        for side in ('baseline', 'candidate'):
+            for record in report[side]['corpus']['timings']:
+                record['input'] = fixture_pin('unpinned.bin', '11' * 32, 1)
+        self.save('linux', resummarize(report))
+        result = self.assert_rejected()
+        self.assertIn('timing input is not a pinned input', result.stderr)
 
     def test_rejects_tampered_paired_summary(self):
         report = copy.deepcopy(self.reports["linux"])

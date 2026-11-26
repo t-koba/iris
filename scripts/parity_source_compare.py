@@ -53,6 +53,8 @@ MAX_ERROR_BYTES = 4096
 MAX_REPORT_BYTES = 266240
 COMMAND_SECONDS = int(os.environ.get("IRIS_PARITY_SOURCE_COMMAND_SECONDS", "1800"))
 SHA_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+CORPUS_MANIFEST = Path("tests/preview-corpus/fixtures.json")
 PARITY_CLAIM = "none; report-only diagnostic, release hold unchanged"
 FFMPEG_POLICY = Path("packaging/linux/ffmpeg.json")
 PINNED_FFMPEG_LICENSE = "LGPL version 2.1 or later"
@@ -162,6 +164,100 @@ def parse_records(text, operations, label):
     require(all(item['passed'] is True for item in correctness), f'{label}: correctness failed')
     return dict(correctness=correctness[0], timings=timings,
                 pdfium_runtime=runtimes[0] if runtimes else None)
+
+
+def pinned_corpus_fixtures():
+    """Read the verifier's own pinned corpus manifest, never a candidate's.
+
+    Only manifest fields needed for input pinning are accepted; a corrupted or
+    incomplete pin file fails closed instead of silently narrowing coverage.
+    """
+    manifest = json.loads((ROOT / CORPUS_MANIFEST).read_text(encoding='utf-8'))
+    require(type(manifest) is dict, 'invalid pinned corpus manifest')
+    files = manifest.get('files')
+    require(type(files) is list and files, 'invalid pinned corpus manifest files')
+    pins = {}
+    for entry in files:
+        require(type(entry) is dict, 'invalid pinned corpus manifest entry')
+        filename, sha256, size = entry.get('filename'), entry.get('sha256'), entry.get('size')
+        require(type(filename) is str and filename and filename not in pins,
+                'invalid or duplicate pinned corpus filename')
+        require(type(sha256) is str and SHA256_PATTERN.fullmatch(sha256) is not None,
+                f'invalid pinned corpus sha256 for {filename}')
+        require(type(size) is int and size > 0, f'invalid pinned corpus size for {filename}')
+        pins[filename] = (sha256, size)
+    return pins
+
+
+def validate_exported_section(section, operations, label):
+    """Reapply the producer's record rules to an exported report section.
+
+    ``operations`` is the exact timing set requested for this section. Corpus
+    fixtures are checked against the verifier's own pinned manifest; a J2K
+    section is checked against the single shared fixture pin. This boundary
+    check cannot be satisfied by agreeing mutations on both sides of a pair.
+    """
+    require(type(section) is dict, f'{label}: exported section must be an object')
+    require(type(operations) in (list, tuple, set) and operations
+            and all(type(item) is str and item for item in operations),
+            f'{label}: invalid requested operations')
+    expected_operations = set(operations)
+    pins = ({FIXTURE: (FIXTURE_SHA256, FIXTURE_SIZE)}
+            if expected_operations == {J2K_OPERATION} else pinned_corpus_fixtures())
+
+    correctness = section.get('correctness')
+    require(type(correctness) is dict, f'{label}: invalid correctness record')
+    require(correctness.get('record') == 'iris.preview_correctness.v1',
+            f'{label}: unexpected correctness record type')
+    require(correctness.get('passed') is True,
+            f'{label}: correctness.passed must be true')
+
+    fixtures = correctness.get('fixtures')
+    require(type(fixtures) is list and fixtures,
+            f'{label}: correctness fixture coverage is empty or invalid')
+    require(all(type(item) is dict for item in fixtures),
+            f'{label}: invalid correctness fixture record')
+    seen = set()
+    for fixture in fixtures:
+        filename, sha256, size = (fixture.get('filename'), fixture.get('sha256'),
+                                  fixture.get('size_bytes'))
+        require(type(filename) is str and filename and filename not in seen,
+                f'{label}: invalid or duplicate fixture filename')
+        seen.add(filename)
+        require(type(sha256) is str and SHA256_PATTERN.fullmatch(sha256) is not None,
+                f'{label}: invalid fixture sha256 for {filename}')
+        require(type(size) is int and size > 0,
+                f'{label}: invalid fixture size_bytes for {filename}')
+        require(type(fixture.get('output')) is dict,
+                f'{label}: invalid fixture output for {filename}')
+
+    timings = section.get('timings')
+    require(type(timings) is list and timings
+            and all(type(item) is dict for item in timings),
+            f'{label}: invalid or empty timing records')
+    observed = []
+    for record in timings:
+        operation = record.get('operation')
+        require(type(operation) is str and operation not in observed,
+                f'{label}: duplicate or invalid timing operation')
+        observed.append(operation)
+        input_pin = record.get('input')
+        require(type(input_pin) is dict, f'{label}: invalid timing input for {operation}')
+        input_filename = input_pin.get('filename')
+        require(type(input_filename) is str and input_filename in pins,
+                f'{label}: timing input is not a pinned input for {operation}')
+        require(input_pin.get('sha256') == pins[input_filename][0]
+                and input_pin.get('size_bytes') == pins[input_filename][1],
+                f'{label}: timing input pin mismatch for {operation}')
+    require(set(observed) == expected_operations
+            and len(observed) == len(expected_operations),
+            f'{label}: timing operation set mismatch')
+
+    require(seen == set(pins), f'{label}: fixture coverage does not match pinned inputs')
+    for fixture in fixtures:
+        sha256, size = pins[fixture['filename']]
+        require(fixture['sha256'] == sha256 and fixture['size_bytes'] == size,
+                f'{label}: {fixture["filename"]} fixture pin mismatch')
 
 
 def identity_pair(baseline, candidate):

@@ -20,7 +20,7 @@ from parity_source_compare import (  # noqa: E402
     BASELINE_SHA, BUILD_SCRIPT, FIXTURE, FIXTURE_SHA256, FIXTURE_SIZE, HARNESS,
     IDENTITY_SCHEMA, J2K_OPERATION, PARITY_CLAIM, PREVIEW_OPERATIONS,
     WINDOWS_FFMPEG_FORBIDDEN_FLAGS, WINDOWS_FFMPEG_REQUIRED_FLAGS, ffmpeg_configuration,
-    pairing_plan, pinned_ffmpeg_identity, require,
+    pairing_plan, pinned_ffmpeg_identity, require, validate_exported_section,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -251,6 +251,12 @@ def validate_report(report, path, platform, expected, harness_digest, build_scri
             f"{label}: harness digest mismatch")
     require(report.get("build_script_sha256") == build_script_digest,
             f"{label}: build script digest mismatch")
+
+    for side in ('baseline', 'candidate'):
+        for name, operations in (('corpus', policy['required_operations']),
+                                 ('j2k', (J2K_OPERATION,))):
+            validate_exported_section(section_of(report, side, name, label), operations,
+                                      f'{label}: {side} {name}')
 
     try:
         paired, paired_j2k, unpaired = pairing_plan(report.get("baseline"),
