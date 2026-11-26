@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "baseline_sha": "12fb51a0ba07c299ea4e9b08890a895797148e11",
+  "required_platforms": ["linux", "macos", "windows"],
+  "platform_identity": {
+    "linux": {"target_os": "linux", "runner_os": "Linux"},
+    "macos": {"target_os": "macos", "runner_os": "macOS"},
+    "windows": {"target_os": "windows", "runner_os": "Windows"}
+  },
+  "required_operations": [
+    "image_generic::extract_image_thumbnail",
+    "raw::extract_raw_thumbnail",
+    "video::extract_video_thumbnail",
+    "video::extract_hevc_thumbnail",
+    "pdf::extract_pdf_thumbnail"
+  ],
+  "warmups": 2,
+  "samples": 21,
+  "max_candidate_minus_baseline_ns": 0,
+  "max_report_bytes": 266240
+}

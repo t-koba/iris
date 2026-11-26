@@ -1,0 +1,82 @@
+name: Parity evidence
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact source revision to pair with the pinned baseline
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  parity-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Produce Linux paired-source parity report
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: python3 scripts/parity_source_compare.py --repo . --candidate "$SOURCE_SHA" --corpus tests/preview-corpus --output audit/parity/linux.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: parity-linux
+          path: audit/parity/linux.json
+          if-no-files-found: error
+
+  parity-macos:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Produce macOS paired-source parity report
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: python3 scripts/parity_source_compare.py --repo . --candidate "$SOURCE_SHA" --corpus tests/preview-corpus --output audit/parity/macos.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: parity-macos
+          path: audit/parity/macos.json
+          if-no-files-found: error
+
+  parity-windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Produce Windows paired-source parity report
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: python3 scripts/parity_source_compare.py --repo . --candidate "$SOURCE_SHA" --corpus tests/preview-corpus --output audit/parity/windows.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: parity-windows
+          path: audit/parity/windows.json
+          if-no-files-found: error

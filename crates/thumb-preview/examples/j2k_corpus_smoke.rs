@@ -95,6 +95,7 @@ fn identity() -> Result<serde_json::Value, Box<dyn Error>> {
     Ok(serde_json::json!({
         "identity_schema": "iris.preview_identity.v2",
         "source_revision": std::env::var("GITHUB_SHA").ok(),
+        "workflow_run_id": std::env::var("GITHUB_RUN_ID").ok(),
         "rustc": String::from_utf8(rustc.stdout)?.trim().to_owned(),
         "target_os": std::env::consts::OS,
         "target_arch": std::env::consts::ARCH,

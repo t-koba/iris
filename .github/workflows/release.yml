@@ -47,6 +47,9 @@ jobs:
       - name: Validate release policy gate offline
         timeout-minutes: 1
         run: python scripts/test-release-policy.py
+      - name: Validate release parity gate offline
+        timeout-minutes: 1
+        run: python scripts/test-release-parity.py
       - name: Validate POSIX native-evidence producer offline
         timeout-minutes: 1
         run: python scripts/test-posix-native-evidence.py
@@ -89,6 +92,15 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match workspace version $workspace_version" >&2
             exit 1
           fi
+
+  parity-evidence:
+    if: github.event_name == 'push'
+    needs: release-preflight
+    permissions:
+      contents: read
+    uses: ./.github/workflows/parity-evidence.yml
+    with:
+      source_sha: ${{ needs.release-preflight.outputs.source_sha }}
 
   package-macos:
     needs: release-preflight
@@ -532,7 +544,7 @@ jobs:
 
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [package-macos, package-linux, package-windows]
+    needs: [package-macos, package-linux, package-windows, parity-evidence]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -565,6 +577,17 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: dist/release
+      - name: Download paired parity evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: parity-*
+          merge-multiple: true
+          path: audit/parity
+      - name: Gate publication on paired parity evidence
+        run: >-
+          python3 scripts/release-parity.py
+          --repo . --expected-sha "$GITHUB_SHA"
+          audit/parity/linux.json audit/parity/macos.json audit/parity/windows.json
       - name: Gate publication on release policy (not legal approval)
         run: >-
           python scripts/release-policy.py
