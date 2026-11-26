@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -53,6 +54,8 @@ MAX_REPORT_BYTES = 266240
 COMMAND_SECONDS = int(os.environ.get("IRIS_PARITY_SOURCE_COMMAND_SECONDS", "1800"))
 SHA_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 PARITY_CLAIM = "none; report-only diagnostic, release hold unchanged"
+FFMPEG_POLICY = Path("packaging/linux/ffmpeg.json")
+PINNED_FFMPEG_LICENSE = "LGPL version 2.1 or later"
 
 
 def require(ok, message):
@@ -62,6 +65,40 @@ def require(ok, message):
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def pinned_ffmpeg_identity(repo=ROOT):
+    """Derive the runtime identity shipped from the pinned upstream source.
+
+    Only the current verifier's own pin is trusted; a paired worktree cannot
+    redefine what counts as the pinned runtime by changing its copy of the
+    policy file.
+    """
+    policy = json.loads((Path(repo) / FFMPEG_POLICY).read_text(encoding='utf-8'))
+    version = policy.get('avcodec_version')
+    flags = policy.get('configure_flags')
+    require(type(version) is list and len(version) == 3
+            and all(type(part) is int and 0 <= part <= 255 for part in version),
+            'invalid pinned avcodec_version')
+    require(type(flags) is list and flags
+            and all(type(flag) is str and flag for flag in flags),
+            'invalid pinned configure_flags')
+    major, minor, micro = version
+    return dict(codec_version=(major << 16) | (minor << 8) | micro,
+                configuration=' '.join(flags), license=PINNED_FFMPEG_LICENSE)
+
+
+def ffmpeg_configuration(value):
+    """Normalize the configure command recorded by libavcodec.
+
+    Production builds add their own prefix/libdir; those paths are not part of
+    the runtime identity. Every other flag is compared exactly.
+    """
+    require(type(value) is str and value.strip(), 'invalid FFmpeg configuration')
+    flags = shlex.split(value)
+    selected = [flag for flag in flags
+                if not flag.startswith(('--prefix=', '--libdir='))]
+    return ' '.join(selected)
 
 
 def run(command, cwd, env, label):

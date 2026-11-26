@@ -32,6 +32,7 @@ SETUP_PYTHON = "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # 
 UPLOAD = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4"
 RUST_TOOLCHAIN = "dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master"
 RUST_CACHE = "Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2"
+PINNED_FFMPEG = m.pinned_ffmpeg_identity()
 
 
 def identity(platform, revision, run_id=RUN_ID):
@@ -44,8 +45,12 @@ def identity(platform, revision, run_id=RUN_ID):
         runner_arch="X64", runner_image_os="image", runner_image_version="1",
         cpu_model="cpu", available_parallelism=4, build_profile="release",
         release_opt_level="3", features=dict(video=True, pdf=True, raw_full=True),
-        ffmpeg_runtime=dict(codec_version=618100, format_version=618100,
-                            util_version=591100),
+        ffmpeg_runtime=dict(
+            codec_version=PINNED_FFMPEG['codec_version'], format_version=618100,
+            util_version=591100,
+            configuration='--prefix=/pinned/ffmpeg --libdir=/pinned/ffmpeg/lib '
+                          + PINNED_FFMPEG['configuration'],
+            license=PINNED_FFMPEG['license']),
         cargo_lock_sha256="11" * 32,
     )
 
@@ -166,6 +171,55 @@ class ReleaseParityTests(unittest.TestCase):
         result = self.gate()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("linux, macos and windows", result.stdout)
+
+    def test_accepts_pinned_ffmpeg_runtime_from_policy(self):
+        pin = m.pinned_ffmpeg_identity()
+        self.assertEqual(pin['codec_version'], (62 << 16) | (28 << 8) | 103)
+        self.assertEqual(pin['license'], 'LGPL version 2.1 or later')
+        self.assertIn('--disable-gpl', pin['configuration'])
+        result = self.gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejects_system_ffmpeg_runtime_on_both_sides(self):
+        """A matching pair is still invalid when neither side uses the pin."""
+        for field, value in (
+            ('codec_version', 618100),
+            ('configuration', '--enable-shared --disable-gpl --enable-zlib'),
+            ('license', 'GPL version 3 or later'),
+        ):
+            with self.subTest(field=field):
+                report = copy.deepcopy(self.reports['linux'])
+                for side in ('baseline', 'candidate'):
+                    for record in [report[side]['corpus']['correctness'],
+                                   *report[side]['corpus']['timings']]:
+                        record['identity']['ffmpeg_runtime'][field] = value
+                self.save('linux', report)
+                result = self.assert_rejected()
+                self.assertIn('pinned FFmpeg', result.stderr)
+
+    def test_rejects_ffmpeg_runtime_drift_on_one_side(self):
+        for field, value in (
+            ('codec_version', PINNED_FFMPEG['codec_version'] + 1),
+            ('configuration', PINNED_FFMPEG['configuration'] + ' --enable-gpl'),
+            ('license', 'LGPL version 3 or later'),
+        ):
+            with self.subTest(field=field):
+                report = copy.deepcopy(self.reports['linux'])
+                for record in [report['candidate']['corpus']['correctness'],
+                               *report['candidate']['corpus']['timings']]:
+                    record['identity']['ffmpeg_runtime'][field] = value
+                self.save('linux', report)
+                self.assert_rejected()
+
+    def test_rejects_missing_ffmpeg_runtime_identity(self):
+        report = copy.deepcopy(self.reports['linux'])
+        for side in ('baseline', 'candidate'):
+            for record in report[side]['corpus']['timings']:
+                if record['uses_ffmpeg']:
+                    record['identity']['ffmpeg_runtime'].pop('configuration')
+        self.save('linux', report)
+        result = self.assert_rejected()
+        self.assertIn('FFmpeg configuration', result.stderr)
 
     def test_rejects_wrong_candidate_sha(self):
         report = copy.deepcopy(self.reports["linux"])

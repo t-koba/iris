@@ -18,6 +18,16 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 PIXELS = "22" * 32
+PINNED_FFMPEG = m.pinned_ffmpeg_identity()
+
+
+def ffmpeg_runtime(**changes):
+    base = dict(codec_version=PINNED_FFMPEG['codec_version'],
+                format_version=618100, util_version=591100,
+                configuration=PINNED_FFMPEG['configuration'],
+                license=PINNED_FFMPEG['license'])
+    base.update(changes)
+    return base
 
 
 def identity(**changes):
@@ -29,8 +39,7 @@ def identity(**changes):
         cpu_model="cpu", available_parallelism=4,
         build_profile="release", release_opt_level="3",
         features=dict(video=True, pdf=True, raw_full=False),
-        ffmpeg_runtime=dict(codec_version=618100, format_version=618100,
-                            util_version=591100),
+        ffmpeg_runtime=ffmpeg_runtime(),
         cargo_lock_sha256="11" * 32,
     )
     base.update(changes)
@@ -216,8 +225,7 @@ class ParitySourceCompareTests(unittest.TestCase):
     def test_paired_records_rejects_ffmpeg_runtime_drift(self):
         baseline = section()
         m.paired_records(baseline, section(), 'J2K')
-        bumped = dict(codec_version=618101, format_version=618100,
-                      util_version=591100)
+        bumped = ffmpeg_runtime(codec_version=PINNED_FFMPEG['codec_version'] + 1)
         with self.subTest(change='codec_version bump'):
             with self.assertRaises(ValueError):
                 m.paired_records(baseline, section(ident=identity(ffmpeg_runtime=bumped)),
@@ -226,14 +234,29 @@ class ParitySourceCompareTests(unittest.TestCase):
             drifted['timings'][0]['identity'] = identity(ffmpeg_runtime=bumped)
             with self.assertRaises(ValueError):
                 m.paired_records(baseline, drifted, 'J2K')
-        for runtime in (dict(codec_version=618100, format_version=618200,
-                             util_version=591100),
-                        dict(codec_version=618100, format_version=618100,
-                             util_version=591200),
+        for runtime in (ffmpeg_runtime(format_version=618200),
+                        ffmpeg_runtime(util_version=591200),
+                        ffmpeg_runtime(configuration='--enable-shared --enable-gpl'),
+                        ffmpeg_runtime(license='GPL version 3 or later'),
                         None):
             with self.subTest(runtime=runtime), self.assertRaises(ValueError):
                 m.paired_records(baseline, section(ident=identity(ffmpeg_runtime=runtime)),
                                  'J2K')
+
+    def test_pinned_ffmpeg_identity_is_derived_from_the_packaging_pin(self):
+        pin = m.pinned_ffmpeg_identity()
+        self.assertEqual(pin['codec_version'], (62 << 16) | (28 << 8) | 103)
+        self.assertEqual(pin['license'], m.PINNED_FFMPEG_LICENSE)
+        self.assertEqual(pin['configuration'], ' '.join(
+            json.loads((ROOT / m.FFMPEG_POLICY).read_text())['configure_flags']))
+        self.assertEqual(m.ffmpeg_configuration(
+            '--prefix=/tmp/other ' + pin['configuration']), pin['configuration'])
+
+    def test_corpus_smoke_records_configuration_and_license(self):
+        source = (ROOT / m.EXAMPLES / m.CORPUS_HARNESS).read_text(encoding='utf-8')
+        self.assertIn('"configuration": ffmpeg_next::codec::configuration()', source)
+        self.assertIn('"license": ffmpeg_next::codec::license()', source)
+        self.assertEqual(m.IDENTITY_SCHEMA, 'iris.preview_identity.v2')
 
     def test_pairing_plan_marks_legacy_schema_unpaired(self):
         baseline = dict(corpus=legacy_section(), j2k=legacy_section())

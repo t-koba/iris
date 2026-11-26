@@ -17,8 +17,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from parity_source_compare import (  # noqa: E402
     BASELINE_SHA, BUILD_SCRIPT, FIXTURE, FIXTURE_SHA256, FIXTURE_SIZE, HARNESS,
-    IDENTITY_SCHEMA, J2K_OPERATION, PARITY_CLAIM, PREVIEW_OPERATIONS, pairing_plan,
-    require,
+    IDENTITY_SCHEMA, J2K_OPERATION, PARITY_CLAIM, PREVIEW_OPERATIONS, ffmpeg_configuration,
+    pairing_plan, pinned_ffmpeg_identity, require,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -158,6 +158,36 @@ def check_pdfium_attribution(report, platform, label):
                 f"{label}: {side} corpus has no loaded PDFium library attribution")
 
 
+def check_pinned_ffmpeg_runtime(report, label, pinned):
+    """FFmpeg-bearing corpus records must report the pinned bundled runtime.
+
+    A system runtime can agree with itself on both sides of a pair, so strict
+    pairing alone is not enough: the recorded ABI, configure flags and license
+    must also match the FFmpeg pin used by the production packages.
+    """
+    for side in ('baseline', 'candidate'):
+        corpus = section_of(report, side, 'corpus', label)
+        correctness = corpus.get('correctness')
+        require(type(correctness) is dict, f'{label}: invalid {side} corpus correctness')
+        records = [correctness, *(record for record in corpus['timings']
+                                 if record.get('uses_ffmpeg') is True)]
+        for record in records:
+            identity = record.get('identity')
+            runtime = identity.get('ffmpeg_runtime') if type(identity) is dict else None
+            require(type(runtime) is dict, f'{label}: {side} corpus has no FFmpeg runtime identity')
+            version = runtime.get('codec_version')
+            require(type(version) is int and version == pinned['codec_version'],
+                    f'{label}: {side} pinned FFmpeg codec_version mismatch')
+            try:
+                configuration = ffmpeg_configuration(runtime.get('configuration'))
+            except ValueError as error:
+                raise ValueError(f'{label}: {side} {error}') from error
+            require(configuration == pinned['configuration'],
+                    f'{label}: {side} pinned FFmpeg configuration mismatch')
+            require(runtime.get('license') == pinned['license'],
+                    f'{label}: {side} pinned FFmpeg license mismatch')
+
+
 def check_pairs(pairs, maps, section_name, policy, label):
     require(type(pairs) is list and pairs and all(type(pair) is dict for pair in pairs),
             f"{label}: missing {section_name} pairs")
@@ -194,7 +224,7 @@ def check_pairs(pairs, maps, section_name, policy, label):
 
 
 def validate_report(report, path, platform, expected, harness_digest, build_script_digest,
-                   policy, run_ids):
+                   policy, run_ids, pinned):
     label = f"{platform} report {path}"
     require(report.get("schema") == REPORT_SCHEMA, f"{label}: unexpected schema")
     require(report.get("parity_claim") == PARITY_CLAIM, f"{label}: unexpected parity_claim")
@@ -231,6 +261,7 @@ def validate_report(report, path, platform, expected, harness_digest, build_scri
             f"{label}: paired_latency operation set mismatch")
 
     check_identities(report, policy, platform, expected, label, run_ids)
+    check_pinned_ffmpeg_runtime(report, label, pinned)
     check_pdfium_attribution(report, platform, label)
     maps = {}
     for name in ("corpus", "j2k"):
@@ -254,6 +285,7 @@ def main():
         require(SHA_PATTERN.fullmatch(args.expected_sha) is not None,
                 "expected SHA must be a full commit SHA")
         policy = load_policy(args.policy)
+        pinned = pinned_ffmpeg_identity()
         harness_path = args.repo / "crates" / "thumb-preview" / "examples" / HARNESS
         require(harness_path.is_file(), "repo has no pinned J2K harness")
         harness_digest = hashlib.sha256(harness_path.read_bytes()).hexdigest()
@@ -264,7 +296,7 @@ def main():
         for platform, path in zip(PLATFORMS, args.reports):
             report = load_report(Path(path), policy["max_report_bytes"], platform)
             validate_report(report, path, platform, args.expected_sha, harness_digest,
-                            build_script_digest, policy, run_ids)
+                            build_script_digest, policy, run_ids, pinned)
         require(len(run_ids) == 1, "reports come from different workflow runs")
     except Exception as error:
         parser.exit(1, f"release parity verification failed: {error}\n")
