@@ -147,6 +147,18 @@ class ReleaseParityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("linux, macos and windows", result.stdout)
 
+    def test_accepts_pinned_baseline_shape_with_shared_corpus_harness(self):
+        source_spec = importlib.util.spec_from_file_location(
+            "parity_source_compare", ROOT / "scripts" / "parity_source_compare.py")
+        source = importlib.util.module_from_spec(source_spec)
+        source_spec.loader.exec_module(source)
+        self.assertIn(source.CORPUS_HARNESS, source.STAGED_EXAMPLES)
+        for platform in m.PLATFORMS:
+            self.save(platform, make_report(platform, baseline=m.BASELINE_SHA))
+        result = self.gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("linux, macos and windows", result.stdout)
+
     def test_rejects_wrong_candidate_sha(self):
         report = copy.deepcopy(self.reports["linux"])
         report["source_revision"]["candidate"] = OTHER_SHA
@@ -368,11 +380,11 @@ class WorkflowContractTests(unittest.TestCase):
             else:
                 self.assertIn("microsoft/vcpkg", block)
                 self.assertIn("b8dfe957ec8b5c0ef5c4b31eea594b8486af744f", block)
-                self.assertIn("ilammy/msvc-dev-cmd@v1", block)
+                self.assertIn("ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0", block)
                 self.assertIn("vcpkg.exe", block)
                 self.assertIn("VCPKG_TARGET_TRIPLET: x64-windows-iris-dynamic", block)
                 self.assertIn("windows-ffmpeg-source.py", block)
-                self.assertIn("windows-ffmpeg-overlay.py", block)
+                self.assertIn("windows-ffmpeg-overlay.py derive $portfile $sourceDir", block)
                 self.assertIn("gh attestation verify", block)
                 self.assertIn("chromium/8138", block)
                 self.assertIn("IRIS_VALIDATION_PDFIUM_RUNTIME", block)

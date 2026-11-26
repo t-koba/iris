@@ -185,7 +185,7 @@ jobs:
           & (Join-Path $root "vcpkg.exe") --version
           if ($LASTEXITCODE -ne 0) { throw "vcpkg --version failed" }
       - name: Set up MSVC developer environment (x64)
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
           arch: x64
       - name: Restore isolated vcpkg root after MSVC setup
@@ -236,9 +236,11 @@ jobs:
           if (!(Test-Path -LiteralPath (Join-Path $sourceDir "RELEASE") -PathType Leaf)) { throw "staged FFmpeg source missing RELEASE; layout drifted" }
           $overlay = $env:IRIS_VALIDATION_OVERLAY
           $portDir = Join-Path $overlay "ffmpeg"
+          if (Test-Path -LiteralPath $portDir) { Remove-Item -Recurse -Force -LiteralPath $portDir }
           New-Item -ItemType Directory -Force -Path $portDir | Out-Null
           Copy-Item -Recurse -Force -Path (Join-Path $env:VCPKG_ROOT "ports/ffmpeg/*") -Destination $portDir
-          python3 scripts/windows-ffmpeg-overlay.py --source $sourceDir --overlay $overlay
+          $portfile = Join-Path $env:VCPKG_ROOT "ports/ffmpeg/portfile.cmake"
+          python3 scripts/windows-ffmpeg-overlay.py derive $portfile $sourceDir (Join-Path $portDir "portfile.cmake")
           if ($LASTEXITCODE -ne 0) { throw "vcpkg overlay derivation failed" }
       - name: Install FFmpeg via pinned vcpkg with verified overlay
         shell: pwsh

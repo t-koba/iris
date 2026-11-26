@@ -23,8 +23,10 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE_SHA = "12fb51a0ba07c299ea4e9b08890a895797148e11"
 EXAMPLES = Path("crates/thumb-preview/examples")
+CORPUS_HARNESS = "preview_corpus_smoke.rs"
 HARNESS = "j2k_corpus_smoke.rs"
 GENERATOR = "generate_j2k_fixture.rs"
+STAGED_EXAMPLES = (CORPUS_HARNESS, HARNESS, GENERATOR)
 FIXTURE = "paired-j2k.jp2"
 FIXTURE_SHA256 = "e44d3480025d87433287c64775c0486cc2e6f7369c6df5b8a249d89f6d2a2caa"
 FIXTURE_SIZE = 393
@@ -251,6 +253,15 @@ def install_example(source, checkout, name):
     require(destination.is_file(), f'{checkout} has no {name} example')
 
 
+def stage_common_examples(repo, baseline, candidate):
+    """Share the candidate's v2 corpus, J2K and generator examples on both sides."""
+    sources = {name: source_example(candidate, repo, name) for name in STAGED_EXAMPLES}
+    for checkout in (baseline, candidate):
+        for name, source in sources.items():
+            install_example(source, checkout, name)
+    return sources
+
+
 @contextmanager
 def worktree(repo, sha, scratch, name):
     path = scratch / name
@@ -279,7 +290,7 @@ def smoke(checkout, example, argument, env, label):
     command = ['cargo', 'run', '--release', '--locked', '-p', 'iris-thumb-preview',
                '--example', example, '--', argument]
     text, _ = run(command, checkout, env, label)
-    return parse_records(text, PREVIEW_OPERATIONS if example == 'preview_corpus_smoke'
+    return parse_records(text, PREVIEW_OPERATIONS if example == CORPUS_HARNESS
                          else {J2K_OPERATION}, label)
 
 
@@ -293,13 +304,9 @@ def compare(args):
         scratch = Path(scratch)
         baseline = stack.enter_context(worktree(repo, args.baseline, scratch, 'baseline'))
         candidate = stack.enter_context(worktree(repo, args.candidate, scratch, 'candidate'))
-        harness = source_example(candidate, repo, HARNESS)
-        generator = source_example(candidate, repo, GENERATOR)
+        sources = stage_common_examples(repo, baseline, candidate)
+        harness = sources[HARNESS]
         harness_sha = digest(harness)
-        # Examples absent from either revision are staged as untracked files.
-        for checkout in (baseline, candidate):
-            install_example(harness, checkout, HARNESS)
-            install_example(generator, checkout, GENERATOR)
         require(digest(baseline / 'tests/preview-corpus/fixtures.json')
                 == digest(candidate / 'tests/preview-corpus/fixtures.json'),
                 'paired revisions pin different corpus manifests')
@@ -316,7 +323,7 @@ def compare(args):
                                     ('candidate', candidate, args.candidate)):
             env = cargo_env(sha, args.warmups, args.samples)
             reports[name] = dict(
-                corpus=smoke(checkout, 'preview_corpus_smoke', corpus, env, f'{name} corpus smoke'),
+                corpus=smoke(checkout, CORPUS_HARNESS, corpus, env, f'{name} corpus smoke'),
                 j2k=smoke(checkout, HARNESS, fixture, env, f'{name} J2K smoke'),
             )
         paired_corpus, paired_j2k, unpaired = pairing_plan(reports['baseline'],

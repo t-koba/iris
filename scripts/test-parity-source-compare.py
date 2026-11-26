@@ -343,6 +343,30 @@ class ParitySourceCompareTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.report_bytes(report)
 
+    def test_common_examples_are_staged_on_both_sides(self):
+        with tempfile.TemporaryDirectory(prefix='iris-parity-examples-') as temporary:
+            root = Path(temporary)
+            source_repo = root / 'source'
+            baseline = root / 'baseline'
+            candidate = root / 'candidate'
+            for checkout in (source_repo, baseline, candidate):
+                (checkout / m.EXAMPLES).mkdir(parents=True)
+            sources = {}
+            for name in m.STAGED_EXAMPLES:
+                path = source_repo / m.EXAMPLES / name
+                path.write_text(name, encoding='utf-8')
+                sources[name] = path
+            staged = m.stage_common_examples(source_repo, baseline, candidate)
+            self.assertEqual(set(staged), set(m.STAGED_EXAMPLES))
+            for name in m.STAGED_EXAMPLES:
+                expected = sources[name].read_bytes()
+                for checkout in (baseline, candidate):
+                    target = checkout / m.EXAMPLES / name
+                    self.assertTrue(target.is_file(), f'{checkout} missing {name}')
+                    self.assertEqual(target.read_bytes(), expected)
+        self.assertIn(m.CORPUS_HARNESS, m.STAGED_EXAMPLES)
+        self.assertNotIn('tests/preview-corpus', m.CORPUS_HARNESS)
+
 
 if __name__ == '__main__':
     unittest.main()
