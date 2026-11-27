@@ -243,6 +243,21 @@ class ParitySourceCompareTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.paired_records(section(), baseline, 'J2K')
 
+    def test_pdfium_runtime_pair_normalizes_windows_library_paths(self):
+        baseline = pdfium_runtime(path=r'C:\a\baseline\pdfium.dll')
+        candidate = pdfium_runtime(path=r'D:\a\candidate\PDFIUM.DLL')
+        m.pdfium_runtime_pair(baseline, candidate, 'windows')
+        for path in (r'D:\a\candidate\wrong.dll',
+                     r'D:\a\candidate\libpdfium.so',
+                     r'/candidate/pdfium.dll'):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                m.pdfium_runtime_pair(baseline, pdfium_runtime(path=path), 'windows')
+        with self.assertRaises(ValueError):
+            m.pdfium_runtime_pair(
+                baseline,
+                pdfium_runtime(path=r'D:\a\candidate\pdfium.dll', required=False),
+                'windows')
+
     def test_paired_records_rejects_ffmpeg_runtime_drift(self):
         baseline = section()
         m.paired_records(baseline, section(), 'J2K')

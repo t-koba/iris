@@ -12,8 +12,10 @@ import argparse
 from contextlib import ExitStack, contextmanager
 import hashlib
 import json
+import ntpath
 import os
 from pathlib import Path
+import posixpath
 import re
 import shlex
 import shutil
@@ -75,9 +77,52 @@ WINDOWS_FFMPEG_FORBIDDEN_FLAGS = (
 )
 
 
+WINDOWS_SEPARATOR = '\\'
+
+
 def require(ok, message):
     if not ok:
         raise ValueError(message)
+
+
+def report_path_module(value, platform=None):
+    """Select the path syntax that produced a report path.
+
+    An explicit platform pins the syntax; otherwise a drive prefix, UNC or
+    extended prefix, or a backslash without a leading POSIX slash, means
+    Windows. All other paths use POSIX syntax.
+    """
+    require(platform is None or platform in ('linux', 'macos', 'windows'),
+            'invalid report path platform')
+    windows = (value.startswith(WINDOWS_SEPARATOR * 2) or re.match(r'[A-Za-z]:', value) is not None
+               or (WINDOWS_SEPARATOR in value and not value.startswith('/')))
+    return ntpath if platform == 'windows' or (platform is None and windows) else posixpath
+
+
+def report_path_parts(value, platform=None):
+    """Return (parent, name) in the producing platform's path syntax.
+
+    Windows paths are normalized with ntpath, lose an extended-length prefix
+    and compare case-insensitively; POSIX paths are normalized with posixpath
+    and keep their case. Invalid paths fail closed.
+    """
+    require(type(value) is str and value.strip(), 'invalid report path')
+    value = value.strip()
+    module = report_path_module(value, platform)
+    prefix = WINDOWS_SEPARATOR * 2 + '?' + WINDOWS_SEPARATOR
+    if module is ntpath and value.startswith(prefix):
+        value = value[len(prefix):]
+    require(value.strip(), 'invalid report path')
+    parent, name = module.split(module.normpath(value))
+    if module is ntpath:
+        return parent.casefold(), name.casefold()
+    return parent, name
+
+
+def report_path(value, platform=None):
+    """Normalize a report path using the producing platform's syntax."""
+    parent, name = report_path_parts(value, platform)
+    return report_path_module(value, platform).join(parent, name)
 
 
 def digest(path):
@@ -309,9 +354,14 @@ def pdfium_runtime_pair(baseline, candidate, label):
                 f'{label}: invalid pdfium runtime path')
         require(runtime['required'] is True,
                 f'{label}: pdfium smoke did not require the staged library')
-    require(Path(baseline['path']).name == Path(candidate['path']).name
-            and Path(baseline['path']).name in PDFIUM_LIBRARY_NAMES.values(),
-            f'{label}: pdfium runtime mismatch')
+    _, baseline_name = report_path_parts(baseline['path'])
+    _, candidate_name = report_path_parts(candidate['path'])
+    require(baseline_name == candidate_name, f'{label}: pdfium runtime mismatch')
+    for runtime, name in ((baseline, baseline_name), (candidate, candidate_name)):
+        module = report_path_module(runtime['path'])
+        expected = (PDFIUM_LIBRARY_NAMES['win32'] if module is ntpath else
+                    PDFIUM_LIBRARY_NAMES['linux'])
+        require(name == expected, f'{label}: pdfium runtime mismatch')
 
 
 def compare_output(baseline, candidate, label):

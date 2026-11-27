@@ -20,7 +20,8 @@ from parity_source_compare import (  # noqa: E402
     BASELINE_SHA, BUILD_SCRIPT, FIXTURE, FIXTURE_SHA256, FIXTURE_SIZE, HARNESS,
     IDENTITY_SCHEMA, J2K_OPERATION, PARITY_CLAIM, PREVIEW_OPERATIONS,
     WINDOWS_FFMPEG_FORBIDDEN_FLAGS, WINDOWS_FFMPEG_REQUIRED_FLAGS, ffmpeg_configuration,
-    pairing_plan, pinned_ffmpeg_identity, require, validate_exported_section,
+    pairing_plan, pinned_ffmpeg_identity, report_path, report_path_parts, require,
+    validate_exported_section,
 )
 from product_build_profile import load as load_product_profiles  # noqa: E402
 
@@ -165,14 +166,14 @@ def check_pdfium_attribution(report, platform, label):
                 f"{label}: {side} corpus has no loaded PDFium library attribution")
         require(runtime.get("required") is True,
                 f"{label}: {side} corpus did not require the staged PDFium library")
-        path = Path(runtime["path"])
-        require(path.name == filename,
+        parent, name = report_path_parts(runtime["path"], platform)
+        require(name == filename,
                 f"{label}: {side} corpus loaded an unexpected PDFium filename")
         side_report = report.get(side)
         worktree = side_report.get("worktree") if type(side_report) is dict else None
         require(type(worktree) is str and worktree.strip(),
                 f"{label}: {side} worktree identity is missing")
-        require(path.resolve().parent == Path(worktree).resolve(),
+        require(parent == report_path(worktree, platform),
                 f"{label}: {side} corpus PDFium path is not the staged worktree library")
 
 

@@ -5,6 +5,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import ntpath
 from pathlib import Path
 import re
 import shutil
@@ -35,6 +36,16 @@ HARNESS_DIGEST = hashlib.sha256(
 BUILD_SCRIPT_DIGEST = hashlib.sha256((ROOT / m.BUILD_SCRIPT).read_bytes()).hexdigest()
 WORKTREES = {"baseline": "/tmp/iris-parity-source-baseline",
              "candidate": "/tmp/iris-parity-source-candidate"}
+WINDOWS_WORKTREES = {
+    "baseline": r"D:\a\_temp\iris-parity-source-baseline",
+    "candidate": r"D:\a\_temp\iris-parity-source-candidate",
+}
+
+
+def report_worktree(platform, side):
+    return WINDOWS_WORKTREES[side] if platform == "windows" else WORKTREES[side]
+
+
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7"
 SETUP_PYTHON = "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6"
 UPLOAD = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4"
@@ -129,9 +140,13 @@ def section(platform, revision, operations, median, run_id=RUN_ID, warmups=2, sa
     )
     # macOS renders PDFs through CoreGraphics; the smoke emits no PDFium line.
     if platform != "macos":
-        directory = worktree or f"/opt/pdfium"
-        result["pdfium_runtime"] = dict(
-            path=str(Path(directory) / pdfium_filename(platform)), required=True)
+        name = pdfium_filename(platform)
+        if platform == "windows":
+            directory = worktree or r"D:\opt\pdfium"
+            path = ntpath.join(directory, name)
+        else:
+            path = str(Path(worktree or "/opt/pdfium") / name)
+        result["pdfium_runtime"] = dict(path=path, required=True)
     return result
 
 
@@ -153,20 +168,20 @@ def make_report(platform, candidate=CANDIDATE, baseline=m.BASELINE_SHA, run_id=R
         fixture_pin=dict(filename=m.FIXTURE, sha256=m.FIXTURE_SHA256,
                          size_bytes=m.FIXTURE_SIZE),
         baseline=section(platform, baseline, operations, baseline_median, run_id,
-                         worktree=WORKTREES["baseline"]),
+                         worktree=report_worktree(platform, "baseline")),
         candidate=section(platform, candidate, operations, candidate_median, run_id,
-                          worktree=WORKTREES["candidate"]),
+                          worktree=report_worktree(platform, "candidate")),
     )
     report["baseline_j2k"] = section(platform, baseline, [m.J2K_OPERATION],
                                     baseline_median, run_id,
-                                    worktree=WORKTREES["baseline"])
+                                    worktree=report_worktree(platform, "baseline"))
     report["candidate_j2k"] = section(platform, candidate, [m.J2K_OPERATION],
                                      candidate_median, run_id,
-                                     worktree=WORKTREES["candidate"])
+                                     worktree=report_worktree(platform, "candidate"))
     # pairing_plan() expects corpus and J2K under each source revision.
-    report["baseline"] = dict(worktree=WORKTREES["baseline"],
+    report["baseline"] = dict(worktree=report_worktree(platform, "baseline"),
                               corpus=report["baseline"], j2k=report.pop("baseline_j2k"))
-    report["candidate"] = dict(worktree=WORKTREES["candidate"],
+    report["candidate"] = dict(worktree=report_worktree(platform, "candidate"),
                                corpus=report["candidate"], j2k=report.pop("candidate_j2k"))
     return resummarize(report)
 
@@ -240,6 +255,54 @@ class ReleaseParityTests(unittest.TestCase):
                 mutate(report, kind)
                 self.save("linux", report)
                 self.assert_rejected()
+
+    def test_report_path_parts_uses_producing_platform_syntax(self):
+        self.assertEqual(m.report_path_parts(r"C:\a\work\PDFIUM.DLL", "windows"),
+                         (r"c:\a\work", "pdfium.dll"))
+        self.assertEqual(m.report_path_parts(r"D:/a/work/pdfium.dll"),
+                         (r"d:\a\work", "pdfium.dll"))
+        self.assertEqual(m.report_path_parts(r"\\?\D:\a\work\pdfium.dll"),
+                         (r"d:\a\work", "pdfium.dll"))
+        self.assertEqual(m.report_path_parts(r"\\server\share\work\pdfium.dll"),
+                         (r"\\server\share\work", "pdfium.dll"))
+        self.assertEqual(m.report_path_parts("/opt/dir/libpdfium.so", "linux"),
+                         ("/opt/dir", "libpdfium.so"))
+        self.assertEqual(m.report_path_parts("/opt/dir/libpdfium.so"),
+                         ("/opt/dir", "libpdfium.so"))
+        for value in ("", "  ", None, 17):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                m.report_path_parts(value)
+
+    def test_accepts_windows_drive_and_extended_length_paths(self):
+        report = copy.deepcopy(self.reports["windows"])
+        for side in ("baseline", "candidate"):
+            worktree = report[side]["worktree"]
+            self.assertTrue(worktree.startswith("D:"))
+            self.assertTrue(report[side]["corpus"]["pdfium_runtime"]["path"].startswith("D:"))
+            report[side]["corpus"]["pdfium_runtime"]["path"] = (
+                "\\\\?\\" + worktree + "\\pdfium.dll")
+        self.save("windows", report)
+        result = self.gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejects_wrong_windows_worktree_pdfium_attribution(self):
+        report = copy.deepcopy(self.reports["windows"])
+        wrong = r"D:\a\_temp\wrong"
+        for side in ("baseline", "candidate"):
+            report[side]["corpus"]["pdfium_runtime"]["path"] = ntpath.join(
+                wrong, "pdfium.dll")
+        self.save("windows", report)
+        result = self.assert_rejected()
+        self.assertIn("PDFium path is not the staged worktree library", result.stderr)
+
+    def test_rejects_posix_library_name_in_windows_report(self):
+        report = copy.deepcopy(self.reports["windows"])
+        for side in ("baseline", "candidate"):
+            runtime = report[side]["corpus"]["pdfium_runtime"]
+            runtime["path"] = runtime["path"].replace("pdfium.dll", "libpdfium.so")
+        self.save("windows", report)
+        result = self.assert_rejected()
+        self.assertIn("pdfium runtime mismatch", result.stderr)
 
     def test_fixture_complete_reports_fit_the_report_budget(self):
         budget = json.loads(POLICY.read_text(encoding="utf-8"))["max_report_bytes"]
