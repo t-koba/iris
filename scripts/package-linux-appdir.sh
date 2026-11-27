@@ -20,8 +20,8 @@ case "$build_variant" in
         export PKG_CONFIG_LIBDIR="$IRIS_FFMPEG_PREFIX/lib/pkgconfig"
         export PKG_CONFIG_PATH="$PKG_CONFIG_LIBDIR"
         export FFMPEG_DIR="$IRIS_FFMPEG_PREFIX"
-        # Match the Linux CI profile used to satisfy the release binary size budget.
-        export CARGO_PROFILE_RELEASE_OPT_LEVEL=z
+        # Match the shared product profile used to satisfy the release size budget.
+        export CARGO_PROFILE_RELEASE_OPT_LEVEL="$(python3 "$script_dir/product_build_profile.py" --platform linux)"
         # Debian packaging requires dpkg-dev (dpkg-shlibdeps) and binutils.
         for tool in dpkg dpkg-deb dpkg-shlibdeps; do
             command -v "$tool" >/dev/null

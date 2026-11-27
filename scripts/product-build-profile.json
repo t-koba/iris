@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "platforms": {
+    "linux": {"build_profile": "release", "release_opt_level": "z"},
+    "macos": {"build_profile": "release", "release_opt_level": "3"},
+    "windows": {"build_profile": "release", "release_opt_level": "3"}
+  }
+}

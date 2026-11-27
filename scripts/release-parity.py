@@ -22,6 +22,7 @@ from parity_source_compare import (  # noqa: E402
     WINDOWS_FFMPEG_FORBIDDEN_FLAGS, WINDOWS_FFMPEG_REQUIRED_FLAGS, ffmpeg_configuration,
     pairing_plan, pinned_ffmpeg_identity, require, validate_exported_section,
 )
+from product_build_profile import load as load_product_profiles  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_SCHEMA = "iris.parity_source_compare.v1"
@@ -113,7 +114,7 @@ def timing_map(section, label):
     return result
 
 
-def check_identities(report, policy, platform, expected, label, run_ids):
+def check_identities(report, policy, platform, expected, label, run_ids, product_profile):
     spec = policy["platform_identity"][platform]
     for side, revision in (("baseline", policy["baseline_sha"]),
                            ("candidate", expected)):
@@ -138,6 +139,9 @@ def check_identities(report, policy, platform, expected, label, run_ids):
                         or (profile == "release" and type(level) is str
                             and level in ("0", "1", "2", "3", "s", "z")),
                         f"{label}: {side} {name} invalid release_opt_level")
+                require(profile == product_profile["build_profile"]
+                        and level == product_profile["release_opt_level"],
+                        f"{label}: {side} {name} wrong product build profile")
                 require(identity.get("source_revision") == revision,
                         f"{label}: {side} {name} source_revision mismatch")
                 require(identity.get("target_os") == spec["target_os"]
@@ -246,7 +250,7 @@ def check_pairs(pairs, maps, section_name, policy, label):
 
 
 def validate_report(report, path, platform, expected, harness_digest, build_script_digest,
-                   policy, run_ids, pinned):
+                   policy, run_ids, pinned, product_profile):
     label = f"{platform} report {path}"
     require(report.get("schema") == REPORT_SCHEMA, f"{label}: unexpected schema")
     require(report.get("parity_claim") == PARITY_CLAIM, f"{label}: unexpected parity_claim")
@@ -288,7 +292,7 @@ def validate_report(report, path, platform, expected, harness_digest, build_scri
             and set(operations) == set(policy["required_operations"]),
             f"{label}: paired_latency operation set mismatch")
 
-    check_identities(report, policy, platform, expected, label, run_ids)
+    check_identities(report, policy, platform, expected, label, run_ids, product_profile)
     check_pinned_ffmpeg_runtime(report, platform, label, pinned)
     check_pdfium_attribution(report, platform, label)
     maps = {}
@@ -313,6 +317,8 @@ def main():
         require(SHA_PATTERN.fullmatch(args.expected_sha) is not None,
                 "expected SHA must be a full commit SHA")
         policy = load_policy(args.policy)
+        product_profiles = load_product_profiles(
+            ROOT / "scripts" / "product-build-profile.json")
         pinned = pinned_ffmpeg_identity()
         harness_path = args.repo / "crates" / "thumb-preview" / "examples" / HARNESS
         require(harness_path.is_file(), "repo has no pinned J2K harness")
@@ -324,7 +330,8 @@ def main():
         for platform, path in zip(PLATFORMS, args.reports):
             report = load_report(Path(path), policy["max_report_bytes"], platform)
             validate_report(report, path, platform, args.expected_sha, harness_digest,
-                            build_script_digest, policy, run_ids, pinned)
+                            build_script_digest, policy, run_ids, pinned,
+                            product_profiles[platform])
         require(len(run_ids) == 1, "reports come from different workflow runs")
     except Exception as error:
         parser.exit(1, f"release parity verification failed: {error}\n")

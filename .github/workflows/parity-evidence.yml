@@ -70,6 +70,10 @@ jobs:
           test -f /usr/local/lib/libpdfium.so
       - name: Fetch preview corpus bytes
         run: python3 scripts/fetch-preview-corpus.py --output "$RUNNER_TEMP/iris-preview-corpus"
+      - name: Apply product build profile to Linux parity smoke
+        shell: bash
+        run: |
+          echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=$(python3 scripts/product_build_profile.py --platform linux)" >> "$GITHUB_ENV"
       - name: Produce Linux paired-source parity report
         shell: bash
         env:
@@ -137,6 +141,10 @@ jobs:
           test "$(pkg-config --variable=prefix libavcodec)" = "$prefix"
       - name: Fetch preview corpus bytes
         run: python3 scripts/fetch-preview-corpus.py --output "$RUNNER_TEMP/iris-preview-corpus"
+      - name: Apply product build profile to macOS parity smoke
+        shell: bash
+        run: |
+          echo "CARGO_PROFILE_RELEASE_OPT_LEVEL=$(python3 scripts/product_build_profile.py --platform macos)" >> "$GITHUB_ENV"
       - name: Produce macOS paired-source parity report
         shell: bash
         env:
@@ -340,6 +348,11 @@ jobs:
       - name: Fetch preview corpus bytes
         shell: bash
         run: python3 scripts/fetch-preview-corpus.py --output "$RUNNER_TEMP/iris-preview-corpus"
+      - name: Apply product build profile to Windows parity smoke
+        shell: pwsh
+        run: |
+          $profile = (& python3 scripts/product_build_profile.py --platform windows | Out-String).Trim()
+          "CARGO_PROFILE_RELEASE_OPT_LEVEL=$profile" >> $env:GITHUB_ENV
       - name: Produce Windows paired-source parity report
         shell: bash
         env:

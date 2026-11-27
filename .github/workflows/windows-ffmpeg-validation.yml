@@ -215,6 +215,8 @@ jobs:
           $ErrorActionPreference = "Stop"
           # Git bash puts its own link.exe ahead of MSVC's, so build from pwsh
           # where the MSVC developer PATH from the previous step is authoritative.
+          $env:CARGO_PROFILE_RELEASE_OPT_LEVEL = (& python3 scripts/product_build_profile.py --platform windows | Out-String).Trim()
+          if ([string]::IsNullOrWhiteSpace($env:CARGO_PROFILE_RELEASE_OPT_LEVEL)) { throw "shared product build profile is empty" }
           cargo build --release -p iris-ui-shell --locked
           if ($LASTEXITCODE -ne 0) { throw "release product build failed" }
           cargo build --release -p iris-thumb-preview --example preview_corpus_smoke --locked

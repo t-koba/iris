@@ -134,7 +134,9 @@ assert_no_unbundled_dependencies() {
 cd "$repo_root"
 build_args=(cargo build --locked --release -p iris-ui-shell --bin "$binary_name")
 case "$build_variant" in
-    product) ;;
+    product)
+        export CARGO_PROFILE_RELEASE_OPT_LEVEL="$(python3 "$script_dir/product_build_profile.py" --platform macos)"
+        ;;
     minimal)
         build_args+=(--no-default-features --features minimal)
         ;;

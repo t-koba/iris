@@ -19,6 +19,10 @@ POLICY = ROOT / "scripts" / "release-parity.json"
 spec = importlib.util.spec_from_file_location("release_parity", SCRIPT)
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+sys.path.insert(0, str(ROOT / "scripts"))
+from product_build_profile import load as load_product_profiles  # noqa: E402
+
+PRODUCT_PROFILES = load_product_profiles()
 
 CANDIDATE = "b" * 40
 OTHER_SHA = "c" * 40
@@ -54,8 +58,10 @@ def identity(platform, revision, run_id=RUN_ID):
         target_os=platform_identity["target_os"], target_arch="x86_64",
         runner_name="runner", runner_os=platform_identity["runner_os"],
         runner_arch="X64", runner_image_os="image", runner_image_version="1",
-        cpu_model="cpu", available_parallelism=4, build_profile="release",
-        release_opt_level="3", features=dict(video=True, pdf=True, raw_full=True),
+        cpu_model="cpu", available_parallelism=4,
+        build_profile=PRODUCT_PROFILES[platform]["build_profile"],
+        release_opt_level=PRODUCT_PROFILES[platform]["release_opt_level"],
+        features=dict(video=True, pdf=True, raw_full=True),
         ffmpeg_runtime=dict(
             codec_version=PINNED_FFMPEG['codec_version'], format_version=618100,
             util_version=591100,
@@ -518,6 +524,20 @@ class ReleaseParityTests(unittest.TestCase):
                 self.assertTrue("invalid build profile" in result.stderr
                                 or "invalid release_opt_level" in result.stderr, result.stderr)
 
+    def test_rejects_a_matched_pair_with_the_wrong_product_build_profile(self):
+        for platform in m.PLATFORMS:
+            with self.subTest(platform=platform):
+                wrong_level = "3" if platform == "linux" else "z"
+                report = copy.deepcopy(self.reports[platform])
+                for side in ("baseline", "candidate"):
+                    for name in ("corpus", "j2k"):
+                        section = report[side][name]
+                        for record in [section["correctness"], *section["timings"]]:
+                            record["identity"]["release_opt_level"] = wrong_level
+                self.save(platform, report)
+                result = self.assert_rejected()
+                self.assertIn("wrong product build profile", result.stderr)
+
     def test_rejects_wrong_harness_digest(self):
         report = copy.deepcopy(self.reports["linux"])
         report["harness_sha256"] = "0" * 64
@@ -594,6 +614,40 @@ class WorkflowContractTests(unittest.TestCase):
         following = re.search(r"(?m)^  [a-zA-Z0-9_-]+:\n", text[start.end():])
         end = start.end() + following.start() if following else len(text)
         return text[start.start():end]
+
+    def test_product_build_profile_is_shared_by_packaging_and_parity(self):
+        profiles = m.load_product_profiles(
+            ROOT / "scripts" / "product-build-profile.json")
+        self.assertEqual(profiles, {
+            "linux": {"build_profile": "release", "release_opt_level": "z"},
+            "macos": {"build_profile": "release", "release_opt_level": "3"},
+            "windows": {"build_profile": "release", "release_opt_level": "3"},
+        })
+        linux_package = (ROOT / "scripts" / "package-linux-appdir.sh").read_text(
+            encoding="utf-8")
+        macos_package = (ROOT / "scripts" / "package-macos-app.sh").read_text(
+            encoding="utf-8")
+        self.assertIn(
+            'export CARGO_PROFILE_RELEASE_OPT_LEVEL="$(python3 '
+            '"$script_dir/product_build_profile.py" --platform linux)"', linux_package)
+        self.assertNotIn("CARGO_PROFILE_RELEASE_OPT_LEVEL=z", linux_package)
+        self.assertIn(
+            'export CARGO_PROFILE_RELEASE_OPT_LEVEL="$(python3 '
+            '"$script_dir/product_build_profile.py" --platform macos)"', macos_package)
+        windows_validation = (ROOT / ".github" / "workflows" /
+                              "windows-ffmpeg-validation.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "$env:CARGO_PROFILE_RELEASE_OPT_LEVEL = (& python3 "
+            "scripts/product_build_profile.py --platform windows | Out-String).Trim()",
+            windows_validation)
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("python3 scripts/test-release-parity.py", ci)
+        for platform, level in (("linux", "z"), ("macos", "3"), ("windows", "3")):
+            block = self.job_block(self.evidence, f"parity-{platform}")
+            self.assertIn(
+                f'python3 scripts/product_build_profile.py --platform {platform}', block)
+            self.assertIn("CARGO_PROFILE_RELEASE_OPT_LEVEL", block)
+            self.assertEqual(level, profiles[platform]["release_opt_level"])
 
     def test_release_wires_parity_evidence_before_policy_gate(self):
         job = self.job_block(self.release, "parity-evidence")
