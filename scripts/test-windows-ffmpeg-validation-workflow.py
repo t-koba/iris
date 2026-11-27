@@ -68,6 +68,9 @@ class WorkflowContracts(unittest.TestCase):
         self.assertTrue(checks["system_dirs_token_scoped"])
         self.assertTrue(checks["vcpkg_empty_path_guard"])
         self.assertTrue(checks["source_bundle_staged"])
+        self.assertTrue(checks["sign_input_declared"])
+        self.assertTrue(checks["sign_secrets_declared"])
+        self.assertTrue(checks["signing_tag_only"])
 
     def test_all_offline_gates_present(self):
         for gate in self.mod.OFFLINE_GATES:
@@ -100,6 +103,10 @@ class WorkflowContracts(unittest.TestCase):
             self.assertIn(marker, shape["required_markers"])
         self.assertEqual(shape["source_bundle_outputs"], list(self.mod.SOURCE_BUNDLE_OUTPUTS))
         self.assertEqual(shape["candidate_input"], "inputs.validate_pdfium_candidate")
+        self.assertEqual(shape["signing_secrets"], list(self.mod.SIGN_SECRET_NAMES))
+        for marker in self.mod.SIGNING_MARKERS:
+            self.assertIn(marker, shape["required_markers"])
+        self.assertIn("python3 scripts/test-windows-signing.py", shape["offline_gates"])
         for marker in (self.mod.STAGE_MARKERS + self.mod.PREVIEW_RECORD_MARKERS
                        + self.mod.PE_IMPORT_MARKERS + self.mod.EVIDENCE_MARKERS
                        + (self.mod.PATH_MARKER,)):
@@ -930,6 +937,12 @@ class WiringContracts(unittest.TestCase):
         self.assertIn("python3 scripts/test-windows-ffmpeg-validation-workflow.py", ci)
         self.assertIn("python3 scripts/test-windows-ffmpeg-validation-workflow.py", wf)
 
+    def test_signing_gate_is_wired_into_ci_preflight_and_release(self):
+        for path in (".github/workflows/ci.yml", ".github/workflows/release.yml",
+                     ".github/workflows/windows-ffmpeg-validation.yml"):
+            self.assertIn("python3 scripts/test-windows-signing.py",
+                          (ROOT / path).read_text())
+
     def test_workflow_registered_for_manual_dispatch(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("uses: ./.github/workflows/windows-ffmpeg-validation.yml", ci)
@@ -1140,6 +1153,97 @@ class ProductRehearsalContracts(unittest.TestCase):
         self.assertEqual(checks["evidence_upload_count"], 1)
         self.assertEqual(checks["export_upload_count"], 2)
         self.assertTrue(checks["evidence_json_only"])
+
+class TagOnlySigningContracts(unittest.TestCase):
+    """The reusable workflow signs only for a tag caller; dispatch stays unsigned."""
+
+    def setUp(self):
+        self.mod = load()
+        self.text = (ROOT / ".github/workflows/windows-ffmpeg-validation.yml").read_text()
+
+    def test_signing_markers_are_required_and_removal_fails_closed(self):
+        for marker in self.mod.SIGNING_MARKERS:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.text)
+                self.assertIn(marker, self.mod.REQUIRED_MARKERS)
+                with self.assertRaises(ValueError):
+                    self.mod.validate(self.text.replace(marker, "<removed>", 1))
+
+    def test_signing_markers_cannot_be_commented_out(self):
+        marker = "[IO.File]::WriteAllBytes($pfxPath, $bytes)"
+        self.assertEqual(self.text.count(marker), 1)
+        mutated = self.text.replace(marker, "          # " + marker, 1)
+        with self.assertRaisesRegex(ValueError, "tag-only signing marker"):
+            self.mod.validate(mutated)
+
+    def test_rejects_missing_or_default_enabled_sign_input(self):
+        block = (
+            "      sign_windows_release:\n"
+            "        description: \"Sign the exported installer on a tag release only\"\n"
+            "        required: false\n"
+            "        type: boolean\n"
+            "        default: false\n")
+        self.assertIn(block, self.text)
+        with self.assertRaisesRegex(ValueError, "sign_windows_release"):
+            self.mod.validate(self.text.replace(block, "", 1))
+        with self.assertRaisesRegex(ValueError, "sign_windows_release"):
+            self.mod.validate(self.text.replace(block, block.replace(
+                "default: false", "default: true"), 1))
+
+    def test_rejects_missing_signing_secret_declaration(self):
+        for name in self.mod.SIGN_SECRET_NAMES:
+            with self.subTest(secret=name):
+                lines = self.text.splitlines(keepends=True)
+                start = lines.index("      " + name + ":\n")
+                block = "".join(lines[start:start + 3])
+                self.assertIn("required: false", block)
+                with self.assertRaisesRegex(ValueError, "signing secrets"):
+                    self.mod.validate(self.text.replace(block, "", 1))
+
+    def test_rejects_ungated_provisioning(self):
+        guard = "        if: ${{ inputs.sign_windows_release }}\n"
+        self.assertEqual(self.text.count(guard), 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(self.text.replace(guard, "", 1))
+
+    def test_rejects_ungated_packaging_secret_env(self):
+        guarded = ("          IRIS_WINDOWS_SIGN_PFX_PASSWORD: ${{ inputs.sign_windows_release "
+                   "&& secrets.IRIS_WINDOWS_SIGN_PFX_PASSWORD || '' }}\n")
+        self.assertIn(guarded, self.text)
+        mutated = self.text.replace(
+            guarded, "          IRIS_WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.IRIS_WINDOWS_SIGN_PFX_PASSWORD }}\n", 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
+    def test_rejects_provisioning_after_packaging(self):
+        provision = "      - name: Provision Windows signing credentials\n"
+        packaging = "      - name: Exercise release packaging from exact product inventory\n"
+        start = self.text.index(provision)
+        end = self.text.index(packaging, start)
+        block = self.text[start:end]
+        mutated = self.text[:start] + self.text[end:]
+        insert = mutated.index("      - name: Assemble bounded evidence manifest\n")
+        mutated = mutated[:insert] + block + mutated[insert:]
+        with self.assertRaisesRegex(ValueError, "provisioned before"):
+            self.mod.validate(mutated)
+
+    def test_rejects_uncleaned_signing_pfx(self):
+        marker = '"${IRIS_WINDOWS_SIGN_PFX:-}"'
+        self.assertEqual(self.text.count(marker), 1)
+        with self.assertRaises(ValueError):
+            self.mod.validate(self.text.replace(marker, "", 1))
+
+    def test_dispatch_callers_never_pass_signing_inputs_or_secrets(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        for token in ("sign_windows_release", "IRIS_WINDOWS_SIGN"):
+            self.assertNotIn(token, ci)
+
+    def test_private_runner_temp_pfx_and_no_values_in_public_file(self):
+        self.assertIn('Join-Path $env:RUNNER_TEMP "iris-windows-signing.pfx"', self.text)
+        self.assertIn("$acl.SetAccessRuleProtection($true, $false)", self.text)
+        for name in ("IRIS_WINDOWS_SIGN_PFX_BASE64", "IRIS_WINDOWS_SIGN_PFX_PASSWORD",
+                     "IRIS_WINDOWS_SIGN_TIMESTAMP_URL"):
+            self.assertIn(name + " }}", self.text)  # reference only, never a value
 
 
 class NativeEvidenceExportContracts(unittest.TestCase):

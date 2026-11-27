@@ -34,6 +34,7 @@ OFFLINE_GATES = (
     "python3 scripts/test-windows-ffmpeg-validation-config.py",
     "python3 scripts/test-windows-ffmpeg-validation-workflow.py",
     "python3 scripts/test-windows-pdfium-candidate.py",
+    "python3 scripts/test-windows-signing.py",
 )
 
 # One RUNNER_TEMP stage binds both release binaries, the vcpkg DLL closure and
@@ -203,6 +204,36 @@ CANDIDATE_MARKERS = (
     "python3 scripts/windows-pdfium-candidate.py",
     '"pdfium-8179-candidate.json"',
     "build/validation/evidence/pdfium-8179-candidate.json",
+)
+
+# Tag-only Authenticode signing. The input and all three secrets are declared
+# on the reusable workflow; unsigned dispatch callers pass neither input nor
+# secrets. Provisioning writes a bounded, ACL-restricted runner-temp PFX and
+# only the tag-gated packaging step receives the secret env. The hash binding
+# stays downstream of that step in package-windows.ps1.
+SIGN_INPUT_NAME = "sign_windows_release"
+SIGN_INPUT = "inputs." + SIGN_INPUT_NAME
+SIGN_SECRET_NAMES = (
+    "IRIS_WINDOWS_SIGN_PFX_BASE64",
+    "IRIS_WINDOWS_SIGN_PFX_PASSWORD",
+    "IRIS_WINDOWS_SIGN_TIMESTAMP_URL",
+)
+SIGNING_MARKERS = (
+    "- name: Provision Windows signing credentials",
+    "if: ${{ inputs.sign_windows_release }}",
+    "IRIS_WINDOWS_SIGN_PFX_BASE64: ${{ secrets.IRIS_WINDOWS_SIGN_PFX_BASE64 }}",
+    "IRIS_WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.IRIS_WINDOWS_SIGN_PFX_PASSWORD }}",
+    "IRIS_WINDOWS_SIGN_TIMESTAMP_URL: ${{ secrets.IRIS_WINDOWS_SIGN_TIMESTAMP_URL }}",
+    "if ($encoded.Length -gt 1400000 -or $encoded -match '[^A-Za-z0-9+/=]')",
+    "try { $bytes = [Convert]::FromBase64String($encoded) }",
+    "if ($bytes.Length -eq 0 -or $bytes.Length -gt 1048576)",
+    '[IO.File]::WriteAllBytes($pfxPath, $bytes)',
+    "$acl.SetAccessRuleProtection($true, $false)",
+    "Set-Acl -LiteralPath $pfxPath -AclObject $acl",
+    '"IRIS_WINDOWS_SIGN_PFX=$pfxPath" >> $env:GITHUB_ENV',
+    "IRIS_WINDOWS_SIGN_PFX_PASSWORD: ${{ inputs.sign_windows_release && secrets.IRIS_WINDOWS_SIGN_PFX_PASSWORD || '' }}",
+    "IRIS_WINDOWS_SIGN_TIMESTAMP_URL: ${{ inputs.sign_windows_release && secrets.IRIS_WINDOWS_SIGN_TIMESTAMP_URL || '' }}",
+    '"${IRIS_WINDOWS_SIGN_PFX:-}"',
 )
 
 # The shippable inventory is derived only from the product binary, the vcpkg
@@ -390,7 +421,7 @@ REQUIRED_MARKERS = (
     CLEANUP_MARKER, PATH_MARKER,
 ) + PRODUCT_INVENTORY_MARKERS + PRODUCT_PACKAGE_MARKERS + PRODUCT_NOTICE_MARKERS + (
     PRODUCT_EVIDENCE_MARKERS + PRODUCT_CLEANUP_MARKERS + SOURCE_BUNDLE_MARKERS
-) + PRODUCT_ZIP_MARKERS + RELEASE_PACKAGE_MARKERS
+) + PRODUCT_ZIP_MARKERS + RELEASE_PACKAGE_MARKERS + SIGNING_MARKERS
 
 # Only these exact action refs may appear in the validation workflow. The
 # trailing `# version` text on a `uses:` line is documentation, not part of the
@@ -687,6 +718,29 @@ def boolean_input_declared(text, name):
                     fields[field.group(1)] = field.group(2).strip()
             if fields.get("type") == "boolean" and fields.get("default") == "false":
                 return True
+    return False
+
+
+def secret_declared(text, name):
+    """Require workflow_call.secrets to declare an optional secret by name."""
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        if not re.match(r"^\s*secrets:\s*$", line):
+            continue
+        base = indent_of(line)
+        for j in range(idx + 1, len(lines)):
+            entry = lines[j]
+            if entry.strip() and indent_of(entry) <= base:
+                break
+            if not re.match(rf"^\s*{re.escape(name)}:\s*$", entry):
+                continue
+            decl_ind = indent_of(entry)
+            for sub in lines[j + 1:]:
+                if sub.strip() and indent_of(sub) <= decl_ind:
+                    break
+                field = re.match(r"^\s*([a-z-]+):\s*(.*)$", sub)
+                if field and field.group(1) == "required":
+                    return field.group(2).strip() == "false"
     return False
 
 
@@ -1113,6 +1167,29 @@ def validate(text):
     # Native bytes must be cleaned before upload.
     require(CLEANUP_MARKER in text and "rm -rf" in text and "if: always()" in text,
             "native bytes cleanup is not fail-closed")
+
+    checks["sign_input_declared"] = boolean_input_declared(trigger_block, SIGN_INPUT_NAME)
+    require(checks["sign_input_declared"],
+            "workflow_call must declare sign_windows_release as boolean defaulting to false")
+    checks["sign_secrets_declared"] = all(
+        secret_declared(trigger_block, name) for name in SIGN_SECRET_NAMES)
+    require(checks["sign_secrets_declared"],
+            "workflow_call.secrets must declare all three optional signing secrets")
+    for marker in SIGNING_MARKERS:
+        require(marker in code,
+                f"tag-only signing marker missing from executable workflow lines: {marker}")
+    provision = "- name: Provision Windows signing credentials"
+    packaging = "- name: Exercise release packaging from exact product inventory"
+    require(code.index(provision) < code.index(packaging),
+            "signing credentials must be provisioned before the packaging step")
+    provision_block = text.split(provision, 1)[1].split("\n      - name:", 1)[0]
+    require(provision_block.count("if: ${{ inputs.sign_windows_release }}") == 1,
+            "credential provisioning must be gated on the tag-only input")
+    packaging_block = text.split(packaging, 1)[1].split("\n      - name:", 1)[0]
+    for name in SIGN_SECRET_NAMES[1:]:
+        require(f"{name}: ${{{{ inputs.sign_windows_release && secrets.{name} || '' }}}}" in packaging_block,
+                f"packaging step must pass {name} only on the tag path")
+    checks["signing_tag_only"] = True
     return checks
 
 
@@ -1123,6 +1200,7 @@ def main():
     if args.command == "contract":
         print(json.dumps(dict(
             triggers=["workflow_call"], offline_gates=list(OFFLINE_GATES),
+            signing_secrets=list(SIGN_SECRET_NAMES),
             required_markers=list(REQUIRED_MARKERS), forbidden_markers=list(FORBIDDEN_MARKERS),
             allowed_actions=sorted(ALLOWED_ACTIONS), flow_steps_allowed=False,
             upload_count=3, evidence_upload_count=1, export_upload_count=2,

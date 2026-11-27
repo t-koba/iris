@@ -150,6 +150,15 @@ if (!(Test-Path -LiteralPath $installerPath -PathType Leaf)) {
     throw "Inno Setup did not produce $installerPath"
 }
 
+# Tag-only Authenticode signing. An empty flag leaves the unsigned rehearsal
+# bytes untouched; the hashes below always bind the final installer bytes.
+if (![string]::IsNullOrWhiteSpace($env:IRIS_WINDOWS_SIGN_PFX)) {
+    & $python.Source (Join-Path $scriptDir "windows-signing.py") sign `
+      --file $installerPath `
+      --output (Join-Path $outputDir "windows-installer-trust.json")
+    if ($LASTEXITCODE -ne 0) { throw "Windows installer signing failed" }
+}
+
 $result = @{
     status = "pass"
     zip_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()

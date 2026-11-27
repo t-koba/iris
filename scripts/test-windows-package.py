@@ -61,6 +61,10 @@ REQUIRED = (
     '"/DInstallerFiles=$includePath"',
     '"/O$outputDir"',
     "if (!(Test-Path -LiteralPath $installerPath -PathType Leaf))",
+    'if (![string]::IsNullOrWhiteSpace($env:IRIS_WINDOWS_SIGN_PFX)) {',
+    'windows-signing.py") sign `',
+    '--file $installerPath `',
+    'throw "Windows installer signing failed"',
     'status = "pass"',
     "zip_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath)",
     "installer_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installerPath)",
@@ -131,6 +135,20 @@ class PackageScriptContracts(unittest.TestCase):
                 self.assertTrue(
                     "cargo metadata" in line.lower() or "cargo resolves" in line.lower(),
                     line)
+
+    def test_signing_runs_after_iscc_and_before_hash_binding(self):
+        iscc = self.text.index('throw "Inno Setup did not produce $installerPath"')
+        sign = self.text.index('if (![string]::IsNullOrWhiteSpace($env:IRIS_WINDOWS_SIGN_PFX)) {')
+        result = self.text.index('$result = @{')
+        self.assertLess(iscc, sign)
+        self.assertLess(sign, result)
+
+    def test_signing_reads_secrets_from_the_environment(self):
+        # Only the guard is named in the packager; the Python helper owns the
+        # password and timestamp inputs, so no secret reaches a script line.
+        for token in ("IRIS_WINDOWS_SIGN_PFX_PASSWORD",
+                      "IRIS_WINDOWS_SIGN_TIMESTAMP_URL", "synthetic-passphrase"):
+            self.assertNotIn(token, self.text)
 
     def test_rehearsal_is_reused_in_process(self):
         bindings = ("$env:IRIS_PRODUCT_STAGE = $stage",

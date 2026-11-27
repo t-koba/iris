@@ -59,6 +59,9 @@ jobs:
       - name: Validate macOS signing credential provisioning offline
         timeout-minutes: 1
         run: python3 scripts/test-macos-signing-provision.py
+      - name: Validate Windows Authenticode signing offline
+        timeout-minutes: 1
+        run: python3 scripts/test-windows-signing.py
 
       - name: Resolve package source and workspace version
         id: source
@@ -367,6 +370,11 @@ jobs:
     uses: ./.github/workflows/windows-ffmpeg-validation.yml
     with:
       export_release_assets: true
+      sign_windows_release: ${{ github.event_name == 'push' }}
+    secrets:
+      IRIS_WINDOWS_SIGN_PFX_BASE64: ${{ secrets.IRIS_WINDOWS_SIGN_PFX_BASE64 }}
+      IRIS_WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.IRIS_WINDOWS_SIGN_PFX_PASSWORD }}
+      IRIS_WINDOWS_SIGN_TIMESTAMP_URL: ${{ secrets.IRIS_WINDOWS_SIGN_TIMESTAMP_URL }}
 
   package-windows:
     needs: [release-preflight, windows-product-assets]
@@ -517,6 +525,22 @@ jobs:
             dist/windows/Iris-windows-setup.exe
             dist/windows/Iris-windows-setup.exe.sha256
 
+      - name: Verify tag Windows installer Authenticode trust
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path audit/windows | Out-Null
+          python3 scripts/windows-signing.py verify `
+            --file dist/windows/Iris-windows-setup.exe `
+            --output audit/windows/windows-installer-trust.json
+          if ($LASTEXITCODE -ne 0) { throw "Windows installer trust verification failed" }
+          $trust = Get-Content -LiteralPath audit/windows/windows-installer-trust.json -Raw | ConvertFrom-Json
+          $exported = Get-Content -LiteralPath verified/windows/release-package-result.json -Raw | ConvertFrom-Json
+          if ($trust.verified -ne $true -or $trust.sha256 -ne $exported.installer_sha256) {
+            throw "staged installer does not match the signed installer sha256"
+          }
+
       - name: Seal reviewed Windows native evidence
         shell: bash
         run: |
@@ -541,6 +565,7 @@ jobs:
           path: |
             audit/windows.json
             audit/windows-installer-smoke.json
+            audit/windows/windows-installer-trust.json
 
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')

@@ -21,6 +21,21 @@ on:
         required: false
         type: boolean
         default: false
+      sign_windows_release:
+        description: "Sign the exported installer on a tag release only"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      IRIS_WINDOWS_SIGN_PFX_BASE64:
+        description: "Base64 PKCS#12 certificate for tag-only installer signing"
+        required: false
+      IRIS_WINDOWS_SIGN_PFX_PASSWORD:
+        description: "Password for the tag-only signing certificate"
+        required: false
+      IRIS_WINDOWS_SIGN_TIMESTAMP_URL:
+        description: "RFC 3161 timestamp URL used by the tag-only signer"
+        required: false
 
 permissions:
   contents: read
@@ -78,6 +93,9 @@ jobs:
       - name: Windows PDFium 8179 candidate contract
         shell: bash
         run: python3 scripts/test-windows-pdfium-candidate.py
+      - name: Windows Authenticode signing contract
+        shell: bash
+        run: python3 scripts/test-windows-signing.py
 
       # Pinned vcpkg source checkout; fail closed on HEAD drift before building.
       - name: Checkout pinned vcpkg source
@@ -749,8 +767,39 @@ jobs:
           $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6/ISCC.exe"
           if (!(Test-Path -LiteralPath $iscc -PathType Leaf)) { throw "ISCC.exe missing after install: $iscc" }
 
+      - name: Provision Windows signing credentials
+        if: ${{ inputs.sign_windows_release }}
+        shell: pwsh
+        env:
+          IRIS_WINDOWS_SIGN_PFX_BASE64: ${{ secrets.IRIS_WINDOWS_SIGN_PFX_BASE64 }}
+          IRIS_WINDOWS_SIGN_PFX_PASSWORD: ${{ secrets.IRIS_WINDOWS_SIGN_PFX_PASSWORD }}
+          IRIS_WINDOWS_SIGN_TIMESTAMP_URL: ${{ secrets.IRIS_WINDOWS_SIGN_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($name in @("IRIS_WINDOWS_SIGN_PFX_BASE64", "IRIS_WINDOWS_SIGN_PFX_PASSWORD", "IRIS_WINDOWS_SIGN_TIMESTAMP_URL")) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) { throw "$name is missing or empty" }
+          }
+          $encoded = $env:IRIS_WINDOWS_SIGN_PFX_BASE64
+          if ($encoded.Length -gt 1400000 -or $encoded -match '[^A-Za-z0-9+/=]') { throw "IRIS_WINDOWS_SIGN_PFX_BASE64 is not bounded base64" }
+          try { $bytes = [Convert]::FromBase64String($encoded) } catch { throw "IRIS_WINDOWS_SIGN_PFX_BASE64 is not valid base64" }
+          if ($bytes.Length -eq 0 -or $bytes.Length -gt 1048576) { throw "decoded signing PFX is empty or too large" }
+          $pfxPath = Join-Path $env:RUNNER_TEMP "iris-windows-signing.pfx"
+          if (Test-Path -LiteralPath $pfxPath) { Remove-Item -LiteralPath $pfxPath -Force }
+          [IO.File]::WriteAllBytes($pfxPath, $bytes)
+          $acl = Get-Acl -LiteralPath $pfxPath
+          $acl.SetAccessRuleProtection($true, $false)
+          $trustee = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+          $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($trustee, "Read", "Allow")
+          $acl.SetAccessRule($rule)
+          Set-Acl -LiteralPath $pfxPath -AclObject $acl
+          "IRIS_WINDOWS_SIGN_PFX=$pfxPath" >> $env:GITHUB_ENV
+          Write-Host "Windows signing credentials provisioned for tag release"
+
       - name: Exercise release packaging from exact product inventory
         shell: pwsh
+        env:
+          IRIS_WINDOWS_SIGN_PFX_PASSWORD: ${{ inputs.sign_windows_release && secrets.IRIS_WINDOWS_SIGN_PFX_PASSWORD || '' }}
+          IRIS_WINDOWS_SIGN_TIMESTAMP_URL: ${{ inputs.sign_windows_release && secrets.IRIS_WINDOWS_SIGN_TIMESTAMP_URL || '' }}
         run: |
           $ErrorActionPreference = "Stop"
           # The real release packager consumes only the clean hash-verified
@@ -880,7 +929,7 @@ jobs:
           for native_dir in "${IRIS_VALIDATION_STAGE:-}" "${IRIS_VALIDATION_PDFIUM_RUNTIME:-}" "${IRIS_PRODUCT_STAGE:-}" "${RUNNER_TEMP:-}/iris-runtime-stage" "${RUNNER_TEMP:-}/iris-product-clean" "${RUNNER_TEMP:-}/iris-release-package" "${RUNNER_TEMP:-}/pdfium-extract" "${RUNNER_TEMP:-}/pdfium-runtime"; do
             if [ -n "$native_dir" ] && [ -d "$native_dir" ]; then rm -rf "$native_dir"; fi
           done
-          for native_file in "${IRIS_PRODUCT_ZIP:-}" "${RUNNER_TEMP:-}/iris-product-rehearsal.zip"; do
+          for native_file in "${IRIS_PRODUCT_ZIP:-}" "${RUNNER_TEMP:-}/iris-product-rehearsal.zip" "${IRIS_WINDOWS_SIGN_PFX:-}"; do
             if [ -n "$native_file" ] && [ -f "$native_file" ]; then rm -f "$native_file"; fi
           done
           rm -rf build/validation/ffmpeg-src build/validation/overlay target/debug target/release .vcpkg-validation/installed
