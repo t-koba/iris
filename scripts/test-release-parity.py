@@ -22,6 +22,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 sys.path.insert(0, str(ROOT / "scripts"))
 from product_build_profile import load as load_product_profiles  # noqa: E402
+from parity_source_compare import BASELINE_SHA  # noqa: E402
 
 PRODUCT_PROFILES = load_product_profiles()
 
@@ -661,7 +662,29 @@ class ReleaseParityTests(unittest.TestCase):
         self.assert_rejected(policy=path)
 
 
+def baseline_fetch_step(sha=BASELINE_SHA, cat_file_guard=True):
+    """Exact pinned-baseline fetch step required immediately after checkout."""
+    step = (
+        "      - name: Fetch pinned baseline commit for paired parity\n"
+        "        shell: bash\n"
+        "        run: |\n"
+        "          git fetch origin refs/heads/main\n"
+    )
+    if cat_file_guard:
+        step += f"          git cat-file -e {sha}^{{commit}}\n"
+    return step
+
+
 class WorkflowContractTests(unittest.TestCase):
+    JOBS = ("parity-linux", "parity-macos", "parity-windows")
+    CHECKOUT_STEP = (
+        f"      - uses: {CHECKOUT}\n"
+        "        with:\n"
+        "          ref: ${{ inputs.source_sha }}\n"
+        "          fetch-depth: 0\n"
+        "          persist-credentials: false\n"
+    )
+
     @classmethod
     def setUpClass(cls):
         cls.release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
@@ -677,6 +700,45 @@ class WorkflowContractTests(unittest.TestCase):
         following = re.search(r"(?m)^  [a-zA-Z0-9_-]+:\n", text[start.end():])
         end = start.end() + following.start() if following else len(text)
         return text[start.start():end]
+
+    def missing_baseline_fetches(self, text):
+        expected = self.CHECKOUT_STEP + baseline_fetch_step()
+        return [job for job in self.JOBS
+                if expected not in self.job_block(text, job)]
+
+    def test_each_parity_job_fetches_pinned_baseline_after_checkout(self):
+        self.assertIn(BASELINE_SHA, baseline_fetch_step())
+        self.assertEqual(self.missing_baseline_fetches(self.evidence), [])
+        self.assertEqual(self.evidence.count(baseline_fetch_step()), len(self.JOBS))
+
+    def test_rejects_baseline_fetch_mutations_in_every_job(self):
+        step = baseline_fetch_step()
+        checkout = self.CHECKOUT_STEP
+        setup = (f"      - uses: {SETUP_PYTHON}\n"
+                 "        with:\n          python-version: '3.13'\n")
+        mutations = {
+            "wrong_sha": (step, step.replace(BASELINE_SHA, OTHER_SHA)),
+            "missing_cat_file": (step, baseline_fetch_step(cat_file_guard=False)),
+            "out_of_order": (checkout + step, checkout + setup + step),
+        }
+        for name, (original, replacement) in mutations.items():
+            with self.subTest(mutation=name):
+                mutated = self.evidence.replace(original, replacement)
+                self.assertNotEqual(mutated, self.evidence)
+                self.assertEqual(set(self.missing_baseline_fetches(mutated)),
+                                 set(self.JOBS))
+
+    def test_rejects_baseline_fetch_in_only_one_or_two_jobs(self):
+        step = baseline_fetch_step()
+        for removed in (1, 2):
+            with self.subTest(removed=removed):
+                mutated = self.evidence
+                for job in self.JOBS[:removed]:
+                    block = self.job_block(mutated, job)
+                    self.assertIn(step, block)
+                    mutated = mutated.replace(block, block.replace(step, ""), 1)
+                self.assertEqual(set(self.missing_baseline_fetches(mutated)),
+                                 set(self.JOBS[:removed]))
 
     def test_product_build_profile_is_shared_by_packaging_and_parity(self):
         profiles = m.load_product_profiles(

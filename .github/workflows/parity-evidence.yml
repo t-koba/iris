@@ -40,6 +40,11 @@ jobs:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Fetch pinned baseline commit for paired parity
+        shell: bash
+        run: |
+          git fetch origin refs/heads/main
+          git cat-file -e 12fb51a0ba07c299ea4e9b08890a895797148e11^{commit}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
@@ -111,6 +116,11 @@ jobs:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Fetch pinned baseline commit for paired parity
+        shell: bash
+        run: |
+          git fetch origin refs/heads/main
+          git cat-file -e 12fb51a0ba07c299ea4e9b08890a895797148e11^{commit}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
@@ -184,6 +194,11 @@ jobs:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Fetch pinned baseline commit for paired parity
+        shell: bash
+        run: |
+          git fetch origin refs/heads/main
+          git cat-file -e 12fb51a0ba07c299ea4e9b08890a895797148e11^{commit}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
