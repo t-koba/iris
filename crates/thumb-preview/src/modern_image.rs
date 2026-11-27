@@ -128,8 +128,143 @@ fn decode_jpeg2000(data: &[u8]) -> Option<DynamicImage> {
     if !j2k_tlm_sot_consistent(data) {
         return None;
     }
-    let decoded = jpeg2k::Image::from_bytes(data).ok()?;
-    DynamicImage::try_from(&decoded).ok()
+    let format = openjp2::Format::detect(data).unwrap_or(openjp2::Format::J2k);
+    let decoded = openjp2::Decoder::new(format)
+        .ok()?
+        .decode_slice(data)
+        .ok()?;
+    openjp2_to_dynamic(&decoded)
+}
+
+/// Convert decoded OpenJPEG component planes into the same `DynamicImage`
+/// variants the previous JPEG 2000 decoder produced.
+fn openjp2_to_dynamic(image: &openjp2::Image) -> Option<DynamicImage> {
+    let width = image.width as usize;
+    let height = image.height as usize;
+    let components = image.components.as_slice();
+    let first = components.first()?;
+    let pixels = first.width as usize * first.height as usize;
+    if pixels != width * height
+        || components
+            .iter()
+            .any(|c| c.width as usize * c.height as usize != pixels || c.data.len() != pixels)
+    {
+        return None;
+    }
+    let max_precision = components
+        .iter()
+        .fold(0u32, |max, c| max.max(u32::from(c.precision.clamp(1, 31))));
+    if max_precision > 16 {
+        return None;
+    }
+    if max_precision <= 8 {
+        let planes: Vec<Vec<u8>> = components.iter().map(|c| scale_u8(c, pixels)).collect();
+        return match planes.as_slice() {
+            [luma] => image::GrayImage::from_vec(width as u32, height as u32, luma.clone())
+                .map(DynamicImage::ImageLuma8),
+            [luma, alpha] => image::GrayAlphaImage::from_vec(
+                width as u32,
+                height as u32,
+                luma.iter().zip(alpha).flat_map(|(l, a)| [*l, *a]).collect(),
+            )
+            .map(DynamicImage::ImageLumaA8),
+            [r, g, b] => image::RgbImage::from_vec(
+                width as u32,
+                height as u32,
+                r.iter()
+                    .zip(g)
+                    .zip(b)
+                    .flat_map(|((r, g), b)| [*r, *g, *b])
+                    .collect(),
+            )
+            .map(DynamicImage::ImageRgb8),
+            [r, g, b, a] => image::RgbaImage::from_vec(
+                width as u32,
+                height as u32,
+                r.iter()
+                    .zip(g)
+                    .zip(b)
+                    .zip(a)
+                    .flat_map(|(((r, g), b), a)| [*r, *g, *b, *a])
+                    .collect(),
+            )
+            .map(DynamicImage::ImageRgba8),
+            _ => None,
+        };
+    }
+    let planes: Vec<Vec<u16>> = components.iter().map(|c| scale_u16(c, pixels)).collect();
+    match planes.as_slice() {
+        [luma] => image::ImageBuffer::from_vec(width as u32, height as u32, luma.clone())
+            .map(DynamicImage::ImageLuma16),
+        [luma, alpha] => image::ImageBuffer::from_vec(
+            width as u32,
+            height as u32,
+            luma.iter().zip(alpha).flat_map(|(l, a)| [*l, *a]).collect(),
+        )
+        .map(DynamicImage::ImageLumaA16),
+        [r, g, b] => image::ImageBuffer::from_vec(
+            width as u32,
+            height as u32,
+            r.iter()
+                .zip(g)
+                .zip(b)
+                .flat_map(|((r, g), b)| [*r, *g, *b])
+                .collect(),
+        )
+        .map(DynamicImage::ImageRgb16),
+        [r, g, b, a] => image::ImageBuffer::from_vec(
+            width as u32,
+            height as u32,
+            r.iter()
+                .zip(g)
+                .zip(b)
+                .zip(a)
+                .flat_map(|(((r, g), b), a)| [*r, *g, *b, *a])
+                .collect(),
+        )
+        .map(DynamicImage::ImageRgba16),
+        _ => None,
+    }
+}
+
+fn scale_u8(component: &openjp2::ImageComponent, pixels: usize) -> Vec<u8> {
+    let prec = u32::from(component.precision.clamp(1, 31));
+    let old_max = if component.signed {
+        1i64 << (prec - 1)
+    } else {
+        (1i64 << prec) - 1
+    };
+    component.data[..pixels]
+        .iter()
+        .map(|&sample| {
+            let v = i64::from(sample);
+            if component.signed {
+                (((v * 255) / old_max) + 255).clamp(0, 255) as u8
+            } else {
+                ((v.clamp(0, old_max) * 255) / old_max) as u8
+            }
+        })
+        .collect()
+}
+
+fn scale_u16(component: &openjp2::ImageComponent, pixels: usize) -> Vec<u16> {
+    let prec = u32::from(component.precision.clamp(1, 31));
+    let old_max = if component.signed {
+        1i64 << (prec - 1)
+    } else {
+        (1i64 << prec) - 1
+    };
+    component.data[..pixels]
+        .iter()
+        .map(|&sample| {
+            let v = i64::from(sample);
+            if component.signed {
+                (((v * 65535) / old_max) + 65535).clamp(0, 65535) as u16
+            } else {
+                ((v.clamp(0, old_max) * 65535) / old_max) as u16
+            }
+        })
+        .collect()
 }
 
 /// OSV-2025-219: unpatched OpenJPEG sizes a tile's tile-part index from the
@@ -795,6 +930,32 @@ mod tests {
         let mut heic = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec();
         heic.resize(32, 0);
         assert_eq!(detect(&heic), Some(ModernFormat::Heic));
+    }
+
+    #[test]
+    fn paired_jpeg2000_fixture_decodes_to_the_pinned_pixels() {
+        use sha2::{Digest, Sha256};
+        let rgb = image::RgbImage::from_fn(256, 256, |x, y| image::Rgb([x as u8, y as u8, 128]));
+        let parameters = jpeg2k::EncodeParameters::new().comment("Iris paired J2K fixture v1");
+        let bytes = jpeg2k::Image::from_dynamic_image(&DynamicImage::ImageRgb8(rgb))
+            .encode_jp2(parameters)
+            .expect("encode fixture");
+        assert_eq!(bytes.len(), 393);
+        assert_eq!(
+            Sha256::digest(&bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+            "e44d3480025d87433287c64775c0486cc2e6f7369c6df5b8a249d89f6d2a2caa"
+        );
+        let decoded = decode_bytes(&bytes).expect("decode fixture").to_rgba8();
+        assert_eq!(
+            Sha256::digest(decoded.as_raw())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+            "108e5ed8cc1a6a83fa1c6dbdd5769596912fde8e3ccc4fd4136546dfbc455440"
+        );
     }
 
     #[test]

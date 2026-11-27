@@ -24,7 +24,7 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 image = { workspace = true }
 avif-rust = { workspace = true }
-jpeg2k = { workspace = true }
+openjp2 = { workspace = true }
 jpegxr = { workspace = true }
 jxl-oxide = { workspace = true }
 heif-oxide = { workspace = true }
@@ -40,6 +40,8 @@ flate2 = { workspace = true }
 pdfium-render = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Only the fixture generator encodes JP2; product decodes through openjp2.
+jpeg2k = { workspace = true }
 jpegxr = { workspace = true, features = ["decoder-accounting"] }
 iris-thumb-preview = { path = ".", features = ["test-fixtures"] }
 criterion = { workspace = true }

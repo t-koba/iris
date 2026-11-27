@@ -3528,6 +3528,7 @@ dependencies = [
  "jpegxr",
  "jxl-oxide",
  "kamadak-exif",
+ "openjpeg2-pure-rs",
  "pdfium-render",
  "serde_json",
  "sha2",
@@ -5148,6 +5149,12 @@ name = "openjp2-ctypes"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc7650425b4f7e4c514e4a6ccaa2c26612f935d0826d2ee5426635d3844a8361"
+
+[[package]]
+name = "openjpeg2-pure-rs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70cbec9906e23f99197f321718ce1f7e2fccd455e45c5b3f7d2bf5d7b635f192"
 
 [[package]]
 name = "openssl-probe"
