@@ -333,16 +333,20 @@ where
     Ok(report)
 }
 
-/// Attribute the bound PDFium library for opt-in candidate gates; no token is printed.
+/// Attribute the caller-staged PDFium library for opt-in gates; no token is printed.
 fn print_pdfium_runtime() {
-    let required =
-        std::env::var_os("IRIS_PDFIUM_REQUIRE_LIBRARY").is_some_and(|value| !value.is_empty());
-    if let Some(path) = pdf::loaded_pdfium_library() {
-        println!(
-            "PREVIEW_PDFIUM_RUNTIME {}",
-            serde_json::json!({"path": path.to_string_lossy(), "required": required})
-        );
-    }
+    // Parity stages one library per worktree and passes its exact path here.
+    // Print that value unchanged, only when it names a local file.
+    let Some(path) = std::env::var("IRIS_PDFIUM_REQUIRE_LIBRARY")
+        .ok()
+        .filter(|value| !value.is_empty() && Path::new(value).is_file())
+    else {
+        return;
+    };
+    println!(
+        "PREVIEW_PDFIUM_RUNTIME {}",
+        serde_json::json!({"path": path, "required": true})
+    );
 }
 
 fn pdf_runtime() -> serde_json::Value {

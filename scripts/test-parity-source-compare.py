@@ -294,6 +294,17 @@ class ParitySourceCompareTests(unittest.TestCase):
         self.assertIn('"license": ffmpeg_next::codec::license()', source)
         self.assertEqual(m.IDENTITY_SCHEMA, 'iris.preview_identity.v2')
 
+    def test_shared_corpus_harness_uses_staged_pdfium_path(self):
+        """The corpus harness is staged onto the pinned baseline worktree."""
+        source = (ROOT / m.EXAMPLES / m.CORPUS_HARNESS).read_text(encoding='utf-8')
+        self.assertNotIn('loaded_pdfium_library', source)
+        self.assertIn('IRIS_PDFIUM_REQUIRE_LIBRARY', source)
+        start = source.index('fn print_pdfium_runtime()')
+        helper = source[start:source.index('\n}\n', start) + 2]
+        self.assertIn('IRIS_PDFIUM_REQUIRE_LIBRARY', helper)
+        self.assertIn('is_file()', helper)
+        self.assertNotIn('canonicalize', helper)
+
     def test_pairing_plan_marks_legacy_schema_unpaired(self):
         baseline = dict(corpus=legacy_section(), j2k=legacy_section())
         candidate = dict(corpus=section(), j2k=section())
