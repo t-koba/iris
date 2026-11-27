@@ -27,6 +27,11 @@ MAX_TOOL_BYTES = 32768
 MAX_TEXT_CHARS = 8192
 MAX_PATH_CHARS = 4096
 MAX_PFX_BYTES = 1024 * 1024
+# POSIX can confine the temporary PFX with mode 0600; Windows has no
+# fchmod and confines it with the icacls step in restrict_acl instead.
+# Derived from the host, not a caller-supplied platform label, so this
+# stays correct when offline tests run on either OS.
+POSIX_PFX_MODE = hasattr(os, "fchmod")
 TOOL_TIMEOUT_SECONDS = 30
 
 PFX_ENV = "IRIS_WINDOWS_SIGN_PFX"
@@ -205,25 +210,21 @@ def write_evidence(path, record):
         stream.write("\n")
 
 
-def private_pfx(source, platform):
+def private_pfx(source):
     """Write a bounded private copy; the caller deletes it on every exit."""
     raw = Path(source).read_bytes()
     if not raw or len(raw) > MAX_PFX_BYTES:
         raise SigningError("signing PFX is empty or exceeds the size bound")
     fd, path = tempfile.mkstemp(prefix="iris-windows-sign-", suffix=".pfx")
     try:
-        # POSIX confidentiality is the 0600 mode. Windows chmod/fchmod only
-        # toggle the read-only flag, so a writable file reports st_mode 0o666
-        # there and a 0600 assertion could never pass. On Windows the caller's
-        # restrict_acl() icacls step provides confidentiality instead.
-        if platform != "nt":
+        if POSIX_PFX_MODE:
             os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as stream:
             fd = -1
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())
-        if platform != "nt" and stat.S_IMODE(os.stat(path).st_mode) != 0o600:
+        if POSIX_PFX_MODE and stat.S_IMODE(os.stat(path).st_mode) != 0o600:
             raise SigningError("temporary signing PFX is not mode 0600")
         return path
     except Exception:
@@ -259,7 +260,7 @@ def do_sign(args, env, runner, platform):
     secrets = (password, pfx)
     pfx_copy = None
     try:
-        pfx_copy = private_pfx(pfx, platform)
+        pfx_copy = private_pfx(pfx)
         restrict_acl(pfx_copy, runner, platform, secrets)
         record = build_plan(tool, pfx_copy, password, timestamp, target, provenance)
         sign_code, sign_text, sign_truncated = run_tool(record["argv"], runner, secrets)

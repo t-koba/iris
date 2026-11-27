@@ -239,7 +239,8 @@ class SignContracts(unittest.TestCase):
         runner = RecordingRunner()
         self.assertEqual(self.call(runner), 0)
         self.assertEqual(runner.pfx_bytes[0], PFX_BYTES)
-        self.assertEqual(runner.pfx_modes[0], 0o600)
+        if m.POSIX_PFX_MODE:
+            self.assertEqual(runner.pfx_modes[0], 0o600)
         failed = RecordingRunner(verify_code=1, verify_text="not verified")
         with self.assertRaises(m.SigningError):
             self.call(failed)
@@ -259,36 +260,21 @@ class SignContracts(unittest.TestCase):
         self.assertEqual(len(denied.calls), 1)
         self.assertFalse(any(path.exists() for path in denied.pfx_paths))
 
-    def _windows_stat_semantics(self):
-        """Context where fchmod is a no-op and stat reports Windows mode bits."""
-        real_stat = os.stat
-
-        class WindowsStat:
-            st_mode = 0o100666  # writable Windows file: S_IMODE == 0o666
-
-            def __init__(self, base):
-                self._base = base
-
-            def __getattr__(self, name):
-                return getattr(self._base, name)
-
-        def windows_fchmod(_fd, _mode):
-            return None  # Windows chmod only toggles the read-only flag.
-
-        def windows_stat(path, *args, **kwargs):
-            return WindowsStat(real_stat(path, *args, **kwargs))
-
-        return patch.object(m.os, "fchmod", windows_fchmod), \
-            patch.object(m.os, "stat", windows_stat)
-
-    def test_windows_sign_succeeds_with_windows_chmod_stat_semantics(self):
-        patches = self._windows_stat_semantics()
-        with patches[0], patches[1]:
-            # POSIX must still fail closed when the mode cannot be 0600.
-            with self.assertRaises(m.SigningError):
-                m.private_pfx(str(self.pfx), "posix")
-            # Windows skips the POSIX check; icacls (not mode) is its control.
-            self.assertEqual(self.call(RecordingRunner(), platform="nt"), 0)
+    def test_sign_succeeds_without_posix_pfx_mode_capability(self):
+        # Simulate a host with no fchmod (as on Windows): the POSIX 0600 mode
+        # must not be attempted, and the icacls branch must still confine the
+        # copy. Patching the module constant keeps this portable on either OS.
+        with patch.object(m, "POSIX_PFX_MODE", False):
+            copy = m.private_pfx(str(self.pfx))
+            try:
+                self.assertEqual(Path(copy).read_bytes(), PFX_BYTES)
+            finally:
+                Path(copy).unlink()
+            runner = RecordingRunner()
+            self.assertEqual(self.call(runner, platform="nt"), 0)
+            self.assertEqual(runner.calls[0][0], "icacls")
+            self.assertEqual(runner.pfx_bytes[0], PFX_BYTES)
+            self.assertFalse(any(path.exists() for path in runner.pfx_paths))
 
     def test_tool_errors_and_unverified_timestamps_fail_closed(self):
         cases = (
