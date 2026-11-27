@@ -131,13 +131,15 @@ def prepare(args):
     require(closure.get("unresolved") == []
             and closure.get("vc_self_test", {}).get("status") == "pass"
             and isinstance(closure.get("imports"), list) and closure["imports"]
+            and isinstance(closure.get("binaries"), list) and closure["binaries"]
             and set(closure.get("resolution_values", [])) == RESOLUTIONS,
             "PE import closure is not reviewed")
-    require({"Iris.exe", "pdfium.dll"} <= set(closure.get("binaries", [])),
-            "PE import closure omits the required staged roots")
     require(all(isinstance(name, str) and SAFE_NAME.fullmatch(name) is not None
                 for name in closure["binaries"]), "invalid PE import closure binary name")
+    # The producer keys PE binaries case-insensitively, as Windows resolves them.
     closure_binaries = {name.lower() for name in closure["binaries"]}
+    require({"iris.exe", "pdfium.dll"} <= closure_binaries,
+            "PE import closure omits the required staged roots")
 
     files = inventory.get("files")
     require(isinstance(files, list) and 0 < len(files) <= MAX_FILES,

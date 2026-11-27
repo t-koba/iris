@@ -1184,7 +1184,7 @@ class WindowsNativeEvidencePipeline(unittest.TestCase):
         inventory = dict(roots=[str(stage)], files=files)
         (ev / "product-inventory.json").write_text(json.dumps(inventory))
         (ev / "pe-import-closure.json").write_text(json.dumps(dict(
-            roots=["Iris.exe"], binaries=names,
+            roots=["Iris.exe"], binaries=[name.lower() for name in names],
             imports=[{"from": "Iris.exe", "import": "avcodec-62.dll",
                       "resolution": "stage"}],
             unresolved=[],
@@ -1298,6 +1298,20 @@ class WindowsNativeEvidencePipeline(unittest.TestCase):
                                        "--product", dist / "Iris", "--output", base / "rejected.json")
             self.assertNotEqual(failed.returncode, 0)
             self.assertFalse((base / "rejected.json").exists())
+
+    def test_missing_staged_root_is_refused_with_case_folded_closure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base, ev, release, stage, dist, names = self.fixture(directory)
+            closure = json.loads((ev / "pe-import-closure.json").read_text())
+            self.assertIn("iris.exe", closure["binaries"])
+            closure["binaries"].remove("iris.exe")
+            (ev / "pe-import-closure.json").write_text(json.dumps(closure))
+            output = ev / "rejected.json"
+            prepared = self.run_evidence("prepare", "--evidence", ev, "--release", release,
+                                         "--stage", stage, "--output", output)
+            self.assertNotEqual(prepared.returncode, 0)
+            self.assertIn("required staged roots", prepared.stderr)
+            self.assertFalse(output.exists())
 
     def test_unknown_native_dll_in_reviewed_inventory_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:
