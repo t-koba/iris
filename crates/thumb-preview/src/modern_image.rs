@@ -119,6 +119,11 @@ fn has_ftyp_brand(data: &[u8], expected: &[[u8; 4]]) -> bool {
         .any(|brand| expected.iter().any(|expected| brand == expected))
 }
 
+// JPEG 2000 is a rare input format and its pure-Rust decoder is a large code
+// body. Keep it in cold text so it does not displace the hot preview-extraction
+// paths in the fat-LTO, single-codegen-unit release build.
+#[cold]
+#[inline(never)]
 fn decode_jpeg2000(data: &[u8]) -> Option<DynamicImage> {
     if !j2k_tlm_sot_consistent(data) {
         return None;
