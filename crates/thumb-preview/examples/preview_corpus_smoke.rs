@@ -338,8 +338,8 @@ fn print_pdfium_runtime() {
     // Only the opt-in gate emits a record; the path is the module actually
     // loaded by this process, never the env var value, so a system fallback
     // cannot be misattributed to the staged file.
-    let required = std::env::var_os("IRIS_PDFIUM_REQUIRE_LIBRARY")
-        .is_some_and(|value| !value.is_empty());
+    let required =
+        std::env::var_os("IRIS_PDFIUM_REQUIRE_LIBRARY").is_some_and(|value| !value.is_empty());
     if !required {
         return;
     }
@@ -399,11 +399,7 @@ fn loaded_pdfium_path() -> Option<String> {
 #[link(name = "kernel32")]
 extern "system" {
     fn GetModuleHandleW(name: *const u16) -> *mut std::ffi::c_void;
-    fn GetModuleFileNameW(
-        handle: *mut std::ffi::c_void,
-        buf: *mut u16,
-        size: u32,
-    ) -> u32;
+    fn GetModuleFileNameW(handle: *mut std::ffi::c_void, buf: *mut u16, size: u32) -> u32;
 }
 
 /// Path of the PDFium module actually loaded by this process, via the loader.
