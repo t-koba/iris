@@ -43,7 +43,7 @@ jobs:
       IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRIES: ${{ vars.IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRIES || 1 }}
       IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRY_DELAY_SECONDS: ${{ vars.IRIS_PROTOTYPE_VCPKG_BOOTSTRAP_RETRY_DELAY_SECONDS || 2 }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
@@ -74,7 +74,7 @@ jobs:
       # Pinned vcpkg source checkout at the exact baseline from pins.json.
       # Fail-closed: the build gate verifies HEAD == baseline before any build.
       - name: Checkout pinned vcpkg source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: microsoft/vcpkg
           ref: b8dfe957ec8b5c0ef5c4b31eea594b8486af744f
@@ -119,7 +119,7 @@ jobs:
 
       # MSVC developer environment (x64) so cl.exe/dumpbin are on PATH.
       - name: Set up MSVC developer environment (x64)
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
           arch: x64
 
@@ -135,12 +135,12 @@ jobs:
           if (!(Test-Path -LiteralPath $root -PathType Container)) { throw "pinned vcpkg checkout missing: $root" }
           "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.97.1
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: windows-ffmpeg-prototype-cargo
 
@@ -190,7 +190,7 @@ jobs:
 
       - name: Upload bounded prototype audit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-prototype-audit-report
           path: target/prototype-audit-report.json

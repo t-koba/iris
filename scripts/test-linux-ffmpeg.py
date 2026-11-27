@@ -531,7 +531,7 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         release = (ROOT / ".github/workflows/release.yml").read_text()
         release_linux = release.split("  package-linux:", 1)[1].split("  package-windows:", 1)[0]
-        self.assertIn("uses: Swatinem/rust-cache@v2", ci)
+        self.assertIn("uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2", ci)
         # The release workflow pins third-party actions to exact commits.
         self.assertIn(
             "uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2",
@@ -544,7 +544,7 @@ exit "${PDFIUM_TEST_GH_EXIT:-0}"
         step = ci.split("      - name: Restore validated Linux FFmpeg runtime\n", 1)[1]
         step = step.split("      - name: Install system dependencies (Ubuntu)", 1)[0]
         self.assertIn("        if: matrix.os == 'ubuntu-latest'\n", step)
-        self.assertIn("        uses: actions/cache@v4\n", step)
+        self.assertIn("        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4\n", step)
         self.assertIn("          path: build/linux-ffmpeg\n", step)
         self.assertIn("packaging/linux/ffmpeg.json", step)
         self.assertIn("scripts/build-linux-ffmpeg.sh", step)

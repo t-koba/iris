@@ -396,7 +396,7 @@ def pinned_actionlint_contract():
     if not all((job, install, lint, compare, upload)):
         return False
     markers = (
-        "      - uses: actions/checkout@v7\n",
+        "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\n",
         "      - name: Install pinned actionlint 1.7.12\n",
         "      - name: Validate workflows with actionlint\n",
         "      - name: Compare actionlint findings with baseline\n",
@@ -468,7 +468,7 @@ def parity_rehearsal_contract():
     if (
         "    needs: parity-rehearsal\n" not in gate
         or "    permissions:\n      contents: read\n" not in gate
-        or "      - uses: actions/checkout@v7\n        with:\n          ref: ${{ github.sha }}\n"
+        or "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\n        with:\n          ref: ${{ github.sha }}\n"
         "          persist-credentials: false\n" not in gate
         or "      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6\n"
         "        with:\n          python-version: '3.13'\n" not in gate
@@ -760,7 +760,7 @@ checks = {
 permissions:
 """ in macos,
     "macOS runtime audit preserves the default product feature variant": "      IRIS_BUILD_VARIANT: product\n" in macos,
-    "macOS runtime audit checks out the caller's exact SHA without credentials": """      - uses: actions/checkout@v7
+    "macOS runtime audit checks out the caller's exact SHA without credentials": """      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -810,7 +810,7 @@ permissions:
         run: rm -rf dist/macos target/package-macos target/macos-runtime-validation
       - name: Retain JSON evidence only
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
 """ in macos,
     "preview corpus network smoke follows local and native integration tests": all(
         ci.index(f"      - name: {step}")
@@ -853,7 +853,7 @@ permissions:
     ),
     "Matrix runner contracts reject a forced single Ubuntu runner": matrix_runner_mutation_regression(),
     "CI test job checkout does not persist Git credentials": (
-        "\n      - uses: actions/checkout@v7\n"
+        "\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\n"
         "        with:\n          persist-credentials: false\n"
     ) in ci_job_block("test"),
     "Workspace tests run unconditionally in the main CI test job": workspace_tests_unconditional(),
