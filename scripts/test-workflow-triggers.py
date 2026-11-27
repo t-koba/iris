@@ -355,6 +355,29 @@ def linux_pristine_stage_order():
     )
 
 
+def windows_path_regression_contract():
+    """Windows-only path tests must be named and executed exactly once in CI."""
+    path_test = "normalize::normalize_tests::normalize_local_path_uses_the_native_separator -- --exact"
+    drive_test = "runtime::directory::tests::local_breadcrumbs_start_at_the_drive -- --exact"
+    root_test = "runtime::directory::tests::local_breadcrumbs_merges_root_into_the_drive_crumb -- --exact"
+    normalize_source = (root / "crates/path-service/src/normalize.rs").read_text(encoding="utf-8")
+    directory_source = (root / "crates/ui-shell/src/runtime/directory.rs").read_text(encoding="utf-8")
+    return (
+        ci_job_has(
+            "windows-minimal",
+            "cargo test -p iris-path-service --lib --locked " + path_test,
+            "cargo test -p iris-ui-shell --lib --no-default-features --features minimal --locked " + drive_test,
+            "cargo test -p iris-ui-shell --lib --no-default-features --features minimal --locked " + root_test,
+        )
+        and normalize_source.count("fn normalize_local_path_uses_the_native_separator()") == 2
+        and normalize_source.count("#[cfg(windows)]") >= 1
+        and normalize_source.count("#[cfg(unix)]") >= 1
+        and directory_source.count("fn local_breadcrumbs_start_at_the_drive()") == 1
+        and directory_source.count("fn local_breadcrumbs_merges_root_into_the_drive_crumb()") == 1
+        and directory_source.count("#[cfg(windows)]") >= 2
+    )
+
+
 def pinned_actionlint_contract():
     """The workflow-contracts job pins actionlint and diffs a sorted baseline."""
     job = ci_job_block("workflow-contracts")
@@ -700,6 +723,7 @@ permissions:
         "workflow-contracts",
         "run: python3 scripts/test-workflow-triggers.py",
     ),
+    "Windows path regressions execute exact Windows-only lib tests": windows_path_regression_contract(),
     "Pinned actionlint findings are baseline-compared without ignored rules": pinned_actionlint_contract(),
     "Product-CI macOS evidence comes from the exact production stage before its audit": (
         in_order(macos_product_step, "./scripts/package-macos-app.sh",

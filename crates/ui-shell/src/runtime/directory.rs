@@ -977,6 +977,18 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn local_breadcrumbs_merges_root_into_the_drive_crumb() {
+        assert_eq!(
+            local_breadcrumbs(Path::new(r"C:\"))
+                .into_iter()
+                .map(|segment| (segment.name, segment.full_path))
+                .collect::<Vec<_>>(),
+            vec![("C:".to_string(), r"C:\".to_string())]
+        );
+    }
+
     #[test]
     fn stat_local_path_sync_reports_file_and_directory_kind() {
         let temp = tempfile::tempdir().expect("tempdir");

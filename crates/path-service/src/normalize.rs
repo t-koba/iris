@@ -127,3 +127,25 @@ mod file_name_tests {
         assert_eq!(file_name_problem("Café 2024"), None);
     }
 }
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn normalize_local_path_uses_the_native_separator() {
+        assert_eq!(
+            normalize_local_path(Path::new(r"C:\Users\me")),
+            r"C:\Users\me"
+        );
+        assert_eq!(normalize_local_path(Path::new(r"C:\")), r"C:\");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_local_path_uses_the_native_separator() {
+        assert_eq!(normalize_local_path(Path::new("/Users/me")), "/Users/me");
+        assert_eq!(normalize_local_path(Path::new("/")), "/");
+    }
+}
