@@ -81,6 +81,10 @@ class RecordingRunner:
             return subprocess.CompletedProcess(argv, self.sign_code, self.sign_text, "")
         if argv[0] == "icacls":
             return subprocess.CompletedProcess(argv, self.acl_code, "", "")
+        if "/v" not in argv:
+            # Real SignTool emits the fields parse_verify needs only with /v.
+            return subprocess.CompletedProcess(
+                argv, self.verify_code, f"Successfully verified: {INSTALLER_NAME}\n", "")
         return subprocess.CompletedProcess(argv, self.verify_code, self.verify_text, "")
 
 
@@ -157,6 +161,15 @@ class VerifyParsingContracts(unittest.TestCase):
         self.assertTrue(m.parse_verify(True, GOOD_OUTPUT.replace(
             "Timestamp Verified by:", "RFc 3161 Timestamp Verified by:")))
 
+    def test_verbose_argv_and_nonverbose_transcript_fails_closed(self):
+        self.assertEqual(m.verification_argv(TOOL, INSTALLER_NAME),
+                         [TOOL, "verify", "/pa", "/v", INSTALLER_NAME])
+        runner = RecordingRunner()
+        minimal = runner([TOOL, "verify", "/pa", INSTALLER_NAME])
+        self.assertFalse(m.parse_verify(True, minimal.stdout))
+        self.assertFalse(m.parse_verify(
+            True, "Successfully verified: Iris-windows-setup.exe\n"))
+
     def test_missing_timestamp_fails(self):
         self.assertFalse(m.parse_verify(True, GOOD_OUTPUT.replace(
             "The signature is timestamped: 2026-11-28 00:00:00\n", "")))
@@ -224,7 +237,8 @@ class SignContracts(unittest.TestCase):
         self.assertEqual(sign_argv[sign_argv.index("/tr") + 1], TIMESTAMP_URL)
         self.assertEqual(sign_argv[sign_argv.index("/p") + 1], PFX_PASSWORD)
         self.assertNotEqual(sign_argv[sign_argv.index("/f") + 1], str(self.pfx))
-        self.assertEqual(runner.calls[1], (TOOL, "verify", "/pa", str(self.installer)))
+        self.assertEqual(runner.calls[1], tuple(m.verification_argv(TOOL, str(self.installer))))
+        self.assertIn("/v", runner.calls[1])
         self.assertFalse(any(path.exists() for path in runner.pfx_paths))
         record = __import__("json").loads(self.evidence.read_text())
         self.assertTrue(record["verified"])
@@ -325,7 +339,8 @@ class VerifyCommandContracts(unittest.TestCase):
     def test_verify_writes_bound_trust_evidence(self):
         runner = RecordingRunner()
         self.assertEqual(self.check(runner), 0)
-        self.assertEqual(runner.calls, [(TOOL, "verify", "/pa", str(self.installer))])
+        self.assertEqual(runner.calls, [tuple(m.verification_argv(TOOL, str(self.installer)))])
+        self.assertIn("/v", runner.calls[0])
         record = __import__("json").loads(self.output.read_text())
         self.assertTrue(record["verified"])
         self.assertEqual(record["sha256"], hashlib.sha256(self.installer.read_bytes()).hexdigest())

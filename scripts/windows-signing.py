@@ -172,6 +172,11 @@ def run_tool(argv, runner, secrets=()):
     return code, scrub(raw[:MAX_TOOL_BYTES].decode("utf-8", "replace"), secrets), len(raw) > MAX_TOOL_BYTES
 
 
+def verification_argv(tool, target):
+    """The single verify invocation; /v requests the fields parse_verify requires."""
+    return [tool, "verify", "/pa", "/v", target]
+
+
 def parse_verify(success, text, truncated=False):
     """True only for an exit-clean, explicitly timestamped valid signature."""
     if not success or truncated or len(text) > MAX_TEXT_CHARS:
@@ -266,7 +271,7 @@ def do_sign(args, env, runner, platform):
         sign_code, sign_text, sign_truncated = run_tool(record["argv"], runner, secrets)
         if sign_code != 0 or sign_truncated:
             raise SigningError("signtool sign failed (exit status or bounded output)")
-        verify_argv = [tool, "verify", "/pa", target]
+        verify_argv = verification_argv(tool, target)
         verify_code, verify_text, verify_truncated = run_tool(verify_argv, runner, secrets)
         if not parse_verify(verify_code == 0, verify_text, verify_truncated):
             raise SigningError("Authenticode signature or RFC 3161 timestamp not verified")
@@ -293,7 +298,7 @@ def do_verify(args, env, runner):
     tool = locate_signtool(args.signtool, env)
     if len(target) > MAX_PATH_CHARS or not Path(target).is_file():
         raise SigningError("verification target is not a file")
-    code, text, truncated = run_tool([tool, "verify", "/pa", target], runner)
+    code, text, truncated = run_tool(verification_argv(tool, target), runner)
     verified = parse_verify(code == 0, text, truncated)
     evidence = dict(
         schema=SCHEMA, artifact=Path(target).name, bytes=Path(target).stat().st_size,
