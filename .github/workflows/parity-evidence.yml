@@ -239,16 +239,6 @@ jobs:
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
           arch: x64
-      - name: Bind MSVC linker for all parity steps
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          # Git bash puts usr/bin ahead of MSVC on PATH; GITHUB_ENV binds LINK for all later steps.
-          $vcTools = $env:VCToolsInstallDir
-          if ([string]::IsNullOrWhiteSpace($vcTools)) { throw "VCToolsInstallDir is not set; refusing to guess the linker" }
-          $linker = [IO.Path]::GetFullPath((Join-Path $vcTools "bin\Hostx64\x64\link.exe"))
-          if (!(Test-Path -LiteralPath $linker -PathType Leaf)) { throw "MSVC linker missing: $linker" }
-          "LINK=$linker" >> $env:GITHUB_ENV
       - name: Restore isolated vcpkg root after MSVC setup
         shell: pwsh
         run: |
@@ -387,10 +377,15 @@ jobs:
           $profile = (& python3 scripts/product_build_profile.py --platform windows | Out-String).Trim()
           "CARGO_PROFILE_RELEASE_OPT_LEVEL=$profile" >> $env:GITHUB_ENV
       - name: Produce Windows paired-source parity report
-        shell: bash
+        shell: pwsh
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
-        run: python3 scripts/parity_source_compare.py --repo . --candidate "$SOURCE_SHA" --corpus "$RUNNER_TEMP/iris-preview-corpus" --pdfium-library "$IRIS_VALIDATION_PDFIUM_RUNTIME/pdfium.dll" --output audit/parity/windows.json
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Run from pwsh where the MSVC developer PATH is authoritative;
+          # Git bash would put its own link.exe ahead of MSVC's.
+          python3 scripts/parity_source_compare.py --repo . --candidate $env:SOURCE_SHA --corpus "$env:RUNNER_TEMP/iris-preview-corpus" --pdfium-library "$env:IRIS_VALIDATION_PDFIUM_RUNTIME/pdfium.dll" --output audit/parity/windows.json
+          if ($LASTEXITCODE -ne 0) { throw "Windows paired-source parity report failed" }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: parity-windows

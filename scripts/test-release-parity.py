@@ -833,21 +833,47 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertIn("IRIS_PREVIEW_CORPUS_MAX_BYTES: ${{ vars.IRIS_PREVIEW_CORPUS_MAX_BYTES", block)
             self.assertIn("        run: python3 scripts/fetch-preview-corpus.py --output", block)
             self.assertNotIn("--corpus tests/preview-corpus", block)
-            self.assertIn("        shell: bash\n        env:\n"
-                          "          SOURCE_SHA: ${{ inputs.source_sha }}\n", block)
             platform = job.removeprefix("parity-")
-            pdfium_flag = {
-                "linux": ' --pdfium-library "$RUNNER_TEMP/iris-pdfium-stage/usr/lib/iris/libpdfium.so"',
-                "windows": ' --pdfium-library "$IRIS_VALIDATION_PDFIUM_RUNTIME/pdfium.dll"',
-            }.get(platform, "")
-            self.assertIn(
-                f'--corpus "$RUNNER_TEMP/iris-preview-corpus"{pdfium_flag} '
-                f'--output audit/parity/{platform}.json\n', block)
-            self.assertIn('--candidate "$SOURCE_SHA"', block)
-            self.assertIn(
-                f'        run: python3 scripts/parity_source_compare.py --repo . '
-                f'--candidate "$SOURCE_SHA" --corpus "$RUNNER_TEMP/iris-preview-corpus"'
-                f'{pdfium_flag} --output audit/parity/{platform}.json\n', block)
+            if platform == "windows":
+                # The Windows producer runs from pwsh so the MSVC developer PATH
+                # is authoritative; Git bash would shadow MSVC link.exe. The
+                # corpus fetch stays on bash, so only the producer step is
+                # checked for PowerShell spelling.
+                self.assertIn("        shell: pwsh\n        env:\n"
+                              "          SOURCE_SHA: ${{ inputs.source_sha }}\n", block)
+                marker = "      - name: Produce Windows paired-source parity report\n"
+                self.assertIn(marker, block)
+                step = block[block.index(marker):].split("\n      - ", 1)[0] + "\n"
+                self.assertIn("        shell: pwsh\n", step)
+                self.assertIn("$env:SOURCE_SHA", step)
+                self.assertIn("$env:RUNNER_TEMP", step)
+                self.assertIn("$env:IRIS_VALIDATION_PDFIUM_RUNTIME", step)
+                self.assertNotIn('"$SOURCE_SHA"', step)
+                self.assertNotIn('"$RUNNER_TEMP', step)
+                self.assertNotIn('"$IRIS_VALIDATION_PDFIUM_RUNTIME', step)
+                self.assertIn(
+                    'python3 scripts/parity_source_compare.py --repo .', step)
+                self.assertIn('--corpus "$env:RUNNER_TEMP/iris-preview-corpus"', step)
+                self.assertIn(
+                    '--pdfium-library "$env:IRIS_VALIDATION_PDFIUM_RUNTIME/pdfium.dll"',
+                    step)
+                self.assertIn('--output audit/parity/windows.json', step)
+                self.assertIn('$ErrorActionPreference = "Stop"', step)
+                self.assertIn('if ($LASTEXITCODE -ne 0)', step)
+            else:
+                self.assertIn("        shell: bash\n        env:\n"
+                              "          SOURCE_SHA: ${{ inputs.source_sha }}\n", block)
+                pdfium_flag = {
+                    "linux": ' --pdfium-library "$RUNNER_TEMP/iris-pdfium-stage/usr/lib/iris/libpdfium.so"',
+                }.get(platform, "")
+                self.assertIn(
+                    f'--corpus "$RUNNER_TEMP/iris-preview-corpus"{pdfium_flag} '
+                    f'--output audit/parity/{platform}.json\n', block)
+                self.assertIn('--candidate "$SOURCE_SHA"', block)
+                self.assertIn(
+                    f'        run: python3 scripts/parity_source_compare.py --repo . '
+                    f'--candidate "$SOURCE_SHA" --corpus "$RUNNER_TEMP/iris-preview-corpus"'
+                    f'{pdfium_flag} --output audit/parity/{platform}.json\n', block)
             if platform == "linux":
                 self.assertIn("sudo apt-get install -y", block)
                 for package in ("pkg-config", "clang", "nasm"):
@@ -882,7 +908,7 @@ class WorkflowContractTests(unittest.TestCase):
                 self.assertIn("chromium/8138", block)
                 self.assertIn("IRIS_VALIDATION_PDFIUM_RUNTIME", block)
                 self.assertIn(
-                    '--pdfium-library "$IRIS_VALIDATION_PDFIUM_RUNTIME/pdfium.dll"', block)
+                    '--pdfium-library "$env:IRIS_VALIDATION_PDFIUM_RUNTIME/pdfium.dll"', block)
                 self.assertIn("shared-key: parity-windows-cargo", block)
             self.assertIn(f"      - uses: {UPLOAD}\n", block)
             self.assertIn(f"          name: parity-{platform}\n"
@@ -954,37 +980,40 @@ class WorkflowContractTests(unittest.TestCase):
             windows)
         self.assertNotIn('"VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV', windows)
 
-    def test_windows_binds_msvc_linker_for_every_parity_step(self):
+    def test_windows_producer_runs_from_pwsh_without_linker_workaround(self):
         windows = self.job_block(self.evidence, "parity-windows")
+        # LINK supplies linker *arguments*, not the linker executable; rustc
+        # still resolves link.exe through PATH, so no LINK/GITHUB_PATH export
+        # can select MSVC over Git bash link.exe.
+        self.assertNotIn("LINK=", windows)
+        self.assertNotIn("Bind MSVC linker", windows)
+        self.assertNotIn("VCToolsInstallDir", windows)
         setup = (
             "      - name: Set up MSVC developer environment (x64)\n"
             "        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0\n"
             "        with:\n"
             "          arch: x64\n"
         )
-        marker = "      - name: Bind MSVC linker for all parity steps\n"
-        producer = (
-            '        run: python3 scripts/parity_source_compare.py --repo . '
-            '--candidate "$SOURCE_SHA" --corpus "$RUNNER_TEMP/iris-preview-corpus" '
-            '--pdfium-library "$IRIS_VALIDATION_PDFIUM_RUNTIME/pdfium.dll" '
-            '--output audit/parity/windows.json\n'
-        )
+        marker = "      - name: Produce Windows paired-source parity report\n"
         self.assertIn(setup, windows)
         self.assertIn(marker, windows)
-        self.assertIn(producer, windows)
         self.assertLess(windows.index(setup), windows.index(marker))
-        self.assertLess(windows.index(marker), windows.index(producer))
         step = windows[windows.index(marker):].split("\n      - ", 1)[0] + "\n"
-        for needle in ("        shell: pwsh\n",
-                       "$vcTools = $env:VCToolsInstallDir\n",
-                       'if ([string]::IsNullOrWhiteSpace($vcTools)) { throw ',
-                       '[IO.Path]::GetFullPath(',
-                       'Join-Path $vcTools "bin\\Hostx64\\x64\\link.exe"',
-                       "Test-Path -LiteralPath $linker -PathType Leaf",
-                       '"LINK=$linker" >> $env:GITHUB_ENV\n'):
-            self.assertIn(needle, step, f"Windows linker binding misses {needle!r}")
-        self.assertLess(step.index("$vcTools = $env:VCToolsInstallDir"),
-                        step.index('"LINK=$linker" >> $env:GITHUB_ENV'))
+        self.assertIn("        shell: pwsh\n", step)
+        self.assertNotIn("        shell: bash\n", step)
+        for needle in ('$ErrorActionPreference = "Stop"',
+                       "$env:SOURCE_SHA",
+                       "$env:RUNNER_TEMP",
+                       "$env:IRIS_VALIDATION_PDFIUM_RUNTIME",
+                       'python3 scripts/parity_source_compare.py --repo .',
+                       '--corpus "$env:RUNNER_TEMP/iris-preview-corpus"',
+                       '--pdfium-library "$env:IRIS_VALIDATION_PDFIUM_RUNTIME/pdfium.dll"',
+                       "--output audit/parity/windows.json",
+                       "if ($LASTEXITCODE -ne 0)"):
+            self.assertIn(needle, step, f"Windows producer misses {needle!r}")
+        for stale in ('"$SOURCE_SHA"', '"$RUNNER_TEMP',
+                      '"$IRIS_VALIDATION_PDFIUM_RUNTIME', '"LINK=$linker"'):
+            self.assertNotIn(stale, step, f"Windows producer keeps bash/LINK spelling {stale!r}")
         self.assertNotIn("GITHUB_PATH", step)
 
     def test_each_parity_job_fetches_bytes_into_its_corpus_directory(self):
@@ -1000,10 +1029,13 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertEqual(len(fetches), 1, f"{job} must fetch corpus bytes once")
             self.assertEqual(len(smokes), 1, f"{job} must run the parity smoke once")
             fetch_dir, corpus_dir = fetches[0].rstrip('"'), smokes[0].rstrip('"')
+            # The Windows producer runs from pwsh ($env:RUNNER_TEMP) while the
+            # fetch stays on bash ($RUNNER_TEMP); both name the same job-local dir.
+            norm = lambda value: value.replace("$env:", "$")
             for value in (fetch_dir, corpus_dir):
                 self.assertLessEqual(len(value), 256, f"{job} corpus path is unbounded")
                 self.assertNotIn("tests/preview-corpus", value, f"{job} uses manifest-only corpus")
-            self.assertEqual(fetch_dir, corpus_dir,
+            self.assertEqual(norm(fetch_dir), norm(corpus_dir),
                              f"{job} must pass its fetched bytes as --corpus, not a manifest")
             self.assertIn("RUNNER_TEMP", fetch_dir, f"{job} corpus must be job-local")
             self.assertIn("iris-preview-corpus", fetch_dir, f"{job} corpus must be a fresh dir")
