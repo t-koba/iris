@@ -148,6 +148,9 @@ jobs:
             echo "PKG_CONFIG_LIBDIR=$prefix/lib/pkgconfig"
             echo "DYLD_LIBRARY_PATH=$prefix/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
           } >> "$GITHUB_ENV"
+          # GITHUB_ENV only reaches later steps; export here for this assertion.
+          export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+          export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig"
           test "$(pkg-config --variable=prefix libavcodec)" = "$prefix"
       - name: Fetch preview corpus bytes
         run: python3 scripts/fetch-preview-corpus.py --output "$RUNNER_TEMP/iris-preview-corpus"
@@ -236,6 +239,16 @@ jobs:
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
           arch: x64
+      - name: Bind MSVC linker for all parity steps
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Git bash puts usr/bin ahead of MSVC on PATH; GITHUB_ENV binds LINK for all later steps.
+          $vcTools = $env:VCToolsInstallDir
+          if ([string]::IsNullOrWhiteSpace($vcTools)) { throw "VCToolsInstallDir is not set; refusing to guess the linker" }
+          $linker = [IO.Path]::GetFullPath((Join-Path $vcTools "bin\Hostx64\x64\link.exe"))
+          if (!(Test-Path -LiteralPath $linker -PathType Leaf)) { throw "MSVC linker missing: $linker" }
+          "LINK=$linker" >> $env:GITHUB_ENV
       - name: Restore isolated vcpkg root after MSVC setup
         shell: pwsh
         run: |

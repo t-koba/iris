@@ -916,6 +916,27 @@ class WorkflowContractTests(unittest.TestCase):
         windows = self.job_block(self.evidence, 'parity-windows')
         self.assertIn('python3 scripts/windows-ffmpeg-overlay.py derive', windows)
 
+    def test_macos_exports_pinned_pkg_config_before_prefix_assertion(self):
+        macos = self.job_block(self.evidence, "parity-macos")
+        marker = "      - name: Build pinned FFmpeg runtime for macOS parity smoke\n"
+        self.assertIn(marker, macos)
+        step = macos[macos.index(marker):].split("\n      - ", 1)[0] + "\n"
+        prepare = '          python3 scripts/macos-ffmpeg.py prepare "$prefix"\n'
+        exports = ('          export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"\n'
+                   '          export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig"\n')
+        assertion = '          test "$(pkg-config --variable=prefix libavcodec)" = "$prefix"\n'
+        self.assertIn(prepare, step)
+        self.assertIn(exports, step)
+        self.assertIn(assertion, step)
+        self.assertLess(step.index(prepare), step.index(exports))
+        self.assertLess(step.index(exports), step.index(assertion))
+        self.assertIn('          } >> "$GITHUB_ENV"\n', step)
+        for needle in ('echo "FFMPEG_DIR=$prefix"',
+                       'echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig"',
+                       'echo "PKG_CONFIG_LIBDIR=$prefix/lib/pkgconfig"',
+                       'echo "DYLD_LIBRARY_PATH=$prefix/lib'):
+            self.assertIn(needle, step)
+
     def test_windows_restores_pinned_vcpkg_root_after_msvc_setup(self):
         windows = self.job_block(self.evidence, "parity-windows")
         self.assertIn(
@@ -932,6 +953,39 @@ class WorkflowContractTests(unittest.TestCase):
             '          "VCPKG_ROOT=$root" >> $env:GITHUB_ENV\n',
             windows)
         self.assertNotIn('"VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV', windows)
+
+    def test_windows_binds_msvc_linker_for_every_parity_step(self):
+        windows = self.job_block(self.evidence, "parity-windows")
+        setup = (
+            "      - name: Set up MSVC developer environment (x64)\n"
+            "        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0\n"
+            "        with:\n"
+            "          arch: x64\n"
+        )
+        marker = "      - name: Bind MSVC linker for all parity steps\n"
+        producer = (
+            '        run: python3 scripts/parity_source_compare.py --repo . '
+            '--candidate "$SOURCE_SHA" --corpus "$RUNNER_TEMP/iris-preview-corpus" '
+            '--pdfium-library "$IRIS_VALIDATION_PDFIUM_RUNTIME/pdfium.dll" '
+            '--output audit/parity/windows.json\n'
+        )
+        self.assertIn(setup, windows)
+        self.assertIn(marker, windows)
+        self.assertIn(producer, windows)
+        self.assertLess(windows.index(setup), windows.index(marker))
+        self.assertLess(windows.index(marker), windows.index(producer))
+        step = windows[windows.index(marker):].split("\n      - ", 1)[0] + "\n"
+        for needle in ("        shell: pwsh\n",
+                       "$vcTools = $env:VCToolsInstallDir\n",
+                       'if ([string]::IsNullOrWhiteSpace($vcTools)) { throw ',
+                       '[IO.Path]::GetFullPath(',
+                       'Join-Path $vcTools "bin\\Hostx64\\x64\\link.exe"',
+                       "Test-Path -LiteralPath $linker -PathType Leaf",
+                       '"LINK=$linker" >> $env:GITHUB_ENV\n'):
+            self.assertIn(needle, step, f"Windows linker binding misses {needle!r}")
+        self.assertLess(step.index("$vcTools = $env:VCToolsInstallDir"),
+                        step.index('"LINK=$linker" >> $env:GITHUB_ENV'))
+        self.assertNotIn("GITHUB_PATH", step)
 
     def test_each_parity_job_fetches_bytes_into_its_corpus_directory(self):
         jobs = ["parity-linux", "parity-macos", "parity-windows"]
