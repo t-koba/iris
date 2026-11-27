@@ -1041,5 +1041,23 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertIn("iris-preview-corpus", fetch_dir, f"{job} corpus must be a fresh dir")
 
 
+class CiPerformanceEvidenceTests(unittest.TestCase):
+    def test_scroll_benchmark_uses_normal_release_optimization(self):
+        ci = (Path(__file__).resolve().parents[1] / ".github" / "workflows"
+              / "ci.yml").read_text(encoding="utf-8")
+        start = ci.index("      - name: UI virtual scroll performance acceptance\n")
+        perf = ci[start:].split("\n      - ", 1)[0]
+        self.assertIn(
+            "        run: cargo run --release -p iris-ui-shell --example "
+            "virtual_scroll_perf --no-default-features --features minimal --locked\n",
+            perf)
+        self.assertNotIn("CARGO_PROFILE_RELEASE_OPT_LEVEL", perf)
+        self.assertNotIn("IRIS_MAX_LINUX_RELEASE_BYTES", perf)
+        size_start = ci.index("      - name: Product binary size upper bound\n")
+        size = ci[size_start:].split("\n      - ", 1)[0]
+        self.assertIn("test \"$actual\" -le \"$IRIS_MAX_LINUX_RELEASE_BYTES\"", size)
+        self.assertLess(size_start, start)
+
+
 if __name__ == "__main__":
     unittest.main()
