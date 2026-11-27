@@ -387,6 +387,21 @@ class ParitySourceCompareTests(unittest.TestCase):
         both_ffmpeg['timings'][0]['uses_ffmpeg'] = True
         m.paired_records(ffmpeg, both_ffmpeg, 'J2K')
 
+    def test_cargo_example_commands_use_target_names(self):
+        """Cargo --example takes a target name; the .rs file name is not one."""
+        for source in (m.CORPUS_HARNESS, m.HARNESS, m.GENERATOR):
+            with self.subTest(source=source):
+                command = m.cargo_example_command(source, '/tmp/argument')
+                self.assertEqual(command[command.index('--example') + 1], source[:-3])
+                self.assertNotIn(source, command)
+                self.assertEqual(command[-1], '/tmp/argument')
+        with self.assertRaises(ValueError):
+            m.cargo_example_command('preview_corpus_smoke', '/tmp/argument')
+        source_text = (ROOT / 'scripts' / 'parity_source_compare.py').read_text(encoding='utf-8')
+        self.assertEqual(source_text.count('cargo_example_command('), 3)
+        self.assertNotIn("'--example', example,", source_text)
+        self.assertNotIn("'--example', GENERATOR,", source_text)
+
     def test_install_example_skips_same_file_and_stages_other_checkout(self):
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)

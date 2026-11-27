@@ -539,9 +539,16 @@ def cargo_env(sha, warmups, samples, pdfium_library=None):
     return env
 
 
+def cargo_example_command(example, argument):
+    """Build a Cargo run using the example target name, not its source file name."""
+    require(example.endswith('.rs') and '/' not in example and WINDOWS_SEPARATOR not in example,
+            f'invalid example source name {example}')
+    return ['cargo', 'run', '--release', '--locked', '-p', 'iris-thumb-preview',
+            '--example', example[:-3], '--', argument]
+
+
 def smoke(checkout, example, argument, env, label):
-    command = ['cargo', 'run', '--release', '--locked', '-p', 'iris-thumb-preview',
-               '--example', example, '--', argument]
+    command = cargo_example_command(example, argument)
     text, _ = run(command, checkout, env, label)
     return parse_records(text, PREVIEW_OPERATIONS if example == CORPUS_HARNESS
                          else {J2K_OPERATION}, label)
@@ -566,8 +573,7 @@ def compare(args):
                 'paired revisions pin different corpus manifests')
 
         fixture = scratch / FIXTURE
-        run(['cargo', 'run', '--release', '--locked', '-p', 'iris-thumb-preview',
-             '--example', GENERATOR, '--', fixture], candidate,
+        run(cargo_example_command(GENERATOR, fixture), candidate,
             cargo_env(args.candidate, args.warmups, args.samples), 'J2K fixture generation')
         require(digest(fixture) == FIXTURE_SHA256 and fixture.stat().st_size == FIXTURE_SIZE,
                 'generated J2K fixture does not match its pin')
