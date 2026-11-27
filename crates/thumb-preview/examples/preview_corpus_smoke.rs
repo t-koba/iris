@@ -352,62 +352,47 @@ fn print_pdfium_runtime() {
     );
 }
 
-#[cfg(unix)]
-#[repr(C)]
-struct DlInfo {
-    fname: *const std::os::raw::c_char,
-    fbase: *const std::os::raw::c_void,
-    sname: *const std::os::raw::c_char,
-    saddr: *const std::os::raw::c_void,
-}
-
-#[cfg(unix)]
-#[cfg_attr(target_os = "linux", link(name = "dl"))]
-extern "C" {
-    fn dlsym(
-        handle: *const std::os::raw::c_void,
-        symbol: *const std::os::raw::c_char,
-    ) -> *const std::os::raw::c_void;
-    fn dladdr(addr: *const std::os::raw::c_void, info: *mut DlInfo) -> std::os::raw::c_int;
-}
-
-/// Path of the PDFium module actually loaded by this process, via the loader.
+#[cfg(target_os = "linux")]
+/// Path of the PDFium module actually loaded by this process.
 ///
-/// On Linux/macOS the address of `FPDF_InitLibrary` is resolved from the
-/// default search scope and then mapped to its file with `dladdr`; a system
-/// fallback reports its own path instead of the staged file.
-#[cfg(unix)]
+/// `libloading` opens PDFium with `RTLD_LOCAL`, so its symbols are absent from
+/// the default loader scope; the process' mappings are the source of truth.
 fn loaded_pdfium_path() -> Option<String> {
-    use std::ffi::{CStr, CString};
+    let maps = fs::read_to_string("/proc/self/maps").ok()?;
+    maps.lines().find_map(|line| {
+        // `address perms offset dev inode pathname`; the pathname is the last
+        // field and can itself contain spaces.
+        let path = line.splitn(6, char::is_whitespace).nth(5)?;
+        let name = Path::new(path).file_name()?.to_str()?;
+        (name == "libpdfium.so" || name.starts_with("libpdfium.so.")).then(|| path.to_owned())
+    })
+}
 
-    const RTLD_DEFAULT: *const std::os::raw::c_void = std::ptr::null();
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn _dyld_get_image_count() -> u32;
+    fn _dyld_get_image_name(index: u32) -> *const std::os::raw::c_char;
+}
 
-    let symbol = CString::new("FPDF_InitLibrary").ok()?;
-    // SAFETY: dlsym with RTLD_DEFAULT only inspects loader state; the
-    // returned address is used read-only for dladdr and never called.
-    let addr = unsafe { dlsym(RTLD_DEFAULT, symbol.as_ptr()) };
-    if addr.is_null() {
-        return None;
-    }
-    let mut info = DlInfo {
-        fname: std::ptr::null(),
-        fbase: std::ptr::null(),
-        sname: std::ptr::null(),
-        saddr: std::ptr::null(),
-    };
-    // SAFETY: addr came from dlsym; info is a valid out-pointer.
-    let ok = unsafe { dladdr(addr, &mut info) };
-    if ok == 0 || info.fname.is_null() {
-        return None;
-    }
-    // SAFETY: dladdr sets fname to a NUL-terminated string it owns.
-    let path = unsafe { CStr::from_ptr(info.fname) }
-        .to_string_lossy()
-        .into_owned();
-    if path.is_empty() {
-        return None;
-    }
-    Some(path)
+#[cfg(target_os = "macos")]
+/// Path of the PDFium module actually loaded by this process.
+///
+/// dyld's image list is the source of truth; both queries live in libSystem.
+fn loaded_pdfium_path() -> Option<String> {
+    use std::ffi::CStr;
+
+    // SAFETY: dyld only reports images loaded for the lifetime of this process
+    // and each name is a NUL-terminated C string owned by dyld.
+    let count = unsafe { _dyld_get_image_count() };
+    (0..count).find_map(|index| {
+        let image = unsafe { _dyld_get_image_name(index) };
+        if image.is_null() {
+            return None;
+        }
+        let path = unsafe { CStr::from_ptr(image) }.to_str().ok()?;
+        let name = Path::new(path).file_name()?.to_str()?;
+        (name == "libpdfium.so" || name.starts_with("libpdfium.so.")).then(|| path.to_owned())
+    })
 }
 
 #[cfg(windows)]

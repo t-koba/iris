@@ -310,16 +310,85 @@ class ParitySourceCompareTests(unittest.TestCase):
         self.assertIn('loaded_pdfium_path', helper)
         self.assertIn('var_os("IRIS_PDFIUM_REQUIRE_LIBRARY")', helper)
         self.assertNotIn('std::env::var("IRIS_PDFIUM_REQUIRE_LIBRARY")', helper)
-        # OS-level lookup for the actually loaded module; the same source must
-        # compile on Linux, macOS and Windows with no new Cargo dependencies.
-        for needle in ('dlsym', 'dladdr', 'FPDF_InitLibrary', 'RTLD_DEFAULT',
-                       'GetModuleHandleW', 'GetModuleFileNameW', 'pdfium.dll'):
+        # Per-OS loader queries: PDFium is opened RTLD_LOCAL, so dynamic symbol
+        # lookup cannot see it; the same source must compile on Linux, macOS and
+        # Windows with no new Cargo dependencies.
+        for forbidden in ('dlsym', 'dladdr', 'FPDF_InitLibrary', 'RTLD_DEFAULT',
+                          'link(name = "dl")'):
+            self.assertNotIn(forbidden, source,
+                             f'harness still relies on {forbidden!r}')
+        for needle in ('"/proc/self/maps"', '_dyld_get_image_count',
+                       '_dyld_get_image_name', 'GetModuleHandleW',
+                       'GetModuleFileNameW', 'pdfium.dll'):
             self.assertIn(needle, source, f'harness misses loader proof {needle!r}')
-        self.assertIn('link(name = "dl")', source)
+        helpers = rust_function_bodies(
+            source, 'fn loaded_pdfium_path() -> Option<String> {')
+        self.assertEqual(len(helpers), 4)  # Linux, macOS, Windows and fallback
+        for body in helpers:
+            self.assertNotIn('env', body,
+                             'the path helper must not consult the environment')
+        for body in helpers[:2]:
+            self.assertIn('file_name()', body)
+            self.assertIn('starts_with("libpdfium.so.")', body)
+        self.assertIn('"/proc/self/maps"', helpers[0])
+        self.assertIn('_dyld_get_image_name', helpers[1])
+        self.assertIn('GetModuleFileNameW', helpers[2])
         # The single optional record keeps its shape; required stays true only
         # for the opt-in gate and nothing prints without a loaded module.
         self.assertIn('"required": true', helper)
         self.assertIn('PREVIEW_PDFIUM_RUNTIME', helper)
+
+    def test_linux_pdfium_path_matches_map_file_names_not_the_gate_value(self):
+        """Exercise the real Linux helper against controlled process mappings."""
+        source = (ROOT / m.EXAMPLES / m.CORPUS_HARNESS).read_text(encoding='utf-8')
+        helpers = rust_function_bodies(
+            source, 'fn loaded_pdfium_path() -> Option<String> {')
+        maps_helpers = [body for body in helpers if '"/proc/self/maps"' in body]
+        self.assertEqual(len(maps_helpers), 1, 'helper must read /proc/self/maps')
+        linux = maps_helpers[0]
+        rustc = shutil.which('rustc')
+        self.assertIsNotNone(rustc, 'rustc is required for the PDFium path test')
+        with tempfile.TemporaryDirectory(prefix='iris-pdfium-path-') as temporary:
+            root = Path(temporary)
+            maps = root / 'maps'
+            literal = '"/proc/self/maps"'
+            patched = linux.replace(literal, json.dumps(str(maps)))
+            self.assertNotEqual(patched, linux, 'helper lost its maps source')
+            (root / 'main.rs').write_text(
+                'use std::{fs, path::Path};\n\n' + patched + '\n'
+                'fn main() {\n'
+                '    println!("{}", loaded_pdfium_path().unwrap_or_default());\n'
+                '}\n', encoding='utf-8')
+            binary = root / 'helper'
+            compiled = subprocess.run(
+                [rustc, '--edition', '2021', '-o', str(binary), str(root / 'main.rs')],
+                capture_output=True, text=True, check=False, timeout=120)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            decoy = '/decoy/from/env/libpdfium.so'
+            env = dict(os.environ, IRIS_PDFIUM_REQUIRE_LIBRARY=decoy)
+
+            def read_maps(lines):
+                maps.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+                result = subprocess.run([str(binary)], env=env, capture_output=True,
+                                        text=True, check=False, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return result.stdout.strip()
+
+            noise = [
+                '7f0000000000-7f0000001000 r--p 00000000 08:01 1 /opt/notlibpdfium.so',
+                '7f0000001000-7f0000002000 r--p 00000000 08:01 2 /opt/libpdfium.so.txt/other',
+                '7f0000002000-7f0000003000 r--p 00000000 08:01 3 /opt/libpdfium.so-backup',
+                '7f0000003000-7f0000004000 r--p 00000000 00:00 0',
+            ]
+            self.assertEqual(read_maps(noise + [
+                '7f0000004000-7f0000005000 r-xp 00000000 08:01 4 '
+                '/staged pdfium/libpdfium.so.8179',
+                '7f0000005000-7f0000006000 r-xp 00000000 08:01 5 /usr/lib/libpdfium.so',
+            ]), '/staged pdfium/libpdfium.so.8179')
+            self.assertEqual(read_maps(noise + [
+                '7f0000004000-7f0000005000 r-xp 00000000 08:01 4 /opt/pdfium/libpdfium.so',
+            ]), '/opt/pdfium/libpdfium.so')
+            self.assertEqual(read_maps(noise), '')
 
     def test_pairing_plan_marks_legacy_schema_unpaired(self):
         baseline = dict(corpus=legacy_section(), j2k=legacy_section())
@@ -497,22 +566,35 @@ class ParitySourceCompareTests(unittest.TestCase):
         self.assertNotIn('tests/preview-corpus', m.CORPUS_HARNESS)
 
 
+def rust_function_bodies(source, marker):
+    """Extract every Rust function in `source` whose signature starts with marker."""
+    bodies = []
+    start = 0
+    while True:
+        begin = source.find(marker, start)
+        if begin < 0:
+            return bodies
+        opening = source.index('{', begin + len(marker) - 1)
+        depth = 0
+        for index in range(opening, len(source)):
+            if source[index] == '{':
+                depth += 1
+            elif source[index] == '}':
+                depth -= 1
+                if depth == 0:
+                    bodies.append(source[begin:index + 1])
+                    start = index + 1
+                    break
+        else:
+            raise ValueError(f'unterminated Rust function at offset {begin}')
+
+
 def compiled_settings_function(example):
     """Extract the real compiled-build-settings helper from a smoke example."""
     source = (ROOT / m.EXAMPLES / example).read_text(encoding='utf-8')
-    marker = 'fn compiled_build_settings()'
-    begin = source.find(marker)
-    m.require(begin >= 0, f'{example} has no compiled_build_settings helper')
-    opening = source.index('{', begin)
-    depth = 0
-    for index in range(opening, len(source)):
-        if source[index] == '{':
-            depth += 1
-        elif source[index] == '}':
-            depth -= 1
-            if depth == 0:
-                return source[begin:index + 1]
-    raise ValueError(f'{example} has an unterminated compiled_build_settings helper')
+    bodies = rust_function_bodies(source, 'fn compiled_build_settings()')
+    m.require(bool(bodies), f'{example} has no compiled_build_settings helper')
+    return bodies[0]
 
 
 class BuildScriptContractTests(unittest.TestCase):
