@@ -472,6 +472,19 @@ jobs:
             (Join-Path $env:IRIS_VALIDATION_STAGE "rustc.exe"),
             (Join-Path $env:IRIS_VALIDATION_STAGE "pdfium.dll")
           )
+          # Runtime-loaded DLLs (e.g. avdevice) are shipped but never appear as
+          # a static PE import. Seed the walk with every shipped native so each
+          # one is bound to a reviewed import inventory.
+          $inventoryPath = Join-Path $env:IRIS_VALIDATION_EVIDENCE "product-inventory.json"
+          if (!(Test-Path -LiteralPath $inventoryPath -PathType Leaf)) { throw "product inventory missing for PE root seed" }
+          $shippedFiles = @((Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json).files)
+          if ($shippedFiles.Count -lt 3) { throw "product inventory empty for PE root seed" }
+          foreach ($entry in $shippedFiles) {
+            $shippedName = [string]$entry.name
+            if ($shippedName -like "*.dll" -or $shippedName -like "*.exe") {
+              $roots += Join-Path $stage $shippedName
+            }
+          }
           $rootNames = @($roots | ForEach-Object { [IO.Path]::GetFileName($_) })
           $queue = New-Object System.Collections.Generic.Queue[string]
           foreach ($root in $roots) {

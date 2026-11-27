@@ -86,6 +86,7 @@ PE_IMPORT_MARKERS = (
     '(Join-Path $env:SystemRoot "System32")',
     'foreach ($sysDir in $systemDirs) {',
     '(Join-Path $env:IRIS_VALIDATION_STAGE "pdfium.dll")',
+    '$roots += Join-Path $stage $shippedName',
     '$rootNames = @($roots | ForEach-Object { [IO.Path]::GetFileName($_) })',
     'roots = @($rootNames)',
     'if (!$visited.ContainsKey("pdfium.dll")) { throw "staged pdfium.dll missing from PE inventory" }',

@@ -73,6 +73,19 @@ class WorkflowContracts(unittest.TestCase):
         for gate in self.mod.OFFLINE_GATES:
             self.assertIn(gate, self.text)
 
+    def test_pe_closure_seeds_roots_from_shipped_inventory(self):
+        marker = '$roots += Join-Path $stage $shippedName'
+        self.assertIn(marker, self.text)
+        root_names = ('          $rootNames = @($roots | ForEach-Object '
+                      '{ [IO.Path]::GetFileName($_) })')
+        self.assertLess(self.text.index(marker), self.text.index(root_names))
+        line = '          ' + marker + '\n'
+        self.assertIn(line, self.text)
+        mutated = self.text.replace(line, '', 1)
+        self.assertNotEqual(mutated, self.text)
+        with self.assertRaises(ValueError):
+            self.mod.validate(mutated)
+
     def test_contract_cli_emits_shape(self):
         r = subprocess.run(
             [sys.executable, str(ROOT / "scripts/windows-ffmpeg-validation-workflow.py"), "contract"],
