@@ -31,7 +31,10 @@ fn object_ref(display_path: &str) -> ObjectRef {
 }
 
 fn list_entry(index: usize) -> ListEntry {
-    let name = format!("asset-{index:06}.jpg");
+    // The harness drops every iced Task, so a media extension would enqueue
+    // thumbnail jobs that never complete and inflate later state updates.
+    // This gate measures layout and scroll windowing, not thumbnail decoding.
+    let name = format!("asset-{index:06}.dat");
     let display_path = format!("/Users/test/Pictures/{name}");
     ListEntry {
         metadata_level: MetadataLevel::L1,

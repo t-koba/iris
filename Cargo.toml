@@ -3,7 +3,8 @@
 # The default release profile uses opt-level 3; Linux packaging overrides it to `z` for
 # the size budget. scripts/product-build-profile.json is the shared product setting for
 # packaging, paired diagnostics and release acceptance. Feature-specific acceptance
-# builds, such as the virtual-scroll smoke, keep their own opt-level.
+# builds, such as the virtual-scroll smoke, use the same shared Linux profile so the
+# performance gate measures the shipped release payload.
 lto = "fat"
 codegen-units = 1
 strip = "symbols"

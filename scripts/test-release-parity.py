@@ -1042,21 +1042,42 @@ class WorkflowContractTests(unittest.TestCase):
 
 
 class CiPerformanceEvidenceTests(unittest.TestCase):
-    def test_scroll_benchmark_uses_normal_release_optimization(self):
+    def test_scroll_benchmark_uses_shipped_linux_profile(self):
         ci = (Path(__file__).resolve().parents[1] / ".github" / "workflows"
               / "ci.yml").read_text(encoding="utf-8")
         start = ci.index("      - name: UI virtual scroll performance acceptance\n")
         perf = ci[start:].split("\n      - ", 1)[0]
         self.assertIn(
-            "        run: cargo run --release -p iris-ui-shell --example "
+            "        run: |\n"
+            "          export CARGO_PROFILE_RELEASE_OPT_LEVEL=\"$(python3 "
+            "scripts/product_build_profile.py --platform linux)\"\n"
+            "          cargo run --release -p iris-ui-shell --example "
             "virtual_scroll_perf --no-default-features --features minimal --locked\n",
             perf)
-        self.assertNotIn("CARGO_PROFILE_RELEASE_OPT_LEVEL", perf)
         self.assertNotIn("IRIS_MAX_LINUX_RELEASE_BYTES", perf)
         size_start = ci.index("      - name: Product binary size upper bound\n")
         size = ci[size_start:].split("\n      - ", 1)[0]
         self.assertIn("test \"$actual\" -le \"$IRIS_MAX_LINUX_RELEASE_BYTES\"", size)
         self.assertLess(size_start, start)
+        product_start = ci.index("      - name: Product default release build (Ubuntu)\n")
+        product = ci[product_start:].split("\n      - ", 1)[0]
+        profile_line = ("export CARGO_PROFILE_RELEASE_OPT_LEVEL=\"$(python3 "
+                        "scripts/product_build_profile.py --platform linux)\"")
+
+        def profile_step(step):
+            lines = [line.strip() for line in step.splitlines()
+                     if "CARGO_PROFILE_RELEASE_OPT_LEVEL=" in line]
+            self.assertEqual(len(lines), 1, "each Linux release step must set one profile")
+            return lines[0]
+
+        self.assertEqual(profile_step(product), profile_line)
+        self.assertEqual(profile_step(perf), profile_line)
+
+    def test_scroll_benchmark_excludes_unfinished_thumbnail_tasks(self):
+        example = (Path(__file__).resolve().parents[1] / "crates" / "ui-shell"
+                   / "examples" / "virtual_scroll_perf.rs").read_text(encoding="utf-8")
+        self.assertIn('format!("asset-{index:06}.dat")', example)
+        self.assertIn("drops every iced Task", example)
 
 
 if __name__ == "__main__":

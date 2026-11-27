@@ -217,8 +217,8 @@ jobs:
           cargo build --release -p iris-ui-shell --locked
 
       # The size limit checks the product-profile binary built above. Measure
-      # scroll performance separately with the default optimized release
-      # profile; a size-optimized build is not the runtime we ship.
+      # scroll performance with that same shipped Linux profile so a regression
+      # in the release payload cannot hide behind a faster benchmark build.
       - name: Product binary size upper bound
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -228,7 +228,9 @@ jobs:
 
       - name: UI virtual scroll performance acceptance
         if: matrix.os == 'ubuntu-latest'
-        run: cargo run --release -p iris-ui-shell --example virtual_scroll_perf --no-default-features --features minimal --locked
+        run: |
+          export CARGO_PROFILE_RELEASE_OPT_LEVEL="$(python3 scripts/product_build_profile.py --platform linux)"
+          cargo run --release -p iris-ui-shell --example virtual_scroll_perf --no-default-features --features minimal --locked
 
       - name: Source safety policy
         if: matrix.os == 'ubuntu-latest'
