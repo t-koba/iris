@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
@@ -259,6 +260,32 @@ class SignContracts(unittest.TestCase):
         with self.assertRaises(m.SigningError):
             self.call(failed)
         self.assertFalse(any(path.exists() for path in failed.pfx_paths))
+
+    def test_world_readable_posix_pfx_fails_closed_and_is_removed(self):
+        # Portable: stub the capability-dependent calls on a proxy, never
+        # patching os.fchmod itself on hosts where that attribute is absent.
+        inspected = []
+
+        class UnsafeOs:
+            def __getattr__(self, name):
+                return getattr(os, name)
+
+            @staticmethod
+            def fchmod(fd, mode):
+                return None
+
+            @staticmethod
+            def stat(path):
+                inspected.append(path)
+                return SimpleNamespace(st_mode=0o666)
+
+        with patch.object(m, "POSIX_PFX_MODE", True), patch.object(m, "os", UnsafeOs()):
+            with self.assertRaises(m.SigningError) as caught:
+                m.private_pfx(str(self.pfx))
+        self.assertIn("0600", str(caught.exception))
+        self.assertEqual(len(inspected), 1)
+        self.assertFalse(Path(inspected[0]).exists())
+        self.assertEqual(Path(self.pfx).read_bytes(), PFX_BYTES)
 
     def test_windows_acl_is_restricted_before_signing(self):
         runner = RecordingRunner()
