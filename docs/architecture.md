@@ -130,11 +130,11 @@ macOS 上のクラウドやネットワーク越しのパスは必ずしも非�
 
 FFmpeg（動画と一部の静止画のフォールバック）の範囲は `packaging/linux/ffmpeg.json` と各プラットフォームの `ffmpeg-README.md` に記録しています。以下はそれらとは異なり、ソースに静的リンクされるデコーダです。
 
-#### JPEG 2000（pure-Rust openjp2 0.7.2）
+#### JPEG 2000（pure-Rust openjpeg2-pure-rs 0.1.1）
 
-`crates/thumb-preview` は `jpeg2k` 0.11.0 を `image` フィーチャーで使用します。`jpeg2k` 0.11.0 は純 Rust の `openjp2` 0.7.2（BSD-2-Clause）をラップし、C ソースのコンパイルや静的リンクは行いません。`Cargo.lock` は `jpeg2k` 0.11.0、`openjp2` 0.7.2、`openjp2-ctypes` 0.7.2 を crates.io のチェックサムで固定します。リポジトリ内のコピーや Cargo パッチは残していません。`modern_image::detect` が JP2/J2K のシグネチャを `decode_jpeg2000` に振り分けます。`decode_jpeg2000` は `jpeg2k::Image::from_bytes` を呼ぶ前に、Iris 側の純 Rust ガードで TLM/SOT の一貫性を検査します。
+`crates/thumb-preview` は `openjpeg2-pure-rs` 0.1.1（BSD-2-Clause、クレート名 `openjp2`）で JPEG 2000 を復号します。C ソースのコンパイルや静的リンクは行いません。`jpeg2k` 0.11.0 は対照用フィクスチャ生成の dev-dependency としてのみ残り、`openjp2` 0.7.2 と `openjp2-ctypes` 0.7.2 とともに crates.io のチェックサムで固定します。リポジトリ内のコピーや Cargo パッチは残していません。`modern_image::detect` が JP2/J2K のシグネチャを `decode_jpeg2000` に振り分けます。`decode_jpeg2000` は `openjp2::Decoder` を呼ぶ前に、Iris 側の純 Rust ガードで TLM/SOT の一貫性を検査し、復号後の色空間も Iris が変換できるものだけを受け付けます。
 
-以前の C デコーダ経路（OpenJPEG 2.5.3）には CVE-2025-54874 と OSV-2025-219 / GHSA-78g4-xqwv-q3g8 のヒープ領域外書き込みが報告されていました。純 Rust の `openjp2` 0.7.2 はこれら上流 C コードを含まないため、これらの報告は現行の経路に直接は当てはまりません。Iris ではいずれの PoC も再現していません。これは安全性の保証ではありません。
+以前の C デコーダ経路（OpenJPEG 2.5.3）には CVE-2025-54874 と OSV-2025-219 / GHSA-78g4-xqwv-q3g8 のヒープ領域外書き込みが報告されていました。純 Rust の `openjpeg2-pure-rs` 0.1.1 はこれら上流 C コードを含まないため、これらの報告は現行の経路に直接は当てはまりません。Iris ではいずれの PoC も再現していません。これは安全性の保証ではありません。
 
 `j2k_tlm_sot_consistent` は JP2 の `jp2c` ペイロードまたは生の J2K バイト列から TLM と SOT だけを読み、Psot でタイルデータ部分を飛ばして、同じタイルの TLM エントリ数以上の TPsot をデコーダ呼び出し前に拒否します。Psot が 0 の最終 tile-part でも SOD までヘッダーを読み、終端 EOC を確認します。TLM のない入力は従来どおりデコーダに渡しますが、ST=3 や不正なエントリ列など TLM が不正な入力は比較を諦めずに拒否します。マーカー長が不正な場合や EOC なしで入力が終わる場合も拒否します。`scripts/test-jpeg2k-route.py` はリポジトリ内にコピーやパッチが残っていないことと、依存がチェックサム付きの crates.io 版の純 Rust クレートであることを確認します。これは限定的な入力ガードの記録であり、安全性の保証やリリース判断ではありません。
 

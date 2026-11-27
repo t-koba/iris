@@ -151,6 +151,14 @@ fn openjp2_to_dynamic(image: &openjp2::Image) -> Option<DynamicImage> {
     {
         return None;
     }
+    // The decoder leaves colour transforms to the caller. Keep the previous
+    // decoder's fail-closed behaviour for spaces we cannot convert faithfully.
+    match image.color_space {
+        openjp2::ColorSpace::Unknown
+        | openjp2::ColorSpace::Srgb
+        | openjp2::ColorSpace::Greyscale => {}
+        _ => return None,
+    }
     let max_precision = components
         .iter()
         .fold(0u32, |max, c| max.max(u32::from(c.precision.clamp(1, 31))));
@@ -229,40 +237,34 @@ fn openjp2_to_dynamic(image: &openjp2::Image) -> Option<DynamicImage> {
 
 fn scale_u8(component: &openjp2::ImageComponent, pixels: usize) -> Vec<u8> {
     let prec = u32::from(component.precision.clamp(1, 31));
-    let old_max = if component.signed {
+    let offset = if component.signed {
         1i64 << (prec - 1)
     } else {
-        (1i64 << prec) - 1
+        0
     };
+    let old_max = (1i64 << prec) - 1;
     component.data[..pixels]
         .iter()
         .map(|&sample| {
-            let v = i64::from(sample);
-            if component.signed {
-                (((v * 255) / old_max) + 255).clamp(0, 255) as u8
-            } else {
-                ((v.clamp(0, old_max) * 255) / old_max) as u8
-            }
+            let v = (i64::from(sample) + offset).clamp(0, old_max);
+            ((v * 255) / old_max) as u8
         })
         .collect()
 }
 
 fn scale_u16(component: &openjp2::ImageComponent, pixels: usize) -> Vec<u16> {
     let prec = u32::from(component.precision.clamp(1, 31));
-    let old_max = if component.signed {
+    let offset = if component.signed {
         1i64 << (prec - 1)
     } else {
-        (1i64 << prec) - 1
+        0
     };
+    let old_max = (1i64 << prec) - 1;
     component.data[..pixels]
         .iter()
         .map(|&sample| {
-            let v = i64::from(sample);
-            if component.signed {
-                (((v * 65535) / old_max) + 65535).clamp(0, 65535) as u16
-            } else {
-                ((v.clamp(0, old_max) * 65535) / old_max) as u16
-            }
+            let v = (i64::from(sample) + offset).clamp(0, old_max);
+            ((v * 65535) / old_max) as u16
         })
         .collect()
 }
@@ -930,6 +932,29 @@ mod tests {
         let mut heic = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec();
         heic.resize(32, 0);
         assert_eq!(detect(&heic), Some(ModernFormat::Heic));
+    }
+
+    #[test]
+    fn unsupported_jpeg2000_color_spaces_stay_rejected() {
+        let component = openjp2::ImageComponent::new(1, 1, 8, false, vec![128]).unwrap();
+        for color_space in [
+            openjp2::ColorSpace::Sycc,
+            openjp2::ColorSpace::Eycc,
+            openjp2::ColorSpace::Cmyk,
+        ] {
+            let image = openjp2::Image::new(1, 1, color_space, vec![component.clone()]).unwrap();
+            assert!(openjp2_to_dynamic(&image).is_none());
+        }
+    }
+
+    #[test]
+    fn signed_jpeg2000_components_are_offset_before_scaling() {
+        let component =
+            openjp2::ImageComponent::new(5, 1, 8, true, vec![-128, -64, 0, 64, 127]).unwrap();
+        let image =
+            openjp2::Image::new(5, 1, openjp2::ColorSpace::Greyscale, vec![component]).unwrap();
+        let decoded = openjp2_to_dynamic(&image).unwrap().to_luma8();
+        assert_eq!(decoded.as_raw(), &[0, 64, 128, 192, 255]);
     }
 
     #[test]

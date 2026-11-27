@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Registry-pin evidence for the Iris JPEG 2000 decoder route and input guard.
 
-Iris decodes JPEG 2000 with the pure-Rust `jpeg2k` / `openjp2` crates; no C
-decoder is vendored, patched or statically linked. This checks that every
-Cargo.lock pinning jpeg2k (including the detached Windows prototype workspace)
-pins the unmodified crates.io crates by checksum, that no in-repo copy or path
-patch remains, and that the Rust TLM/SOT guard and its tests remain wired into
-CI. This is configuration evidence, not execution evidence: it does not
+Iris decodes JPEG 2000 with the pure-Rust `openjpeg2-pure-rs` crate (`openjp2`);
+`jpeg2k` remains only a dev-dependency for fixture generation. No C decoder is
+vendored, patched or statically linked. This checks that every Cargo.lock
+pinning either crate (including the detached Windows prototype workspace) pins
+the unmodified crates.io crates by checksum, that no in-repo copy or path patch
+remains, and that the Rust TLM/SOT guard and its tests remain wired into CI. This is configuration evidence, not execution evidence: it does not
 establish that an advisory proof of concept was reproduced or that a particular
 input is safe.
 """
@@ -23,6 +23,7 @@ pinned = {
     "jpeg2k": ("0.11.0", "c8e4eea66cd0363fb2048d457f732a5d8a1bbbb2451e8db0bff7c4860defcafb"),
     "openjp2": ("0.7.2", "c41f2738518a4f8a8c6a9816b1b70b37511bc6f9f04d4f72230326f6abf3d489"),
     "openjp2-ctypes": ("0.7.2", "fc7650425b4f7e4c514e4a6ccaa2c26612f935d0826d2ee5426635d3844a8361"),
+    "openjpeg2-pure-rs": ("0.1.1", "70cbec9906e23f99197f321718ce1f7e2fccd455e45c5b3f7d2bf5d7b635f192"),
 }
 
 
@@ -46,12 +47,13 @@ def patch_section():
 
 
 def jpeg2k_lockfiles():
-    """Every Cargo.lock pinning jpeg2k, including detached prototype workspaces."""
+    """Every Cargo.lock pinning a JPEG 2000 decoder crate, including detached workspaces."""
     found = []
     for path in root.rglob("Cargo.lock"):
         if "target" in path.parts:
             continue
-        if 'name = "jpeg2k"' in path.read_text(encoding="utf-8"):
+        text = path.read_text(encoding="utf-8")
+        if 'name = "jpeg2k"' in text or 'name = "openjpeg2-pure-rs"' in text:
             found.append(path)
     return sorted(found)
 
@@ -105,13 +107,18 @@ class Jpeg2kRegistryRoute(unittest.TestCase):
                 lock_text = lock.read_text(encoding="utf-8")
                 self.assertNotIn('name = "openjpeg-sys"', lock_text,
                                  "C decoder is still in the lockfile")
+                self.assertIn('name = "openjpeg2-pure-rs"', lock_text,
+                              "pure-Rust decoder is not pinned")
                 for name, (version, sha256) in pinned.items():
                     block = package_block(lock_text, name)
+                    if not block:
+                        # Fixture-generation crates may be absent from detached workspaces.
+                        self.assertNotEqual(name, "openjpeg2-pure-rs")
+                        continue
                     self.assertIn(f'version = "{version}"', block, f"{name} version")
                     self.assertIn(f'source = "{registry_source}"', block, f"{name} source")
                     self.assertIn(f'checksum = "{sha256}"', block, f"{name} checksum")
                     self.assertNotIn("path", block, f"{name} path patch")
-                self.assertIn('"openjp2"', package_block(lock_text, "jpeg2k"))
 
     def test_cached_crates_match_pinned_checksums(self):
         for name, (version, sha256) in pinned.items():
