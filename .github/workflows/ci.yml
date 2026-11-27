@@ -237,14 +237,16 @@ jobs:
         run: |
           command -v rg >/dev/null 2>&1 || { echo "required command is missing: rg" >&2; exit 1; }
           test -z "$(rg -n '#\[allow' crates --glob '*.rs' || true)"
-          unsafe_files=$(rg -l '\bunsafe\b' crates --glob '*.rs' | rg -v '^(crates/backends/src/common.rs|crates/backends/src/localfs/reflink.rs|crates/platform-integration/src/trash.rs|crates/thumb-preview/src/image_generic.rs|crates/thumb-preview/src/pdf.rs|crates/thumb-preview/src/video.rs|crates/ui-shell/src/macos_menu.rs)$' || true)
+          unsafe_files=$(rg -l '\bunsafe\b' crates --glob '*.rs' | rg -v '^(crates/backends/src/common.rs|crates/backends/src/localfs/reflink.rs|crates/platform-integration/src/trash.rs|crates/thumb-preview/src/image_generic.rs|crates/thumb-preview/src/pdf.rs|crates/thumb-preview/src/video.rs|crates/thumb-preview/examples/preview_corpus_smoke.rs|crates/ui-shell/src/macos_menu.rs)$' || true)
           test -z "$unsafe_files"
           unsafe_count=$(rg -n '\bunsafe\b' crates --glob '*.rs' | wc -l)
           # objc2 0.6 makes selector/super safety explicit with #[unsafe(...)];
           # The video boundary keeps AVFrame.format raw and tests an invalid ID before scaling.
+          # The parity smoke reads the loaded Windows PDFium module through
+          # GetModuleHandleW/GetModuleFileNameW with explicit SAFETY notes.
           # The allowed-file list above still prevents the unsafe surface from spreading.
-          echo "unsafe baseline count: $unsafe_count (limit: 76)"
-          test "$unsafe_count" -le 76
+          echo "unsafe baseline count: $unsafe_count (limit: 77)"
+          test "$unsafe_count" -le 77
 
       - name: Package Linux AppDir and Debian installer
         if: matrix.os == 'ubuntu-latest'
