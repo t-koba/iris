@@ -491,6 +491,138 @@ def parity_rehearsal_contract():
     )
 
 
+windows_export_caller = """  windows-release-export-rehearsal:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      attestations: read
+    uses: ./.github/workflows/windows-ffmpeg-validation.yml
+    with:
+      export_release_assets: true
+"""
+windows_export_checkout = """      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+"""
+windows_export_assets_download = """      - name: Download Windows release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-release-assets
+          path: verified/windows
+"""
+windows_export_evidence_download = """      - name: Download Windows native evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-native-evidence
+          path: verified/windows-native-evidence
+"""
+windows_export_upload = """      - name: Retain Windows export verifier report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-export-rehearsal-verifier
+          path: audit/windows-export-rehearsal.txt
+          if-no-files-found: error
+"""
+windows_export_required_checks = (
+    '          expected = ("Iris-windows.zip", "Iris-windows-setup.exe",\n',
+    '                      "release-package-result.json", "product-inventory.json")\n',
+    '          if result.get("status") != "pass":\n',
+    '          for field, name in (("zip_sha256", "Iris-windows.zip"),\n',
+    '                              ("installer_sha256", "Iris-windows-setup.exe")):\n',
+    '              actual = sha256(assets / name)\n',
+    '              if recorded != actual:\n',
+    '          if not isinstance(files, list) or not 1 <= len(files) <= 256:\n',
+    '          native = evidence / "windows-native-evidence.json"\n',
+    '          if not native.is_file() or native.stat().st_size <= 0:\n',
+    '          if len(text.encode("utf-8")) > 4096:\n',
+    '          report = Path("audit/windows-export-rehearsal.txt")\n',
+)
+
+windows_export_publish_tokens = re.compile(
+    r"softprops/action-gh-release|gh\s+release|git\s+tag|"
+    r"git\s+push[^\n]*(?:refs/tags|--tags|\btag\b)|actions/create-release", re.IGNORECASE,
+)
+
+
+def windows_release_export_rehearsal_contract(workflow=ci):
+    """Dispatch-only export rehearsal verifies the exact-SHA handoff without publishing."""
+    caller = ci_job_block("windows-release-export-rehearsal", workflow)
+    gate = ci_job_block("windows-release-export-gate", workflow)
+    if caller.rstrip("\n") != windows_export_caller.rstrip("\n"):
+        return False
+    if "validate_pdfium_candidate" in caller:
+        return False
+    if not gate:
+        return False
+    if re.findall(r"(?m)^    if: (.*)$", gate) != ["github.event_name == 'workflow_dispatch'"]:
+        return False
+    if (
+        "    needs: windows-release-export-rehearsal\n" not in gate
+        or "    runs-on: ubuntu-latest\n" not in gate
+        or "    permissions:\n      contents: read\n" not in gate
+        or windows_export_checkout not in gate
+        or windows_export_assets_download not in gate
+        or windows_export_evidence_download not in gate
+        or windows_export_upload not in gate
+    ):
+        return False
+    verify = ci_step_block(
+        "Verify exact-SHA Windows release export", "windows-release-export-gate", workflow
+    )
+    return (
+        all(snippet in verify for snippet in windows_export_required_checks)
+        and not windows_export_publish_tokens.search(caller + gate)
+    )
+
+
+def windows_release_export_mutation_regression():
+    """Prove the export rehearsal guard rejects each unsafe mutation."""
+    caller = ci_job_block("windows-release-export-rehearsal")
+    gate = ci_job_block("windows-release-export-gate")
+    verify = ci_step_block("Verify exact-SHA Windows release export", "windows-release-export-gate")
+    if not (caller and gate and verify):
+        return False
+
+    wrong_trigger = caller.replace(
+        "    if: github.event_name == 'workflow_dispatch'\n",
+        "    if: github.event_name == 'push'\n", 1,
+    )
+    export_false = caller.replace(
+        "      export_release_assets: true\n",
+        "      export_release_assets: false\n", 1,
+    )
+    hash_check = (
+        '              actual = sha256(assets / name)\n'
+        '              if recorded != actual:\n'
+        '                  raise SystemExit(f"{field} mismatch: {recorded} != {actual}")\n'
+    )
+    native_check = (
+        '          native = evidence / "windows-native-evidence.json"\n'
+        '          if not native.is_file() or native.stat().st_size <= 0:\n'
+        '              raise SystemExit("native evidence JSON is missing or empty")\n'
+        '          json.loads(native.read_text(encoding="utf-8"))\n'
+    )
+    publish_step = gate.rstrip("\n") + (
+        "\n      - name: Publish release\n"
+        "        run: gh release create v0.0.0 verified/windows/Iris-windows.zip\n"
+    )
+    mutants = {
+        "wrong trigger": ci.replace(caller, wrong_trigger, 1),
+        "export false": ci.replace(caller, export_false, 1),
+        "removed hash check": ci.replace(verify, verify.replace(hash_check, "", 1), 1),
+        "removed native-evidence check": ci.replace(verify, verify.replace(native_check, "", 1), 1),
+        "added publish step": ci.replace(gate, publish_step, 1),
+    }
+    return (
+        windows_release_export_rehearsal_contract()
+        and all(
+            mutated != ci and not windows_release_export_rehearsal_contract(workflow=mutated)
+            for mutated in mutants.values()
+        )
+    )
+
+
 checks = {
     "Final macOS installer trust runs before publication and is offline-tested": (
         release.count(installer_verify) == 1 and release.count(installer_check) == 1
@@ -855,6 +987,10 @@ permissions:
           persist-credentials: false
 """ in win_validation,
     "Dispatch-only parity rehearsal runs the release gate without publishing": parity_rehearsal_contract(),
+    "Dispatch-only Windows export rehearsal verifies the exact-SHA handoff without publishing":
+        windows_release_export_rehearsal_contract(),
+    "Windows export rehearsal guard rejects trigger, export, evidence and publish mutations":
+        windows_release_export_mutation_regression(),
 }
 failed = [name for name, passed in checks.items() if not passed]
 if failed:

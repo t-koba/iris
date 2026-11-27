@@ -803,3 +803,115 @@ jobs:
           name: parity-verifier
           path: audit/parity/verifier.txt
           if-no-files-found: error
+
+  windows-release-export-rehearsal:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      attestations: read
+    uses: ./.github/workflows/windows-ffmpeg-validation.yml
+    with:
+      export_release_assets: true
+
+  windows-release-export-gate:
+    if: github.event_name == 'workflow_dispatch'
+    needs: windows-release-export-rehearsal
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Download Windows release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-release-assets
+          path: verified/windows
+      - name: Download Windows native evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-native-evidence
+          path: verified/windows-native-evidence
+      - name: Verify exact-SHA Windows release export
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          assets = Path("verified/windows")
+          evidence = Path("verified/windows-native-evidence")
+          expected = ("Iris-windows.zip", "Iris-windows-setup.exe",
+                      "release-package-result.json", "product-inventory.json")
+          for name in expected:
+              path = assets / name
+              if not path.is_file() or path.stat().st_size <= 0:
+                  raise SystemExit(f"export asset missing or empty: {name}")
+
+          result = json.loads((assets / "release-package-result.json").read_text(encoding="utf-8"))
+          if result.get("status") != "pass":
+              raise SystemExit(f"release package result is not pass: {result.get('status')!r}")
+
+          def sha256(path):
+              digest = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          for field, name in (("zip_sha256", "Iris-windows.zip"),
+                              ("installer_sha256", "Iris-windows-setup.exe")):
+              recorded = result.get(field)
+              if not isinstance(recorded, str) or re.fullmatch(r"[0-9a-f]{64}", recorded) is None:
+                  raise SystemExit(f"invalid {field} in release result")
+              actual = sha256(assets / name)
+              if recorded != actual:
+                  raise SystemExit(f"{field} mismatch: {recorded} != {actual}")
+
+          inventory = json.loads((assets / "product-inventory.json").read_text(encoding="utf-8"))
+          files = inventory.get("files")
+          if not isinstance(files, list) or not 1 <= len(files) <= 256:
+              raise SystemExit("exported product inventory has no bounded file list")
+          names = [entry.get("name") for entry in files]
+          if not all(isinstance(name, str) and name and name == Path(name).name for name in names):
+              raise SystemExit("exported product inventory has invalid file names")
+          if len(set(names)) != len(names):
+              raise SystemExit("exported product inventory has duplicate file names")
+
+          native = evidence / "windows-native-evidence.json"
+          if not native.is_file() or native.stat().st_size <= 0:
+              raise SystemExit("native evidence JSON is missing or empty")
+          json.loads(native.read_text(encoding="utf-8"))
+
+          text = "\n".join((
+              "windows release export rehearsal: pass",
+              f"caller_sha: {os.environ.get('GITHUB_SHA', '')}",
+              f"asset_count: {len(expected)}",
+              f"inventory_files: {len(files)}",
+              f"zip_sha256: {result['zip_sha256']}",
+              f"installer_sha256: {result['installer_sha256']}",
+              "native_evidence: present",
+              "release_promotion: false",
+          )) + "\n"
+          if len(text.encode("utf-8")) > 4096:
+              raise SystemExit("verifier report exceeds its bound")
+          report = Path("audit/windows-export-rehearsal.txt")
+          report.parent.mkdir(parents=True, exist_ok=True)
+          report.write_text(text, encoding="utf-8")
+          print(text, end="")
+          PY
+      - name: Retain Windows export verifier report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-export-rehearsal-verifier
+          path: audit/windows-export-rehearsal.txt
+          if-no-files-found: error
