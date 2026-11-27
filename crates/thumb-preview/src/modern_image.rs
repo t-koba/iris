@@ -119,11 +119,6 @@ fn has_ftyp_brand(data: &[u8], expected: &[[u8; 4]]) -> bool {
         .any(|brand| expected.iter().any(|expected| brand == expected))
 }
 
-// JPEG 2000 is a rare input format and its pure-Rust decoder is a large code
-// body. Keep it in cold text so it does not displace the hot preview-extraction
-// paths in the fat-LTO, single-codegen-unit release build.
-#[cold]
-#[inline(never)]
 fn decode_jpeg2000(data: &[u8]) -> Option<DynamicImage> {
     if !j2k_tlm_sot_consistent(data) {
         return None;
@@ -508,8 +503,6 @@ fn jpeg2000_codestream(data: &[u8]) -> Option<&[u8]> {
     None
 }
 
-#[cold]
-#[inline(never)]
 fn decode_avif(data: &[u8]) -> Option<DynamicImage> {
     let decoded = avif_rust::image_from_bytes(data).ok()?;
     let width = u32::try_from(decoded.width).ok()?;
@@ -517,8 +510,6 @@ fn decode_avif(data: &[u8]) -> Option<DynamicImage> {
     image::RgbaImage::from_raw(width, height, decoded.rgba).map(DynamicImage::ImageRgba8)
 }
 
-#[cold]
-#[inline(never)]
 fn decode_jpeg_xl(data: &[u8]) -> Option<DynamicImage> {
     use image::ImageDecoder;
 
@@ -531,8 +522,6 @@ fn decode_jpeg_xl(data: &[u8]) -> Option<DynamicImage> {
     DynamicImage::from_decoder(decoder).ok()
 }
 
-#[cold]
-#[inline(never)]
 fn decode_heic(data: &[u8]) -> Option<DynamicImage> {
     let decoded = heif_oxide::decode_bytes(data).ok()?;
     let rgba = image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.to_rgba8())?;
@@ -584,8 +573,6 @@ fn preview_dimensions_supported(width: u32, height: u32) -> bool {
             .is_some_and(|pixels| pixels <= JXR_MAX_PIXELS)
 }
 
-#[cold]
-#[inline(never)]
 fn decode_jpeg_xr(data: &[u8]) -> Option<DynamicImage> {
     use jpegxr::{BitDepthBits, ColorFormat, ImageDecode, PixelFormat, PixelInfo};
 
