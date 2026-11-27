@@ -333,20 +333,141 @@ where
     Ok(report)
 }
 
-/// Attribute the caller-staged PDFium library for opt-in gates; no token is printed.
+/// Attribute the actually loaded PDFium library for opt-in gates; no token is printed.
 fn print_pdfium_runtime() {
-    // Parity stages one library per worktree and passes its exact path here.
-    // Print that value unchanged, only when it names a local file.
-    let Some(path) = std::env::var("IRIS_PDFIUM_REQUIRE_LIBRARY")
-        .ok()
-        .filter(|value| !value.is_empty() && Path::new(value).is_file())
-    else {
+    // Only the opt-in gate emits a record; the path is the module actually
+    // loaded by this process, never the env var value, so a system fallback
+    // cannot be misattributed to the staged file.
+    let required = std::env::var_os("IRIS_PDFIUM_REQUIRE_LIBRARY")
+        .is_some_and(|value| !value.is_empty());
+    if !required {
+        return;
+    }
+    let Some(path) = loaded_pdfium_path() else {
         return;
     };
     println!(
         "PREVIEW_PDFIUM_RUNTIME {}",
         serde_json::json!({"path": path, "required": true})
     );
+}
+
+#[cfg(unix)]
+#[repr(C)]
+struct DlInfo {
+    fname: *const std::os::raw::c_char,
+    fbase: *const std::os::raw::c_void,
+    sname: *const std::os::raw::c_char,
+    saddr: *const std::os::raw::c_void,
+}
+
+#[cfg(unix)]
+#[cfg_attr(target_os = "linux", link(name = "dl"))]
+extern "C" {
+    fn dlsym(
+        handle: *const std::os::raw::c_void,
+        symbol: *const std::os::raw::c_char,
+    ) -> *const std::os::raw::c_void;
+    fn dladdr(addr: *const std::os::raw::c_void, info: *mut DlInfo) -> std::os::raw::c_int;
+}
+
+/// Path of the PDFium module actually loaded by this process, via the loader.
+///
+/// On Linux/macOS the address of `FPDF_InitLibrary` is resolved from the
+/// default search scope and then mapped to its file with `dladdr`; a system
+/// fallback reports its own path instead of the staged file.
+#[cfg(unix)]
+fn loaded_pdfium_path() -> Option<String> {
+    use std::ffi::{CStr, CString};
+
+    const RTLD_DEFAULT: *const std::os::raw::c_void = std::ptr::null();
+
+    let symbol = CString::new("FPDF_InitLibrary").ok()?;
+    // SAFETY: dlsym with RTLD_DEFAULT only inspects loader state; the
+    // returned address is used read-only for dladdr and never called.
+    let addr = unsafe { dlsym(RTLD_DEFAULT, symbol.as_ptr()) };
+    if addr.is_null() {
+        return None;
+    }
+    let mut info = DlInfo {
+        fname: std::ptr::null(),
+        fbase: std::ptr::null(),
+        sname: std::ptr::null(),
+        saddr: std::ptr::null(),
+    };
+    // SAFETY: addr came from dlsym; info is a valid out-pointer.
+    let ok = unsafe { dladdr(addr, &mut info) };
+    if ok == 0 || info.fname.is_null() {
+        return None;
+    }
+    // SAFETY: dladdr sets fname to a NUL-terminated string it owns.
+    let path = unsafe { CStr::from_ptr(info.fname) }
+        .to_string_lossy()
+        .into_owned();
+    if path.is_empty() {
+        return None;
+    }
+    Some(path)
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetModuleHandleW(name: *const u16) -> *mut std::ffi::c_void;
+    fn GetModuleFileNameW(
+        handle: *mut std::ffi::c_void,
+        buf: *mut u16,
+        size: u32,
+    ) -> u32;
+}
+
+/// Path of the PDFium module actually loaded by this process, via the loader.
+///
+/// `GetModuleHandleW` finds `pdfium.dll` only when it is already loaded, and
+/// `GetModuleFileNameW` reports the file that provided it; a system fallback
+/// reports its own path instead of the staged file.
+#[cfg(windows)]
+fn loaded_pdfium_path() -> Option<String> {
+    use std::os::windows::ffi::OsStringExt;
+
+    fn wide_null(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    unsafe {
+        let name = wide_null("pdfium.dll");
+        // SAFETY: GetModuleHandleW only reads loader state; null means not loaded.
+        let handle = GetModuleHandleW(name.as_ptr());
+        if handle.is_null() {
+            return None;
+        }
+        let mut capacity: u32 = 1024;
+        loop {
+            let mut buf = vec![0u16; capacity as usize];
+            // SAFETY: buf is valid for `capacity` u16s.
+            let len = GetModuleFileNameW(handle, buf.as_mut_ptr(), capacity);
+            if len == 0 {
+                return None;
+            }
+            if len < capacity - 1 {
+                buf.truncate(len as usize);
+                let path = std::ffi::OsString::from_wide(&buf).into_string().ok()?;
+                if path.is_empty() {
+                    return None;
+                }
+                return Some(path);
+            }
+            capacity = capacity.checked_mul(2)?;
+            if capacity > 32768 {
+                return None;
+            }
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn loaded_pdfium_path() -> Option<String> {
+    None
 }
 
 fn pdf_runtime() -> serde_json::Value {

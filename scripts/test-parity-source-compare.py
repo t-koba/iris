@@ -294,16 +294,32 @@ class ParitySourceCompareTests(unittest.TestCase):
         self.assertIn('"license": ffmpeg_next::codec::license()', source)
         self.assertEqual(m.IDENTITY_SCHEMA, 'iris.preview_identity.v2')
 
-    def test_shared_corpus_harness_uses_staged_pdfium_path(self):
-        """The corpus harness is staged onto the pinned baseline worktree."""
+    def test_shared_corpus_harness_reports_loaded_pdfium_module(self):
+        """The staged harness must attribute the loaded module, not the env value."""
         source = (ROOT / m.EXAMPLES / m.CORPUS_HARNESS).read_text(encoding='utf-8')
+        # The pinned baseline has no required-library gate and may bind a system
+        # PDFium while the staged file exists; printing the env value would hide
+        # that fallback, so the helper must query the loader instead.
         self.assertNotIn('loaded_pdfium_library', source)
+        self.assertNotIn('is_file()', source)
+        self.assertNotIn('canonicalize', source)
         self.assertIn('IRIS_PDFIUM_REQUIRE_LIBRARY', source)
         start = source.index('fn print_pdfium_runtime()')
         helper = source[start:source.index('\n}\n', start) + 2]
         self.assertIn('IRIS_PDFIUM_REQUIRE_LIBRARY', helper)
-        self.assertIn('is_file()', helper)
-        self.assertNotIn('canonicalize', helper)
+        self.assertIn('loaded_pdfium_path', helper)
+        self.assertIn('var_os("IRIS_PDFIUM_REQUIRE_LIBRARY")', helper)
+        self.assertNotIn('std::env::var("IRIS_PDFIUM_REQUIRE_LIBRARY")', helper)
+        # OS-level lookup for the actually loaded module; the same source must
+        # compile on Linux, macOS and Windows with no new Cargo dependencies.
+        for needle in ('dlsym', 'dladdr', 'FPDF_InitLibrary', 'RTLD_DEFAULT',
+                       'GetModuleHandleW', 'GetModuleFileNameW', 'pdfium.dll'):
+            self.assertIn(needle, source, f'harness misses loader proof {needle!r}')
+        self.assertIn('link(name = "dl")', source)
+        # The single optional record keeps its shape; required stays true only
+        # for the opt-in gate and nothing prints without a loaded module.
+        self.assertIn('"required": true', helper)
+        self.assertIn('PREVIEW_PDFIUM_RUNTIME', helper)
 
     def test_pairing_plan_marks_legacy_schema_unpaired(self):
         baseline = dict(corpus=legacy_section(), j2k=legacy_section())
