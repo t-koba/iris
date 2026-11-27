@@ -61,6 +61,7 @@
   },
   "evidence_files": [
     "Iris.AppDir/usr/share/doc/iris/ffmpeg/README.md",
+    "Iris.AppDir/usr/share/doc/iris/ffmpeg/openjpeg2-pure-rs-license.txt",
     "Iris.AppDir/usr/share/doc/iris/ffmpeg/COPYING.LGPLv2.1",
     "Iris.AppDir/usr/share/doc/iris/ffmpeg/manifest.json",
     "Iris.AppDir/usr/share/doc/iris/ffmpeg/source.tar.xz",

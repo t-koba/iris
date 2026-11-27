@@ -5,3 +5,4 @@ vendor/jpegxr/** -whitespace
 
 # Retain third-party notice texts with the exact bytes pinned by the bundler.
 packaging/windows/third-party-notices/*.txt text eol=lf
+packaging/third-party-notices/*.txt text eol=lf

@@ -60,6 +60,9 @@ THIRD_PARTY_NOTICES = (
      "1d1bbba6a5789a10aeed40e452697468c3da4e4500e74e1e3650cf4782e08f56"),
     ("vcpkg-license.txt", "packaging/windows/third-party-notices/vcpkg-license.txt",
      "1ee376fc340e0aa6ad6a3581c94126e741468705096ac92263048a21daa86460"),
+    ("openjpeg2-pure-rs-license.txt",
+     "packaging/third-party-notices/openjpeg2-pure-rs-license.txt",
+     "a6af136f3e15038a666b61f376612a07d9a4e48cb7c01adbf3e33b3f14ab49b6"),
 )
 # Every redistributed overlay root file must name the upstream notice that
 # travels with it. Adding a helper without a notice assignment is refused.

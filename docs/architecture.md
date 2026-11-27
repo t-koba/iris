@@ -138,6 +138,11 @@ FFmpeg（動画と一部の静止画のフォールバック）の範囲は `pac
 
 `j2k_tlm_sot_consistent` は JP2 の `jp2c` ペイロードまたは生の J2K バイト列から TLM と SOT だけを読み、Psot でタイルデータ部分を飛ばして、同じタイルの TLM エントリ数以上の TPsot をデコーダ呼び出し前に拒否します。Psot が 0 の最終 tile-part でも SOD までヘッダーを読み、終端 EOC を確認します。TLM のない入力は従来どおりデコーダに渡しますが、ST=3 や不正なエントリ列など TLM が不正な入力は比較を諦めずに拒否します。マーカー長が不正な場合や EOC なしで入力が終わる場合も拒否します。`scripts/test-jpeg2k-route.py` はリポジトリ内にコピーやパッチが残っていないことと、依存がチェックサム付きの crates.io 版の純 Rust クレートであることを確認します。これは限定的な入力ガードの記録であり、安全性の保証やリリース判断ではありません。
 
+BSD-2-Clause 通知は上流 `LICENSE` の bytes をそのまま
+`packaging/third-party-notices/openjpeg2-pure-rs-license.txt` に保管し、
+Linux の AppDir、macOS の app bundle、Windows の ZIP の既存通知 set に同じ
+bytes で同梱します。
+
 #### PDFium（chromium/8138）
 
 PDF のサムネイル生成では、macOS は CoreGraphics、Linux などは動的に読み込んだ PDFium を使います。Iris は PDFium をブラウザーのサンドボックスなしでプロセス内から FFI で呼び出すため、缺陷が存在する場合に影響を受けるのは Iris プロセス自体です。

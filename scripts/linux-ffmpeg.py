@@ -13,6 +13,32 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = json.loads((ROOT / "packaging/linux/ffmpeg.json").read_text())
+# Upstream BSD-2-Clause notice for the pure-Rust JPEG 2000 decoder built into
+# Iris. The staged file is copied verbatim and pinned by the upstream LICENSE
+# digest, never regenerated from the crate metadata.
+RUST_NOTICES = (
+    ("openjpeg2-pure-rs-license.txt",
+     "packaging/third-party-notices/openjpeg2-pure-rs-license.txt",
+     "a6af136f3e15038a666b61f376612a07d9a4e48cb7c01adbf3e33b3f14ab49b6"),
+)
+
+
+def stage_rust_notices(docs):
+    """Copy the pinned notices into the existing runtime documentation set."""
+    for name, relative, expected in RUST_NOTICES:
+        data = (ROOT / relative).read_bytes()
+        require(hashlib.sha256(data).hexdigest() == expected,
+                "Rust notice differs from upstream: " + name)
+        (Path(docs) / name).write_bytes(data)
+
+
+def check_rust_notices(docs):
+    """Require the staged bytes to be the exact upstream notice bytes."""
+    for name, _, expected in RUST_NOTICES:
+        path = Path(docs) / name
+        require(path.is_file() and not path.is_symlink(),
+                "missing staged Rust notice: " + name)
+        require(digest(path) == expected, "staged Rust notice changed: " + name)
 
 
 def run(*args):
@@ -161,6 +187,7 @@ def validate(libdir, docs):
     require(digest(docs / "source.tar.xz") == POLICY["sha256"], "source hash mismatch")
     signature((docs / "signature.status").read_text())
     config((docs / "config.h").read_text())
+    check_rust_notices(docs)
     require(manifest["enabled_codecs"] == codecs((docs / "config_components.h").read_text()),
             "enabled codec inventory changed")
     require(manifest["documents"] == {p.name: digest(p) for p in docs.iterdir()
@@ -176,6 +203,7 @@ def record(prefix):
         if not path.is_symlink():
             run("patchelf", "--set-rpath", "$ORIGIN", str(path))
     shutil.copy2(ROOT / "packaging/linux/ffmpeg-README.md", docs / "README.md")
+    stage_rust_notices(docs)
     data = dict(policy=POLICY, signature_verified=True,
                 libraries=inventory(libdir), runtime=runtime(libdir),
                 enabled_codecs=codecs((docs / "config_components.h").read_text()),

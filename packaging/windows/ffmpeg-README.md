@@ -52,6 +52,8 @@ the installer source file and the reviewed native evidence.
 - `ffmpeg-legal-notices.tar.gz`: upstream `COPYING.LGPLv2.1`, `COPYING.GPLv2`,
   `COPYRIGHT`/`CREDITS`, this notice and a `REPLACEMENT.md` excerpt of the
   DLL replacement instructions below.
+  It also retains `openjpeg2-pure-rs-license.txt`, the verbatim BSD-2-Clause
+  notice for the pure-Rust JPEG 2000 decoder compiled into Iris.
 - `ffmpeg-build-materials.tar.gz`: the derived vcpkg portfile and its evidence,
   retained baseline-port patches, manifest, registry configuration, triplet,
   source-acquisition record, detached signature, signing key and GPG status.

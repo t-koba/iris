@@ -505,6 +505,7 @@ def build(prefix, sdk):
         (docs / Path(filename).name).write_text(clean((source / filename).read_text()))
     shutil.copy2(ROOT / 'packaging/macos/ffmpeg-README.md', docs / 'README.md')
     shutil.copy2(ROOT / 'scripts/macos-ffmpeg.py', docs / 'macos-ffmpeg.py')
+    common.stage_rust_notices(docs)
     paths = libraries(prefix)
     for path in paths.values():
         closure(path, paths.values(), sdk)
@@ -535,6 +536,7 @@ def stage(prefix, app, sdk):
     require(manifest['enabled_codecs'] == codecs, 'candidate codec manifest mismatch')
     require(manifest['documents'] == {p.name: digest(p) for p in docs.iterdir() if p.name != 'manifest.json'},
             'candidate documents changed')
+    common.check_rust_notices(docs)
     require(manifest['libraries'] == {p.name: digest(p) for p in paths.values()}, 'candidate bytes changed')
     frameworks = app / 'Contents/Frameworks'
     require(not list(frameworks.iterdir()), 'stale app frameworks')
@@ -600,6 +602,7 @@ def check(app, sdk):
     require(manifest['enabled_codecs'] == codecs, 'staged candidate codec manifest mismatch')
     require(manifest['documents'] == {p.name: digest(p) for p in docs.iterdir() if p.name != 'manifest.json'},
             'staged source/notice evidence changed')
+    common.check_rust_notices(docs)
     common.signature((docs / 'signature.status').read_text())
     evidence = lzma_evidence(docs)
     require(all(manifest['liblzma'].get(k) == v for k, v in evidence.items()), 'liblzma evidence mismatch')

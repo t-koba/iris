@@ -6,15 +6,20 @@ Iris decodes JPEG 2000 with the pure-Rust `openjpeg2-pure-rs` crate (`openjp2`);
 vendored, patched or statically linked. This checks that every Cargo.lock
 pinning either crate (including the detached Windows prototype workspace) pins
 the unmodified crates.io crates by checksum, that no in-repo copy or path patch
-remains, and that the Rust TLM/SOT guard and its tests remain wired into CI. This is configuration evidence, not execution evidence: it does not
-establish that an advisory proof of concept was reproduced or that a particular
-input is safe.
+remains, and that the Rust TLM/SOT guard and its tests remain wired into CI. It
+also checks that the verbatim upstream BSD-2-Clause notice reaches the Linux,
+macOS and Windows release notice sets with unchanged bytes. This is
+configuration evidence, not execution evidence: it does not establish that an
+advisory proof of concept was reproduced or that a particular input is safe.
 """
 
 from pathlib import Path
 import hashlib
+import importlib.util
+import json
 import os
 import re
+import tempfile
 import unittest
 
 root = Path(__file__).resolve().parents[1]
@@ -148,6 +153,77 @@ class Jpeg2kRegistryRoute(unittest.TestCase):
         self.assertNotIn("test-openjpeg-backport.py", ci)
         self.assertNotIn("vendor/openjpeg-sys", read(".gitattributes"))
         self.assertNotIn("vendor/openjpeg-sys", read("docs/architecture.md"))
+
+
+class ReleaseNoticeSet(unittest.TestCase):
+    """The upstream BSD-2-Clause bytes reach every shipped notice set."""
+
+    name = "openjpeg2-pure-rs-license.txt"
+    sha256 = "a6af136f3e15038a666b61f376612a07d9a4e48cb7c01adbf3e33b3f14ab49b6"
+    vendored = "packaging/third-party-notices/openjpeg2-pure-rs-license.txt"
+
+    def module(self, relative):
+        spec = importlib.util.spec_from_file_location(relative, root / relative)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_vendored_notice_is_the_pinned_upstream_license(self):
+        data = (root / self.vendored).read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), self.sha256)
+        for line in (b"2-clauses \n", b"other third \n", b"(CNES), France \n"):
+            self.assertIn(line, data, "upstream trailing space changed")
+        self.assertTrue(data.endswith(b" */\n"), "upstream final newline changed")
+
+    def test_posix_runtime_notice_sets_stage_and_verify_exact_bytes(self):
+        ffmpeg = self.module("scripts/linux-ffmpeg.py")
+        source = read("scripts/macos-ffmpeg.py")
+        self.assertIn("common.stage_rust_notices(docs)", source,
+                      "macOS bundle does not stage the notice")
+        self.assertEqual(source.count("common.check_rust_notices(docs)"), 2,
+                         "macOS staging and final audit must both check the notice")
+        self.assertEqual(ffmpeg.RUST_NOTICES,
+                         ((self.name, self.vendored, self.sha256),))
+        expected = (root / self.vendored).read_bytes()
+        with tempfile.TemporaryDirectory() as temporary:
+            docs = Path(temporary)
+            ffmpeg.stage_rust_notices(docs)
+            staged = docs / self.name
+            self.assertEqual(staged.read_bytes(), expected)
+            ffmpeg.check_rust_notices(docs)
+            staged.write_bytes(expected + b"tampered")
+            with self.assertRaisesRegex(ValueError, "staged Rust notice changed"):
+                ffmpeg.check_rust_notices(docs)
+            staged.unlink()
+            with self.assertRaisesRegex(ValueError, "missing staged Rust notice"):
+                ffmpeg.check_rust_notices(docs)
+
+    def test_windows_legal_notice_archive_carries_exact_bytes(self):
+        bundle = self.module("scripts/windows-release-source-bundle.py")
+        self.assertIn((self.name, self.vendored, self.sha256),
+                      bundle.THIRD_PARTY_NOTICES)
+        members, inputs = {}, {}
+        bundle.add_third_party_notices(members, inputs)
+        expected = (root / self.vendored).read_bytes()
+        self.assertEqual(members[self.name], expected)
+        binding = inputs["third-party-notices/" + self.name]
+        self.assertEqual((binding["sha256"], binding["bytes"]),
+                         (self.sha256, len(expected)))
+        self.assertIn(self.name, read("packaging/windows/ffmpeg-README.md"))
+
+    def test_posix_native_evidence_maps_the_staged_notice(self):
+        staged = {
+            "linux": "Iris.AppDir/usr/share/doc/iris/ffmpeg/" + self.name,
+            "macos": "Iris.app/Contents/Resources/ffmpeg/" + self.name,
+        }
+        for platform, path in staged.items():
+            with self.subTest(platform=platform):
+                mapping = json.loads(read(f"packaging/native-evidence/{platform}-mapping.json"))
+                self.assertIn(path, mapping["evidence_files"])
+                roles = [rule["role"] for rule in mapping["staged_rules"]
+                         if rule["path"].endswith("/ffmpeg/*")]
+                self.assertEqual(roles, ["evidence"])
+                self.assertIn(self.name, read(f"packaging/{platform}/ffmpeg-README.md"))
 
 
 if __name__ == "__main__":

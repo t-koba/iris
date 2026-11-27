@@ -4,6 +4,9 @@ Product packaging (`scripts/package-macos-app.sh`) builds the pinned shared
 FFmpeg runtime with static/PIC liblzma in fresh native and Cargo scratch. It
 never selects Homebrew FFmpeg or falls back to it. Default Iris features remain
 enabled. ZIP and PKG contain this app, its runtime and the evidence below.
+`Contents/Resources/ffmpeg/openjpeg2-pure-rs-license.txt` keeps the verbatim
+BSD-2-Clause notice for the pure-Rust JPEG 2000 decoder compiled into Iris,
+hash-bound by `manifest.json`.
 
 `Contents/Resources/ffmpeg/manifest.json` identifies the exact FFmpeg source pin,
 verified signing identity, configure policy, generated decoder inventory, build
