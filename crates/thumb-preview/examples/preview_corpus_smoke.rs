@@ -369,30 +369,13 @@ fn loaded_pdfium_path() -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-extern "C" {
-    fn _dyld_get_image_count() -> u32;
-    fn _dyld_get_image_name(index: u32) -> *const std::os::raw::c_char;
-}
-
-#[cfg(target_os = "macos")]
-/// Path of the PDFium module actually loaded by this process.
+/// macOS thumbnails use CoreGraphics and never load PDFium.
 ///
-/// dyld's image list is the source of truth; both queries live in libSystem.
+/// There is no PDFium module to attribute on this platform, so the optional
+/// provenance record stays absent. Linux and Windows report their actually
+/// loaded module; no dyld image-list API is required at the deployment target.
 fn loaded_pdfium_path() -> Option<String> {
-    use std::ffi::CStr;
-
-    // SAFETY: dyld only reports images loaded for the lifetime of this process
-    // and each name is a NUL-terminated C string owned by dyld.
-    let count = unsafe { _dyld_get_image_count() };
-    (0..count).find_map(|index| {
-        let image = unsafe { _dyld_get_image_name(index) };
-        if image.is_null() {
-            return None;
-        }
-        let path = unsafe { CStr::from_ptr(image) }.to_str().ok()?;
-        let name = Path::new(path).file_name()?.to_str()?;
-        (name == "libpdfium.so" || name.starts_with("libpdfium.so.")).then(|| path.to_owned())
-    })
+    None
 }
 
 #[cfg(windows)]

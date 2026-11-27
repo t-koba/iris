@@ -328,21 +328,26 @@ class ParitySourceCompareTests(unittest.TestCase):
                           'link(name = "dl")'):
             self.assertNotIn(forbidden, source,
                              f'harness still relies on {forbidden!r}')
-        for needle in ('"/proc/self/maps"', '_dyld_get_image_count',
-                       '_dyld_get_image_name', 'GetModuleHandleW',
+        for needle in ('"/proc/self/maps"', 'GetModuleHandleW',
                        'GetModuleFileNameW', 'pdfium.dll'):
             self.assertIn(needle, source, f'harness misses loader proof {needle!r}')
+        for dyld in ('_dyld_get_image_count', '_dyld_get_image_name',
+                     'extern "C"'):
+            self.assertNotIn(dyld, source,
+                             f'harness uses dyld image list {dyld!r}')
         helpers = rust_function_bodies(
             source, 'fn loaded_pdfium_path() -> Option<String> {')
         self.assertEqual(len(helpers), 4)  # Linux, macOS, Windows and fallback
         for body in helpers:
             self.assertNotIn('env', body,
                              'the path helper must not consult the environment')
-        for body in helpers[:2]:
-            self.assertIn('file_name()', body)
-            self.assertIn('starts_with("libpdfium.so.")', body)
+        self.assertIn('file_name()', helpers[0])
+        self.assertIn('starts_with("libpdfium.so.")', helpers[0])
         self.assertIn('"/proc/self/maps"', helpers[0])
-        self.assertIn('_dyld_get_image_name', helpers[1])
+        # macOS uses CoreGraphics: no PDFium is loaded, so no record is emitted.
+        self.assertIn('None', helpers[1])
+        self.assertNotIn('file_name', helpers[1])
+        self.assertNotIn('dyld', helpers[1])
         self.assertIn('GetModuleFileNameW', helpers[2])
         # The single optional record keeps its shape; required stays true only
         # for the opt-in gate and nothing prints without a loaded module.
