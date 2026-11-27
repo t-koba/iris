@@ -633,6 +633,146 @@ Load command 2
                         m.runtime({'avcodec': path})
                     values[key] = good
 
+    def test_runtime_identity_queries_a_fresh_process_and_validates_records(self):
+        expected = {f'lib{name}.1.2.3.dylib': f'{i:02x}' * 32
+                    for i, name in enumerate(m.POLICY['libraries'], 1)}
+        records = [dict(library=name, sha256=sha, configuration=list(m.POLICY['configure_flags']),
+                        license='LGPL version 2.1 or later', version=[1, 2, 3])
+                   for name, sha in expected.items()]
+        prefix = Path('/tmp/pinned runtime prefix')
+        answer = m.subprocess.CompletedProcess([], 0, json.dumps(records), '')
+
+        def query(output=answer):
+            if isinstance(output, BaseException):
+                return patch.object(m.subprocess, 'run', side_effect=output)
+            return patch.object(m.subprocess, 'run', return_value=output)
+
+        with query() as run:
+            got = m.runtime_identity(prefix)
+        self.assertEqual(got, records)
+        self.assertEqual({r['library']: r['sha256'] for r in got}, expected)
+        self.assertEqual(run.call_args.args[0], [sys.executable,
+                         str(ROOT / 'scripts/macos-ffmpeg.py'), 'runtime-identity', str(prefix)])
+        self.assertTrue(run.call_args.kwargs['capture_output'])
+
+        bad_outputs = [json.dumps(value) for value in (
+            {}, records[:-1], records + records[:1],
+            [{k: v for k, v in record.items() if k != 'version'} for record in records],
+            [dict(record, extra=True) for record in records],
+            [dict(record, library=record['library'], sha256='zz' * 32) for record in records],
+            [dict(record, library='libunexpected.1.dylib') for record in records],
+            [dict(record, configuration=['--enable-gpl']) for record in records],
+            [dict(record, license='GPL') for record in records],
+            [dict(record, version=[1]) for record in records],
+            records[:1] + [dict(records[1], library=records[0]['library'])] + records[2:],
+        )] + ['', json.dumps(records) + ' trailing']
+        for output in bad_outputs:
+            with self.subTest(output=output[:60]), query(m.subprocess.CompletedProcess([], 0, output, '')):
+                with self.assertRaises(ValueError):
+                    m.runtime_identity(prefix)
+        failure = m.subprocess.CalledProcessError(1, ['python3'], output='', stderr='dylib load failed')
+        with query(failure), self.assertRaisesRegex(ValueError, 'python3 failed: dylib load failed'):
+            m.runtime_identity(prefix)
+
+    def test_runtime_identity_cli_rejects_unexpected_arguments(self):
+        script = ROOT / 'scripts/macos-ffmpeg.py'
+        for args in (['runtime-identity'], ['runtime-identity', 'a', 'b'], ['prepare'], ['unknown']):
+            with self.subTest(args=args):
+                result = m.subprocess.run([sys.executable, str(script), *args],
+                                          capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, '')
+                self.assertIn('expected prepare PREFIX', result.stderr)
+
+    def test_build_manifest_strictly_binds_fresh_runtime_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp).resolve()
+            sdk = work / 'sdk'
+            expected = {f'lib{name}.1.2.3.dylib': m.POLICY['sha256'] for name in m.POLICY['libraries']}
+            records = [dict(library=name, sha256=sha, configuration=list(m.POLICY['configure_flags']),
+                            license='LGPL version 2.1 or later',
+                            version=m.POLICY['avcodec_version'] if name.startswith('libavcodec.') else [1, 2, 3])
+                       for name, sha in expected.items()]
+
+            def fake_lzma(work, sdk, env, docs):
+                lzma = work / 'liblzma'
+                (lzma / 'lib').mkdir(parents=True, exist_ok=True)
+                (lzma / 'lib/liblzma.a').write_bytes(b'static')
+                (docs / 'liblzma-build.json').write_text('{}')
+                return lzma
+
+            def fake_fetch(url, output):
+                output.write_bytes(b'synthetic')
+
+            def fake_run(*args, **kwargs):
+                if '--version' in args:
+                    return 'clang version 17'
+                if args[:2] == ('xcrun', '-f'):
+                    return '/clang'
+                if args[:2] == ('pkg-config', '--modversion'):
+                    return m.LZMA['version']
+                if args[:2] == ('pkg-config', '--variable=libdir'):
+                    return str(work / 'liblzma/lib')
+                if '--list-keys' in args:
+                    return f"fpr:::::::::{m.POLICY['fingerprint']}:"
+                if '--verify' in args:
+                    fp = m.POLICY['fingerprint']
+                    return f'[GNUPG:] VALIDSIG {fp} 2026-01-01 1 0 4 0 1 10 00 {fp}'
+                if args[0] == './configure':
+                    out = Path(args[1].split('=', 1)[1])
+                    libdir = out / 'lib'
+                    libdir.mkdir(parents=True)
+                    for name in expected:
+                        (libdir / name).touch()
+                        (libdir / f'lib{name.split(".")[0][3:]}.dylib').symlink_to(name)
+                    source = kwargs['cwd']
+                    (source / 'ffbuild').mkdir(parents=True, exist_ok=True)
+                    config = dict(GPL=0, VERSION3=0, NONFREE=0, SHARED=1, STATIC=0,
+                                  PIC=1, ZLIB=1, BZLIB=1, LZMA=1, ICONV=1)
+                    (source / 'config.h').write_text(''.join(
+                        f'#define CONFIG_{key} {value}\n' for key, value in config.items()))
+                    (source / 'config_components.h').write_text(''.join(
+                        f'#define CONFIG_{decoder} 1\n' for decoder in m.POLICY['required_decoders']))
+                    (source / 'ffbuild/config.mak').write_text('# synthetic\n')
+                    (source / 'COPYING.LGPLv2.1').write_text('synthetic LGPL\n')
+                return ''
+
+            prefix = work / 'candidate'
+            answer = m.subprocess.CompletedProcess([], 0, json.dumps(records), '')
+
+            def build(target, payload):
+                with patch.object(m, 'build_lzma', side_effect=fake_lzma), \
+                        patch.object(m, 'download_pinned', side_effect=fake_fetch), \
+                        patch.object(m, 'run', side_effect=fake_run), \
+                        patch.object(m, 'digest', return_value=m.POLICY['sha256']), \
+                        patch.object(m, 'closure'), \
+                        patch.object(m.subprocess, 'run',
+                                     return_value=m.subprocess.CompletedProcess([], 0, payload, '')) as query:
+                    m.build(target, sdk)
+                return query
+
+            query = build(prefix, json.dumps(records))
+            docs = prefix / 'share/iris-ffmpeg'
+            manifest = json.loads((docs / 'manifest.json').read_text())
+            self.assertEqual(manifest['runtime'], records)
+            self.assertEqual({r['library']: r['sha256'] for r in manifest['runtime']}, expected)
+            self.assertEqual(manifest['libraries'], expected)
+            self.assertEqual(manifest['documents'], {p.name: m.POLICY['sha256']
+                             for p in docs.iterdir() if p.name != 'manifest.json'})
+            self.assertNotIn('manifest.json', manifest['documents'])
+            query.assert_called_once()
+            self.assertEqual(query.call_args.args[0][-2:], ['runtime-identity', str(prefix)])
+
+            mismatched = [dict(records[0], sha256='00' * 32)] + records[1:]
+            for label, payload in (('mismatch', json.dumps(mismatched)),
+                                   ('malformed', json.dumps(records[:-1]))):
+                with self.subTest(label=label):
+                    m.shutil.rmtree(work / 'gnupg')
+                    target = work / f'candidate-{label}'
+                    with self.assertRaisesRegex(ValueError, 'malformed runtime identity|runtime identity does not match'):
+                        build(target, payload)
+                    self.assertFalse((target / 'share/iris-ffmpeg/manifest.json').exists())
+
     def test_prepare_builds_and_validates_a_fresh_pinned_prefix(self):
         with tempfile.TemporaryDirectory() as tmp:
             prefix = (Path(tmp) / 'runtime').resolve()

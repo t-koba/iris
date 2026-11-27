@@ -314,6 +314,41 @@ def runtime(paths):
     return records
 
 
+RUNTIME_RECORD_FIELDS = {'library', 'sha256', 'configuration', 'license', 'version'}
+
+
+def runtime_identity(prefix):
+    """Query the pinned prefix in a fresh process; never load its dylibs here.
+
+    Identical install names from fresh and staged dylibs cannot coexist in one
+    Python process, so only the subprocess loads this prefix's runtime.
+    """
+    command = [sys.executable, str(Path(__file__).resolve()), 'runtime-identity', str(prefix)]
+    try:
+        output = subprocess.run(command, check=True, capture_output=True, text=True).stdout
+    except subprocess.CalledProcessError as error:
+        raise CommandFailure(command[0], error.returncode, error.stderr or '') from error
+    records = json.loads(output)
+    require(isinstance(records, list) and len(records) == len(POLICY['libraries']),
+            'malformed runtime identity')
+    names = []
+    for record in records:
+        require(isinstance(record, dict) and set(record) == RUNTIME_RECORD_FIELDS
+                and isinstance(record['library'], str), 'malformed runtime identity')
+        name = next((n for n in POLICY['libraries']
+                     if re.fullmatch(rf'lib{n}\.\d+(?:\.\d+)*\.dylib', record['library'])), None)
+        require(name is not None and name not in names, 'malformed runtime identity')
+        require(isinstance(record['sha256'], str) and re.fullmatch(r'[0-9a-f]{64}', record['sha256'])
+                and record['configuration'] == POLICY['configure_flags']
+                and record['license'] == 'LGPL version 2.1 or later'
+                and isinstance(record['version'], list) and len(record['version']) == 3
+                and all(isinstance(v, int) and not isinstance(v, bool) and v >= 0
+                        for v in record['version']), 'malformed runtime identity')
+        names.append(name)
+    require(sorted(names) == sorted(POLICY['libraries']), 'malformed runtime identity')
+    return records
+
+
 def static_lzma_libraries(paths, manifest):
     """Bind reviewed static liblzma build provenance to final dylib bytes.
 
@@ -480,9 +515,11 @@ def build(prefix, sdk):
                     tools=dict(clang=run(env['CC'], '--version').splitlines()[0],
                                sdk=run('xcrun', '--show-sdk-version'), os=run('sw_vers', '-productVersion'),
                                architecture=run('uname', '-m'), rustc=run('rustc', '--version')))
+    records = runtime_identity(prefix)
+    require({r['library']: r['sha256'] for r in records} == manifest['libraries'],
+            'runtime identity does not match candidate bytes')
+    manifest['runtime'] = records
     (docs / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
-    # Runtime queries happen in a separate process after staging, never mixing two
-    # dylibs with identical install names in this Python process.
 
 
 def stage(prefix, app, sdk):
@@ -893,8 +930,10 @@ if __name__ == '__main__':
                   Path(run('xcrun', '--sdk', 'macosx', '--show-sdk-path')).resolve())
         elif sys.argv[1] == 'prepare' and len(sys.argv) == 3:
             prepare(Path(sys.argv[2]))
+        elif sys.argv[1] == 'runtime-identity' and len(sys.argv) == 3:
+            print(json.dumps(runtime(libraries(Path(sys.argv[2]).resolve()))))
         else:
             raise ValueError('expected prepare PREFIX, validate OUTPUT, stage PREFIX APP, '
-                             'product APP or check APP')
+                             'product APP, check APP or runtime-identity PREFIX')
     except Exception as error:
         sys.exit(clean(str(error)))
