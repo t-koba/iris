@@ -161,10 +161,20 @@ def validate_release_wiring(release_yml, package_ps1, release_audit, release_pol
             "package-windows.ps1 must consume the bounded exact-SHA product inventory")
     require("--no-default-features" not in package_ps1 and '"--features", "minimal"' not in package_ps1,
             "package-windows.ps1 must not rebuild a reduced feature variant")
+    helper_marker = "    def product_build(self, platform, **extra):\n"
+    require(helper_marker in release_audit, "release audit product build helper missing")
+    build_helper = release_audit.split(helper_marker, 1)[1].split("\n    def ", 1)[0]
+    require('variant="product"' in build_helper
+            and 'features="Cargo defaults"' in build_helper
+            and 'build_profile=spec["build_profile"]' in build_helper
+            and 'opt_level=spec["release_opt_level"]' in build_helper,
+            "release audit must record the product build variant from the shared profile")
     audit_marker = "    def windows(self, executable):\n"
     require(audit_marker in release_audit, "release audit Windows section missing")
-    windows_audit = release_audit.split(audit_marker, 1)[1].split("\n    def ", 1)[0]
-    require('variant="product"' in windows_audit and 'features="Cargo defaults"' in windows_audit,
+    # Stop at the first module-level definition; the old method-only split ran
+    # into main() and let its "windows" argparse choice satisfy the guard.
+    windows_audit = release_audit.split(audit_marker, 1)[1].split("\ndef ", 1)[0]
+    require(re.search(r'self\.product_build\(\s*"windows"\s*,', windows_audit) is not None,
             "release audit must record the Windows product build variant")
     require("--no-default-features" not in windows_audit
             and 'variant="minimal"' not in windows_audit,

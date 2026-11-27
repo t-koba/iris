@@ -12,7 +12,11 @@ import sys
 import tempfile
 import threading
 
+from product_build_profile import load as load_product_profiles
 from release_evidence import ffmpeg_component, load_json, require, validate_closure
+
+ROOT = Path(__file__).resolve().parent
+PRODUCT_PROFILE = ROOT / "product-build-profile.json"
 
 
 # Keep in sync with fetch-pdfium-runtime.sh (checked by the offline contracts).
@@ -111,6 +115,13 @@ class Audit:
             self.used += size
             return True
         return False
+
+    def product_build(self, platform, **extra):
+        """Record the shipped build from the one shared product profile."""
+        spec = load_product_profiles(PRODUCT_PROFILE)[platform]
+        self.add("build", variant="product", features="Cargo defaults",
+                 build_profile=spec["build_profile"],
+                 opt_level=spec["release_opt_level"], **extra)
 
     @staticmethod
     def sha256_file(path):
@@ -730,8 +741,9 @@ class Audit:
             if path != executable:
                 self.file(path)
                 self.ffmpeg(path)
-        self.add("build", variant="product", features="Cargo defaults",
-                 native_preview="FFmpeg and PDFium come from the verified exact-SHA product stage; video/PDF preview support is asserted from that stage's evidence.")
+        self.product_build(
+            "windows",
+            native_preview="FFmpeg and PDFium come from the verified exact-SHA product stage; video/PDF preview support is asserted from that stage's evidence.")
         tool = shutil.which("llvm-readobj")
         if not tool:
             candidate = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "LLVM/bin/llvm-readobj.exe"
@@ -825,7 +837,7 @@ def main():
             audit.file(path)
     if args.platform == "linux":
         app = directory / "Iris.AppDir"
-        audit.add("build", variant="product", features="Cargo defaults", opt_level="z")
+        audit.product_build("linux")
         docs = app / "usr/share/doc/iris/pdfium"
         audit.add("provenance-check", subject="PDFium",
                   **audit.pdfium_attestation(docs, app / "usr/lib/iris/libpdfium.so"))
@@ -838,7 +850,7 @@ def main():
                     audit.file(path, text=True)
     elif args.platform == "macos":
         contents = directory / "Iris.app/Contents"
-        audit.add("build", variant="product", features="Cargo defaults")
+        audit.product_build("macos")
         audit.macos([contents / "MacOS/Iris", *sorted((contents / "Frameworks").glob("*.dylib"))])
     else:
         audit.windows(directory / "Iris/Iris.exe")

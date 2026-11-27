@@ -564,6 +564,44 @@ class Reports(unittest.TestCase):
                 report.windows(path)
             self.assertTrue(any(r["kind"] == "missing" for r in report.records))
 
+    def test_product_build_records_follow_the_shared_profile(self):
+        levels = {"linux": "z", "macos": "3", "windows": "3"}
+        for platform, level in levels.items():
+            with self.subTest(platform=platform):
+                report = audit(platform=platform)
+                report.product_build(platform)
+                build = report.records[-1]
+                self.assertEqual(build["kind"], "build")
+                self.assertEqual(build["variant"], "product")
+                self.assertEqual(build["features"], "Cargo defaults")
+                self.assertEqual(build["build_profile"], "release")
+                self.assertEqual(build["opt_level"], level)
+
+        changed = json.loads(module.PRODUCT_PROFILE.read_text(encoding="utf-8"))
+        changed["platforms"]["linux"]["release_opt_level"] = "3"
+        changed["platforms"]["macos"]["release_opt_level"] = "2"
+        with tempfile.TemporaryDirectory(prefix="iris-release-profile-") as directory:
+            profile = Path(directory) / "product-build-profile.json"
+            profile.write_text(json.dumps(changed), encoding="utf-8")
+            with patch.object(module, "PRODUCT_PROFILE", profile):
+                report = audit(platform="linux")
+                report.product_build("linux")
+                self.assertEqual(report.records[-1]["opt_level"], "3")
+                report = audit(platform="macos")
+                report.product_build("macos")
+                self.assertEqual(report.records[-1]["opt_level"], "2")
+
+    def test_product_build_dispatch_sites_bind_each_platform(self):
+        source = (ROOT / "scripts/release-audit.py").read_text(encoding="utf-8")
+        main = source.split("def main():", 1)[1]
+        linux = main.split('if args.platform == "linux":', 1)[1].split(
+            'elif args.platform == "macos":', 1)[0]
+        macos = main.split('elif args.platform == "macos":', 1)[1].split("else:", 1)[0]
+        windows = "audit.windows(" + main.split('    else:\n        audit.windows(', 1)[1]
+        self.assertRegex(linux, r'audit\.product_build\(\s*"linux"\s*\)')
+        self.assertRegex(macos, r'audit\.product_build\(\s*"macos"\s*\)')
+        self.assertRegex(windows, r'audit\.windows\(')
+
     def test_pdfium_pins_match_fetch_policy(self):
         fetch = (ROOT / "scripts/fetch-pdfium-runtime.sh").read_text()
         def pin(name):
