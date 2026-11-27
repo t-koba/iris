@@ -404,6 +404,62 @@ def pinned_actionlint_contract():
     )
 
 
+parity_rehearsal_call = """  parity-rehearsal:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/parity-evidence.yml
+    with:
+      source_sha: ${{ github.sha }}
+"""
+parity_gate_command = (
+    'python3 scripts/release-parity.py --repo . --expected-sha "$GITHUB_SHA" '
+    "audit/parity/linux.json audit/parity/macos.json audit/parity/windows.json"
+)
+parity_dispatch_if = "    if: github.event_name == 'workflow_dispatch'\n"
+parity_publish_tokens = re.compile(
+    r"publish|\btag\b|refs/tags|gh[- ]release|release\.yml|"
+    r"workflow[-_]dispatch|repository[-_]dispatch|dispatches|workflow run|"
+    r"(?:contents|actions): write", re.IGNORECASE,
+)
+
+
+def parity_rehearsal_contract():
+    """Dispatch-only rehearsal reuses the producer and runs the release gate."""
+    caller = ci_job_block("parity-rehearsal")
+    gate = ci_job_block("parity-rehearsal-gate")
+    if not (caller and gate) or caller.rstrip("\n") != parity_rehearsal_call.rstrip("\n"):
+        return False
+    if not (root / ".github/workflows/parity-evidence.yml").is_file():
+        return False
+    if re.findall(r"(?m)^    if: (.*)$", gate) != ["github.event_name == 'workflow_dispatch'"]:
+        return False
+    if (
+        "    needs: parity-rehearsal\n" not in gate
+        or "    permissions:\n      contents: read\n" not in gate
+        or "      - uses: actions/checkout@v7\n        with:\n          ref: ${{ github.sha }}\n"
+        "          persist-credentials: false\n" not in gate
+        or "      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6\n"
+        "        with:\n          python-version: '3.13'\n" not in gate
+        or "          pattern: parity-*\n          merge-multiple: true\n"
+        "          path: audit/parity\n" not in gate
+        or f"          {parity_gate_command} > audit/parity/verifier.txt 2>&1 || status=$?\n" not in gate
+        or gate.count("--expected-sha") != 1
+    ):
+        return False
+    verifier = ci_step_block("Retain parity verifier evidence", "parity-rehearsal-gate")
+    if not all(needle in verifier for needle in (
+        "        if: always()\n",
+        "          name: parity-verifier\n",
+        "          path: audit/parity/verifier.txt\n",
+        "          if-no-files-found: error\n",
+    )):
+        return False
+    return not parity_publish_tokens.search(
+        (caller + gate).replace(parity_dispatch_if, "")
+    )
+
+
 checks = {
     "Final macOS installer trust runs before publication and is offline-tested": (
         release.count(installer_verify) == 1 and release.count(installer_check) == 1
@@ -766,6 +822,7 @@ permissions:
           ref: ${{ github.sha }}
           persist-credentials: false
 """ in win_validation,
+    "Dispatch-only parity rehearsal runs the release gate without publishing": parity_rehearsal_contract(),
 }
 failed = [name for name, passed in checks.items() if not passed]
 if failed:

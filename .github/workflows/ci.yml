@@ -733,3 +733,46 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/macos-runtime-validation.yml
+
+  parity-rehearsal:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/parity-evidence.yml
+    with:
+      source_sha: ${{ github.sha }}
+
+  parity-rehearsal-gate:
+    if: github.event_name == 'workflow_dispatch'
+    needs: parity-rehearsal
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Download paired parity evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: parity-*
+          merge-multiple: true
+          path: audit/parity
+      - name: Gate paired parity evidence
+        shell: bash
+        run: |
+          status=0
+          python3 scripts/release-parity.py --repo . --expected-sha "$GITHUB_SHA" audit/parity/linux.json audit/parity/macos.json audit/parity/windows.json > audit/parity/verifier.txt 2>&1 || status=$?
+          cat audit/parity/verifier.txt
+          exit "$status"
+      - name: Retain parity verifier evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: parity-verifier
+          path: audit/parity/verifier.txt
+          if-no-files-found: error
