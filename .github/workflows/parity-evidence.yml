@@ -171,6 +171,7 @@ jobs:
     timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
+      IRIS_PARITY_VCPKG_ROOT: ${{ github.workspace }}/.vcpkg-validation
       VCPKG_ROOT: ${{ github.workspace }}/.vcpkg-validation
       VCPKG_INSTALLED_DIR: ${{ github.workspace }}/.vcpkg-validation/installed
       VCPKG_TARGET_TRIPLET: x64-windows-iris-dynamic
@@ -238,7 +239,11 @@ jobs:
       - name: Restore isolated vcpkg root after MSVC setup
         shell: pwsh
         run: |
-          "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
+          $ErrorActionPreference = "Stop"
+          $root = $env:IRIS_PARITY_VCPKG_ROOT
+          if ([string]::IsNullOrWhiteSpace($root)) { throw "IRIS_PARITY_VCPKG_ROOT is not set" }
+          if (!(Test-Path -LiteralPath $root -PathType Container)) { throw "pinned vcpkg checkout missing: $root" }
+          "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.97.1

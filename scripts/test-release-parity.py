@@ -916,6 +916,23 @@ class WorkflowContractTests(unittest.TestCase):
         windows = self.job_block(self.evidence, 'parity-windows')
         self.assertIn('python3 scripts/windows-ffmpeg-overlay.py derive', windows)
 
+    def test_windows_restores_pinned_vcpkg_root_after_msvc_setup(self):
+        windows = self.job_block(self.evidence, "parity-windows")
+        self.assertIn(
+            "      IRIS_PARITY_VCPKG_ROOT: ${{ github.workspace }}/.vcpkg-validation\n",
+            windows)
+        self.assertIn(
+            "      - name: Restore isolated vcpkg root after MSVC setup\n"
+            "        shell: pwsh\n"
+            "        run: |\n"
+            '          $ErrorActionPreference = "Stop"\n'
+            "          $root = $env:IRIS_PARITY_VCPKG_ROOT\n"
+            '          if ([string]::IsNullOrWhiteSpace($root)) { throw "IRIS_PARITY_VCPKG_ROOT is not set" }\n'
+            '          if (!(Test-Path -LiteralPath $root -PathType Container)) { throw "pinned vcpkg checkout missing: $root" }\n'
+            '          "VCPKG_ROOT=$root" >> $env:GITHUB_ENV\n',
+            windows)
+        self.assertNotIn('"VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV', windows)
+
     def test_each_parity_job_fetches_bytes_into_its_corpus_directory(self):
         jobs = ["parity-linux", "parity-macos", "parity-windows"]
         self.assertEqual(len(jobs), 3)
