@@ -25,7 +25,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE_SHA = "12fb51a0ba07c299ea4e9b08890a895797148e11"
+BASELINE_SHA = "8e55c491f27b3cb9ca7c7245610812d3e7dcb5cc"
 EXAMPLES = Path("crates/thumb-preview/examples")
 CORPUS_HARNESS = "preview_corpus_smoke.rs"
 HARNESS = "j2k_corpus_smoke.rs"

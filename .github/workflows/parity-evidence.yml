@@ -44,7 +44,7 @@ jobs:
         shell: bash
         run: |
           git fetch origin refs/heads/main
-          git cat-file -e 12fb51a0ba07c299ea4e9b08890a895797148e11^{commit}
+          git cat-file -e 8e55c491f27b3cb9ca7c7245610812d3e7dcb5cc^{commit}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
@@ -120,7 +120,7 @@ jobs:
         shell: bash
         run: |
           git fetch origin refs/heads/main
-          git cat-file -e 12fb51a0ba07c299ea4e9b08890a895797148e11^{commit}
+          git cat-file -e 8e55c491f27b3cb9ca7c7245610812d3e7dcb5cc^{commit}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
@@ -198,7 +198,7 @@ jobs:
         shell: bash
         run: |
           git fetch origin refs/heads/main
-          git cat-file -e 12fb51a0ba07c299ea4e9b08890a895797148e11^{commit}
+          git cat-file -e 8e55c491f27b3cb9ca7c7245610812d3e7dcb5cc^{commit}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "baseline_sha": "12fb51a0ba07c299ea4e9b08890a895797148e11",
+  "baseline_sha": "8e55c491f27b3cb9ca7c7245610812d3e7dcb5cc",
   "required_platforms": ["linux", "macos", "windows"],
   "platform_identity": {
     "linux": {"target_os": "linux", "runner_os": "Linux"},

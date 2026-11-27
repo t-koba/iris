@@ -124,9 +124,12 @@ parity conclusion; until then parity remains unknown and the all-platform releas
 hold stays in force.
 
 A defensible rebuilt reference is available in source history even though no shipped
-baseline was found. Commit `12fb51a0ba07c299ea4e9b08890a895797148e11`
+baseline was found. Workspace commit `12fb51a0ba07c299ea4e9b08890a895797148e11`
 (2026-11-23, "Reload visual preview when Quick Look opens from Properties") is the
-parent of the pure-Rust JPEG 2000 migration `7d0b311`. It pins the same
+parent of the pure-Rust JPEG 2000 migration `7d0b311`. Publication replays the same
+tree on the `mizu` branch as `8e55c491f27b3cb9ca7c7245610812d3e7dcb5cc`; that
+published SHA is the pin CI fetches, because workspace commit IDs do not exist on
+GitHub. It pins the same
 `tests/preview-corpus/fixtures.json` bytes (SHA-256
 `349e9b98e5a959bf0915493e631b58e8927dd574d31349a97031fc3cdf635dd1`) and the same
 fetch script bytes (SHA-256
@@ -168,10 +171,11 @@ preference). It verifies the pin, requires nonuniform 128x128 JPEG output, and
 emits one `PREVIEW_CORRECTNESS` and one `PREVIEW_LATENCY` record with the input
 pin, output dimensions/bytes/decoded RGB digest, timing statistics and
 source/toolchain/runner identity. The opt-in paired-source report stages
-detached worktrees for `12fb51a0ba07c299ea4e9b08890a895797148e11` and an exact
-candidate SHA, stages the candidate examples and `build.rs` into both worktrees
-as untracked files, generates the JP2 once from the candidate generator, and runs both
-revisions' pinned corpus and J2K smokes on the same inputs:
+detached worktrees for the published baseline
+`8e55c491f27b3cb9ca7c7245610812d3e7dcb5cc` and an exact candidate SHA, stages the
+candidate examples and `build.rs` into both worktrees as untracked files, generates
+the JP2 once from the candidate generator, and runs both revisions' pinned corpus
+and J2K smokes on the same inputs:
 
 ```sh
 python3 scripts/parity_source_compare.py \
