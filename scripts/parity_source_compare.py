@@ -325,9 +325,10 @@ def pdfium_library_name():
 def stage_pdfium_library(source, checkout, label):
     """Copy the verified runtime into a worktree and return its exact path.
 
-    The smoke's required-library gate accepts only a local candidate that
-    canonicalizes to this file, so its runtime line identifies the staged bytes
-    rather than a system search-path library.
+    The candidate's required-library gate accepts only a local candidate that
+    canonicalizes to this file. The shared harness reports the module actually
+    loaded by each process; the unpinned baseline may report a system copy, so
+    the runtime line is not by itself provenance for that side.
     """
     source = Path(source).resolve()
     name = pdfium_library_name()

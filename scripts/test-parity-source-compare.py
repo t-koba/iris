@@ -294,6 +294,17 @@ class ParitySourceCompareTests(unittest.TestCase):
         self.assertIn('"license": ffmpeg_next::codec::license()', source)
         self.assertEqual(m.IDENTITY_SCHEMA, 'iris.preview_identity.v2')
 
+    def test_stage_pdfium_docstring_does_not_claim_runtime_provenance(self):
+        """Staging declares the candidate gate, not provenance for both sides."""
+        source = (ROOT / 'scripts' / 'parity_source_compare.py').read_text(encoding='utf-8')
+        start = source.index('def stage_pdfium_library(')
+        doc = source[start:source.index('    source = Path(source).resolve()', start)]
+        self.assertNotIn('identifies the staged bytes', doc)
+        self.assertNotIn('rather than a system search-path library', doc)
+        self.assertIn("The candidate's required-library gate", doc)
+        self.assertIn('module actually\n    loaded by each process', doc)
+        self.assertIn('not by itself provenance', doc)
+
     def test_shared_corpus_harness_reports_loaded_pdfium_module(self):
         """The staged harness must attribute the loaded module, not the env value."""
         source = (ROOT / m.EXAMPLES / m.CORPUS_HARNESS).read_text(encoding='utf-8')
