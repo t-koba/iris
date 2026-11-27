@@ -205,20 +205,25 @@ def write_evidence(path, record):
         stream.write("\n")
 
 
-def private_pfx(source):
+def private_pfx(source, platform):
     """Write a bounded private copy; the caller deletes it on every exit."""
     raw = Path(source).read_bytes()
     if not raw or len(raw) > MAX_PFX_BYTES:
         raise SigningError("signing PFX is empty or exceeds the size bound")
     fd, path = tempfile.mkstemp(prefix="iris-windows-sign-", suffix=".pfx")
     try:
-        os.fchmod(fd, 0o600)
+        # POSIX confidentiality is the 0600 mode. Windows chmod/fchmod only
+        # toggle the read-only flag, so a writable file reports st_mode 0o666
+        # there and a 0600 assertion could never pass. On Windows the caller's
+        # restrict_acl() icacls step provides confidentiality instead.
+        if platform != "nt":
+            os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as stream:
             fd = -1
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())
-        if stat.S_IMODE(os.stat(path).st_mode) != 0o600:
+        if platform != "nt" and stat.S_IMODE(os.stat(path).st_mode) != 0o600:
             raise SigningError("temporary signing PFX is not mode 0600")
         return path
     except Exception:
@@ -254,7 +259,7 @@ def do_sign(args, env, runner, platform):
     secrets = (password, pfx)
     pfx_copy = None
     try:
-        pfx_copy = private_pfx(pfx)
+        pfx_copy = private_pfx(pfx, platform)
         restrict_acl(pfx_copy, runner, platform, secrets)
         record = build_plan(tool, pfx_copy, password, timestamp, target, provenance)
         sign_code, sign_text, sign_truncated = run_tool(record["argv"], runner, secrets)
