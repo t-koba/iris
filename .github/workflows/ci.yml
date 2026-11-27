@@ -512,22 +512,28 @@ jobs:
       - name: Windows local path normalization regression
         shell: bash
         run: |
-          output=$(cargo test -p iris-path-service --lib --locked normalize::normalize_tests::normalize_local_path_uses_the_native_separator -- --exact 2>&1)
+          status=0
+          output=$(cargo test -p iris-path-service --lib --locked normalize::normalize_tests::normalize_local_path_uses_the_native_separator -- --exact 2>&1) || status=$?
           printf '%s\n' "$output"
+          test "$status" -eq 0
           grep -Fq '1 passed; 0 failed' <<< "$output"
 
       - name: Windows drive breadcrumb regression
         shell: bash
         run: |
-          output=$(cargo test -p iris-ui-shell --lib --no-default-features --features minimal --locked runtime::directory::tests::local_breadcrumbs_start_at_the_drive -- --exact 2>&1)
+          status=0
+          output=$(cargo test -p iris-ui-shell --lib --no-default-features --features minimal --locked runtime::directory::tests::local_breadcrumbs_start_at_the_drive -- --exact 2>&1) || status=$?
           printf '%s\n' "$output"
+          test "$status" -eq 0
           grep -Fq '1 passed; 0 failed' <<< "$output"
 
       - name: Windows drive-root breadcrumb regression
         shell: bash
         run: |
-          output=$(cargo test -p iris-ui-shell --lib --no-default-features --features minimal --locked runtime::directory::tests::local_breadcrumbs_merges_root_into_the_drive_crumb -- --exact 2>&1)
+          status=0
+          output=$(cargo test -p iris-ui-shell --lib --no-default-features --features minimal --locked runtime::directory::tests::local_breadcrumbs_merges_root_into_the_drive_crumb -- --exact 2>&1) || status=$?
           printf '%s\n' "$output"
+          test "$status" -eq 0
           grep -Fq '1 passed; 0 failed' <<< "$output"
 
       - name: UI shell integration smoke

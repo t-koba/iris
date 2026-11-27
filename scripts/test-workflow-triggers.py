@@ -373,6 +373,9 @@ def windows_path_regression_contract():
             workflow=ci,
         )
         and job.count("shell: bash") == 3
+        and job.count("status=0") == 3
+        and job.count("|| status=$?") == 3
+        and job.count('test "$status" -eq 0') == 3
         and job.count('grep -Fq \'1 passed; 0 failed\' <<< "$output"') == 3
         and normalize_source.count("fn normalize_local_path_uses_the_native_separator()") == 2
         and normalize_source.count("#[cfg(windows)]") >= 1
