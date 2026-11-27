@@ -362,13 +362,18 @@ def windows_path_regression_contract():
     root_test = "runtime::directory::tests::local_breadcrumbs_merges_root_into_the_drive_crumb -- --exact"
     normalize_source = (root / "crates/path-service/src/normalize.rs").read_text(encoding="utf-8")
     directory_source = (root / "crates/ui-shell/src/runtime/directory.rs").read_text(encoding="utf-8")
+    job = ci_job_block("windows-minimal", workflow=ci)
     return (
         ci_job_has(
             "windows-minimal",
+            "runs-on: windows-latest",
             "cargo test -p iris-path-service --lib --locked " + path_test,
             "cargo test -p iris-ui-shell --lib --no-default-features --features minimal --locked " + drive_test,
             "cargo test -p iris-ui-shell --lib --no-default-features --features minimal --locked " + root_test,
+            workflow=ci,
         )
+        and job.count("shell: bash") == 3
+        and job.count('grep -Fq \'1 passed; 0 failed\' <<< "$output"') == 3
         and normalize_source.count("fn normalize_local_path_uses_the_native_separator()") == 2
         and normalize_source.count("#[cfg(windows)]") >= 1
         and normalize_source.count("#[cfg(unix)]") >= 1
