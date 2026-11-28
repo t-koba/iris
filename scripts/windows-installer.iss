@@ -30,6 +30,14 @@ OutputBaseFilename=Iris-windows-setup
 UninstallDisplayIcon={app}\Iris.exe
 WizardStyle=modern
 
+; Tag compilation only: /DSignedUninstaller=yes activates the SignTool defined
+; by the compiler's /s switch. Inno signs Setup, its temporary self-copies and
+; the generated uninstaller. Rehearsals define nothing and stay unsigned.
+#ifdef SignedUninstaller
+SignTool=IrisCompilerSign
+SignedUninstaller=yes
+#endif
+
 [CustomMessages]
 ; External prerequisite: no vc_redist binary is bundled with or downloaded by
 ; this installer. Microsoft documents that the matching 2015-2022 x64

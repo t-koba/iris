@@ -113,6 +113,35 @@ $python = Get-Command python3 -ErrorAction SilentlyContinue
 if (!$python) { $python = Get-Command python -ErrorAction SilentlyContinue }
 if (!$python) { throw "python is required to generate the installer file list" }
 
+# Inno Setup's /s switch defines a named SignTool for one compilation only.
+# Quote the argv from windows-signing.py plan with CommandLineToArgvW rules so
+# Inno launches exactly the sign command used by the outer signing step.
+function Quote-SignToolArgument {
+    param([string]$Value)
+    if ($Value.Length -eq 0 -or $Value -notmatch '[\s"]') { return $Value }
+    $quoted = '"'
+    $slashes = 0
+    foreach ($char in $Value.ToCharArray()) {
+        if ($char -eq '\') { $slashes += 1; continue }
+        if ($char -eq '"') {
+            $quoted += ('\' * ($slashes * 2 + 1)) + '"'
+        } else {
+            $quoted += ('\' * $slashes) + $char
+        }
+        $slashes = 0
+    }
+    return $quoted + ('\' * ($slashes * 2)) + '"'
+}
+
+function Resolve-CompilerSignTool {
+    # Reuse the signing helper's PATH/Windows SDK lookup rather than keeping a
+    # second resolver here; Inno needs an absolute tool path on tag runners.
+    $code = 'import importlib.util, os, sys; spec = importlib.util.spec_from_file_location("windows_signing", sys.argv[1]); module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module); print(module.locate_signtool(None, os.environ))'
+    $tool = & $python.Source -c $code (Join-Path $scriptDir "windows-signing.py")
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tool)) { throw "compiler signtool resolution failed" }
+    return ([string]@($tool)[0]).Trim()
+}
+
 # Rebuild dist from scratch from the exact inventory, never from a stale tree.
 if (Test-Path -LiteralPath $distDir) { Remove-Item -LiteralPath $distDir -Recurse -Force }
 New-Item -ItemType Directory -Path $distDir | Out-Null
@@ -144,7 +173,43 @@ $sourceLines = @(Get-Content -LiteralPath $includePath)
 if ($sourceLines.Count -ne $entries.Count) { throw "installer source count mismatch" }
 
 if (Test-Path -LiteralPath $installerPath) { Remove-Item -LiteralPath $installerPath -Force }
-& $isccPath "/DAppVersion=$appVersion" "/DFileVersion=$fileVersion" "/DInstallerFiles=$includePath" "/DSourceDir=$distDir" "/O$outputDir" (Join-Path $scriptDir "windows-installer.iss")
+$isccArgs = @(
+    "/DAppVersion=$appVersion",
+    "/DFileVersion=$fileVersion",
+    "/DInstallerFiles=$includePath",
+    "/DSourceDir=$distDir",
+    "/O$outputDir",
+    (Join-Path $scriptDir "windows-installer.iss")
+)
+$compilerSigning = ![string]::IsNullOrWhiteSpace($env:IRIS_WINDOWS_SIGN_PFX)
+if ($compilerSigning) {
+    $pfxPath = [string]$env:IRIS_WINDOWS_SIGN_PFX
+    if ($pfxPath.Length -gt 4096 -or $pfxPath -match '[\x00-\x1f\x7f]' -or
+        !(Test-Path -LiteralPath $pfxPath -PathType Leaf)) {
+        throw "invalid compiler signing certificate path"
+    }
+    # plan is secret-bearing: it stays in this process, never in a file or a
+    # printed command line. Its target is Inno's $f placeholder, so the same
+    # argv signs Setup, the uninstaller's temporary self-copy and the
+    # generated uninstaller. Provenance must stay environment-bound so no
+    # credential is baked into a script or an argv supplied by a caller.
+    $signtool = Resolve-CompilerSignTool
+    $planJson = & $python.Source (Join-Path $scriptDir "windows-signing.py") plan --signtool $signtool --file '$f'
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($planJson)) { throw "compiler signing plan failed" }
+    $plan = $planJson | ConvertFrom-Json
+    $planJson = $null
+    $argv = @($plan.argv)
+    if ($plan.schema -ne 1 -or $plan.operation -ne 'sign' -or $argv.Count -ne 13 -or
+        $argv[1] -cne 'sign' -or $argv[-1] -cne '$f' -or
+        $plan.provenance.pfx -cnotlike 'env:*' -or
+        $plan.provenance.password -cnotlike 'env:*' -or
+        $plan.provenance.timestamp -cnotlike 'env:*') {
+        throw "compiler signing plan is invalid"
+    }
+    $definition = ($argv | ForEach-Object { Quote-SignToolArgument $_ }) -join ' '
+    $isccArgs = @("/sIrisCompilerSign=$definition", "/DSignedUninstaller=yes") + $isccArgs
+}
+& $isccPath @isccArgs
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
 if (!(Test-Path -LiteralPath $installerPath -PathType Leaf)) {
     throw "Inno Setup did not produce $installerPath"
