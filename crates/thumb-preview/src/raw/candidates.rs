@@ -135,3 +135,75 @@ pub(super) fn candidate_from_bytes(bytes: Vec<u8>) -> Option<StructuredJpegCandi
         height,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    struct RecordingSource {
+        data: Vec<u8>,
+        reads: RefCell<Vec<usize>>,
+    }
+
+    impl BlockingBinaryReader for RecordingSource {
+        fn read_range(&self, offset: u64, len: usize) -> Option<Vec<u8>> {
+            let start = usize::try_from(offset).ok()?;
+            let end = start.checked_add(len)?;
+            self.reads.borrow_mut().push(len);
+            Some(self.data.get(start..end)?.to_vec())
+        }
+
+        fn len(&self) -> u64 {
+            self.data.len() as u64
+        }
+    }
+
+    fn sof0(width: u16, height: u16) -> [u8; 10] {
+        [
+            0xFF,
+            0xC0,
+            0x00,
+            0x08,
+            0x08,
+            (height >> 8) as u8,
+            height as u8,
+            (width >> 8) as u8,
+            width as u8,
+            0x01,
+        ]
+    }
+
+    #[test]
+    fn early_sof_needs_only_the_bounded_probe() {
+        let mut data = vec![0xFF, 0xD8];
+        data.extend_from_slice(&sof0(200, 100));
+        data.extend_from_slice(&[0xFF, 0xD9]);
+        data.resize(4096, 0);
+        let source = RecordingSource {
+            data,
+            reads: RefCell::new(Vec::new()),
+        };
+        let candidate = candidate_from_range(&source, 0, source.data.len()).unwrap();
+        assert_eq!((candidate.width, candidate.height), (200, 100));
+        assert_eq!(source.reads.into_inner(), vec![4096]);
+    }
+
+    #[test]
+    fn late_sof_falls_back_without_losing_dimensions() {
+        let mut data = vec![0xFF, 0xD8, 0xFF, 0xE0, 0xFF, 0xFF];
+        // APP0 payload ends after the 64 KiB probe boundary.
+        data.resize(2 + 2 + 65535, 0);
+        data.extend_from_slice(&sof0(640, 480));
+        data.extend_from_slice(&[0xFF, 0xD9]);
+        let total = data.len();
+        let source = RecordingSource {
+            data,
+            reads: RefCell::new(Vec::new()),
+        };
+        let candidate = candidate_from_range(&source, 0, total).unwrap();
+        assert_eq!((candidate.width, candidate.height), (640, 480));
+        assert_eq!(candidate.byte_len, total);
+        assert_eq!(source.reads.into_inner(), vec![JPEG_PROBE_BYTES, total]);
+    }
+}

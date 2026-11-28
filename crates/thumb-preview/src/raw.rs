@@ -30,7 +30,9 @@ use tiff_numeric::*;
 const RAW_CORE_EXTENSIONS: &[&str] = &["arw", "cr3", "dng", "nef"];
 
 const MIN_JPEG_BYTES: usize = 256;
-const JPEG_PROBE_BYTES: usize = 256 * 1024;
+// Embedded JPEG dimensions live in the first markers; read a bounded prefix
+// and fall back to the full range only for unusually late SOF markers.
+const JPEG_PROBE_BYTES: usize = 64 * 1024;
 const MAX_IFD_VISITS: usize = 96;
 const MAX_IFD_ENTRIES: usize = 512;
 const MAX_TAG_ARRAY_COUNT: usize = 256;
