@@ -566,6 +566,71 @@ class ReleaseParityTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+    def test_accepts_curved_drift_residual_with_zero_variance(self):
+        """Curved monotone drift leaves a 5ns residual; sub-2% noise passes."""
+        baseline_medians = [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000]
+        candidate_medians = [1498, 1512, 3478, 3532, 5458, 5552, 7438, 7572]
+        baseline_deltas = deltas_for_round_medians(baseline_medians, 1000)
+        candidate_deltas = deltas_for_round_medians(candidate_medians, 1000)
+        report = make_report("linux", baseline_median=1000, candidate_median=1000,
+                             baseline_deltas=baseline_deltas,
+                             candidate_deltas=candidate_deltas)
+        pair = report["paired_latency"][0]
+        self.assertEqual(pair["round_deltas_ns"],
+                         [498, -488, 478, -468, 458, -448, 438, -428])
+        self.assertEqual(pair["balanced_delta_sums_ns"], [10, 10, 10, 10])
+        self.save("linux", report)
+        result = self.gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_accepts_sub_two_percent_zero_variance_shift(self):
+        """Uniform 100->101ns (1ns, 1%) has zero variance but passes as noise."""
+        report = make_report("linux", baseline_median=100, candidate_median=101,
+                             baseline_deltas=[0] * m.SAMPLES_PER_SIDE,
+                             candidate_deltas=[0] * m.SAMPLES_PER_SIDE)
+        pair = report["paired_latency"][0]
+        self.assertEqual(pair["round_deltas_ns"], [1] * m.ROUNDS)
+        self.assertEqual(pair["balanced_delta_sums_ns"], [2] * 4)
+        self.save("linux", report)
+        result = self.gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejects_consistent_ten_percent_zero_variance_regression(self):
+        """Uniform 100->110ns (10ns, 10%) exceeds the 2% floor and still fails."""
+        report = make_report("linux", baseline_median=100, candidate_median=110,
+                             baseline_deltas=[0] * m.SAMPLES_PER_SIDE,
+                             candidate_deltas=[0] * m.SAMPLES_PER_SIDE)
+        pair = report["paired_latency"][0]
+        self.assertEqual(pair["round_deltas_ns"], [10] * m.ROUNDS)
+        self.assertEqual(pair["balanced_delta_sums_ns"], [20] * 4)
+        self.save("linux", report)
+        result = self.assert_rejected()
+        self.assertIn("paired candidate slowdown", result.stderr)
+
+    def test_rejects_tampered_min_relative_effect_policy(self):
+        """A policy with changed min_relative_effect is rejected."""
+        raw = json.loads(POLICY.read_text(encoding="utf-8"))
+        for value in (0.01, 0.03, 0.0, 0.0200001, "0.02", None, True):
+            with self.subTest(value=value):
+                changed = copy.deepcopy(raw)
+                changed["min_relative_effect"] = value
+                path = self.work / "policy.json"
+                path.write_text(json.dumps(changed), encoding="utf-8")
+                self.assert_rejected(policy=path)
+        changed = copy.deepcopy(raw)
+        del changed["min_relative_effect"]
+        path = self.work / "policy.json"
+        path.write_text(json.dumps(changed), encoding="utf-8")
+        self.assert_rejected(policy=path)
+
+    def test_samples_help_text_says_24(self):
+        """The paired budget is 24 samples per side, not 21."""
+        source = (ROOT / "scripts" / "parity_source_compare.py").read_text(
+            encoding="utf-8")
+        self.assertIn("fixed at 24 by the paired budget", source)
+        self.assertNotIn("fixed at 21 by the paired budget", source)
+
+
     def test_rejects_false_correctness_on_both_sides(self):
         """Agreed failure on both sides cannot pass the consumer boundary."""
         for name in ("corpus", "j2k"):

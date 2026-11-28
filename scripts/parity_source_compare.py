@@ -813,7 +813,7 @@ def main():
     parser.add_argument('--warmups', type=int, default=WARMUPS_PER_BLOCK,
                         help='warmups per block; fixed at 2 by the paired budget')
     parser.add_argument('--samples', type=int, default=SAMPLES_PER_SIDE,
-                        help='total samples per side; fixed at 21 by the paired budget')
+                        help='total samples per side; fixed at 24 by the paired budget')
     parser.add_argument('--pdfium-library', type=Path, default=None,
                         help='verified PDFium library staged into both worktrees')
     args = parser.parse_args()

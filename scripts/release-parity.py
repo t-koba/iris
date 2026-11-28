@@ -6,10 +6,12 @@ platform, and verifies source/revision/harness binding, strict identity, the
 declared (B/C, C/B) x4 round alternation, recomputed statistics from 24
 chronological samples per side with eight block medians, and a drift-invariant
 magnitude-aware t test over four balanced round-pair sums. A candidate fails
-only when the mean of the four drift-free estimates is positive with
+only when the mean of the four drift-free estimates is positive, exceeds 2%
+of the baseline median, with
 t = effect/(sd/2) at or above the Bonferroni-calibrated df=3 threshold;
 magnitude matters and monotone runner drift cancels in each opposite-order
-pair sum. The pooled median delta is reported, not used as a gate. This
+pair sum; sub-2% shifts are treated as runner noise. The pooled median delta
+is reported, not used as a gate. This
 verifier makes no parity claim of its own, runs no builds and writes nothing.
 """
 
@@ -44,8 +46,8 @@ PLATFORM_IDENTITY = {
 POLICY_KEYS = {
     "schema", "baseline_sha", "required_platforms", "platform_identity",
     "required_operations", "warmups", "samples", "rounds", "alpha",
-    "significance_family_size", "t_critical_df3", "policy_rationale",
-    "max_report_bytes",
+    "significance_family_size", "t_critical_df3", "min_relative_effect",
+    "policy_rationale", "max_report_bytes",
 }
 SHA_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 MAX_POLICY_BYTES = 65536
@@ -123,6 +125,9 @@ def load_policy(path):
                                        policy["significance_family_size"])
     require(abs(policy["t_critical_df3"] - expected_critical) < 1e-9,
             "invalid policy t_critical_df3")
+    require(type(policy["min_relative_effect"]) is float
+            and policy["min_relative_effect"] == 0.02,
+            "invalid policy min_relative_effect")
     require(type(policy["policy_rationale"]) is str and policy["policy_rationale"].strip(),
             "invalid policy policy_rationale")
     exact_int(policy["max_report_bytes"], 266240, "max_report_bytes")
@@ -334,6 +339,9 @@ def check_pairs(pairs, maps, section_name, policy, label):
                 f"{label}: {section_name} {operation} invalid balanced sums")
         effect = sum(balanced) / 8.0
         if effect <= 0:
+            continue
+        floor = policy["min_relative_effect"] * baseline
+        if effect <= floor:
             continue
         estimates = [value / 2.0 for value in balanced]
         mean = effect

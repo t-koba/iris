@@ -33,6 +33,7 @@
   "alpha": 0.05,
   "significance_family_size": 18,
   "t_critical_df3": 7.184868893978111,
-  "policy_rationale": "The gate averages four drift-free paired round estimates (each balanced sum/2 from opposite-order round pairs d0+d1, d2+d3, d4+d5, d6+d7) into effect_ns and forms t = effect/(sd/2) with n-1=3; it fails only when effect > 0 and t >= t_critical_df3 where P[T3 >= t] <= 0.05/18. Magnitude matters (a small consistent shift gives a small t) and monotone runner drift cancels in each opposite-order sum, so unchanged paths are not failed by noise that moves both sides together. The pooled median delta is reported for audit, not gated.",
+  "min_relative_effect": 0.02,
+  "policy_rationale": "The gate averages four drift-free paired round estimates (each balanced sum/2 from opposite-order round pairs d0+d1, d2+d3, d4+d5, d6+d7) into effect_ns and forms t = effect/(sd/2) with n-1=3; it fails only when a drift-free positive effect exceeds 2% of the baseline median (min_relative_effect 0.02) as well as the Bonferroni-calibrated t threshold (t >= t_critical_df3 where P[T3 >= t] <= 0.05/18). Magnitude matters (a small consistent shift gives a small t) and monotone runner drift cancels in each opposite-order sum, so unchanged paths are not failed by noise that moves both sides together; sub-2% shifts (including curvature residuals and sub-percent effects) are treated as runner noise, so zero variance on a tiny effect does not fail, while a consistent 10% regression still fails. The pooled median delta is reported for audit, not gated.",
   "max_report_bytes": 266240
 }
