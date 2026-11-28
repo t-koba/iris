@@ -336,7 +336,15 @@ class ReleaseParityTests(unittest.TestCase):
         result = self.assert_rejected()
         self.assertIn("PDFium path is not the staged worktree library", result.stderr)
 
-    def test_accepts_windows_short_name_ancestor_on_both_sides(self):
+    def test_accepts_canonical_windows_long_paths(self):
+        report = copy.deepcopy(self.reports["windows"])
+        worktrees = windows_root_worktrees(WINDOWS_LONG_ROOT)
+        self.save("windows", set_windows_attribution(report, worktrees, worktrees))
+        result = self.gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejects_windows_short_name_alias_in_offline_report(self):
+        """The offline verifier cannot resolve 8.3 aliases; only the producer can."""
         original = copy.deepcopy(self.reports["windows"])
         long_worktrees = windows_root_worktrees(WINDOWS_LONG_ROOT)
         short_worktrees = windows_root_worktrees(WINDOWS_SHORT_ROOT)
@@ -347,8 +355,9 @@ class ReleaseParityTests(unittest.TestCase):
                 report = copy.deepcopy(original)
                 self.save("windows", set_windows_attribution(
                     report, worktrees, libraries))
-                result = self.gate()
-                self.assertEqual(result.returncode, 0, result.stderr)
+                result = self.assert_rejected()
+                self.assertIn("PDFium path is not the staged worktree library",
+                              result.stderr)
 
     def test_rejects_windows_paths_that_are_not_the_same_worktree(self):
         original = copy.deepcopy(self.reports["windows"])

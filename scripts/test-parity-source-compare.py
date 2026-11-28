@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -244,11 +245,13 @@ class ParitySourceCompareTests(unittest.TestCase):
     def test_measure_round_runs_full_smokes_in_declared_order(self):
         checkouts = dict(baseline=Path('/baseline'), candidate=Path('/candidate'))
         shas = dict(baseline='a' * 40, candidate='b' * 40)
-        libraries = dict(baseline=None, candidate=None)
+        libraries = dict(baseline=None, candidate=Path('/staged/libpdfium.so'))
         with mock.patch.object(m, 'smoke',
-                               side_effect=lambda checkout, example, argument, env, label:
+                               side_effect=lambda checkout, example, argument, env, label,
+                               pdfium_library=None:
                                dict(checkout=str(checkout), example=example,
-                                    argument=str(argument), env=env, label=label)) as smoke:
+                                    argument=str(argument), env=env, label=label,
+                                    pdfium_library=pdfium_library)) as smoke:
             collected = m.measure_round(2, m.ROUND_ORDER[1], checkouts, shas, libraries,
                                         Path('/corpus'), Path('/fixture'), 2, 3)
         self.assertEqual(list(collected), ['candidate', 'baseline'])
@@ -264,6 +267,8 @@ class ParitySourceCompareTests(unittest.TestCase):
             self.assertEqual(call.args[3]['GITHUB_SHA'], shas[side])
             expected_argument = Path('/corpus' if 'corpus' in call.args[4] else '/fixture')
             self.assertEqual(call.args[2], expected_argument)
+            staged = libraries[side] if 'corpus' in call.args[4] else None
+            self.assertEqual(call.args[5] if len(call.args) > 5 else None, staged)
         self.assertEqual(collected['candidate']['corpus']['example'], m.CORPUS_HARNESS)
         self.assertEqual(collected['baseline']['j2k']['example'], m.HARNESS)
 
@@ -793,48 +798,102 @@ def compiled_settings_function(example):
     return bodies[0]
 
 
-class ReportPathEquivalenceTests(unittest.TestCase):
-    """Path aliases accepted by the provenance fix must stay narrow."""
+class CanonicalPdfiumRuntimeTests(unittest.TestCase):
+    """Producer-side file identity is proved on the filesystem that loaded PDFium."""
 
-    LONG = r"C:\Users\runneradmin\AppData\Local\Temp\iris-parity\baseline"
-    SHORT = r"C:\Users\RUNNER~1\AppData\Local\Temp\iris-parity\baseline"
+    def same_file_alias(self, root, staged):
+        """Return a distinct path to the staged file, or None if unavailable."""
+        if os.name != 'nt':
+            alias = root / 'alias' / staged.name
+            alias.parent.mkdir()
+            os.link(staged, alias)
+            return alias
+        try:
+            import ctypes
+            from ctypes import wintypes
+            get_short = ctypes.windll.kernel32.GetShortPathNameW
+            get_short.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+            get_short.restype = wintypes.DWORD
+            size = get_short(str(staged), None, 0)
+            if not size:
+                return None
+            buffer = ctypes.create_unicode_buffer(size)
+            if get_short(str(staged), buffer, size) != size - 1:
+                return None
+            alias = Path(buffer.value)
+            return alias if alias != staged and alias.is_file() else None
+        except (AttributeError, OSError, ValueError):
+            return None
 
-    def test_windows_short_name_aliases_match_in_both_directions(self):
-        equivalent = m.report_path_equivalent
-        for left, right in ((self.SHORT, self.LONG), (self.LONG, self.SHORT),
-                            ("\\\\?\\" + self.SHORT, self.LONG),
-                            (self.SHORT.upper(), self.LONG)):
-            with self.subTest(left=left, right=right):
-                self.assertTrue(equivalent(left, right, 'windows'))
-        self.assertTrue(equivalent(self.SHORT, self.LONG))  # syntax auto-detected
-        self.assertTrue(equivalent(r"\\server\share\RUNNER~1\baseline",
-                                   r"\\server\share\runneradmin\baseline", 'windows'))
-        self.assertFalse(equivalent(r"\\server\other\RUNNER~1\baseline",
-                                    r"\\server\share\runneradmin\baseline", 'windows'))
+    def test_distinct_path_to_same_file_is_canonicalized(self):
+        name = m.pdfium_library_name()
+        with tempfile.TemporaryDirectory(prefix='iris-pdfium-identity-') as temporary:
+            root = Path(temporary)
+            staged = root / 'worktree' / name
+            staged.parent.mkdir()
+            staged.write_bytes(b'verified pdfium bytes')
+            expected = pdfium_runtime(path=str(staged.resolve()))
+            self.assertEqual(m.canonical_pdfium_runtime(expected, staged, 'synthetic'), expected)
+            alias = self.same_file_alias(root, staged)
+            with self.subTest(alias='distinct path to the same file'):
+                if alias is None:
+                    self.skipTest('no distinct short path available for the staged file')
+                observed = pdfium_runtime(path=str(alias))
+                self.assertEqual(m.canonical_pdfium_runtime(observed, staged, 'synthetic'),
+                                 expected)
 
-    def test_windows_aliases_reject_unrelated_or_extra_components(self):
-        equivalent = m.report_path_equivalent
-        for other in (
-                r"D:\Users\RUNNER~1\AppData\Local\Temp\iris-parity\baseline",
-                r"C:\Users\RUNNER~1\AppData\Local\Other\iris-parity\baseline",
-                r"C:\Users\RUNNER~1\AppData\Local\Temp\extra\iris-parity\baseline",
-                r"C:\Users\RUNNER~1\AppData\Local\Temp\iris-parity\wrong",
-                r"C:\Users\robert~1\AppData\Local\Temp\iris-parity\baseline",
-                r"C:\Users\runner~1\AppData\Local\Temp\iris-parity\runner~2",
-                r"C:\Users\verylongprefix~1\AppData\Local\Temp\iris-parity\baseline",
-                r"C:Users\RUNNER~1\AppData\Local\Temp\iris-parity\baseline",
-                r"\Users\RUNNER~1\AppData\Local\Temp\iris-parity\baseline"):
-            with self.subTest(other=other):
-                self.assertFalse(equivalent(self.SHORT, other, 'windows'))
-                self.assertFalse(equivalent(other, self.SHORT, 'windows'))
+    def test_rejects_different_file_with_shared_prefix(self):
+        name = m.pdfium_library_name()
+        with tempfile.TemporaryDirectory(prefix='iris-pdfium-prefix-') as temporary:
+            root = Path(temporary)
+            staged = root / 'iris-source' / name
+            different = root / 'iris-source~1' / name
+            for path in (staged, different):
+                path.parent.mkdir()
+            staged.write_bytes(b'staged library')
+            different.write_bytes(b'different library')
+            with self.assertRaisesRegex(ValueError, 'not the staged file'):
+                m.canonical_pdfium_runtime(pdfium_runtime(path=str(different)), staged,
+                                           'synthetic corpus smoke')
 
-    def test_posix_comparison_stays_exact_and_case_sensitive(self):
-        equivalent = m.report_path_equivalent
-        self.assertTrue(equivalent('/opt/iris/baseline', '/opt/iris/baseline', 'linux'))
-        self.assertFalse(equivalent('/opt/iris/baseline', '/Opt/iris/baseline', 'linux'))
-        self.assertFalse(equivalent('/opt/iris-s~1/baseline', '/opt/iris-source/baseline',
-                                    'linux'))
-        self.assertFalse(equivalent('/opt/iris/baseline', self.SHORT))
+    def test_rejects_missing_paths_and_optional_loader_record(self):
+        name = m.pdfium_library_name()
+        with tempfile.TemporaryDirectory(prefix='iris-pdfium-missing-') as temporary:
+            root = Path(temporary)
+            staged = root / name
+            staged.write_bytes(b'staged library')
+            missing = root / 'absent' / name
+            for runtime, library, message in (
+                    (pdfium_runtime(path=str(missing)), staged, 'loaded PDFium library is missing'),
+                    (pdfium_runtime(path=str(staged)), missing, 'staged PDFium library is missing'),
+                    (pdfium_runtime(path=str(staged), required=False), staged,
+                     'does not require the staged library')):
+                with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                    m.canonical_pdfium_runtime(runtime, library, 'synthetic corpus smoke')
+
+    def test_corpus_smoke_canonicalizes_runtime_and_fails_closed(self):
+        name = m.pdfium_library_name()
+        with tempfile.TemporaryDirectory(prefix='iris-pdfium-smoke-') as temporary:
+            staged = Path(temporary) / name
+            staged.write_bytes(b'staged library')
+            observed = pdfium_runtime(path=str(Path(temporary) / 'nested' / '..' / name))
+            (Path(temporary) / 'nested').mkdir()
+            with mock.patch.object(m, 'run', return_value=('', '')), \
+                 mock.patch.object(m, 'parse_records',
+                                   return_value=dict(pdfium_runtime=observed,
+                                                     correctness=None, timings=[])):
+                parsed = m.smoke(Path(temporary), m.CORPUS_HARNESS, '/corpus', {},
+                                 'synthetic corpus smoke', staged)
+            self.assertEqual(parsed['pdfium_runtime'],
+                             pdfium_runtime(path=str(staged.resolve())))
+            for runtime in (None, pdfium_runtime(path=str(staged), required=False)):
+                with mock.patch.object(m, 'run', return_value=('', '')), \
+                     mock.patch.object(m, 'parse_records',
+                                       return_value=dict(pdfium_runtime=runtime,
+                                                         correctness=None, timings=[])):
+                    with self.assertRaises(ValueError):
+                        m.smoke(Path(temporary), m.CORPUS_HARNESS, '/corpus', {},
+                                'synthetic corpus smoke', staged)
 
 
 class BuildScriptContractTests(unittest.TestCase):

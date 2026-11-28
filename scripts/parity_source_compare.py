@@ -160,59 +160,6 @@ def report_path(value, platform=None):
     return report_path_module(value, platform).join(parent, name)
 
 
-_WINDOWS_SHORT_COMPONENT = re.compile(r"([^~\\/]{1,6})~[1-9][0-9]*\Z")
-
-
-def _windows_short_prefix(component):
-    """Return the prefix of a whole 8.3-style component, if it is one."""
-    match = _WINDOWS_SHORT_COMPONENT.match(component)
-    return match.group(1) if match else None
-
-
-def _windows_component_equivalent(left, right):
-    """Match equal components, or one 8.3 alias against its longer long name."""
-    if left == right:
-        return True
-    left_prefix = _windows_short_prefix(left)
-    right_prefix = _windows_short_prefix(right)
-    return ((left_prefix is not None and right_prefix is None
-             and right.startswith(left_prefix) and len(right) > len(left))
-            or (right_prefix is not None and left_prefix is None
-                and left.startswith(right_prefix) and len(left) > len(right)))
-
-
-def report_path_equivalent(left, right, platform=None):
-    """Return whether two report paths name the same location.
-
-    POSIX paths keep report_path()'s exact, case-sensitive comparison. Windows
-    paths are normalized in the producing syntax (extended prefix removed,
-    casefolded) and compared component by component: one whole ``prefix~n``
-    component may stand for a strictly longer component starting with that
-    same prefix, as Windows 8.3 short names do. Both paths must be absolute
-    with the same drive or UNC share; component count and every other component
-    must still match, so a short ancestor aliases only its own long name -- not
-    another drive, root, extra directory or filename. Drive-relative and
-    rooted-current-drive forms are rejected because they name no fixed root.
-    """
-    module = report_path_module(left, platform)
-    if module is not report_path_module(right, platform):
-        return False
-    left, right = report_path(left, platform), report_path(right, platform)
-    if module is posixpath:
-        return left == right
-    left_drive, left_rest = ntpath.splitdrive(left)
-    right_drive, right_rest = ntpath.splitdrive(right)
-    if (not left_drive or not right_drive
-            or not ntpath.isabs(left) or not ntpath.isabs(right)
-            or left_drive.casefold() != right_drive.casefold()):
-        return False
-    left_parts = [part for part in re.split(r"[\\/]+", left_rest) if part]
-    right_parts = [part for part in re.split(r"[\\/]+", right_rest) if part]
-    return (len(left_parts) == len(right_parts)
-            and all(_windows_component_equivalent(a, b)
-                    for a, b in zip(left_parts, right_parts)))
-
-
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -448,6 +395,28 @@ def identity_pair(baseline, candidate):
 def pdfium_library_name():
     """Platform-specific filename of the PDFium library staged for smokes."""
     return PDFIUM_LIBRARY_NAMES[sys.platform]
+
+
+def canonical_pdfium_runtime(runtime, staged, label):
+    """Prove on the producing filesystem that the loader used the staged file.
+
+    The smoke prints the path of the module it actually loaded; Windows may
+    report an 8.3 short name for the very same file. Resolve both paths on the
+    producing filesystem rather than trusting their spelling, and emit only
+    the staged library's canonical path so the report cannot claim a different
+    file identity from the one verified here.
+    """
+    require(type(runtime) is dict and runtime.get('required') is True,
+            f'{label}: pdfium runtime record does not require the staged library')
+    loaded = runtime.get('path')
+    require(type(loaded) is str and loaded.strip(),
+            f'{label}: invalid pdfium runtime path')
+    staged = Path(staged).resolve()
+    require(staged.is_file(), f'{label}: staged PDFium library is missing')
+    require(os.path.isfile(loaded), f'{label}: loaded PDFium library is missing')
+    require(os.path.samefile(loaded, staged),
+            f'{label}: loaded PDFium library is not the staged file')
+    return dict(path=str(staged), required=True)
 
 
 def stage_pdfium_library(source, checkout, label):
@@ -721,11 +690,18 @@ def cargo_example_command(example, argument):
             '--example', example[:-3], '--', argument]
 
 
-def smoke(checkout, example, argument, env, label):
+def smoke(checkout, example, argument, env, label, pdfium_library=None):
     command = cargo_example_command(example, argument)
     text, _ = run(command, checkout, env, label)
-    return parse_records(text, PREVIEW_OPERATIONS if example == CORPUS_HARNESS
-                         else {J2K_OPERATION}, label)
+    parsed = parse_records(text, PREVIEW_OPERATIONS if example == CORPUS_HARNESS
+                           else {J2K_OPERATION}, label)
+    if pdfium_library is not None:
+        require(example == CORPUS_HARNESS, f'{label}: staged PDFium library outside corpus smoke')
+        require(parsed['pdfium_runtime'] is not None,
+                f'{label}: corpus smoke emitted no PDFium runtime record')
+        parsed['pdfium_runtime'] = canonical_pdfium_runtime(
+            parsed['pdfium_runtime'], pdfium_library, label)
+    return parsed
 
 
 def measure_round(number, order, checkouts, shas, libraries, corpus, fixture,
@@ -737,7 +713,7 @@ def measure_round(number, order, checkouts, shas, libraries, corpus, fixture,
         env = cargo_env(shas[side], warmups, samples_per_block, libraries[side])
         collected[side] = dict(
             corpus=smoke(checkouts[side], CORPUS_HARNESS, corpus, env,
-                         f'{label} corpus smoke'),
+                         f'{label} corpus smoke', libraries[side]),
             j2k=smoke(checkouts[side], HARNESS, fixture, env, f'{label} J2K smoke'),
         )
     return collected

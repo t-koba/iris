@@ -30,8 +30,8 @@ from parity_source_compare import (  # noqa: E402
     HARNESS, IDENTITY_SCHEMA, J2K_OPERATION, PARITY_CLAIM, PREVIEW_OPERATIONS, ROUNDS,
     SAMPLES_PER_SIDE, WARMUPS_PER_BLOCK, WINDOWS_FFMPEG_FORBIDDEN_FLAGS,
     WINDOWS_FFMPEG_REQUIRED_FLAGS, ffmpeg_configuration, measurement_rounds,
-    pairing_plan, percentile, pinned_ffmpeg_identity, report_path_equivalent,
-    report_path_parts, require, timing_statistics, validate_exported_section,
+    pairing_plan, percentile, pinned_ffmpeg_identity, report_path, report_path_parts,
+    require, timing_statistics, validate_exported_section,
 )
 from product_build_profile import load as load_product_profiles  # noqa: E402
 
@@ -226,7 +226,7 @@ def check_pdfium_attribution(report, platform, label):
         worktree = side_report.get("worktree") if type(side_report) is dict else None
         require(type(worktree) is str and worktree.strip(),
                 f"{label}: {side} worktree identity is missing")
-        require(report_path_equivalent(parent, worktree, platform),
+        require(parent == report_path(worktree, platform),
                 f"{label}: {side} corpus PDFium path is not the staged worktree library")
 
 
