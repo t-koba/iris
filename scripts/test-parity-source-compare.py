@@ -573,7 +573,9 @@ class ParitySourceCompareTests(unittest.TestCase):
                 result = subprocess.run([str(binary)], env=env, capture_output=True,
                                         text=True, check=False, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                return result.stdout.strip()
+                # Keep leading padding: /proc/self/maps may right-align the
+                # pathname and the helper must not print those spaces.
+                return result.stdout.rstrip('\n')
 
             noise = [
                 '7f0000000000-7f0000001000 r--p 00000000 08:01 1 /opt/notlibpdfium.so',
@@ -589,6 +591,12 @@ class ParitySourceCompareTests(unittest.TestCase):
             self.assertEqual(read_maps(noise + [
                 '7f0000004000-7f0000005000 r-xp 00000000 08:01 4 /opt/pdfium/libpdfium.so',
             ]), '/opt/pdfium/libpdfium.so')
+            # /proc/self/maps right-aligns the pathname field; the helper must
+            # report the path itself, never the padding used to print it.
+            self.assertEqual(read_maps(noise + [
+                '7f0000004000-7f0000005000 r-xp 00000000 08:01 4 '
+                + ' ' * 19 + '/staged pdfium/libpdfium.so.8179',
+            ]), '/staged pdfium/libpdfium.so.8179')
             self.assertEqual(read_maps(noise), '')
 
     def test_pairing_plan_marks_legacy_schema_unpaired(self):
