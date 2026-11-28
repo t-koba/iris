@@ -991,6 +991,13 @@ permissions:
         windows_release_export_rehearsal_contract(),
     "Windows export rehearsal guard rejects trigger, export, evidence and publish mutations":
         windows_release_export_mutation_regression(),
+    "Windows installer prerequisite failure still aborts the release smoke without bundling a redistributable": (
+        'if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }' in release
+        and "python scripts/windows-installed-smoke.py verify" in release
+        and all(token not in release.lower() and token not in win_validation.lower()
+                for token in ("vc_redist", "vcredist.exe", "vcredist_x64.exe",
+                              "winget install", "choco install vcredist"))
+    ),
 }
 failed = [name for name, passed in checks.items() if not passed]
 if failed:

@@ -110,12 +110,24 @@ The rehearsal's PE import closure classifies file-backed VC/UCRT
 redistributable imports, including `vcruntime140.dll` and
 `vcruntime140_1.dll`, separately as `vc-redist`, never as Windows OS DLLs. A
 runner-installed copy in System32 is recorded but is not proof that a fresh
-Windows install provides it. Virtual `api-ms-win-*` and `ext-ms-win-*` API sets
-resolve as `system` forwarders; genuine OS DLL imports resolve as `os` only
-when allowlisted and physically present in a Windows system directory, staged
-DLLs resolve as `stage`, and anything else is `unresolved`. Whether those VC
-imports are satisfied by a documented VC redistributable prerequisite or by
-app-local DLLs is still unresolved; no app-local VC runtime copies are staged. This notice makes no provisioning or
-app-local redistribution claim. This is runtime, source and notice evidence
-only: not legal approval, parity evidence, latency parity, audit approval or
-release readiness.
+Windows install provides it, as the checked-in
+`packaging/windows/validation/windows-vc-redist-allowlist.txt` requires.
+Virtual `api-ms-win-*` and `ext-ms-win-*` API sets resolve as `system`
+forwarders; genuine OS DLL imports resolve as `os` only when allowlisted and
+physically present in a Windows system directory, staged DLLs resolve as
+`stage`, and anything else is `unresolved`.
+
+The x64 installer treats the Visual C++ Redistributable for Visual Studio
+2015-2022 (x64) as an external prerequisite: it checks
+the native 64-bit system directory for `vcruntime140.dll`,
+`vcruntime140_1.dll` and `msvcp140.dll` and aborts before installing when any
+is missing. Microsoft documents that the matching Visual C++ redistributable
+must be installed on the target machine for apps using the Visual C++ runtime
+(https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files?view=msvc-170
+and https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170).
+No `vc_redist` executable is bundled with, downloaded by, or staged for the
+installer, and no app-local VC runtime copies are staged. Runner presence
+remains evidence about the runner only, not about a clean target. This notice
+makes no clean-target provisioning proof or app-local redistribution claim. It
+is runtime, source and notice evidence only: not legal approval, parity
+evidence, latency parity, audit approval or release readiness.

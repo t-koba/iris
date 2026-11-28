@@ -71,6 +71,8 @@ Linux のリリースビルドは、PDF プレビュー用 PDFium 共有ライ�
 - `Iris-windows.zip`: 展開して `Iris.exe` を実行します。
 - `Iris-windows-setup.exe`: 管理者権限なしのユーザー単位で `%LOCALAPPDATA%\Programs\Iris` にインストールします。スタートメニューに登録され、インストーラでデスクトップショートカットも選べます。アンインストールは Windows のアプリ一覧から行えます。
 
+Iris は x64 ビルドのみを配布しており、実行には **Visual C++ Redistributable for Visual Studio 2015-2022 (x64)** が必要です。Microsoft は、アプリが Visual C++ ランタイムを使う場合、対応する redistributable を対象コンピューターにインストールしなければならないと説明しています（https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files?view=msvc-170 、https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170 ）。インストーラーはネイティブの 64-bit system ディレクトリにある `vcruntime140.dll` / `vcruntime140_1.dll` / `msvcp140.dll` を確認し、不足していれば開始前に中止します。redistributable 本体は同梱もダウンロードもされません。ビルド用 runner に DLL があることは、クリーンな対象 PC での動作の証明にはなりません（`packaging/windows/validation/windows-vc-redist-allowlist.txt` の allowlist ルールを参照）。
+
 Windows のリリースは、同じ SHA で動く `windows-ffmpeg-validation` の reusable workflow が検証した exact-SHA product stage を `windows-release-assets` から受け取り、成果物の SHA-256 と収録ファイルを照合してから zip とインストーラーを作成します。開発者向けの `./scripts/package-windows.ps1` もビルドを行わず、`IRIS_PRODUCT_STAGE` / `IRIS_PRODUCT_INVENTORY` / `IRIS_PRODUCT_ZIP` / `IRIS_RELEASE_OUTPUT_DIR` で渡した検証済みステージから同じ成果物を作成します。現在の workflow では実行ファイルやインストーラにコード署名を行わないため、Windows の警告や SmartScreen の表示は環境によって異なります。
 
 ### チェックサムの確認

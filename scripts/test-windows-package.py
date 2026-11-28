@@ -79,6 +79,46 @@ FORBIDDEN = (
     "http://", "https://",
 )
 
+# The VC++ 2015-2022 runtime is an external prerequisite on the target system.
+# These markers keep the launch condition, architecture scope and failure path
+# visible to the offline installer contract.
+ISS_VC_REQUIRED = (
+    "ArchitecturesAllowed=x64",
+    "ArchitecturesInstallIn64BitMode=x64",
+    "[CustomMessage]",
+    "VcRedistMissing=Iris requires the Visual C++ Redistributable for Visual Studio 2015-2022 (x64)",
+    "[Code]",
+    "function IsVcRedistInstalled: Boolean;",
+    "if not Is64BitInstallMode then",
+    "ExpandConstant('{sys}')",
+    "FileExists(SystemDir + '\\vcruntime140.dll')",
+    "FileExists(SystemDir + '\\vcruntime140_1.dll')",
+    "FileExists(SystemDir + '\\msvcp140.dll')",
+    "function InitializeSetup: Boolean;",
+    "Result := True;",
+    "if not IsVcRedistInstalled then",
+    "MsgBox(ExpandConstant('{cm:VcRedistMissing}'), mbError, MB_OK)",
+    "Result := False;",
+    "Check: IsVcRedistInstalled",
+)
+
+ISS_VC_FORBIDDEN = (
+    "vc_redist.x64.exe", "vc_redist.x86.exe", "vc_redist.exe",
+    "DownloadTemporaryFile", "ExtractTemporaryFile", "ShellExec",
+    "http://", "https://",
+)
+
+DOC_VC_REQUIRED = (
+    "2015-2022",
+    "learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files",
+    "vcruntime140_1.dll",
+    "windows-vc-redist-allowlist.txt",
+)
+
+
+def vc_contract_holds(text):
+    return all(marker in text for marker in ISS_VC_REQUIRED)
+
 
 def contract_holds(text):
     return all(marker in text for marker in REQUIRED)
@@ -188,8 +228,55 @@ class InstallerScriptContracts(unittest.TestCase):
 
     def test_identity_and_icons_unchanged(self):
         self.assertIn("AppId={{91ED532A-29D6-4EB6-9692-9EF3994B1DA3}", self.text)
-        self.assertIn('Name: "{userprograms}\\Iris"; Filename: "{app}\\Iris.exe"', self.text)
-        self.assertIn('Name: "{userdesktop}\\Iris"; Filename: "{app}\\Iris.exe"; Tasks: desktopicon', self.text)
+        self.assertIn('PrivilegesRequired=lowest', self.text)
+        self.assertIn('DefaultDirName={localappdata}\\Programs\\Iris', self.text)
+        self.assertIn('Name: "{userprograms}\\Iris"; Filename: "{app}\\Iris.exe"; Check: IsVcRedistInstalled', self.text)
+        self.assertIn('Name: "{userdesktop}\\Iris"; Filename: "{app}\\Iris.exe"; Tasks: desktopicon; Check: IsVcRedistInstalled', self.text)
+
+    def test_vc_redist_prerequisite_is_explicit_and_x64_scoped(self):
+        self.assertTrue(vc_contract_holds(self.text))
+        for marker in ISS_VC_REQUIRED:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.text)
+                self.assertFalse(vc_contract_holds(
+                    self.text.replace(marker, "<removed>")))
+
+    def test_vc_redist_failure_path_aborts_before_install(self):
+        code = self.text.split("[Code]", 1)[1]
+        probe = code.split("function IsVcRedistInstalled", 1)[1].split("end;", 1)[0]
+        self.assertIn("Result := False;", probe)
+        self.assertLess(probe.index("if not Is64BitInstallMode then"),
+                        probe.index("ExpandConstant('{sys}')"))
+        for dll in ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"):
+            self.assertIn(dll, probe)
+        init = code.split("function InitializeSetup", 1)[1]
+        self.assertLess(init.index("if not IsVcRedistInstalled then"),
+                        init.index("MsgBox("))
+        self.assertLess(init.index("MsgBox("), init.index("Result := False;"))
+        icons = self.text.split("[Icons]", 1)[1]
+        for line in icons.splitlines():
+            if line.startswith("Name:"):
+                self.assertIn("Check: IsVcRedistInstalled", line)
+
+    def test_vc_redist_is_not_bundled_or_downloaded(self):
+        for token in ISS_VC_FORBIDDEN:
+            with self.subTest(token=token):
+                self.assertNotIn(token, self.text)
+
+    def test_windows_docs_cite_the_external_prerequisite(self):
+        for relative in ("README.md", "packaging/windows/ffmpeg-README.md"):
+            with self.subTest(doc=relative):
+                text = (ROOT / relative).read_text(encoding="utf-8")
+                for marker in DOC_VC_REQUIRED:
+                    self.assertIn(marker, text)
+                self.assertNotIn("vc_redist.x64.exe", text)
+
+    def test_native_notice_keeps_runner_presence_rule(self):
+        text = (ROOT / "packaging/windows/ffmpeg-README.md").read_text(encoding="utf-8")
+        self.assertIn("must be installed on the target machine", text)
+        self.assertIn("Runner presence", text)
+        self.assertIn("not about a clean target", text)
+        self.assertIn("or release readiness", text)
 
 
 class InstallerFilesContracts(unittest.TestCase):
