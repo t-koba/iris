@@ -375,6 +375,22 @@ class ReleaseParityTests(unittest.TestCase):
             self.assertIn("PDFium path is not the staged worktree library",
                           result.stderr)
 
+    def test_rejects_windows_drive_relative_pdfium_attribution(self):
+        original = copy.deepcopy(self.reports["windows"])
+        long_root = WINDOWS_LONG_ROOT.replace("C:\\", "C:", 1)
+        short_root = WINDOWS_SHORT_ROOT.replace("C:\\", "C:", 1)
+        for kind, worktrees, libraries in (
+                ("relative_library", windows_root_worktrees(WINDOWS_LONG_ROOT),
+                 windows_root_worktrees(short_root)),
+                ("relative_worktree", windows_root_worktrees(long_root),
+                 windows_root_worktrees(WINDOWS_SHORT_ROOT))):
+            with self.subTest(kind=kind):
+                report = copy.deepcopy(original)
+                self.save("windows", set_windows_attribution(report, worktrees, libraries))
+                result = self.assert_rejected()
+                self.assertIn("PDFium path is not the staged worktree library",
+                              result.stderr)
+
     def test_rejects_wrong_windows_filename_with_short_name_ancestor(self):
         report = copy.deepcopy(self.reports["windows"])
         self.save("windows", set_windows_attribution(

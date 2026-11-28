@@ -188,9 +188,11 @@ def report_path_equivalent(left, right, platform=None):
     paths are normalized in the producing syntax (extended prefix removed,
     casefolded) and compared component by component: one whole ``prefix~n``
     component may stand for a strictly longer component starting with that
-    same prefix, as Windows 8.3 short names do. The drive, component count and
-    every other component must still match, so a short ancestor aliases only
-    its own long name -- not another drive, root, extra directory or filename.
+    same prefix, as Windows 8.3 short names do. Both paths must be absolute
+    with the same drive or UNC share; component count and every other component
+    must still match, so a short ancestor aliases only its own long name -- not
+    another drive, root, extra directory or filename. Drive-relative and
+    rooted-current-drive forms are rejected because they name no fixed root.
     """
     module = report_path_module(left, platform)
     if module is not report_path_module(right, platform):
@@ -200,7 +202,9 @@ def report_path_equivalent(left, right, platform=None):
         return left == right
     left_drive, left_rest = ntpath.splitdrive(left)
     right_drive, right_rest = ntpath.splitdrive(right)
-    if left_drive.casefold() != right_drive.casefold():
+    if (not left_drive or not right_drive
+            or not ntpath.isabs(left) or not ntpath.isabs(right)
+            or left_drive.casefold() != right_drive.casefold()):
         return False
     left_parts = [part for part in re.split(r"[\\/]+", left_rest) if part]
     right_parts = [part for part in re.split(r"[\\/]+", right_rest) if part]

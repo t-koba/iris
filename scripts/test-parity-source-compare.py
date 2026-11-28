@@ -807,6 +807,10 @@ class ReportPathEquivalenceTests(unittest.TestCase):
             with self.subTest(left=left, right=right):
                 self.assertTrue(equivalent(left, right, 'windows'))
         self.assertTrue(equivalent(self.SHORT, self.LONG))  # syntax auto-detected
+        self.assertTrue(equivalent(r"\\server\share\RUNNER~1\baseline",
+                                   r"\\server\share\runneradmin\baseline", 'windows'))
+        self.assertFalse(equivalent(r"\\server\other\RUNNER~1\baseline",
+                                    r"\\server\share\runneradmin\baseline", 'windows'))
 
     def test_windows_aliases_reject_unrelated_or_extra_components(self):
         equivalent = m.report_path_equivalent
@@ -817,7 +821,9 @@ class ReportPathEquivalenceTests(unittest.TestCase):
                 r"C:\Users\RUNNER~1\AppData\Local\Temp\iris-parity\wrong",
                 r"C:\Users\robert~1\AppData\Local\Temp\iris-parity\baseline",
                 r"C:\Users\runner~1\AppData\Local\Temp\iris-parity\runner~2",
-                r"C:\Users\verylongprefix~1\AppData\Local\Temp\iris-parity\baseline"):
+                r"C:\Users\verylongprefix~1\AppData\Local\Temp\iris-parity\baseline",
+                r"C:Users\RUNNER~1\AppData\Local\Temp\iris-parity\baseline",
+                r"\Users\RUNNER~1\AppData\Local\Temp\iris-parity\baseline"):
             with self.subTest(other=other):
                 self.assertFalse(equivalent(self.SHORT, other, 'windows'))
                 self.assertFalse(equivalent(other, self.SHORT, 'windows'))
