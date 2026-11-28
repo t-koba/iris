@@ -240,8 +240,9 @@ class JxrVendorHardening(unittest.TestCase):
             self.assertIn(f"`{commit}` is {cve}", provenance, f"missing mapping {commit}")
         # A CVE identifier must never be attributed to the newer imported hunks.
         second_batch = provenance.split("Second imported batch", 1)[1]
-        for _, cve in mappings:
-            self.assertNotIn(cve, second_batch, f"CVE leaked into second batch: {cve}")
+        self.assertNotRegex(
+            second_batch, r"CVE-\d{4}-\d+", "CVE attributed to second batch"
+        )
 
     def test_provenance_and_ci_guard(self):
         provenance = read("IRIS-VENDOR.md")
