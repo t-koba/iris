@@ -78,8 +78,16 @@ pub(super) fn candidate_from_range(
     let (width, height) = match crate::jpeg::jpeg_dimensions(&probe) {
         Some(dimensions) => dimensions,
         None if probe_len < len => {
-            let full = source.read_range(start, len)?;
-            crate::jpeg::jpeg_dimensions(&full)?
+            let wide_len = len.min(JPEG_WIDE_PROBE_BYTES);
+            let wide = source.read_range(start, wide_len)?;
+            if let Some(dimensions) = crate::jpeg::jpeg_dimensions(&wide) {
+                dimensions
+            } else if wide_len == len {
+                return None;
+            } else {
+                let full = source.read_range(start, len)?;
+                crate::jpeg::jpeg_dimensions(&full)?
+            }
         }
         None => return None,
     };
@@ -189,14 +197,24 @@ mod tests {
         assert_eq!(source.reads.into_inner(), vec![4096]);
     }
 
-    #[test]
-    fn late_sof_falls_back_without_losing_dimensions() {
-        let mut data = vec![0xFF, 0xD8, 0xFF, 0xE0, 0xFF, 0xFF];
-        // APP0 payload ends after the 64 KiB probe boundary.
-        data.resize(2 + 2 + 65535, 0);
+    fn jpeg_with_late_sof(sof_offset: usize, total: usize) -> Vec<u8> {
+        let mut data = vec![0xFF, 0xD8];
+        while sof_offset - data.len() > 4 {
+            let segment_len = (sof_offset - data.len() - 2).min(usize::from(u16::MAX));
+            data.extend_from_slice(&[0xFF, 0xE0]);
+            data.extend_from_slice(&(segment_len as u16).to_be_bytes());
+            data.resize(data.len() + segment_len - 2, 0);
+        }
         data.extend_from_slice(&sof0(640, 480));
         data.extend_from_slice(&[0xFF, 0xD9]);
-        let total = data.len();
+        data.resize(total, 0);
+        data
+    }
+
+    #[test]
+    fn sof_after_first_probe_uses_wide_prefix_without_full_read() {
+        let total = 300 * 1024;
+        let data = jpeg_with_late_sof(128 * 1024, total);
         let source = RecordingSource {
             data,
             reads: RefCell::new(Vec::new()),
@@ -204,6 +222,26 @@ mod tests {
         let candidate = candidate_from_range(&source, 0, total).unwrap();
         assert_eq!((candidate.width, candidate.height), (640, 480));
         assert_eq!(candidate.byte_len, total);
-        assert_eq!(source.reads.into_inner(), vec![JPEG_PROBE_BYTES, total]);
+        assert_eq!(
+            source.reads.into_inner(),
+            vec![JPEG_PROBE_BYTES, JPEG_WIDE_PROBE_BYTES]
+        );
+    }
+
+    #[test]
+    fn sof_after_wide_probe_falls_back_to_full_range() {
+        let total = 320 * 1024;
+        let data = jpeg_with_late_sof(280 * 1024, total);
+        let source = RecordingSource {
+            data,
+            reads: RefCell::new(Vec::new()),
+        };
+        let candidate = candidate_from_range(&source, 0, total).unwrap();
+        assert_eq!((candidate.width, candidate.height), (640, 480));
+        assert_eq!(candidate.byte_len, total);
+        assert_eq!(
+            source.reads.into_inner(),
+            vec![JPEG_PROBE_BYTES, JPEG_WIDE_PROBE_BYTES, total]
+        );
     }
 }
