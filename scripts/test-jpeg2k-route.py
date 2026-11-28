@@ -7,9 +7,10 @@ vendored, patched or statically linked. This checks that every Cargo.lock
 pinning either crate (including the detached Windows prototype workspace) pins
 the unmodified crates.io crates by checksum, that no in-repo copy or path patch
 remains, and that the Rust TLM/SOT guard and its tests remain wired into CI. It
-also checks that the verbatim upstream BSD-2-Clause notice, the font notices
-and the SPDX MIT notice for the pinned `block` fork reach the Linux, macOS and
-Windows release notice sets with unchanged bytes. This is
+also checks that the verbatim upstream BSD-2-Clause notice, the font notices,
+the SPDX MIT notice for the pinned `block` fork and the verbatim license texts
+of the linked vendored crates reach the Linux, macOS and Windows release notice
+sets with unchanged bytes. This is
 configuration evidence, not execution evidence: it does not establish that an
 advisory proof of concept was reproduced or that a particular input is safe.
 """
@@ -195,7 +196,27 @@ class ReleaseNoticeSet(unittest.TestCase):
          "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd"),
         ("block-mit.txt", "packaging/third-party-notices/block-mit.txt",
          "3dbb61cc50fd61a7114cc3dc10ab58d981228790d50e4dba2d537f87839b1acb"),
+        ("cryoglyph-mit.txt",
+         "packaging/third-party-notices/cryoglyph-mit.txt",
+         "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"),
+        ("cryoglyph-apache-2.0.txt",
+         "packaging/third-party-notices/cryoglyph-apache-2.0.txt",
+         "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"),
+        ("cryoglyph-zlib.txt",
+         "packaging/third-party-notices/cryoglyph-zlib.txt",
+         "b3ec01ad0869c5c50937bc68780cd0bb44e235ad858dfa54a7a381dced9b115a"),
+        ("jpegxr-bsd-3-clause.txt",
+         "packaging/third-party-notices/jpegxr-bsd-3-clause.txt",
+         "f7a19d880e5c4cd98701970ae9550775b66fce292e7946b4af6a15f4887151d6"),
     )
+    # The four appended notices are verbatim copies of files in the linked
+    # vendored crates; the original four keep their positions.
+    vendored_sources = {
+        "packaging/third-party-notices/cryoglyph-mit.txt": "vendor/cryoglyph/LICENSE-MIT",
+        "packaging/third-party-notices/cryoglyph-apache-2.0.txt": "vendor/cryoglyph/LICENSE-APACHE",
+        "packaging/third-party-notices/cryoglyph-zlib.txt": "vendor/cryoglyph/LICENSE-ZLIB",
+        "packaging/third-party-notices/jpegxr-bsd-3-clause.txt": "vendor/jpegxr/license.md",
+    }
 
     def module(self, relative):
         spec = importlib.util.spec_from_file_location(relative, root / relative)
@@ -243,6 +264,66 @@ class ReleaseNoticeSet(unittest.TestCase):
         self.assertNotRegex(text, r"\b(?:19|20)\d{2}\b", "invented copyright year")
         self.assertIn("Copyright (c) Steven Sheldon\n".encode("utf-8"), data)
 
+    def test_linked_vendored_notices_are_verbatim_vendor_bytes(self):
+        """The four staged notices match the linked vendored license files."""
+        ffmpeg = self.module("scripts/linux-ffmpeg.py")
+        bundle = self.module("scripts/windows-release-source-bundle.py")
+        appended = self.notices[4:]
+        self.assertEqual(len(appended), 4)
+        self.assertEqual({relative for _, relative, _ in appended},
+                         set(self.vendored_sources))
+        for name, relative, sha256 in appended:
+            with self.subTest(notice=name):
+                expected = (root / self.vendored_sources[relative]).read_bytes()
+                staged = (root / relative).read_bytes()
+                self.assertEqual(staged, expected, "staged notice is not verbatim")
+                self.assertEqual(hashlib.sha256(expected).hexdigest(), sha256)
+                with tempfile.TemporaryDirectory() as temporary:
+                    docs = Path(temporary)
+                    ffmpeg.stage_rust_notices(docs)
+                    self.assertEqual((docs / name).read_bytes(), expected)
+                    ffmpeg.check_rust_notices(docs)
+                members, inputs = {}, {}
+                bundle.add_third_party_notices(members, inputs)
+                self.assertEqual(members[name], expected)
+                self.assertEqual(inputs["third-party-notices/" + name]["sha256"], sha256)
+
+    def test_linked_vendored_notice_staging_refuses_changed_or_absent_source(self):
+        """Staging fails closed when a vendored source notice changes or vanishes."""
+        ffmpeg = self.module("scripts/linux-ffmpeg.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            sources = Path(temporary) / "sources"
+            docs = Path(temporary) / "docs"
+            docs.mkdir()
+            for _, relative, _ in ffmpeg.RUST_NOTICES:
+                target = sources / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((root / relative).read_bytes())
+            with mock.patch.object(ffmpeg, "ROOT", sources):
+                ffmpeg.stage_rust_notices(docs)
+                for relative in self.vendored_sources:
+                    path = sources / relative
+                    original = path.read_bytes()
+                    with self.subTest(source_absent=relative):
+                        path.unlink()
+                        with self.assertRaises(FileNotFoundError):
+                            ffmpeg.stage_rust_notices(docs)
+                        path.write_bytes(original)
+                    with self.subTest(source_tampered=relative):
+                        path.write_bytes(original + b"tampered")
+                        with self.assertRaisesRegex(
+                                ValueError, "Rust notice differs from pinned bytes"):
+                            ffmpeg.stage_rust_notices(docs)
+                        path.write_bytes(original)
+                ffmpeg.stage_rust_notices(docs)
+            for name, _, _ in self.notices[4:]:
+                with self.subTest(staged_absent=name):
+                    staged = docs / name
+                    staged.unlink()
+                    with self.assertRaisesRegex(ValueError, "missing staged Rust notice"):
+                        ffmpeg.check_rust_notices(docs)
+                    ffmpeg.stage_rust_notices(docs)
+
     def test_posix_runtime_notice_sets_stage_and_verify_exact_bytes(self):
         ffmpeg = self.module("scripts/linux-ffmpeg.py")
         source = read("scripts/macos-ffmpeg.py")
@@ -275,6 +356,7 @@ class ReleaseNoticeSet(unittest.TestCase):
         bundle = self.module("scripts/windows-release-source-bundle.py")
         members, inputs = {}, {}
         bundle.add_third_party_notices(members, inputs)
+        readme_notices = {item[0] for item in self.notices[:4]}
         for name, relative, sha256 in self.notices:
             with self.subTest(notice=name):
                 self.assertIn((name, relative, sha256), bundle.THIRD_PARTY_NOTICES)
@@ -283,7 +365,11 @@ class ReleaseNoticeSet(unittest.TestCase):
                 binding = inputs["third-party-notices/" + name]
                 self.assertEqual((binding["sha256"], binding["bytes"]),
                                  (sha256, len(expected)))
-                self.assertIn(name, read("packaging/windows/ffmpeg-README.md"))
+                if name in readme_notices:
+                    self.assertIn(name, read("packaging/windows/ffmpeg-README.md"))
+                else:
+                    self.assertIn(name, read("docs/architecture.md"),
+                                  "linked vendored notice is not described")
 
     def test_windows_legal_notice_archive_rejects_tampered_or_missing_bytes(self):
         bundle = self.module("scripts/windows-release-source-bundle.py")
@@ -316,8 +402,9 @@ class ReleaseNoticeSet(unittest.TestCase):
                         path.write_bytes(original)
 
     def test_posix_native_evidence_maps_the_staged_notice(self):
-        suffixes = ("openjpeg2-pure-rs-license.txt", "noto-sans-cjk-jp-OFL.txt",
-                    "material-symbols-apache-2.0.txt", "block-mit.txt")
+        # Only the original four notices are listed in the reviewed native
+        # evidence mapping; the appended vendored notices are staged as docs.
+        suffixes = tuple(Path(relative).name for _, relative, _ in self.notices[:4])
         roots = {"linux": "Iris.AppDir/usr/share/doc/iris/ffmpeg/",
                  "macos": "Iris.app/Contents/Resources/ffmpeg/"}
         for platform, prefix in roots.items():

@@ -72,6 +72,18 @@ THIRD_PARTY_NOTICES = (
     ("block-mit.txt",
      "packaging/third-party-notices/block-mit.txt",
      "3dbb61cc50fd61a7114cc3dc10ab58d981228790d50e4dba2d537f87839b1acb"),
+    ("cryoglyph-mit.txt",
+     "packaging/third-party-notices/cryoglyph-mit.txt",
+     "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"),
+    ("cryoglyph-apache-2.0.txt",
+     "packaging/third-party-notices/cryoglyph-apache-2.0.txt",
+     "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"),
+    ("cryoglyph-zlib.txt",
+     "packaging/third-party-notices/cryoglyph-zlib.txt",
+     "b3ec01ad0869c5c50937bc68780cd0bb44e235ad858dfa54a7a381dced9b115a"),
+    ("jpegxr-bsd-3-clause.txt",
+     "packaging/third-party-notices/jpegxr-bsd-3-clause.txt",
+     "f7a19d880e5c4cd98701970ae9550775b66fce292e7946b4af6a15f4887151d6"),
 )
 # Every redistributed overlay root file must name the upstream notice that
 # travels with it. Adding a helper without a notice assignment is refused.

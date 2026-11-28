@@ -158,6 +158,10 @@ SIL OFL 1.1 と Apache-2.0 の通知 bytes を
 上流 LICENSE の verbatim bytes ではないことをヘッダーに明記します。同じ 3 つの
 通知 set に同じ bytes を同梱し、SHA-256 `3dbb61cc50fd61a7114cc3dc10ab58d981228790d50e4dba2d537f87839b1acb` で固定します。
 
+`iced_wgpu` が依存する vendored `cryoglyph` 0.1.0（MIT OR Apache-2.0 OR Zlib）と、JPEG XR プレビューにリンクされる vendored `jpegxr` 0.3.1 の jxrlib（BSD-3-Clause）についても、`vendor/` のライセンス文書の bytes をそのまま `packaging/third-party-notices/` に保管します。`cryoglyph-mit.txt`、`cryoglyph-apache-2.0.txt`、`cryoglyph-zlib.txt` はそれぞれ `vendor/cryoglyph/LICENSE-MIT`、`LICENSE-APACHE`、`LICENSE-ZLIB` と、`jpegxr-bsd-3-clause.txt` は `vendor/jpegxr/license.md` とバイト単位で一致します。SHA-256 は順に `23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3`、`a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2`、`b3ec01ad0869c5c50937bc68780cd0bb44e235ad858dfa54a7a381dced9b115a`、`f7a19d880e5c4cd98701970ae9550775b66fce292e7946b4af6a15f4887151d6` で固定し、Linux の AppDir、macOS の app bundle、Windows の ZIP の通知 set に同じ bytes を staging します。
+
+`crates/paste-compat` の背後で使う `pastey` 0.1.1 はビルド時に動作する proc macro で、ランタイム成果物には同梱されません。
+
 #### PDFium（chromium/8138）
 
 PDF のサムネイル生成では、macOS は CoreGraphics、Linux などは動的に読み込んだ PDFium を使います。Iris は PDFium をブラウザーのサンドボックスなしでプロセス内から FFI で呼び出すため、缺陷が存在する場合に影響を受けるのは Iris プロセス自体です。
