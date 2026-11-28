@@ -128,7 +128,7 @@ fn encode_resized_image(
     file_path: Option<&Path>,
 ) -> Option<ThumbnailResult> {
     let resized = if img.width() > max_dimension || img.height() > max_dimension {
-        img.thumbnail(max_dimension, max_dimension)
+        crate::fast_thumbnail::thumbnail(&img, max_dimension)
     } else {
         img
     };

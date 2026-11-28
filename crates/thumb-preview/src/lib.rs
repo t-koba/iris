@@ -5,6 +5,7 @@
 mod macos_ffi;
 
 pub mod encoded;
+mod fast_thumbnail;
 pub mod image_generic;
 pub mod io;
 pub mod jpeg;
