@@ -226,6 +226,23 @@ class JxrVendorHardening(unittest.TestCase):
         for impl in ("GetSizeWS_File", "GetSizeWS_Memory", "GetSizeWS_List"):
             self.assertIn(impl, strcodec, f"stream size query missing {impl}")
 
+    def test_cve_traceability_matches_imported_first_batch(self):
+        provenance = read("IRIS-VENDOR.md")
+        mappings = (
+            ("cb97e6d", "CVE-2026-129857"),
+            ("d6e5f8d19d452d1191c329614077f0fecab933c6", "CVE-2026-129858"),
+            ("debe47a27c1ae37626fae9b8369db93e47d0aa19", "CVE-2024-58407"),
+            ("ba86c041febb1472551681bae0d59a62e2e42072", "CVE-2024-58408"),
+            ("190078d2c4d8fcc9e4660baf0f65c960fa95dd21", "CVE-2026-129859"),
+            ("7d2d462f6ca2d8395dde8b33883a9751299d6144", "CVE-2026-129860"),
+        )
+        for commit, cve in mappings:
+            self.assertIn(f"`{commit}` is {cve}", provenance, f"missing mapping {commit}")
+        # A CVE identifier must never be attributed to the newer imported hunks.
+        second_batch = provenance.split("Second imported batch", 1)[1]
+        for _, cve in mappings:
+            self.assertNotIn(cve, second_batch, f"CVE leaked into second batch: {cve}")
+
     def test_provenance_and_ci_guard(self):
         provenance = read("IRIS-VENDOR.md")
         for commit in (

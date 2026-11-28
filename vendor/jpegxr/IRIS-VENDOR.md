@@ -47,6 +47,18 @@ were not. `scripts/test-jxr-vendor-hardening.py` fails if any of them is absent
 or altered. This is a source-level hardening of the existing vendored copy,
 not a claim of end-to-end Iris exploitability or release readiness.
 
+CVE traceability for that first batch (identifiers assigned and catalogued after
+the upstream fixes were imported): `cb97e6d` is CVE-2026-129857,
+`d6e5f8d19d452d1191c329614077f0fecab933c6` is CVE-2026-129858,
+`debe47a27c1ae37626fae9b8369db93e47d0aa19` is CVE-2024-58407,
+`ba86c041febb1472551681bae0d59a62e2e42072` is CVE-2024-58408,
+`190078d2c4d8fcc9e4660baf0f65c960fa95dd21` is CVE-2026-129859, and
+`7d2d462f6ca2d8395dde8b33883a9751299d6144` is CVE-2026-129860. The four
+2026-129xxx records were published on 2026-11-16; the 2024-numbered records
+describe the same functions and upstream fix commits. These identifiers record
+source-level correspondence only: they do not establish Iris end-to-end
+exploitability, and no CVE is claimed for the second batch below.
+
 Second imported batch, from the 1.4.5-1.4.7 range of the same upstream
 (BSD-2-Clause sources and license text, unchanged). The vendored tree is not
 stock 1.4.4, so each hunk was adapted function-by-function rather than applied
