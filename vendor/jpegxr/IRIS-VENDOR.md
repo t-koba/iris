@@ -31,6 +31,22 @@ probe exercises the production guard with boundary counts without adding any
 crafted JPEG-XR bytes. This is a local source fix, not a claim of end-to-end
 Iris exploitability or a replacement of the vendored decoder.
 
+Imported upstream safety fixes (BSD-3-Clause, same licence and upstream project):
+the mircomir/jxrlib fixes for the six damaged-file memory bugs reported in 2026.
+The metadata-count wrap is already covered by the local guard above (upstream
+`cb97e6d`). The remaining five minimal hunks are ported here with their commit
+IDs: `d6e5f8d19d452d1191c329614077f0fecab933c6` rejects an unterminated
+8-byte WMPHOTO signature before `strstr`;
+`debe47a27c1ae37626fae9b8369db93e47d0aa19` bounds the significance-run table
+index; `ba86c041febb1472551681bae0d59a62e2e42072` bounds the bit-depth table
+index; `190078d2c4d8fcc9e4660baf0f65c960fa95dd21` rejects a missing coefficient
+buffer before `memset`; and `7d2d462f6ca2d8395dde8b33883a9751299d6144` turns a
+debug-only orientation assertion into a hard format error. Only these security
+hunks were imported; unrelated platform, version and cosmetic upstream changes
+were not. `scripts/test-jxr-vendor-hardening.py` fails if any of them is absent
+or altered. This is a source-level hardening of the existing vendored copy,
+not a claim of end-to-end Iris exploitability or release readiness.
+
 The registry cache markers, duplicate manifest/license metadata, JS/Wasm tooling
 and binary documentation are omitted. The 8.7 MiB upstream screenshot is replaced
 by a 17 KiB synthetic fixture at `samples/panel-hdr.jxr`, preserving the metadata

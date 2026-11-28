@@ -170,6 +170,10 @@ jobs:
           cargo test -p iris-thumb-preview --lib modern_image::tests::tlm_ --locked
           python3 scripts/test-jpeg2k-route.py
 
+      - name: JPEG XR vendored decoder hardening regression
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-jxr-vendor-hardening.py
+
       - name: Paste compatibility facade regression
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/test-paste-compat.py

@@ -355,6 +355,10 @@ static Void DecodeCBP(CWMImageStrCodec * pSC, CCodingContext *pContext)
 
 Int _FORCEINLINE DecodeSignificantRun (Int iMaxRun, struct CAdaptiveHuffman *pAHexpt, BitIOInfo* pIO)
 {
+    /* Upstream debe47a: reject an out-of-range significance-run bin index. */
+    if (iMaxRun < 0 || iMaxRun > 14) {
+        return 0;
+    }
     Int iIndex;
     static const Int aRemap[] = {1,2,3,5,7,   1,2,3,5,7,   /*1,2,3,4,6,  */1,2,3,4,5 };
     Int iBin = gSignificantRunBin[iMaxRun];
