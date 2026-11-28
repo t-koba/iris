@@ -97,8 +97,9 @@ upstream n8.1.3 Changelog (https://github.com/FFmpeg/FFmpeg/blob/n8.1.3/Changelo
 the 8.1-branch backports for CVE-2026-70628 (DVB subtitle parser signed overflow),
 CVE-2026-70629 (RSCC uninitialized data), CVE-2026-70630 (Screenpresso short deflate
 output), CVE-2026-70631 (TIFF short inflate output) and CVE-2026-70632 (CFHD transform-2
-output width). Debian and NVD CPE ranges saying before 9.0 track distribution versions and
-do not model those upstream branch backports; the security web page has no 8.1.3 section.
+output width). Debian's tracker lists distribution versions, while NVD/CVE CPE ranges describe
+upstream releases as before 9.0; neither models those 8.1-branch backports in n8.1.3, and the
+security web page has no 8.1.3 section.
 This is source-level evidence for the pinned n8.1.3 tree, not proof that a shipped binary
 contains the backports or that Iris reaches the affected paths. Untrusted media remains
 untrusted; for a single-user desktop preview flow the documented impact is a bounded

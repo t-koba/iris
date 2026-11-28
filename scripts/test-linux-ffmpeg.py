@@ -185,6 +185,8 @@ class RuntimeContracts(unittest.TestCase):
             for cve in ("70628", "70629", "70630", "70631", "70632"):
                 self.assertIn("CVE-2026-" + cve, text)
             self.assertNotIn("pinned 8.1.3 is in range", text)
+            self.assertIn("NVD/CVE CPE ranges describe upstream releases", text.replace("\n", " "))
+            self.assertIn("Debian's tracker lists distribution versions", text.replace("\n", " "))
         self.assertEqual(module.POLICY["version"], "8.1.3")
 
     def test_pinned_fetch_retries_are_bounded_and_configurable(self):
