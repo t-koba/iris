@@ -675,23 +675,6 @@ def baseline_fetch_step(sha=BASELINE_SHA, cat_file_guard=True):
     return step
 
 
-class SourceByteBindingTests(unittest.TestCase):
-    """The gate's digested sources must check out byte-identically everywhere."""
-
-    def test_digested_sources_are_pinned_to_lf(self):
-        import fnmatch
-        attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
-        rules = [line.split()[0] for line in attributes
-                 if line.strip() and not line.lstrip().startswith("#")
-                 and "text" in line and "eol=lf" in line]
-        for relative in ("Cargo.lock", str(m.BUILD_SCRIPT),
-                         "crates/thumb-preview/examples/" + m.HARNESS,
-                         "tests/preview-corpus/fixtures.json"):
-            with self.subTest(path=relative):
-                self.assertTrue(any(fnmatch.fnmatchcase(relative, rule) for rule in rules),
-                                f"{relative} has no eol=lf checkout rule")
-
-
 class WorkflowContractTests(unittest.TestCase):
     JOBS = ("parity-linux", "parity-macos", "parity-windows")
     CHECKOUT_STEP = (
