@@ -793,6 +793,44 @@ def compiled_settings_function(example):
     return bodies[0]
 
 
+class ReportPathEquivalenceTests(unittest.TestCase):
+    """Path aliases accepted by the provenance fix must stay narrow."""
+
+    LONG = r"C:\Users\runneradmin\AppData\Local\Temp\iris-parity\baseline"
+    SHORT = r"C:\Users\RUNNER~1\AppData\Local\Temp\iris-parity\baseline"
+
+    def test_windows_short_name_aliases_match_in_both_directions(self):
+        equivalent = m.report_path_equivalent
+        for left, right in ((self.SHORT, self.LONG), (self.LONG, self.SHORT),
+                            ("\\\\?\\" + self.SHORT, self.LONG),
+                            (self.SHORT.upper(), self.LONG)):
+            with self.subTest(left=left, right=right):
+                self.assertTrue(equivalent(left, right, 'windows'))
+        self.assertTrue(equivalent(self.SHORT, self.LONG))  # syntax auto-detected
+
+    def test_windows_aliases_reject_unrelated_or_extra_components(self):
+        equivalent = m.report_path_equivalent
+        for other in (
+                r"D:\Users\RUNNER~1\AppData\Local\Temp\iris-parity\baseline",
+                r"C:\Users\RUNNER~1\AppData\Local\Other\iris-parity\baseline",
+                r"C:\Users\RUNNER~1\AppData\Local\Temp\extra\iris-parity\baseline",
+                r"C:\Users\RUNNER~1\AppData\Local\Temp\iris-parity\wrong",
+                r"C:\Users\robert~1\AppData\Local\Temp\iris-parity\baseline",
+                r"C:\Users\runner~1\AppData\Local\Temp\iris-parity\runner~2",
+                r"C:\Users\verylongprefix~1\AppData\Local\Temp\iris-parity\baseline"):
+            with self.subTest(other=other):
+                self.assertFalse(equivalent(self.SHORT, other, 'windows'))
+                self.assertFalse(equivalent(other, self.SHORT, 'windows'))
+
+    def test_posix_comparison_stays_exact_and_case_sensitive(self):
+        equivalent = m.report_path_equivalent
+        self.assertTrue(equivalent('/opt/iris/baseline', '/opt/iris/baseline', 'linux'))
+        self.assertFalse(equivalent('/opt/iris/baseline', '/Opt/iris/baseline', 'linux'))
+        self.assertFalse(equivalent('/opt/iris-s~1/baseline', '/opt/iris-source/baseline',
+                                    'linux'))
+        self.assertFalse(equivalent('/opt/iris/baseline', self.SHORT))
+
+
 class BuildScriptContractTests(unittest.TestCase):
     def prepare_crate(self, temporary, main_source):
         crate = Path(temporary) / 'tiny'

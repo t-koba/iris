@@ -160,6 +160,55 @@ def report_path(value, platform=None):
     return report_path_module(value, platform).join(parent, name)
 
 
+_WINDOWS_SHORT_COMPONENT = re.compile(r"([^~\\/]{1,6})~[1-9][0-9]*\Z")
+
+
+def _windows_short_prefix(component):
+    """Return the prefix of a whole 8.3-style component, if it is one."""
+    match = _WINDOWS_SHORT_COMPONENT.match(component)
+    return match.group(1) if match else None
+
+
+def _windows_component_equivalent(left, right):
+    """Match equal components, or one 8.3 alias against its longer long name."""
+    if left == right:
+        return True
+    left_prefix = _windows_short_prefix(left)
+    right_prefix = _windows_short_prefix(right)
+    return ((left_prefix is not None and right_prefix is None
+             and right.startswith(left_prefix) and len(right) > len(left))
+            or (right_prefix is not None and left_prefix is None
+                and left.startswith(right_prefix) and len(left) > len(right)))
+
+
+def report_path_equivalent(left, right, platform=None):
+    """Return whether two report paths name the same location.
+
+    POSIX paths keep report_path()'s exact, case-sensitive comparison. Windows
+    paths are normalized in the producing syntax (extended prefix removed,
+    casefolded) and compared component by component: one whole ``prefix~n``
+    component may stand for a strictly longer component starting with that
+    same prefix, as Windows 8.3 short names do. The drive, component count and
+    every other component must still match, so a short ancestor aliases only
+    its own long name -- not another drive, root, extra directory or filename.
+    """
+    module = report_path_module(left, platform)
+    if module is not report_path_module(right, platform):
+        return False
+    left, right = report_path(left, platform), report_path(right, platform)
+    if module is posixpath:
+        return left == right
+    left_drive, left_rest = ntpath.splitdrive(left)
+    right_drive, right_rest = ntpath.splitdrive(right)
+    if left_drive.casefold() != right_drive.casefold():
+        return False
+    left_parts = [part for part in re.split(r"[\\/]+", left_rest) if part]
+    right_parts = [part for part in re.split(r"[\\/]+", right_rest) if part]
+    return (len(left_parts) == len(right_parts)
+            and all(_windows_component_equivalent(a, b)
+                    for a, b in zip(left_parts, right_parts)))
+
+
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 

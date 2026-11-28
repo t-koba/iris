@@ -43,6 +43,23 @@ WINDOWS_WORKTREES = {
 }
 
 
+WINDOWS_LONG_ROOT = r"C:\Users\runneradmin\AppData\Local\Temp\iris-parity"
+WINDOWS_SHORT_ROOT = r"C:\Users\RUNNER~1\AppData\Local\Temp\iris-parity"
+
+
+def windows_root_worktrees(root):
+    return {side: ntpath.join(root, side) for side in ("baseline", "candidate")}
+
+
+def set_windows_attribution(report, worktrees, libraries, filename="pdfium.dll"):
+    """Point each side's worktree identity and loaded library at given directories."""
+    for side in ("baseline", "candidate"):
+        report[side]["worktree"] = worktrees[side]
+        report[side]["corpus"]["pdfium_runtime"]["path"] = ntpath.join(
+            libraries[side], filename)
+    return report
+
+
 def report_worktree(platform, side):
     return WINDOWS_WORKTREES[side] if platform == "windows" else WORKTREES[side]
 
@@ -318,6 +335,66 @@ class ReleaseParityTests(unittest.TestCase):
         self.save("windows", report)
         result = self.assert_rejected()
         self.assertIn("PDFium path is not the staged worktree library", result.stderr)
+
+    def test_accepts_windows_short_name_ancestor_on_both_sides(self):
+        original = copy.deepcopy(self.reports["windows"])
+        long_worktrees = windows_root_worktrees(WINDOWS_LONG_ROOT)
+        short_worktrees = windows_root_worktrees(WINDOWS_SHORT_ROOT)
+        for kind, worktrees, libraries in (
+                ("short_library", long_worktrees, short_worktrees),
+                ("short_worktree", short_worktrees, long_worktrees)):
+            with self.subTest(kind=kind):
+                report = copy.deepcopy(original)
+                self.save("windows", set_windows_attribution(
+                    report, worktrees, libraries))
+                result = self.gate()
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejects_windows_paths_that_are_not_the_same_worktree(self):
+        original = copy.deepcopy(self.reports["windows"])
+        worktrees = windows_root_worktrees(WINDOWS_LONG_ROOT)
+        roots = {
+            "different_drive": r"D:\Users\RUNNER~1\AppData\Local\Temp\iris-parity",
+            "different_temp_name": r"C:\Users\RUNNER~1\AppData\Local\Other\iris-parity",
+            "extra_component": r"C:\Users\RUNNER~1\AppData\Local\Temp\extra\iris-parity",
+        }
+        for kind, root in roots.items():
+            with self.subTest(kind=kind):
+                report = copy.deepcopy(original)
+                self.save("windows", set_windows_attribution(
+                    report, worktrees, windows_root_worktrees(root)))
+                result = self.assert_rejected()
+                self.assertIn("PDFium path is not the staged worktree library",
+                              result.stderr)
+        with self.subTest(kind="different_final_directory"):
+            report = copy.deepcopy(original)
+            libraries = {side: ntpath.join(WINDOWS_SHORT_ROOT, "wrong")
+                         for side in ("baseline", "candidate")}
+            self.save("windows", set_windows_attribution(report, worktrees, libraries))
+            result = self.assert_rejected()
+            self.assertIn("PDFium path is not the staged worktree library",
+                          result.stderr)
+
+    def test_rejects_wrong_windows_filename_with_short_name_ancestor(self):
+        report = copy.deepcopy(self.reports["windows"])
+        self.save("windows", set_windows_attribution(
+            report, windows_root_worktrees(WINDOWS_LONG_ROOT),
+            windows_root_worktrees(WINDOWS_SHORT_ROOT), filename="pdfium64.dll"))
+        result = self.assert_rejected()
+        self.assertIn("pdfium runtime mismatch", result.stderr)
+
+    def test_posix_pdfium_attribution_stays_case_sensitive(self):
+        original = copy.deepcopy(self.reports["linux"])
+        for kind, worktree in (
+                ("different_case", "/Tmp/iris-parity-source-baseline"),
+                ("short_name_alias", "/tmp/iris-parity-source-b~1")):
+            with self.subTest(kind=kind):
+                report = copy.deepcopy(original)
+                report["baseline"]["worktree"] = worktree
+                self.save("linux", report)
+                result = self.assert_rejected()
+                self.assertIn("PDFium path is not the staged worktree library",
+                              result.stderr)
 
     def test_rejects_posix_library_name_in_windows_report(self):
         report = copy.deepcopy(self.reports["windows"])
