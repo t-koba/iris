@@ -846,6 +846,10 @@ Void freeTileInfo(CWMImageStrCodec * pSC)
 {
     size_t iTile;
 
+    /* Upstream 544a0ce: no tile array means there is nothing to free. */
+    if(pSC->pTile == NULL)
+        return;
+
     if((pSC->m_param.uQPMode & 1) != 0) // not DC uniform
         for(iTile = 0; iTile <= pSC->WMISCP.cNumOfSliceMinus1V; iTile ++)
             freeQuantizer(pSC->pTile[iTile].pQuantizerDC);
@@ -888,7 +892,7 @@ Int allocateQuantizer(CWMIQuantizer * pQuantizer[MAX_CHANNELS], size_t cChannel,
 
 Void freeQuantizer(CWMIQuantizer * pQuantizer[MAX_CHANNELS])
 {
-    if(pQuantizer[0] != NULL)
+    if(pQuantizer != NULL && pQuantizer[0] != NULL)
         free(pQuantizer[0]);
 }
 

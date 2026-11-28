@@ -427,6 +427,9 @@ ERR PKCodecFactory_CreateDecoderFromFile(const char* szFilename, PKImageDecode**
     pDecoder->fStreamOwner = !0;
 
 Cleanup:
+    /* Upstream 9f5616a: release a decoder whose initialization failed. */
+    if (pDecoder && err != WMP_errSuccess)
+        pDecoder->Release(ppDecoder);
     return err;
 }
 

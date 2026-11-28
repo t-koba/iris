@@ -805,8 +805,12 @@ Int DecodeMacroblockLowpass (CWMImageStrCodec * pSC, CCodingContext *pContext,
     UNREFERENCED_PARAMETER( iMBYdummy );
 
     readIS_L1(pSC, pIO);
-    if((pSC->WMISCP.bfBitstreamFormat != SPATIAL) && (pSC->pTile[pSC->cTileColumn].cBitsLP > 0))  // MB-based LP QP index
+    if((pSC->WMISCP.bfBitstreamFormat != SPATIAL) && (pSC->pTile[pSC->cTileColumn].cBitsLP > 0)) {  // MB-based LP QP index
         pMBInfo->iQIndexLP = decodeQPIndex(pIO, pSC->pTile[pSC->cTileColumn].cBitsLP);
+        /* Upstream 9bf026d: reject an out-of-range MB-based LP QP index. */
+        if (pMBInfo->iQIndexLP >= pSC->pTile[pSC->cTileColumn].cNumQPLP)
+            return ICERR_ERROR;
+    }
     
     // set arrays
     for (k = 0; k < (Int) pSC->m_param.cNumChannels; k++) {

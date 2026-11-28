@@ -1715,7 +1715,6 @@ ERR ParsePFDEntry(
             // Change type from C-style byte array to LPWSTR
             assert((U8*)pID->WMP.sDescMetadata.pvarCaption.VT.pwszVal ==
                 pID->WMP.sDescMetadata.pvarCaption.VT.pbVal);
-            assert(0 == pID->WMP.sDescMetadata.pvarCaption.VT.pwszVal[uCount/sizeof(U16) - 1]); // Confirm null-term
             //  make sure null term (ReadPropvar allocated enough space for this)
             pID->WMP.sDescMetadata.pvarCaption.VT.pwszVal[uCount/sizeof(U16)] = 0;
             pID->WMP.sDescMetadata.pvarCaption.vt = DPKVT_LPWSTR;
@@ -1955,6 +1954,8 @@ ERR PKImageDecode_Copy_WMP(
     // and I didn't care to get into floating point or a bunch of conditional tests or
     // other rewrite for a case not needed nor tested by PS plugin.  sorry.
     linesperMBRow = 16 / cThumbnailScale;
+    /* Upstream c7f0ff5 / 0d92eb5: reject a thumbnail scale that would divide by zero. */
+    FailIf(0 == linesperMBRow, WMP_errFail);
 
 #ifdef REENTRANT_MODE
     if (0 == pID->WMP.DecoderCurrMBRow) 
@@ -1985,6 +1986,8 @@ ERR PKImageDecode_Copy_WMP(
 #ifdef REENTRANT_MODE
         if (0 == pID->WMP.DecoderCurrMBRow) 
         {
+            /* Upstream 0e9a584: rewind before capturing the marker for a fresh decode. */
+            Call(pID->WMP.wmiSCP.pWStream->SetPos(pID->WMP.wmiSCP.pWStream, pID->WMP.wmiDEMisc.uImageOffset));
             Call(pID->WMP.wmiSCP.pWStream->GetPos(pID->WMP.wmiSCP.pWStream, &(pID->WMP.cMarker)));
             FailIf(ICERR_OK != ImageStrDecInit(&pID->WMP.wmiI, &pID->WMP.wmiSCP, &pID->WMP.ctxSC), WMP_errFail);
         }
@@ -2051,9 +2054,11 @@ ERR PKImageDecode_Copy_WMP(
 
         // If we're past the top of the image, then we're done, so terminate.
         if (linesperMBRow * (cMBRow - 1) >= (U32) pID->WMP.cLinesCropped + pID->WMP.wmiI.cROIHeight) {
-            FailIf(ICERR_OK != ImageStrDecTerm(pID->WMP.ctxSC), WMP_errFail);        
+            FailIf(ICERR_OK != ImageStrDecTerm(pID->WMP.ctxSC), WMP_errFail);
+            pID->WMP.DecoderCurrMBRow = 0;
         }
-        pID->WMP.DecoderCurrMBRow = cMBRow; // Set to next possible MBRow that is decodable
+        else
+            pID->WMP.DecoderCurrMBRow = cMBRow; // Set to next possible MBRow that is decodable
 
 #else
         FailIf(ICERR_OK != ImageStrDecInit(&pID->WMP.wmiI, &pID->WMP.wmiSCP, &pID->WMP.ctxSC), WMP_errFail);
@@ -2134,8 +2139,10 @@ ERR PKImageDecode_Copy_WMP(
         // If we're past the top of the image, then we're done, so terminate
         if (linesperMBRow * (cMBRow - 1) >= (U32) pID->WMP.cLinesCropped + pID->WMP.wmiI.cROIHeight) {
             FailIf(ICERR_OK != ImageStrDecTerm(pID->WMP.ctxSC_Alpha), WMP_errFail);
+            pID->WMP.DecoderCurrAlphaMBRow = 0;
         }
-        pID->WMP.DecoderCurrAlphaMBRow = cMBRow; // Set to next possible MBRow that is decodable
+        else
+            pID->WMP.DecoderCurrAlphaMBRow = cMBRow; // Set to next possible MBRow that is decodable
         wmiBI.pv = pb;
 #else
         FailIf(ICERR_OK != ImageStrDecInit(&pID->WMP.wmiI_Alpha, &pID->WMP.wmiSCP_Alpha, &pID->WMP.ctxSC_Alpha), WMP_errFail);
@@ -2147,6 +2154,11 @@ ERR PKImageDecode_Copy_WMP(
     pID->idxCurrentLine += pRect->Height;
 
 Cleanup:
+    /* Upstream 0e9a584: a failed reentrant decode leaves no usable decoder state. */
+    if (err != WMP_errSuccess) {
+        pID->WMP.DecoderCurrMBRow = 0;
+        pID->WMP.DecoderCurrAlphaMBRow = 0;
+    }
     return err;
 }
 

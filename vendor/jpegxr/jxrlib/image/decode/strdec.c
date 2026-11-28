@@ -3023,6 +3023,8 @@ pSCP->bdBitDepth = BD_LONG; // remove when optimization is done
 // size
     pII->cWidth = getBit32_SB(pSB, bAbbreviatedHeader ? 16 : 32) + 1;
     pII->cHeight = getBit32_SB(pSB, bAbbreviatedHeader ? 16 : 32) + 1;
+    /* Upstream 5d93278: keep dimensions small enough for stride and buffer arithmetic. */
+    FailIf(pII->cWidth > (1 << 28) || pII->cHeight > (1 << 28), WMP_errUnsupportedFormat);
     pSC->cExtraPixelsTop = pSC->cExtraPixelsLeft = pSC->cExtraPixelsBottom = pSC->cExtraPixelsRight = 0;
     if (bInscribed == FALSE && (pII->cWidth & 0xf) != 0)
         pSC->cExtraPixelsRight = 0x10 - (pII->cWidth & 0xF);
@@ -3116,6 +3118,10 @@ EXTERN_C Int WMPhotoValidate(
     size_t cScale = 1;
 
     if(ImageStrDecGetInfo(&cII, pSCP) != ICERR_OK)
+        return ICERR_ERROR;
+
+    /* Upstream 5d93278: reject a plane larger than the caller's image dimensions. */
+    if(pII->cWidth && pII->cHeight && (cII.cWidth > pII->cWidth || cII.cHeight > pII->cHeight))
         return ICERR_ERROR;
 
     // copy over un-overwritable ImageInfo parameters
@@ -3408,6 +3414,13 @@ Int ImageStrDecInit(
     PERFTIMER_STOP(pSC->m_fMeasurePerf, pSC->m_ptEncDecPerf);
 
 Cleanup:
+    if (err != WMP_errSuccess && pSC != NULL) {
+        /* Upstream 9f5616a: release a partially initialized decoder on failure. */
+        pSC->m_pNextSC = pNextSC;
+        StrDecTerm(pSC);
+        free(pSC->m_pNextSC);
+        free(pSC);
+    }
     return WMP_errSuccess == err ? ICERR_OK : ICERR_ERROR;
 }
 
