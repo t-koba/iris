@@ -81,8 +81,8 @@ THIRD_PARTY_NOTICES = (
     ("cryoglyph-zlib.txt",
      "packaging/third-party-notices/cryoglyph-zlib.txt",
      "b3ec01ad0869c5c50937bc68780cd0bb44e235ad858dfa54a7a381dced9b115a"),
-    ("jpegxr-bsd-3-clause.txt",
-     "packaging/third-party-notices/jpegxr-bsd-3-clause.txt",
+    ("jpegxr-bsd-2-clause.txt",
+     "packaging/third-party-notices/jpegxr-bsd-2-clause.txt",
      "f7a19d880e5c4cd98701970ae9550775b66fce292e7946b4af6a15f4887151d6"),
 )
 # Every redistributed overlay root file must name the upstream notice that

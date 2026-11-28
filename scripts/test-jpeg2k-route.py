@@ -205,8 +205,8 @@ class ReleaseNoticeSet(unittest.TestCase):
         ("cryoglyph-zlib.txt",
          "packaging/third-party-notices/cryoglyph-zlib.txt",
          "b3ec01ad0869c5c50937bc68780cd0bb44e235ad858dfa54a7a381dced9b115a"),
-        ("jpegxr-bsd-3-clause.txt",
-         "packaging/third-party-notices/jpegxr-bsd-3-clause.txt",
+        ("jpegxr-bsd-2-clause.txt",
+         "packaging/third-party-notices/jpegxr-bsd-2-clause.txt",
          "f7a19d880e5c4cd98701970ae9550775b66fce292e7946b4af6a15f4887151d6"),
     )
     # The four appended notices are verbatim copies of files in the linked
@@ -215,7 +215,7 @@ class ReleaseNoticeSet(unittest.TestCase):
         "packaging/third-party-notices/cryoglyph-mit.txt": "vendor/cryoglyph/LICENSE-MIT",
         "packaging/third-party-notices/cryoglyph-apache-2.0.txt": "vendor/cryoglyph/LICENSE-APACHE",
         "packaging/third-party-notices/cryoglyph-zlib.txt": "vendor/cryoglyph/LICENSE-ZLIB",
-        "packaging/third-party-notices/jpegxr-bsd-3-clause.txt": "vendor/jpegxr/license.md",
+        "packaging/third-party-notices/jpegxr-bsd-2-clause.txt": "vendor/jpegxr/license.md",
     }
 
     def module(self, relative):

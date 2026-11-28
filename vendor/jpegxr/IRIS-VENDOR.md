@@ -4,7 +4,7 @@ Source: the crates.io `jpegxr` 0.3.1 package from
 <https://github.com/brion/jpegxr>, upstream revision
 `3e8b298304cd8a42e773afb0af5cf57bd49549c4` (package VCS metadata); crates.io
 archive SHA-256 `20a0328c45484d19035d80b72eaadaefa374ff3f4b07737b6ad426587c890fbf`.
-License: BSD-3-Clause; see `license.md` and the notices in the C sources.
+License: the crate metadata declares BSD-3-Clause, but the bundled jxrlib C sources and `license.md` text are BSD-2-Clause (two conditions, no non-endorsement clause). See `license.md` and the notices in the C sources.
 
 This temporary Cargo patch changes the build dependency from bindgen 0.69
 to 0.73.2 with the same runtime-only features used by Iris's FFmpeg bindings.
@@ -31,7 +31,7 @@ probe exercises the production guard with boundary counts without adding any
 crafted JPEG-XR bytes. This is a local source fix, not a claim of end-to-end
 Iris exploitability or a replacement of the vendored decoder.
 
-Imported upstream safety fixes (BSD-3-Clause, same licence and upstream project):
+Imported upstream safety fixes (BSD-2-Clause text in `license.md` and C headers; crate metadata declares BSD-3-Clause, same upstream project):
 the mircomir/jxrlib fixes for the six damaged-file memory bugs reported in 2026.
 The metadata-count wrap is already covered by the local guard above (upstream
 `cb97e6d`). The remaining five minimal hunks are ported here with their commit
