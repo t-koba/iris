@@ -382,7 +382,8 @@ fn loaded_pdfium_path() -> Option<String> {
         // field and can itself contain spaces.
         let path = line.splitn(6, char::is_whitespace).nth(5)?;
         let name = Path::new(path).file_name()?.to_str()?;
-        (name == "libpdfium.so" || name.starts_with("libpdfium.so.")).then(|| path.to_owned())
+        (name == "libpdfium.so" || name.starts_with("libpdfium.so."))
+            .then(|| path.trim().to_owned())
     })
 }
 

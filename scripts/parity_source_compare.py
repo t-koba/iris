@@ -411,6 +411,9 @@ def canonical_pdfium_runtime(runtime, staged, label):
     loaded = runtime.get('path')
     require(type(loaded) is str and loaded.strip(),
             f'{label}: invalid pdfium runtime path')
+    # /proc/self/maps right-aligns its pathname field; accept that padding but
+    # compare file identity only after removing it.
+    loaded = loaded.strip()
     staged = Path(staged).resolve()
     require(staged.is_file(), f'{label}: staged PDFium library is missing')
     require(os.path.isfile(loaded), f'{label}: loaded PDFium library is missing')

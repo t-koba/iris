@@ -876,7 +876,8 @@ class CanonicalPdfiumRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='iris-pdfium-smoke-') as temporary:
             staged = Path(temporary) / name
             staged.write_bytes(b'staged library')
-            observed = pdfium_runtime(path=str(Path(temporary) / 'nested' / '..' / name))
+            observed = pdfium_runtime(
+                path='  ' + str(Path(temporary) / 'nested' / '..' / name))
             (Path(temporary) / 'nested').mkdir()
             with mock.patch.object(m, 'run', return_value=('', '')), \
                  mock.patch.object(m, 'parse_records',
