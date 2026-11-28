@@ -231,19 +231,24 @@ fn openjp2_to_dynamic(image: &openjp2::Image) -> Option<DynamicImage> {
 }
 
 fn scale_u8(component: &openjp2::ImageComponent, pixels: usize) -> Vec<u8> {
-    let prec = u32::from(component.precision.clamp(1, 31));
+    // Only reached when every component has at most 8 bits. A 256-entry table
+    // removes a runtime integer division per sample from this hot path; the
+    // table entries are the same `(v * 255) / old_max` values as before.
+    let prec = u32::from(component.precision.clamp(1, 8));
+    let old_max = (1u32 << prec) - 1;
+    let mut lut = [0u8; 256];
+    for (value, entry) in lut.iter_mut().enumerate().take(old_max as usize + 1) {
+        *entry = ((value * 255) / old_max as usize) as u8;
+    }
     let offset = if component.signed {
         1i64 << (prec - 1)
     } else {
         0
     };
-    let old_max = (1i64 << prec) - 1;
+    let limit = i64::from(old_max);
     component.data[..pixels]
         .iter()
-        .map(|&sample| {
-            let v = (i64::from(sample) + offset).clamp(0, old_max);
-            ((v * 255) / old_max) as u8
-        })
+        .map(|&sample| lut[(i64::from(sample) + offset).clamp(0, limit) as usize])
         .collect()
 }
 
@@ -1307,6 +1312,33 @@ mod tests {
         }
         let usable_alloc = usize::try_from(JXL_MAX_ALLOC_BYTES).unwrap();
         assert!(usable_alloc > 0 && usable_alloc < usize::MAX);
+    }
+
+    #[test]
+    fn scale_u8_lookup_matches_division_for_eight_bit_samples() {
+        for precision in 1..=8u8 {
+            let old_max = (1i64 << precision) - 1;
+            for signed in [false, true] {
+                let offset = if signed { 1i64 << (precision - 1) } else { 0 };
+                let mut lut = [0u8; 256];
+                for (value, entry) in lut.iter_mut().enumerate().take(old_max as usize + 1) {
+                    *entry = ((value * 255) / old_max as usize) as u8;
+                }
+                let low = if signed {
+                    -(1i64 << (precision - 1))
+                } else {
+                    0
+                };
+                for sample in low..=old_max {
+                    let v = (sample + offset).clamp(0, old_max);
+                    assert_eq!(
+                        lut[v as usize],
+                        ((v * 255) / old_max) as u8,
+                        "precision {precision}, signed {signed}, sample {sample}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
