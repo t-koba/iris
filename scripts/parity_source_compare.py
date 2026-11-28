@@ -517,7 +517,10 @@ def stage_common_examples(repo, baseline, candidate):
 @contextmanager
 def worktree(repo, sha, scratch, name):
     path = scratch / name
-    run(['git', '-C', repo, 'worktree', 'add', '--detach', path, sha], ROOT,
+    # Byte-faithful worktrees: a Windows runner's implicit CRLF conversion
+    # would make the same revision hash differently across platforms.
+    run(['git', '-c', 'core.autocrlf=false', '-C', repo, 'worktree',
+         'add', '--detach', path, sha], ROOT,
         os.environ.copy(), f'worktree add {name}')
     try:
         yield path

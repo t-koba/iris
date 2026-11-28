@@ -98,6 +98,38 @@ def text(section):
 
 
 class ParitySourceCompareTests(unittest.TestCase):
+    def test_worktrees_are_created_without_eol_conversion(self):
+        source = (ROOT / "scripts" / "parity_source_compare.py").read_text()
+        self.assertIn("'-c', 'core.autocrlf=false', '-C', repo, 'worktree'", source)
+
+        # Prove the flag actually keeps blob bytes identical when a runner has
+        # implicit CRLF conversion enabled and the tree has no eol attribute.
+        with tempfile.TemporaryDirectory(prefix="iris-parity-eol-") as temporary:
+            repo = Path(temporary) / "repo"
+            repo.mkdir()
+            def git(*args):
+                return subprocess.run(["git", "-C", str(repo), *args],
+                                      capture_output=True, text=True, check=True)
+            git("init", "-q")
+            git("config", "core.autocrlf", "true")
+            payload = repo / "sample.txt"
+            payload.write_bytes(b"line one\nline two\n")
+            git("-c", "user.email=test@example.invalid", "-c", "user.name=test",
+                "add", "sample.txt")
+            git("-c", "user.email=test@example.invalid", "-c", "user.name=test",
+                "commit", "-qm", "fixture")
+            sha = git("rev-parse", "HEAD").stdout.strip()
+            converted = Path(temporary) / "converted"
+            faithful = Path(temporary) / "faithful"
+            git("worktree", "add", "-q", "--detach", str(converted), sha)
+            subprocess.run(["git", "-c", "core.autocrlf=false", "-C", str(repo),
+                            "worktree", "add", "-q", "--detach", str(faithful), sha],
+                           capture_output=True, text=True, check=True)
+            self.assertEqual((converted / "sample.txt").read_bytes(),
+                             b"line one\r\nline two\r\n")
+            self.assertEqual((faithful / "sample.txt").read_bytes(),
+                             b"line one\nline two\n")
+
     def test_parse_records_accepts_exact_set_and_rejects_bad_streams(self):
         parsed = m.parse_records(text(section()), {m.J2K_OPERATION}, 'synthetic')
         self.assertEqual(parsed['correctness']['record'], 'iris.preview_correctness.v1')
