@@ -6,3 +6,10 @@ vendor/jpegxr/** -whitespace
 # Retain third-party notice texts with the exact bytes pinned by the bundler.
 packaging/windows/third-party-notices/*.txt text eol=lf
 packaging/third-party-notices/*.txt text eol=lf
+
+# Parity reports bind the bytes of these sources across platforms; force LF on
+# every checkout so Windows CRLF conversion cannot fail the release gate.
+Cargo.lock text eol=lf
+crates/thumb-preview/build.rs text eol=lf
+crates/thumb-preview/examples/*.rs text eol=lf
+tests/preview-corpus/fixtures.json text eol=lf
