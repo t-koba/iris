@@ -261,6 +261,13 @@ class InstallerScriptContracts(unittest.TestCase):
             if line.startswith("Name:"):
                 self.assertIn("Check: IsVcRedistInstalled", line)
 
+    def test_code_section_uses_pascal_comments(self):
+        # Inno Setup parses [Code] as Pascal; INI-style ';' comments are a
+        # compile error there, while '//' and '{...}' are valid Pascal.
+        code = self.text.split("[Code]", 1)[1].split("[Tasks]", 1)[0]
+        for line in code.splitlines():
+            self.assertFalse(line.lstrip().startswith(";"), line)
+
     def test_vc_redist_is_not_bundled_or_downloaded(self):
         for token in ISS_VC_FORBIDDEN:
             with self.subTest(token=token):

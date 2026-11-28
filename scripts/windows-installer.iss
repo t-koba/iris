@@ -37,9 +37,9 @@ WizardStyle=modern
 VcRedistMissing=Iris requires the Visual C++ Redistributable for Visual Studio 2015-2022 (x64), which is not installed on this computer. Install the matching x64 redistributable from Microsoft and run this installer again.
 
 [Code]
-; The checked-in VC import allowlist records that a runner's system-directory
-; copy is not proof of what a target system provides. Iris x64 PE imports are
-; satisfied by this externally installed runtime; no app-local copies exist.
+// The checked-in VC import allowlist records that a runner's system-directory
+// copy is not proof of what a target system provides. Iris x64 PE imports are
+// satisfied by this externally installed runtime; no app-local copies exist.
 function IsVcRedistInstalled: Boolean;
 var
   SystemDir: string;
