@@ -1226,6 +1226,20 @@ mod tests {
     }
 
     #[test]
+    fn batch_rename_invalid_regex_is_reported_without_panicking() {
+        let mut dialog = dialog_with_items(vec![batch_item("/tmp/a.txt", "a.txt")]);
+        dialog.mode = BatchRenameMode::Regex;
+        dialog.pattern_input = r"([".to_string();
+
+        refresh_batch_rename_preview(&mut dialog);
+
+        assert!(!dialog.can_apply());
+        let error = dialog.error_message.as_deref().unwrap();
+        assert!(error.starts_with(&tr("batch-rename-error-regex")));
+        assert_eq!(dialog.preview[0].new_name, "a.txt");
+    }
+
+    #[test]
     fn batch_rename_preview_blocks_existing_destination() {
         let mut dialog = dialog_with_items(vec![
             batch_item("/tmp/a.txt", "a.txt"),
