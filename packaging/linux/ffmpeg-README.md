@@ -91,18 +91,18 @@ also supports a compatible replacement through the dynamic loader's normal
 
 ## Security and system dependencies
 
-The upstream security page (https://ffmpeg.org/security.html) lists fixes for
-CVE-2026-8461 and CVE-2026-30999 in 8.1.2; this runtime selects 8.1.3 (libavcodec
-62.28.103). CVE-2026-70629 (RSCC decoder) and CVE-2026-70631 (TIFF decoder) are
-uninitialized-heap-read disclosures affecting FFmpeg before 9.0; 8.1.3 is in range and
-both decoders are enabled. A retained exact-SHA Linux CI inventory (source revision
-e753c3164efe06221266c848016a6424fbcb198e, workflow run 44263681973) records both
-RSCC_DECODER and TIFF_DECODER in `runtime.enabled_codecs` for this pinned 8.1.3 build
-(libavcodec 62.28.103); that is external CI evidence about the tested runner build, not a
-claim of Iris reachability, release-artifact equivalence, or a required runtime change.
-Their documented impact needs a crafted file in a persistent,
-multi-user decoding service; for a single-user desktop preview flow this is a bounded
-residual risk, not an assumption that untrusted media is safe. This is not a claim of a
+The upstream security page (https://ffmpeg.org/security.html) lists fixes for CVE-2026-8461
+and CVE-2026-30999 in 8.1.2; this runtime selects n8.1.3 (libavcodec 62.28.103). The
+upstream n8.1.3 Changelog (https://github.com/FFmpeg/FFmpeg/blob/n8.1.3/Changelog) records
+the 8.1-branch backports for CVE-2026-70628 (DVB subtitle parser signed overflow),
+CVE-2026-70629 (RSCC uninitialized data), CVE-2026-70630 (Screenpresso short deflate
+output), CVE-2026-70631 (TIFF short inflate output) and CVE-2026-70632 (CFHD transform-2
+output width). Debian and NVD CPE ranges saying before 9.0 track distribution versions and
+do not model those upstream branch backports; the security web page has no 8.1.3 section.
+This is source-level evidence for the pinned n8.1.3 tree, not proof that a shipped binary
+contains the backports or that Iris reaches the affected paths. Untrusted media remains
+untrusted; for a single-user desktop preview flow the documented impact is a bounded
+residual risk, not an assumption that malformed media is safe. This is not a claim of a
 broader security review.
 
 To ship FFmpeg fixes, distributors must update the source/hash/signature pin and rebuild;

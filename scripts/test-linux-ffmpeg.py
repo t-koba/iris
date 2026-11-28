@@ -177,6 +177,16 @@ class RuntimeContracts(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "system FFmpeg"):
                     module.check(root, output, 4096)
 
+    def test_ffmpeg_cve_scope_matches_the_pinned_8_1_3_changelog(self):
+        scope = module.POLICY["security_scope"]
+        readme = (ROOT / "packaging/linux/ffmpeg-README.md").read_text()
+        for text in (scope, readme):
+            self.assertIn("n8.1.3 Changelog", text)
+            for cve in ("70628", "70629", "70630", "70631", "70632"):
+                self.assertIn("CVE-2026-" + cve, text)
+            self.assertNotIn("pinned 8.1.3 is in range", text)
+        self.assertEqual(module.POLICY["version"], "8.1.3")
+
     def test_pinned_fetch_retries_are_bounded_and_configurable(self):
         build = (ROOT / "scripts/build-linux-ffmpeg.sh").read_text()
         self.assertIn('fetch_seconds=${IRIS_FFMPEG_FETCH_SECONDS:-300}', build)
