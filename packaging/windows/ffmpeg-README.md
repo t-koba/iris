@@ -59,6 +59,12 @@ the installer source file and the reviewed native evidence.
   exact `LICENSE` bytes from `material-foundation/material-symbols-and-variable-fonts`
   for the 48-glyph Material Symbols Outlined subset compiled into Iris, pinned at
   SHA-256 `58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd`.
+  It also retains `block-mit.txt`, the canonical MIT License text from SPDX
+  for the `block` fork pinned at b88ec0f in `Cargo.toml`. The Steven Sheldon
+  attribution comes from the pinned fork's Cargo.toml; neither the fork nor
+  upstream ships a LICENSE file, no year is asserted, and this is not a
+  verbatim upstream LICENSE. Its SHA-256 is
+  `3dbb61cc50fd61a7114cc3dc10ab58d981228790d50e4dba2d537f87839b1acb`.
 - `ffmpeg-build-materials.tar.gz`: the derived vcpkg portfile and its evidence,
   retained baseline-port patches, manifest, registry configuration, triplet,
   source-acquisition record, detached signature, signing key and GPG status.

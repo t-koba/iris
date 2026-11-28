@@ -7,9 +7,9 @@ vendored, patched or statically linked. This checks that every Cargo.lock
 pinning either crate (including the detached Windows prototype workspace) pins
 the unmodified crates.io crates by checksum, that no in-repo copy or path patch
 remains, and that the Rust TLM/SOT guard and its tests remain wired into CI. It
-also checks that the verbatim upstream BSD-2-Clause notice and the font
-notices reach the Linux, macOS and Windows release notice sets with unchanged
-bytes. This is
+also checks that the verbatim upstream BSD-2-Clause notice, the font notices
+and the SPDX MIT notice for the pinned `block` fork reach the Linux, macOS and
+Windows release notice sets with unchanged bytes. This is
 configuration evidence, not execution evidence: it does not establish that an
 advisory proof of concept was reproduced or that a particular input is safe.
 """
@@ -22,6 +22,7 @@ import os
 import re
 import tempfile
 import unittest
+from unittest import mock
 
 root = Path(__file__).resolve().parents[1]
 registry_source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -31,6 +32,28 @@ pinned = {
     "openjp2-ctypes": ("0.7.2", "fc7650425b4f7e4c514e4a6ccaa2c26612f935d0826d2ee5426635d3844a8361"),
     "openjpeg2-pure-rs": ("0.1.1", "70cbec9906e23f99197f321718ce1f7e2fccd455e45c5b3f7d2bf5d7b635f192"),
 }
+SPDX_MIT_BODY = """MIT License
+
+Copyright (c) Steven Sheldon
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
 
 
 def read(relative):
@@ -157,7 +180,7 @@ class Jpeg2kRegistryRoute(unittest.TestCase):
 
 
 class ReleaseNoticeSet(unittest.TestCase):
-    """The pinned upstream bytes reach every shipped notice set."""
+    """The pinned notice bytes reach every shipped notice set."""
 
     name = "openjpeg2-pure-rs-license.txt"
     sha256 = "a6af136f3e15038a666b61f376612a07d9a4e48cb7c01adbf3e33b3f14ab49b6"
@@ -170,6 +193,8 @@ class ReleaseNoticeSet(unittest.TestCase):
         ("material-symbols-apache-2.0.txt",
          "packaging/third-party-notices/material-symbols-apache-2.0.txt",
          "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd"),
+        ("block-mit.txt", "packaging/third-party-notices/block-mit.txt",
+         "3dbb61cc50fd61a7114cc3dc10ab58d981228790d50e4dba2d537f87839b1acb"),
     )
 
     def module(self, relative):
@@ -201,6 +226,22 @@ class ReleaseNoticeSet(unittest.TestCase):
                        b"                           Version 2.0, January 2004\n",
                        b"   APPENDIX: How to apply the Apache License to your work.\n"):
             self.assertIn(marker, apache, "full Apache-2.0 text changed")
+
+    def test_block_notice_is_spdx_mit_with_pinned_attribution(self):
+        _, relative, sha256 = self.notices[3]
+        data = (root / relative).read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), sha256)
+        self.assertTrue(data.endswith(SPDX_MIT_BODY.encode("utf-8")),
+                        "SPDX MIT License text changed")
+        text = data.decode("utf-8")
+        for marker in ("canonical MIT License text from SPDX",
+                       "https://spdx.org/licenses/MIT.html", "b88ec0f",
+                       "license = \"MIT\"", "author Steven Sheldon",
+                       "upstream ships a LICENSE file",
+                       "not a verbatim upstream LICENSE", "copyright year is asserted"):
+            self.assertIn(marker, text, "block notice provenance changed")
+        self.assertNotRegex(text, r"\b(?:19|20)\d{2}\b", "invented copyright year")
+        self.assertIn("Copyright (c) Steven Sheldon\n".encode("utf-8"), data)
 
     def test_posix_runtime_notice_sets_stage_and_verify_exact_bytes(self):
         ffmpeg = self.module("scripts/linux-ffmpeg.py")
@@ -244,9 +285,39 @@ class ReleaseNoticeSet(unittest.TestCase):
                                  (sha256, len(expected)))
                 self.assertIn(name, read("packaging/windows/ffmpeg-README.md"))
 
+    def test_windows_legal_notice_archive_rejects_tampered_or_missing_bytes(self):
+        bundle = self.module("scripts/windows-release-source-bundle.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            for _, relative, _ in bundle.THIRD_PARTY_NOTICES:
+                target = stage / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((root / relative).read_bytes())
+            with mock.patch.object(bundle, "ROOT", stage):
+                for name, relative, _ in self.notices:
+                    with self.subTest(tamper=name):
+                        members, inputs = {}, {}
+                        bundle.add_third_party_notices(members, inputs)
+                        self.assertEqual(len(members), len(bundle.THIRD_PARTY_NOTICES))
+                        path = stage / relative
+                        original = path.read_bytes()
+                        path.write_bytes(original + b"tampered")
+                        with self.assertRaisesRegex(ValueError,
+                                                   "third-party notice changed: " + name):
+                            bundle.add_third_party_notices({}, {})
+                        path.write_bytes(original)
+                for name, relative, _ in self.notices:
+                    with self.subTest(missing=name):
+                        path = stage / relative
+                        original = path.read_bytes()
+                        path.unlink()
+                        with self.assertRaisesRegex(ValueError, "absent or unsupported"):
+                            bundle.add_third_party_notices({}, {})
+                        path.write_bytes(original)
+
     def test_posix_native_evidence_maps_the_staged_notice(self):
         suffixes = ("openjpeg2-pure-rs-license.txt", "noto-sans-cjk-jp-OFL.txt",
-                    "material-symbols-apache-2.0.txt")
+                    "material-symbols-apache-2.0.txt", "block-mit.txt")
         roots = {"linux": "Iris.AppDir/usr/share/doc/iris/ffmpeg/",
                  "macos": "Iris.app/Contents/Resources/ffmpeg/"}
         for platform, prefix in roots.items():

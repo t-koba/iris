@@ -13,6 +13,12 @@ exact `LICENSE` bytes from `material-foundation/material-symbols-and-variable-fo
 for the 48-glyph Material Symbols Outlined subset compiled into Iris, pinned at
 SHA-256 `58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd`;
 both are hash-bound by `manifest.json`.
+`block-mit.txt` is the canonical MIT License text from SPDX for the `block`
+fork pinned at b88ec0f in `Cargo.toml`. The Steven Sheldon attribution comes
+from that pinned fork's Cargo.toml; neither the fork nor upstream ships a
+LICENSE file, no year is asserted, and this is not a verbatim upstream LICENSE.
+It is pinned at SHA-256 `3dbb61cc50fd61a7114cc3dc10ab58d981228790d50e4dba2d537f87839b1acb`
+and hash-bound by `manifest.json`.
 
 `Contents/Resources/ffmpeg/manifest.json` identifies the exact FFmpeg source pin,
 verified signing identity, configure policy, generated decoder inventory, build

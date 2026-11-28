@@ -151,6 +151,13 @@ SIL OFL 1.1 と Apache-2.0 の通知 bytes を
 の bytes をそのまま使い、SHA-256
 `58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd` で固定します。
 
+`Cargo.toml` の git pin（`block` 0.1.6 のフォーク、b88ec0f）にはフォーク側にも
+上流側にも LICENSE ファイルがありません。pin 先 Cargo.toml の
+`license = "MIT"` と作者 Steven Sheldon に基づき、SPDX の MIT License 本文を
+`packaging/third-party-notices/block-mit.txt` に保管します。年号は書かず、
+上流 LICENSE の verbatim bytes ではないことをヘッダーに明記します。同じ 3 つの
+通知 set に同じ bytes を同梱し、SHA-256 `3dbb61cc50fd61a7114cc3dc10ab58d981228790d50e4dba2d537f87839b1acb` で固定します。
+
 #### PDFium（chromium/8138）
 
 PDF のサムネイル生成では、macOS は CoreGraphics、Linux などは動的に読み込んだ PDFium を使います。Iris は PDFium をブラウザーのサンドボックスなしでプロセス内から FFI で呼び出すため、缺陷が存在する場合に影響を受けるのは Iris プロセス自体です。

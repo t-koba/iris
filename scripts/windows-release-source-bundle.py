@@ -69,6 +69,9 @@ THIRD_PARTY_NOTICES = (
     ("material-symbols-apache-2.0.txt",
      "packaging/third-party-notices/material-symbols-apache-2.0.txt",
      "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd"),
+    ("block-mit.txt",
+     "packaging/third-party-notices/block-mit.txt",
+     "3dbb61cc50fd61a7114cc3dc10ab58d981228790d50e4dba2d537f87839b1acb"),
 )
 # Every redistributed overlay root file must name the upstream notice that
 # travels with it. Adding a helper without a notice assignment is refused.
@@ -282,7 +285,7 @@ def ffmpeg_members(args, inputs, notice):
 
 
 def add_third_party_notices(members, inputs):
-    """Retain upstream notices for every redistributed helper in the bundle."""
+    """Retain pinned notices for every redistributed helper in the bundle."""
     require(set(overlay_notices().values()) <= set(NOTICE_NAMES),
             "bundled overlay file has an unknown notice")
     for name, relative, expected in THIRD_PARTY_NOTICES:

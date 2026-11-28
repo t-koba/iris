@@ -13,9 +13,9 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = json.loads((ROOT / "packaging/linux/ffmpeg.json").read_text())
-# Upstream notices for code and fonts compiled into Iris. Each staged file is
-# copied verbatim and pinned by its upstream digest, never regenerated from
-# crate metadata or font tables.
+# Notices for code and fonts compiled into Iris. Each staged file is pinned by
+# its exact SHA-256: upstream notices are copied verbatim, while the SPDX MIT
+# notice for the pinned `block` fork carries its own provenance header.
 RUST_NOTICES = (
     ("openjpeg2-pure-rs-license.txt",
      "packaging/third-party-notices/openjpeg2-pure-rs-license.txt",
@@ -26,6 +26,9 @@ RUST_NOTICES = (
     ("material-symbols-apache-2.0.txt",
      "packaging/third-party-notices/material-symbols-apache-2.0.txt",
      "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd"),
+    ("block-mit.txt",
+     "packaging/third-party-notices/block-mit.txt",
+     "3dbb61cc50fd61a7114cc3dc10ab58d981228790d50e4dba2d537f87839b1acb"),
 )
 
 
@@ -34,12 +37,12 @@ def stage_rust_notices(docs):
     for name, relative, expected in RUST_NOTICES:
         data = (ROOT / relative).read_bytes()
         require(hashlib.sha256(data).hexdigest() == expected,
-                "Rust notice differs from upstream: " + name)
+                "Rust notice differs from pinned bytes: " + name)
         (Path(docs) / name).write_bytes(data)
 
 
 def check_rust_notices(docs):
-    """Require the staged bytes to be the exact upstream notice bytes."""
+    """Require the staged bytes to be the exact pinned notice bytes."""
     for name, _, expected in RUST_NOTICES:
         path = Path(docs) / name
         require(path.is_file() and not path.is_symlink(),
