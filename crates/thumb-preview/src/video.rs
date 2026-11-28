@@ -165,7 +165,10 @@ fn extract_keyframe(file_path: &Path, max_dimension: u32) -> Option<ThumbnailRes
 
             let img = image::RgbImage::from_raw(actual_w as u32, actual_h as u32, pixels)?;
 
-            let mut jpeg_buf = Cursor::new(Vec::new());
+            // Reserve a close estimate of the JPEG payload so encoding does not
+            // repeatedly grow the buffer inside the timed extraction.
+            let jpeg_capacity = (row_bytes * actual_h / 8).max(4096);
+            let mut jpeg_buf = Cursor::new(Vec::with_capacity(jpeg_capacity));
             image::DynamicImage::ImageRgb8(img)
                 .write_to(&mut jpeg_buf, image::ImageFormat::Jpeg)
                 .ok()?;

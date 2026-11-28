@@ -190,7 +190,10 @@ mod platform {
             CGContextRelease(ctx);
 
             let img = image::RgbaImage::from_raw(render_w as u32, render_h as u32, pixel_data)?;
-            let mut jpeg_buf = std::io::Cursor::new(Vec::new());
+            // Reserve a close estimate of the JPEG payload so encoding does not
+            // repeatedly grow the buffer inside the timed extraction.
+            let jpeg_capacity = (render_w * render_h * 3 / 8).max(4096);
+            let mut jpeg_buf = std::io::Cursor::new(Vec::with_capacity(jpeg_capacity));
             image::DynamicImage::ImageRgba8(img)
                 .write_to(&mut jpeg_buf, image::ImageFormat::Jpeg)
                 .ok()?;
