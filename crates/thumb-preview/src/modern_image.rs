@@ -1315,28 +1315,47 @@ mod tests {
     }
 
     #[test]
-    fn scale_u8_lookup_matches_division_for_eight_bit_samples() {
+    fn scale_u8_matches_division_for_eight_bit_samples() {
         for precision in 1..=8u8 {
-            let old_max = (1i64 << precision) - 1;
+            let max = (1i64 << precision) - 1;
             for signed in [false, true] {
-                let offset = if signed { 1i64 << (precision - 1) } else { 0 };
-                let mut lut = [0u8; 256];
-                for (value, entry) in lut.iter_mut().enumerate().take(old_max as usize + 1) {
-                    *entry = ((value * 255) / old_max as usize) as u8;
-                }
                 let low = if signed {
                     -(1i64 << (precision - 1))
                 } else {
                     0
                 };
-                for sample in low..=old_max {
-                    let v = (sample + offset).clamp(0, old_max);
-                    assert_eq!(
-                        lut[v as usize],
-                        ((v * 255) / old_max) as u8,
-                        "precision {precision}, signed {signed}, sample {sample}"
-                    );
-                }
+                let high = if signed {
+                    (1i64 << (precision - 1)) - 1
+                } else {
+                    max
+                };
+                let samples: Vec<i32> = std::iter::once(low - 1)
+                    .chain(low..=high)
+                    .chain(std::iter::once(high + 1))
+                    .map(|value| value as i32)
+                    .collect();
+                let component = openjp2::ImageComponent {
+                    width: samples.len() as u32,
+                    height: 1,
+                    dx: 1,
+                    dy: 1,
+                    precision,
+                    signed,
+                    data: samples.clone(),
+                };
+                let offset = if signed { 1i64 << (precision - 1) } else { 0 };
+                let expected: Vec<u8> = samples
+                    .iter()
+                    .map(|&sample| {
+                        let value = (i64::from(sample) + offset).clamp(0, max);
+                        ((value * 255) / max) as u8
+                    })
+                    .collect();
+                assert_eq!(
+                    scale_u8(&component, samples.len()),
+                    expected,
+                    "precision {precision}, signed {signed}"
+                );
             }
         }
     }
