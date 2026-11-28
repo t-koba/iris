@@ -30,7 +30,7 @@ OutputBaseFilename=Iris-windows-setup
 UninstallDisplayIcon={app}\Iris.exe
 WizardStyle=modern
 
-[CustomMessage]
+[CustomMessages]
 ; External prerequisite: no vc_redist binary is bundled with or downloaded by
 ; this installer. Microsoft documents that the matching 2015-2022 x64
 ; redistributable must already be installed on the target machine.

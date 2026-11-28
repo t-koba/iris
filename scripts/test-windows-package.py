@@ -85,7 +85,7 @@ FORBIDDEN = (
 ISS_VC_REQUIRED = (
     "ArchitecturesAllowed=x64",
     "ArchitecturesInstallIn64BitMode=x64",
-    "[CustomMessage]",
+    "[CustomMessages]",
     "VcRedistMissing=Iris requires the Visual C++ Redistributable for Visual Studio 2015-2022 (x64)",
     "[Code]",
     "function IsVcRedistInstalled: Boolean;",
@@ -234,6 +234,9 @@ class InstallerScriptContracts(unittest.TestCase):
         self.assertIn('Name: "{userdesktop}\\Iris"; Filename: "{app}\\Iris.exe"; Tasks: desktopicon; Check: IsVcRedistInstalled', self.text)
 
     def test_vc_redist_prerequisite_is_explicit_and_x64_scoped(self):
+        # Inno Setup expands {cm:...} only from [CustomMessages]; the singular
+        # section would compile but fail at runtime in InitializeSetup.
+        self.assertNotIn("[CustomMessage]", self.text)
         self.assertTrue(vc_contract_holds(self.text))
         for marker in ISS_VC_REQUIRED:
             with self.subTest(marker=marker):
