@@ -7,10 +7,22 @@ sources. A changed guard is a defect, not a version difference.
 """
 
 from pathlib import Path
+import re
 import unittest
 
 root = Path(__file__).resolve().parents[1]
 vendor = root / "vendor/jpegxr"
+
+SECOND_BATCH_COMMITS = (
+    "544a0ce8f7d11d24c2e73ee52ec6c5073c975b57",
+    "c7f0ff5d8d27ff579fd4075b7e6e41aa5afbe3e2",
+    "9f5616abf3e50ebf28a734006f420853492e2d87",
+    "0d92eb5ab4fca48c16fee672f66554338117251b",
+    "4b40a579d4838b8f67ed545b252fff8b06db0c9a",
+    "9bf026d7b33d4331cd5e47b94c33bd010cc9a197",
+    "5d932789cfeaf32298a7c280d819d6fc0a6e5f6b",
+    "0e9a58411bc876a2737963c54748cfc40744a326",
+)
 
 
 def read(relative):
@@ -238,11 +250,19 @@ class JxrVendorHardening(unittest.TestCase):
         )
         for commit, cve in mappings:
             self.assertIn(f"`{commit}` is {cve}", provenance, f"missing mapping {commit}")
-        # A CVE identifier must never be attributed to the newer imported hunks.
-        second_batch = provenance.split("Second imported batch", 1)[1]
-        self.assertNotRegex(
-            second_batch, r"CVE-\d{4}-\d+", "CVE attributed to second batch"
+        # Only the six first-batch identifiers may appear anywhere, and no
+        # second-batch commit may share a line with a CVE identifier.
+        expected = {cve for _, cve in mappings}
+        found = set(re.findall(r"CVE-\d{4}-\d+", provenance))
+        self.assertEqual(
+            found, expected, f"unexpected CVE identifiers: {sorted(found - expected)}"
         )
+        for commit in SECOND_BATCH_COMMITS:
+            for line in provenance.splitlines():
+                if commit in line:
+                    self.assertNotRegex(
+                        line, r"CVE-\d{4}-\d+", f"CVE attributed to {commit}"
+                    )
 
     def test_provenance_and_ci_guard(self):
         provenance = read("IRIS-VENDOR.md")
@@ -253,14 +273,7 @@ class JxrVendorHardening(unittest.TestCase):
             "ba86c041febb1472551681bae0d59a62e2e42072",
             "190078d2c4d8fcc9e4660baf0f65c960fa95dd21",
             "7d2d462f6ca2d8395dde8b33883a9751299d6144",
-            "544a0ce8f7d11d24c2e73ee52ec6c5073c975b57",
-            "c7f0ff5d8d27ff579fd4075b7e6e41aa5afbe3e2",
-            "9f5616abf3e50ebf28a734006f420853492e2d87",
-            "0d92eb5ab4fca48c16fee672f66554338117251b",
-            "4b40a579d4838b8f67ed545b252fff8b06db0c9a",
-            "9bf026d7b33d4331cd5e47b94c33bd010cc9a197",
-            "5d932789cfeaf32298a7c280d819d6fc0a6e5f6b",
-            "0e9a58411bc876a2737963c54748cfc40744a326",
+            *SECOND_BATCH_COMMITS,
         ):
             self.assertIn(commit, provenance, f"provenance missing {commit}")
         ci = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
