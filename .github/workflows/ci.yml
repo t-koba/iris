@@ -173,6 +173,9 @@ jobs:
       - name: JPEG XR vendored decoder hardening regression
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/test-jxr-vendor-hardening.py
+      - name: POSIX final payload notice verification regression
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/test-posix-notices.py
 
       - name: EXIF dependency security pin regression
         if: matrix.os == 'ubuntu-latest'
