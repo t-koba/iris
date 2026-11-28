@@ -314,6 +314,15 @@ def do_verify(args, env, runner):
     return 0
 
 
+def error_secrets(args, env):
+    """Credential values that a fail-closed error string must never carry."""
+    return [value for value in (
+        env.get(PFX_ENV), env.get(PASSWORD_ENV), env.get(TIMESTAMP_ENV),
+        getattr(args, "pfx", None), getattr(args, "password", None),
+        getattr(args, "timestamp", None),
+    ) if value]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -342,7 +351,8 @@ def main(argv=None):
             return do_sign(args, env, None, os.name)
         return do_verify(args, env, None)
     except SigningError as error:
-        print("Windows signing BLOCKED: " + scrub(str(error)), file=sys.stderr)
+        print("Windows signing BLOCKED: " + scrub(str(error), error_secrets(args, env)),
+              file=sys.stderr)
         return 1
     except Exception as error:
         print("Windows signing BLOCKED (" + type(error).__name__ + ")", file=sys.stderr)

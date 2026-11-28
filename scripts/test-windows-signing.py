@@ -342,6 +342,18 @@ class SignContracts(unittest.TestCase):
         self.assertNotIn(PFX_PASSWORD, stderr.getvalue())
         self.assertIn("RuntimeError", stderr.getvalue())
 
+    def test_cli_signing_error_stays_fail_closed(self):
+        # A SigningError must be reported, not turn into a scrub() TypeError
+        # traceback from inside its own exception handler.
+        stderr = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=True), \
+                patch.object(m, "do_sign", side_effect=m.SigningError("PFX password is missing")), \
+                contextlib.redirect_stderr(stderr):
+            self.assertEqual(m.main(["sign", "--output", str(self.evidence)]), 1)
+        self.assertIn("Windows signing BLOCKED", stderr.getvalue())
+        self.assertNotIn(PFX_PASSWORD, stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_locator_fails_closed_without_a_tool(self):
         with patch.object(m.shutil, "which", return_value=None), \
                 patch.dict(os.environ, {}, clear=True):
