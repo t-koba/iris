@@ -534,10 +534,21 @@ fn decode_jpeg_xl(data: &[u8]) -> Option<DynamicImage> {
     DynamicImage::from_decoder(decoder).ok()
 }
 
+// These are Iris preview policy ceilings. heif-oxide still enforces its own
+// per-picture HEVC cap, so `max_pixels` cannot raise that format limit.
+fn heic_limits() -> heif_oxide::Limits {
+    let mut limits = heif_oxide::Limits::default();
+    limits.max_pixels = 100_000_000;
+    limits.max_grid_tiles = 1024;
+    limits.max_item_payload_bytes = 256 * 1024 * 1024;
+    limits.max_picture_memory_bytes = 512 * 1024 * 1024;
+    limits
+}
+
 #[cold]
 #[inline(never)]
 fn decode_heic(data: &[u8]) -> Option<DynamicImage> {
-    let decoded = heif_oxide::decode_bytes(data).ok()?;
+    let decoded = heif_oxide::decode_bytes_with(data, &heic_limits()).ok()?;
     let rgba = image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.to_rgba8())?;
     Some(DynamicImage::ImageRgba8(rgba))
 }
@@ -1217,6 +1228,82 @@ mod tests {
     fn detects_compatible_brand_in_extended_ftyp_box() {
         let avif = b"\0\0\0\x01ftyp\0\0\0\0\0\0\0\x20mif1\0\0\0\0avifmif1";
         assert_eq!(detect(avif), Some(ModernFormat::Avif));
+    }
+
+    /// A one-item HEIC with an `ispe` declaration and a dummy `hvc1` payload.
+    /// The payload is never decoded: a pixel-limit rejection happens first.
+    fn heic_with_ispe(width: u32, height: u32) -> Vec<u8> {
+        fn bmff(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+            let mut bytes = ((8 + body.len()) as u32).to_be_bytes().to_vec();
+            bytes.extend_from_slice(kind);
+            bytes.extend_from_slice(body);
+            bytes
+        }
+        fn full(kind: &[u8; 4], version: u8, body: &[u8]) -> Vec<u8> {
+            let mut inner = vec![version, 0, 0, 0]; // flags = 0
+            inner.extend_from_slice(body);
+            bmff(kind, &inner)
+        }
+
+        let ftyp = bmff(b"ftyp", b"heic\0\0\0\0heic");
+        let payload = [0u8; 8];
+        let meta = |offset: u32| {
+            let pitm = full(b"pitm", 0, &1u16.to_be_bytes());
+            let mut infe_body = 1u16.to_be_bytes().to_vec(); // item id
+            infe_body.extend_from_slice(&0u16.to_be_bytes()); // protection index
+            infe_body.extend_from_slice(b"hvc1");
+            infe_body.push(0); // empty item name
+            let mut iinf_body = 1u16.to_be_bytes().to_vec(); // entry count
+            iinf_body.extend_from_slice(&full(b"infe", 2, &infe_body));
+            let iinf = full(b"iinf", 0, &iinf_body);
+
+            let mut iloc_body = vec![0x44, 0]; // 4-byte offsets and lengths
+            iloc_body.extend_from_slice(&1u16.to_be_bytes()); // item count
+            iloc_body.extend_from_slice(&1u16.to_be_bytes()); // item id
+            iloc_body.extend_from_slice(&0u16.to_be_bytes()); // data reference
+            iloc_body.extend_from_slice(&1u16.to_be_bytes()); // extent count
+            iloc_body.extend_from_slice(&offset.to_be_bytes());
+            iloc_body.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            let iloc = full(b"iloc", 0, &iloc_body);
+
+            let mut ispe_body = width.to_be_bytes().to_vec();
+            ispe_body.extend_from_slice(&height.to_be_bytes());
+            let mut iprp_body = bmff(b"ipco", &full(b"ispe", 0, &ispe_body));
+            let mut ipma_body = 1u32.to_be_bytes().to_vec(); // entry count
+            ipma_body.extend_from_slice(&1u16.to_be_bytes()); // item id
+            ipma_body.push(1); // property count
+            ipma_body.push(0x80 | 1); // essential ispe at index 1
+            iprp_body.extend_from_slice(&full(b"ipma", 0, &ipma_body));
+            let iprp = bmff(b"iprp", &iprp_body);
+
+            let mut meta_body = pitm;
+            meta_body.extend_from_slice(&iinf);
+            meta_body.extend_from_slice(&iloc);
+            meta_body.extend_from_slice(&iprp);
+            full(b"meta", 0, &meta_body)
+        };
+        let mdat_start = ftyp.len() + meta(0).len() + 8;
+        let mut file = ftyp;
+        file.extend_from_slice(&meta(mdat_start as u32));
+        file.extend_from_slice(&bmff(b"mdat", &payload));
+        file
+    }
+
+    #[test]
+    fn heic_ispe_above_preview_ceiling_is_rejected_before_hevc_decode() {
+        let bytes = heic_with_ispe(20_000, 20_000);
+        assert_eq!(detect(&bytes), Some(ModernFormat::Heic));
+        assert!(decode_heic(&bytes).is_none());
+        // The declaration itself is the rejection reason; the dummy hvc1
+        // payload cannot reach the HEVC decoder.
+        assert!(matches!(
+            heif_oxide::decode_bytes_with(&bytes, &heic_limits()),
+            Err(heif_oxide::HeifError::ImageTooLarge {
+                width: 20_000,
+                height: 20_000,
+                max_pixels: 100_000_000,
+            })
+        ));
     }
 
     #[test]

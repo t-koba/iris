@@ -2755,9 +2755,9 @@ dependencies = [
 
 [[package]]
 name = "heif-oxide"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e12acb6edcb3bb9227dc6a06dd375a221eafe397ae2de72a876d79313831e365"
+checksum = "6839df9900736e00ea35c584ad9bd66cdf7d1d20a61dc6e733e4db28f26fa4da"
 dependencies = [
  "rust_h265",
  "thiserror 2.0.21",
@@ -6193,9 +6193,9 @@ dependencies = [
 
 [[package]]
 name = "rust_h265"
-version = "0.1.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dde60f5842f27ed06f1d84844cacd93d1a159f606365b30a5594c771e6b4eb17"
+checksum = "673f6ab280648836c8a4b2bdaf4877532b2715e3fdcf6e37a2f46ebed41c8cfd"
 
 [[package]]
 name = "rustc-hash"
