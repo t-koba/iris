@@ -53,7 +53,9 @@ the upstream fixes were imported): `cb97e6d` is CVE-2026-129857,
 `debe47a27c1ae37626fae9b8369db93e47d0aa19` is CVE-2024-58407,
 `ba86c041febb1472551681bae0d59a62e2e42072` is CVE-2024-58408,
 `190078d2c4d8fcc9e4660baf0f65c960fa95dd21` is CVE-2026-129859, and
-`7d2d462f6ca2d8395dde8b33883a9751299d6144` is CVE-2026-129860. The four
+`7d2d462f6ca2d8395dde8b33883a9751299d6144` changes `ParsePFDEntry`, the function CVE-2026-129860 concerns, but that CVE record names
+different upstream fix commits; canonical patch identity is not established
+here. The four
 2026-129xxx records were published on 2026-11-16; the 2024-numbered records
 describe the same functions and upstream fix commits. These identifiers record
 source-level correspondence only: they do not establish Iris end-to-end

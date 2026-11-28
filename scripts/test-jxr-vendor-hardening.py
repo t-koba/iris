@@ -246,16 +246,24 @@ class JxrVendorHardening(unittest.TestCase):
             ("debe47a27c1ae37626fae9b8369db93e47d0aa19", "CVE-2024-58407"),
             ("ba86c041febb1472551681bae0d59a62e2e42072", "CVE-2024-58408"),
             ("190078d2c4d8fcc9e4660baf0f65c960fa95dd21", "CVE-2026-129859"),
-            ("7d2d462f6ca2d8395dde8b33883a9751299d6144", "CVE-2026-129860"),
         )
+        same_function = ("7d2d462f6ca2d8395dde8b33883a9751299d6144", "CVE-2026-129860")
+        all_mappings = (*mappings, same_function)
         for commit, cve in mappings:
             self.assertIn(f"`{commit}` is {cve}", provenance, f"missing mapping {commit}")
+        commit, cve = same_function
+        self.assertIn(
+            f"`{commit}` changes `ParsePFDEntry`, the function {cve} concerns",
+            provenance,
+            "same-function relationship must not be stated as an exact mapping",
+        )
+        self.assertNotIn(f"`{commit}` is {cve}", provenance)
         # Only the six first-batch identifiers may appear anywhere, and every
         # occurrence must sit on the line pairing it with its own first-batch
         # commit. This rejects a CVE claimed anywhere in the second imported
         # batch, independent of headings or of whether a second-batch commit
         # hash shares the line.
-        expected = {cve for _, cve in mappings}
+        expected = {cve for _, cve in all_mappings}
         found = set(re.findall(r"CVE-\d{4}-\d+", provenance))
         self.assertEqual(
             found, expected, f"unexpected CVE identifiers: {sorted(found - expected)}"
@@ -265,7 +273,7 @@ class JxrVendorHardening(unittest.TestCase):
             if not line_cves:
                 continue
             for cve in line_cves:
-                owners = [commit for commit, mapped in mappings if mapped == cve]
+                owners = [commit for commit, mapped in all_mappings if mapped == cve]
                 self.assertTrue(
                     any(commit in line for commit in owners),
                     f"{cve} is not paired with its first-batch commit: {line}",
