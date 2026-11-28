@@ -360,7 +360,10 @@ mod platform {
 
         // JPEG has no alpha channel; the image crate refuses to encode RGBA as JPEG.
         let rgb = image::DynamicImage::ImageRgb8(bitmap.as_image().ok()?.into_rgb8());
-        let mut buf = Cursor::new(Vec::new());
+        // Reserve a close estimate of the JPEG payload so encoding does not
+        // repeatedly grow the buffer inside the timed extraction.
+        let jpeg_capacity = (rgb.width() as usize * rgb.height() as usize * 3 / 8).max(4096);
+        let mut buf = Cursor::new(Vec::with_capacity(jpeg_capacity));
         rgb.write_to(&mut buf, image::ImageFormat::Jpeg).ok()?;
 
         debug!(
