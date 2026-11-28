@@ -53,7 +53,11 @@ the installer source file and the reviewed native evidence.
   `COPYRIGHT`/`CREDITS`, this notice and a `REPLACEMENT.md` excerpt of the
   DLL replacement instructions below.
   It also retains `openjpeg2-pure-rs-license.txt`, the verbatim BSD-2-Clause
-  notice for the pure-Rust JPEG 2000 decoder compiled into Iris.
+  notice for the pure-Rust JPEG 2000 decoder compiled into Iris,
+  `noto-sans-cjk-jp-OFL.txt`, the verbatim SIL OFL 1.1 notice for the Noto Sans
+  CJK JP subset compiled into Iris, and `material-symbols-apache-2.0.txt`, the
+  verbatim Apache-2.0 notice for the 48-glyph Material Symbols Outlined subset
+  compiled into Iris.
 - `ffmpeg-build-materials.tar.gz`: the derived vcpkg portfile and its evidence,
   retained baseline-port patches, manifest, registry configuration, triplet,
   source-acquisition record, detached signature, signing key and GPG status.

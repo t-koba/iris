@@ -63,6 +63,12 @@ THIRD_PARTY_NOTICES = (
     ("openjpeg2-pure-rs-license.txt",
      "packaging/third-party-notices/openjpeg2-pure-rs-license.txt",
      "a6af136f3e15038a666b61f376612a07d9a4e48cb7c01adbf3e33b3f14ab49b6"),
+    ("noto-sans-cjk-jp-OFL.txt",
+     "packaging/third-party-notices/noto-sans-cjk-jp-OFL.txt",
+     "1c05c68c34f9708415aada51f17e1b0092d2cea709bf4a94cd38114f9e73d7d9"),
+    ("material-symbols-apache-2.0.txt",
+     "packaging/third-party-notices/material-symbols-apache-2.0.txt",
+     "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"),
 )
 # Every redistributed overlay root file must name the upstream notice that
 # travels with it. Adding a helper without a notice assignment is refused.

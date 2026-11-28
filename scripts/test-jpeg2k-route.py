@@ -7,8 +7,9 @@ vendored, patched or statically linked. This checks that every Cargo.lock
 pinning either crate (including the detached Windows prototype workspace) pins
 the unmodified crates.io crates by checksum, that no in-repo copy or path patch
 remains, and that the Rust TLM/SOT guard and its tests remain wired into CI. It
-also checks that the verbatim upstream BSD-2-Clause notice reaches the Linux,
-macOS and Windows release notice sets with unchanged bytes. This is
+also checks that the verbatim upstream BSD-2-Clause notice and the font
+notices reach the Linux, macOS and Windows release notice sets with unchanged
+bytes. This is
 configuration evidence, not execution evidence: it does not establish that an
 advisory proof of concept was reproduced or that a particular input is safe.
 """
@@ -156,11 +157,20 @@ class Jpeg2kRegistryRoute(unittest.TestCase):
 
 
 class ReleaseNoticeSet(unittest.TestCase):
-    """The upstream BSD-2-Clause bytes reach every shipped notice set."""
+    """The pinned upstream bytes reach every shipped notice set."""
 
     name = "openjpeg2-pure-rs-license.txt"
     sha256 = "a6af136f3e15038a666b61f376612a07d9a4e48cb7c01adbf3e33b3f14ab49b6"
     vendored = "packaging/third-party-notices/openjpeg2-pure-rs-license.txt"
+    notices = (
+        (name, vendored, sha256),
+        ("noto-sans-cjk-jp-OFL.txt",
+         "packaging/third-party-notices/noto-sans-cjk-jp-OFL.txt",
+         "1c05c68c34f9708415aada51f17e1b0092d2cea709bf4a94cd38114f9e73d7d9"),
+        ("material-symbols-apache-2.0.txt",
+         "packaging/third-party-notices/material-symbols-apache-2.0.txt",
+         "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"),
+    )
 
     def module(self, relative):
         spec = importlib.util.spec_from_file_location(relative, root / relative)
@@ -175,6 +185,22 @@ class ReleaseNoticeSet(unittest.TestCase):
             self.assertIn(line, data, "upstream trailing space changed")
         self.assertTrue(data.endswith(b" */\n"), "upstream final newline changed")
 
+    def test_vendored_font_notices_are_the_pinned_upstream_bytes(self):
+        noto = (root / self.notices[1][1]).read_bytes()
+        self.assertEqual(hashlib.sha256(noto).hexdigest(), self.notices[1][2])
+        self.assertTrue(noto.startswith(
+            b"Copyright 2014-2021 Adobe (http://www.adobe.com/), "
+            b"with Reserved Font Name 'Source'\n"), "OFL copyright head changed")
+        for marker in (b"SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007\n",
+                       b"PERMISSION & CONDITIONS\n",
+                       b"OTHER DEALINGS IN THE FONT SOFTWARE.\n"):
+            self.assertIn(marker, noto, "full OFL 1.1 text changed")
+        apache = (root / self.notices[2][1]).read_bytes()
+        self.assertEqual(hashlib.sha256(apache).hexdigest(), self.notices[2][2])
+        for marker in (b"Apache License\n", b"Version 2.0, January 2004\n",
+                       b"APPENDIX: How to apply the Apache License to your work.\n"):
+            self.assertIn(marker, apache, "full Apache-2.0 text changed")
+
     def test_posix_runtime_notice_sets_stage_and_verify_exact_bytes(self):
         ffmpeg = self.module("scripts/linux-ffmpeg.py")
         source = read("scripts/macos-ffmpeg.py")
@@ -182,48 +208,55 @@ class ReleaseNoticeSet(unittest.TestCase):
                       "macOS bundle does not stage the notice")
         self.assertEqual(source.count("common.check_rust_notices(docs)"), 2,
                          "macOS staging and final audit must both check the notice")
-        self.assertEqual(ffmpeg.RUST_NOTICES,
-                         ((self.name, self.vendored, self.sha256),))
-        expected = (root / self.vendored).read_bytes()
+        self.assertEqual(ffmpeg.RUST_NOTICES, self.notices)
         with tempfile.TemporaryDirectory() as temporary:
             docs = Path(temporary)
             ffmpeg.stage_rust_notices(docs)
-            staged = docs / self.name
-            self.assertEqual(staged.read_bytes(), expected)
-            ffmpeg.check_rust_notices(docs)
-            staged.write_bytes(expected + b"tampered")
-            with self.assertRaisesRegex(ValueError, "staged Rust notice changed"):
-                ffmpeg.check_rust_notices(docs)
-            staged.unlink()
-            with self.assertRaisesRegex(ValueError, "missing staged Rust notice"):
-                ffmpeg.check_rust_notices(docs)
+            for name, relative, _ in self.notices:
+                with self.subTest(notice=name):
+                    expected = (root / relative).read_bytes()
+                    staged = docs / name
+                    self.assertEqual(staged.read_bytes(), expected)
+                    ffmpeg.check_rust_notices(docs)
+                    staged.write_bytes(expected + b"tampered")
+                    with self.assertRaisesRegex(ValueError, "staged Rust notice changed"):
+                        ffmpeg.check_rust_notices(docs)
+                    staged.write_bytes(expected)
+            for name, _, _ in self.notices:
+                with self.subTest(missing=name):
+                    (docs / name).unlink()
+                    with self.assertRaisesRegex(ValueError, "missing staged Rust notice"):
+                        ffmpeg.check_rust_notices(docs)
+                    ffmpeg.stage_rust_notices(docs)
 
     def test_windows_legal_notice_archive_carries_exact_bytes(self):
         bundle = self.module("scripts/windows-release-source-bundle.py")
-        self.assertIn((self.name, self.vendored, self.sha256),
-                      bundle.THIRD_PARTY_NOTICES)
         members, inputs = {}, {}
         bundle.add_third_party_notices(members, inputs)
-        expected = (root / self.vendored).read_bytes()
-        self.assertEqual(members[self.name], expected)
-        binding = inputs["third-party-notices/" + self.name]
-        self.assertEqual((binding["sha256"], binding["bytes"]),
-                         (self.sha256, len(expected)))
-        self.assertIn(self.name, read("packaging/windows/ffmpeg-README.md"))
+        for name, relative, sha256 in self.notices:
+            with self.subTest(notice=name):
+                self.assertIn((name, relative, sha256), bundle.THIRD_PARTY_NOTICES)
+                expected = (root / relative).read_bytes()
+                self.assertEqual(members[name], expected)
+                binding = inputs["third-party-notices/" + name]
+                self.assertEqual((binding["sha256"], binding["bytes"]),
+                                 (sha256, len(expected)))
+                self.assertIn(name, read("packaging/windows/ffmpeg-README.md"))
 
     def test_posix_native_evidence_maps_the_staged_notice(self):
-        staged = {
-            "linux": "Iris.AppDir/usr/share/doc/iris/ffmpeg/" + self.name,
-            "macos": "Iris.app/Contents/Resources/ffmpeg/" + self.name,
-        }
-        for platform, path in staged.items():
-            with self.subTest(platform=platform):
-                mapping = json.loads(read(f"packaging/native-evidence/{platform}-mapping.json"))
-                self.assertIn(path, mapping["evidence_files"])
-                roles = [rule["role"] for rule in mapping["staged_rules"]
-                         if rule["path"].endswith("/ffmpeg/*")]
-                self.assertEqual(roles, ["evidence"])
-                self.assertIn(self.name, read(f"packaging/{platform}/ffmpeg-README.md"))
+        suffixes = ("openjpeg2-pure-rs-license.txt", "noto-sans-cjk-jp-OFL.txt",
+                    "material-symbols-apache-2.0.txt")
+        roots = {"linux": "Iris.AppDir/usr/share/doc/iris/ffmpeg/",
+                 "macos": "Iris.app/Contents/Resources/ffmpeg/"}
+        for platform, prefix in roots.items():
+            mapping = json.loads(read(f"packaging/native-evidence/{platform}-mapping.json"))
+            roles = [rule["role"] for rule in mapping["staged_rules"]
+                     if rule["path"].endswith("/ffmpeg/*")]
+            self.assertEqual(roles, ["evidence"])
+            for name in suffixes:
+                with self.subTest(platform=platform, notice=name):
+                    self.assertIn(prefix + name, mapping["evidence_files"])
+                    self.assertIn(name, read(f"packaging/{platform}/ffmpeg-README.md"))
 
 
 if __name__ == "__main__":

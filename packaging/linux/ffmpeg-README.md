@@ -6,7 +6,11 @@ separate work under LGPL 2.1 or later; see `COPYING.LGPLv2.1`. This is not a
 license declaration for Iris. PDFium has its own adjacent notices/provenance.
 `openjpeg2-pure-rs-license.txt` is the verbatim BSD-2-Clause notice for the
 pure-Rust JPEG 2000 decoder compiled into Iris; its bytes are pinned by
-`manifest.json`.
+`manifest.json`. `noto-sans-cjk-jp-OFL.txt` is the verbatim SIL OFL 1.1 notice
+for the Noto Sans CJK JP subset compiled into Iris.
+`material-symbols-apache-2.0.txt` is the verbatim Apache-2.0 notice for the
+48-glyph Material Symbols Outlined subset compiled into Iris. Both notices are
+pinned by `manifest.json`.
 
 `manifest.json` records the exact upstream source URL and SHA-256, required
 signing-key fingerprint, successful detached-signature status, actual library

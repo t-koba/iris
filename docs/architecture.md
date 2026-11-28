@@ -141,7 +141,12 @@ FFmpeg（動画と一部の静止画のフォールバック）の範囲は `pac
 BSD-2-Clause 通知は上流 `LICENSE` の bytes をそのまま
 `packaging/third-party-notices/openjpeg2-pure-rs-license.txt` に保管し、
 Linux の AppDir、macOS の app bundle、Windows の ZIP の既存通知 set に同じ
-bytes で同梱します。
+bytes で同梱します。全実行ファイルに埋め込まれる Noto Sans CJK JP のサブセット
+と 48 グリフの Material Symbols Outlined サブセットについても、上流の
+SIL OFL 1.1 と Apache-2.0 の通知 bytes を
+`packaging/third-party-notices/noto-sans-cjk-jp-OFL.txt` と
+`packaging/third-party-notices/material-symbols-apache-2.0.txt` に保管し、
+同じ 3 つの通知 set に同じ bytes で同梱します。
 
 #### PDFium（chromium/8138）
 

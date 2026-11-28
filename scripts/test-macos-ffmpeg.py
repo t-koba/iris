@@ -346,8 +346,8 @@ class CandidateContracts(unittest.TestCase):
             (docs / 'signature.status').write_text('synthetic signature')
             (docs / 'config.h').write_text('synthetic generated config')
             (docs / 'config_components.h').write_text('synthetic generated codecs')
-            (docs / 'openjpeg2-pure-rs-license.txt').write_bytes(
-                (ROOT / 'packaging/third-party-notices/openjpeg2-pure-rs-license.txt').read_bytes())
+            for name, relative, _ in m.common.RUST_NOTICES:
+                (docs / name).write_bytes((ROOT / relative).read_bytes())
             paths = {name: frameworks / f'lib{name}.62.dylib' for name in m.POLICY['libraries']}
             for path in paths.values():
                 path.write_bytes(b'synthetic staged dylib')
@@ -1033,8 +1033,8 @@ class ProductRuntime(unittest.TestCase):
                 (docs / 'config.h').write_text('synthetic generated configuration')
                 (docs / 'config_components.h').write_text('synthetic generated codecs')
                 (docs / 'COPYING.LGPLv2.1').write_text('synthetic notice')
-                (docs / 'openjpeg2-pure-rs-license.txt').write_bytes(
-                    (ROOT / 'packaging/third-party-notices/openjpeg2-pure-rs-license.txt').read_bytes())
+                for name, relative, _ in m.common.RUST_NOTICES:
+                    (docs / name).write_bytes((ROOT / relative).read_bytes())
                 manifest = dict(policy=m.MACOS_POLICY, signature_verified=True, liblzma={}, enabled_codecs=[],
                                 documents={p.name: m.digest(p) for p in docs.iterdir()},
                                 libraries={library.name: m.digest(library)})

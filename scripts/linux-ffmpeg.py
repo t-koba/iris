@@ -13,13 +13,19 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = json.loads((ROOT / "packaging/linux/ffmpeg.json").read_text())
-# Upstream BSD-2-Clause notice for the pure-Rust JPEG 2000 decoder built into
-# Iris. The staged file is copied verbatim and pinned by the upstream LICENSE
-# digest, never regenerated from the crate metadata.
+# Upstream notices for code and fonts compiled into Iris. Each staged file is
+# copied verbatim and pinned by its upstream digest, never regenerated from
+# crate metadata or font tables.
 RUST_NOTICES = (
     ("openjpeg2-pure-rs-license.txt",
      "packaging/third-party-notices/openjpeg2-pure-rs-license.txt",
      "a6af136f3e15038a666b61f376612a07d9a4e48cb7c01adbf3e33b3f14ab49b6"),
+    ("noto-sans-cjk-jp-OFL.txt",
+     "packaging/third-party-notices/noto-sans-cjk-jp-OFL.txt",
+     "1c05c68c34f9708415aada51f17e1b0092d2cea709bf4a94cd38114f9e73d7d9"),
+    ("material-symbols-apache-2.0.txt",
+     "packaging/third-party-notices/material-symbols-apache-2.0.txt",
+     "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"),
 )
 
 
