@@ -4,6 +4,7 @@ use crate::SmbClientError;
 use aes::cipher::{BlockCipherEncrypt, KeyInit};
 use aes::Aes128;
 use sha2::{Digest, Sha256, Sha512};
+use zeroize::Zeroize;
 
 const AES_CMAC_BLOCK_BYTES: usize = 16;
 const AES_CMAC_RB: u8 = 0x87;
@@ -320,12 +321,18 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     let mut inner = Sha256::new();
     inner.update(ipad);
     inner.update(data);
-    let inner_digest = inner.finalize();
+    let mut inner_digest: [u8; 32] = inner.finalize().into();
 
     let mut outer = Sha256::new();
     outer.update(opad);
     outer.update(inner_digest);
-    outer.finalize().into()
+    let signature: [u8; 32] = outer.finalize().into();
+
+    key_block.zeroize();
+    ipad.zeroize();
+    opad.zeroize();
+    inner_digest.zeroize();
+    signature
 }
 
 fn constant_time_eq(left: &[u8; SMB2_SIGNATURE_BYTES], right: &[u8; SMB2_SIGNATURE_BYTES]) -> bool {
@@ -341,6 +348,24 @@ mod tests {
     use super::*;
     use crate::packet::header::{Smb2Command, Smb2Header};
     use crate::test_support::*;
+
+    #[test]
+    fn hmac_signing_key_buffers_are_zeroized() {
+        let manifest = include_str!("../../../Cargo.toml");
+        assert!(
+            manifest.contains(r#"sha2 = { version = "0.11", features = ["zeroize"] }"#),
+            "sha2 zeroize feature must stay enabled so hash cores clear on drop"
+        );
+        let source = include_str!("crypto.rs");
+        for call in [
+            "key_block.zeroize()",
+            "ipad.zeroize()",
+            "opad.zeroize()",
+            "inner_digest.zeroize()",
+        ] {
+            assert!(source.contains(call), "missing buffer clearing: {call}");
+        }
+    }
 
     #[test]
     fn smb311_preauth_hash_starts_with_zero_hash() {

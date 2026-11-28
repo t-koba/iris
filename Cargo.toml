@@ -118,7 +118,7 @@ aes = "0.9"
 aes-gcm = { version = "0.11", features = ["zeroize"] }
 getrandom = "0.4"
 zeroize = { version = "1", features = ["zeroize_derive"] }
-sha2 = "0.11"
+sha2 = { version = "0.11", features = ["zeroize"] }
 ring = "0.17"
 hmac = "0.13"
 md-5 = "0.11"
