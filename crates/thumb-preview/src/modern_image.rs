@@ -503,6 +503,11 @@ fn jpeg2000_codestream(data: &[u8]) -> Option<&[u8]> {
     None
 }
 
+// Rare legacy decoders stay out of hot preview text in the fat-LTO
+// single-codegen-unit release build. The JPEG 2000 decoder stays in line:
+// marking it cold regressed paired JPEG latency in exact-SHA CI.
+#[cold]
+#[inline(never)]
 fn decode_avif(data: &[u8]) -> Option<DynamicImage> {
     let decoded = avif_rust::image_from_bytes(data).ok()?;
     let width = u32::try_from(decoded.width).ok()?;
@@ -510,6 +515,8 @@ fn decode_avif(data: &[u8]) -> Option<DynamicImage> {
     image::RgbaImage::from_raw(width, height, decoded.rgba).map(DynamicImage::ImageRgba8)
 }
 
+#[cold]
+#[inline(never)]
 fn decode_jpeg_xl(data: &[u8]) -> Option<DynamicImage> {
     use image::ImageDecoder;
 
@@ -522,6 +529,8 @@ fn decode_jpeg_xl(data: &[u8]) -> Option<DynamicImage> {
     DynamicImage::from_decoder(decoder).ok()
 }
 
+#[cold]
+#[inline(never)]
 fn decode_heic(data: &[u8]) -> Option<DynamicImage> {
     let decoded = heif_oxide::decode_bytes(data).ok()?;
     let rgba = image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.to_rgba8())?;
@@ -573,6 +582,8 @@ fn preview_dimensions_supported(width: u32, height: u32) -> bool {
             .is_some_and(|pixels| pixels <= JXR_MAX_PIXELS)
 }
 
+#[cold]
+#[inline(never)]
 fn decode_jpeg_xr(data: &[u8]) -> Option<DynamicImage> {
     use jpegxr::{BitDepthBits, ColorFormat, ImageDecode, PixelFormat, PixelInfo};
 
