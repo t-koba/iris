@@ -2,14 +2,21 @@
 """Offline release gate for same-source paired parity evidence.
 
 Consumes three bounded reports from scripts/parity_source_compare.py, one per
-platform, and verifies source/revision/harness binding, strict identity, a
-recomputed pairing with no unpaired section and no candidate slowdown. This
-verifier makes no parity claim of its own, runs no builds and writes nothing.
+platform, and verifies source/revision/harness binding, strict identity, the
+declared B/C, C/B, B/C round alternation, recomputed statistics from 21
+chronological samples per side, and a paired sign test. A candidate fails only
+when at least policy.paired_sign_test_min_positive of 21 index-paired
+candidate-minus-baseline differences are positive; runner noise that moves both
+interleaved sides together yields roughly half positive pairs. The pooled
+median delta is reported, not used as a gate. This verifier makes no parity
+claim of its own, runs no builds and writes nothing.
 """
 
 import argparse
+from fractions import Fraction
 import hashlib
 import json
+from math import comb
 from pathlib import Path
 import re
 import shlex
@@ -17,11 +24,12 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from parity_source_compare import (  # noqa: E402
-    BASELINE_SHA, BUILD_SCRIPT, FIXTURE, FIXTURE_SHA256, FIXTURE_SIZE, HARNESS,
-    IDENTITY_SCHEMA, J2K_OPERATION, PARITY_CLAIM, PREVIEW_OPERATIONS,
-    WINDOWS_FFMPEG_FORBIDDEN_FLAGS, WINDOWS_FFMPEG_REQUIRED_FLAGS, ffmpeg_configuration,
-    pairing_plan, pinned_ffmpeg_identity, report_path, report_path_parts, require,
-    validate_exported_section,
+    BASELINE_SHA, BLOCK_SAMPLES, BUILD_SCRIPT, FIXTURE, FIXTURE_SHA256, FIXTURE_SIZE,
+    HARNESS, IDENTITY_SCHEMA, J2K_OPERATION, PARITY_CLAIM, PREVIEW_OPERATIONS, ROUNDS,
+    SAMPLES_PER_SIDE, WARMUPS_PER_BLOCK, WINDOWS_FFMPEG_FORBIDDEN_FLAGS,
+    WINDOWS_FFMPEG_REQUIRED_FLAGS, ffmpeg_configuration, measurement_rounds,
+    paired_sample_differences, pairing_plan, pinned_ffmpeg_identity, report_path,
+    report_path_parts, require, timing_statistics, validate_exported_section,
 )
 from product_build_profile import load as load_product_profiles  # noqa: E402
 
@@ -35,7 +43,8 @@ PLATFORM_IDENTITY = {
 }
 POLICY_KEYS = {
     "schema", "baseline_sha", "required_platforms", "platform_identity",
-    "required_operations", "warmups", "samples", "max_candidate_minus_baseline_ns",
+    "required_operations", "warmups", "samples", "rounds", "sign_test_alpha",
+    "sign_test_family_size", "paired_sign_test_min_positive", "policy_rationale",
     "max_report_bytes",
 }
 SHA_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -44,6 +53,30 @@ MAX_POLICY_BYTES = 65536
 
 def exact_int(value, expected, label):
     require(type(value) is int and value == expected, f"invalid policy {label}")
+
+
+def sign_test_tail(samples, count):
+    """One-sided P[Binomial(samples, 0.5) >= count] as an exact fraction."""
+    require(type(samples) is int and samples > 0 and type(count) is int
+            and 0 <= count <= samples, "invalid sign test tail arguments")
+    return Fraction(sum(comb(samples, index) for index in range(count, samples + 1)),
+                    1 << samples)
+
+
+def sign_test_critical(samples, alpha, family_size):
+    """Smallest positive count whose tail fits the Bonferroni alpha.
+
+    For 21 samples, alpha 0.05 and 18 comparisons this is 18: the tail is
+    about 0.000745, while 17 positives still exceed 0.05/18.
+    """
+    require(type(samples) is int and samples > 0 and type(alpha) is float
+            and 0 < alpha < 1 and type(family_size) is int and family_size > 0,
+            "invalid sign test policy inputs")
+    limit = Fraction(str(alpha)) / family_size
+    for count in range(samples + 1):
+        if sign_test_tail(samples, count) <= limit:
+            return count
+    return samples + 1
 
 
 def load_policy(path):
@@ -73,10 +106,19 @@ def load_policy(path):
             and all(type(item) is str for item in operations)
             and set(operations) == set(PREVIEW_OPERATIONS),
             "invalid policy required_operations")
-    exact_int(policy["warmups"], 2, "warmups")
-    exact_int(policy["samples"], 21, "samples")
-    exact_int(policy["max_candidate_minus_baseline_ns"], 0,
-              "max_candidate_minus_baseline_ns")
+    exact_int(policy["warmups"], WARMUPS_PER_BLOCK, "warmups")
+    exact_int(policy["samples"], SAMPLES_PER_SIDE, "samples")
+    exact_int(policy["rounds"], ROUNDS, "rounds")
+    require(ROUNDS * BLOCK_SAMPLES == SAMPLES_PER_SIDE, "invalid paired sample budget")
+    require(type(policy["sign_test_alpha"]) is float and policy["sign_test_alpha"] == 0.05,
+            "invalid policy sign_test_alpha")
+    exact_int(policy["sign_test_family_size"], 18, "sign_test_family_size")
+    exact_int(policy["paired_sign_test_min_positive"],
+              sign_test_critical(policy["samples"], policy["sign_test_alpha"],
+                                 policy["sign_test_family_size"]),
+              "paired_sign_test_min_positive")
+    require(type(policy["policy_rationale"]) is str and policy["policy_rationale"].strip(),
+            "invalid policy policy_rationale")
     exact_int(policy["max_report_bytes"], 266240, "max_report_bytes")
     return policy
 
@@ -218,6 +260,7 @@ def check_pinned_ffmpeg_runtime(report, platform, label, pinned):
 def check_pairs(pairs, maps, section_name, policy, label):
     require(type(pairs) is list and pairs and all(type(pair) is dict for pair in pairs),
             f"{label}: missing {section_name} pairs")
+    threshold = policy["paired_sign_test_min_positive"]
     for pair in pairs:
         operation = pair.get("operation")
         require(type(operation) is str
@@ -232,8 +275,7 @@ def check_pairs(pairs, maps, section_name, policy, label):
                 f"{label}: {section_name} {operation} invalid candidate median")
         require(type(delta) is int and delta == candidate - baseline,
                 f"{label}: {section_name} {operation} median delta mismatch")
-        require(delta <= policy["max_candidate_minus_baseline_ns"],
-                f"{label}: {section_name} {operation} candidate slowdown {delta} ns")
+        samples = {}
         for side, median in (("baseline", baseline), ("candidate", candidate)):
             record = maps[section_name][side][operation]
             timing = record.get("timing") if type(record) is dict else None
@@ -246,8 +288,29 @@ def check_pairs(pairs, maps, section_name, policy, label):
             require(type(timing.get("sample_count")) is int
                     and timing["sample_count"] == policy["samples"],
                     f"{label}: {side} {operation} sample count mismatch")
+            require(type(timing.get("rounds")) is int
+                    and timing["rounds"] == policy["rounds"],
+                    f"{label}: {side} {operation} round count mismatch")
+            values = timing.get("samples_ns")
+            require(type(values) is list and len(values) == policy["samples"]
+                    and all(type(value) is int and value >= 0 for value in values),
+                    f"{label}: {side} {operation} invalid chronological samples")
+            for key, value in timing_statistics(values, f"{label}: {side} {operation}").items():
+                require(timing.get(key) == value,
+                        f"{label}: {side} {operation} recomputed {key} mismatch")
             require(timing.get("median") == median,
                     f"{label}: {side} {operation} paired median does not match source")
+            samples[side] = values
+        differences = paired_sample_differences(samples["baseline"], samples["candidate"],
+                                                 f"{label}: {section_name} {operation}")
+        require(pair.get("paired_differences_ns") == differences,
+                f"{label}: {section_name} {operation} paired differences mismatch")
+        positive = sum(difference > 0 for difference in differences)
+        require(pair.get("positive_differences") == positive,
+                f"{label}: {section_name} {operation} positive count mismatch")
+        require(positive < threshold,
+                f"{label}: {section_name} {operation} paired candidate slowdown: "
+                f"{positive}/{len(differences)} positive (threshold {threshold})")
 
 
 def validate_report(report, path, platform, expected, harness_digest, build_script_digest,
@@ -255,6 +318,8 @@ def validate_report(report, path, platform, expected, harness_digest, build_scri
     label = f"{platform} report {path}"
     require(report.get("schema") == REPORT_SCHEMA, f"{label}: unexpected schema")
     require(report.get("parity_claim") == PARITY_CLAIM, f"{label}: unexpected parity_claim")
+    require(report.get("measurement_rounds") == measurement_rounds(),
+            f"{label}: measurement round alternation mismatch")
     revision = report.get("source_revision")
     require(type(revision) is dict and set(revision) == {"baseline", "candidate"},
             f"{label}: invalid source_revision")

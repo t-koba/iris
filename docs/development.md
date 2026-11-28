@@ -420,6 +420,11 @@ upstream の権限、Iris 自体の license、配布全体の互換性を推定�
 実際の evidence の収集・内容 review と必要な法的判断は別途必要です。
 synthetic positive regression は到達可能な PASS を確認するだけで、production の license evidence や approval ではありません。
 
+
+### Paired preview parity 計測（release readiness の主張ではない）
+
+`scripts/parity_source_compare.py` は baseline/candidate を B/C, C/B, B/C の順に 3 round 交互に測定し、各 round で corpus と J2K の入力・出力検証をやり直します。片側 7 サンプル × 3 round = 21 サンプルを時刻順に残し、`scripts/release-parity.py` は同じ index の baseline/candidate を対応づけます。pooled median の差は記録しますが、それだけで失敗させません。runner の負荷変動は交互実行で両側にかかり、対応する差の正負はおおむね半々になります。実在の遅延劣化は正の差に片寄るため、21 件中 18 件以上が positive のときだけ失敗します（片側 binomial 確率 0.000745 < Bonferroni 0.05/18）。この判定は same-source の preview diagnostic の比較であり、release readiness や絶対性能を保証しません。
+
 ## CI
 
 | ワークフロー | いつ | 内容 |

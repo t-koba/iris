@@ -16,6 +16,10 @@
   ],
   "warmups": 2,
   "samples": 21,
-  "max_candidate_minus_baseline_ns": 0,
+  "rounds": 3,
+  "sign_test_alpha": 0.05,
+  "sign_test_family_size": 18,
+  "paired_sign_test_min_positive": 18,
+  "policy_rationale": "Fail a paired operation only when at least 18 of 21 index-paired candidate-minus-baseline samples are positive: P[Binomial(21, 0.5) >= 18] = 0.000745, below the Bonferroni alpha 0.05/18 = 0.002778. Runner noise shifts both interleaved sides and gives roughly half positive differences; 18 consistently positive pairs is evidence of a real slowdown. The pooled median delta is reported for audit, not gated.",
   "max_report_bytes": 266240
 }

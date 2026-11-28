@@ -131,6 +131,29 @@ fn percentile(sorted: &[u64], percent: usize) -> u64 {
     sorted[(sorted.len() - 1) * percent / 100]
 }
 
+/// Return (min, median, p90, MAD, max) without reordering the caller's samples.
+fn sample_statistics(samples: &[u64]) -> (u64, u64, u64, u64, u64) {
+    assert!(!samples.is_empty(), "latency samples must not be empty");
+    let sorted = {
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        sorted
+    };
+    let median = percentile(&sorted, 50);
+    let mut deviations: Vec<u64> = sorted
+        .iter()
+        .map(|sample| sample.abs_diff(median))
+        .collect();
+    deviations.sort_unstable();
+    (
+        sorted[0],
+        median,
+        percentile(&sorted, 90),
+        percentile(&deviations, 50),
+        sorted[sorted.len() - 1],
+    )
+}
+
 fn validate_timed_output(name: &str, thumb: &ThumbnailResult, expected: (u32, u32)) {
     assert_eq!(
         thumb.format,
@@ -234,13 +257,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::hint::black_box(timed);
         samples.push(elapsed);
     }
-    samples.sort_unstable();
-    let median = percentile(&samples, 50);
-    let mut deviations: Vec<u64> = samples
-        .iter()
-        .map(|sample| sample.abs_diff(median))
-        .collect();
-    deviations.sort_unstable();
+    let (min, median, p90, mad, max) = sample_statistics(&samples);
     println!(
         "PREVIEW_LATENCY {}",
         serde_json::to_string(&serde_json::json!({
@@ -253,11 +270,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 "unit": "nanoseconds",
                 "warmup_iterations": config.warmups,
                 "sample_count": samples.len(),
-                "min": samples[0],
+                "samples_ns": samples,
+                "min": min,
                 "median": median,
-                "p90": percentile(&samples, 90),
-                "median_absolute_deviation": percentile(&deviations, 50),
-                "max": samples[samples.len() - 1],
+                "p90": p90,
+                "median_absolute_deviation": mad,
+                "max": max,
             },
             "identity": identity,
             "measurement_scope": "crate-level local-byte extraction, not UI/end-to-end latency",
@@ -283,6 +301,13 @@ mod tests {
             height: rgb.height(),
             source: iris_core_domain::types::thumbnail::ThumbnailSource::FullDecode,
         }
+    }
+
+    #[test]
+    fn sample_statistics_keep_chronological_order_for_paired_tests() {
+        let chronological = [7_u64, 3, 5, 1, 9, 2, 4];
+        assert_eq!(sample_statistics(&chronological), (1, 4, 7, 2, 9));
+        assert_eq!(chronological, [7, 3, 5, 1, 9, 2, 4]);
     }
 
     #[test]

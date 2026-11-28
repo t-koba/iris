@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """Report-only paired-source preview diagnostic; no parity claim or release-gate change.
 
-Builds detached worktrees for two exact source revisions, runs the pinned corpus
-smoke and the shared JPEG 2000 smoke on the same inputs, and writes a bounded
-JSON report. It never uploads bytes, changes release policy or asserts parity.
-Baseline dependencies may need network; run with CARGO_NET_OFFLINE=1 only when
-both dependency sets are already cached.
+Builds detached worktrees for two exact source revisions and runs the pinned
+corpus smoke and the shared JPEG 2000 smoke alternately in three rounds
+(B/C, C/B, B/C). Each side contributes seven chronological samples per block,
+pooled into 21 samples per operation. Interleaving exposes both sources to the
+same runner drift; the verifier pairs samples by position and uses a sign test,
+so a consistently slower candidate is detectable while unchanged paths are not
+failed by noise that moves both sides together. Every round repeats full
+correctness/output validation. This script writes a bounded JSON report, never
+uploads bytes, changes release policy or asserts parity. Baseline dependencies
+may need network; run with CARGO_NET_OFFLINE=1 only when both dependency sets
+are already cached.
 """
 
 import argparse
+import copy
 from contextlib import ExitStack, contextmanager
 import hashlib
 import json
@@ -83,6 +90,24 @@ WINDOWS_SEPARATOR = '\\'
 def require(ok, message):
     if not ok:
         raise ValueError(message)
+
+
+# 3 interleaved rounds x 7 samples = the same 21 samples per side as before.
+WARMUPS_PER_BLOCK = 2
+ROUNDS = 3
+BLOCK_SAMPLES = 7
+SAMPLES_PER_SIDE = 21
+ROUND_ORDER = (
+    ("baseline", "candidate"),
+    ("candidate", "baseline"),
+    ("baseline", "candidate"),
+)
+
+
+def measurement_rounds():
+    """Declare the executed alternation for audit; the verifier pins this plan."""
+    return [dict(round=number, order=list(order))
+            for number, order in enumerate(ROUND_ORDER, 1)]
 
 
 def report_path_module(value, platform=None):
@@ -212,8 +237,43 @@ def parse_records(text, operations, label):
     require({item['operation'] for item in timings} == set(operations)
             and len(timings) == len(operations), f'{label}: latency operation set mismatch')
     require(all(item['passed'] is True for item in correctness), f'{label}: correctness failed')
+    for item in timings:
+        timing = item.get('timing')
+        samples = timing.get('samples_ns') if type(timing) is dict else None
+        require(type(samples) is list and samples
+                and all(type(sample) is int and sample >= 0 for sample in samples)
+                and len(samples) == timing.get('sample_count'),
+                f'{label}: invalid chronological samples for {item["operation"]}')
     return dict(correctness=correctness[0], timings=timings,
                 pdfium_runtime=runtimes[0] if runtimes else None)
+
+
+def percentile(sorted_values, percent):
+    """Match the harness's percentile index over an already sorted vector."""
+    return sorted_values[(len(sorted_values) - 1) * percent // 100]
+
+
+def timing_statistics(samples, label):
+    """Recompute the harness statistics from pooled chronological samples."""
+    require(type(samples) is list and samples
+            and all(type(sample) is int and sample >= 0 for sample in samples),
+            f'{label}: invalid chronological samples')
+    ordered = sorted(samples)
+    median = percentile(ordered, 50)
+    deviations = sorted(abs(sample - median) for sample in samples)
+    return dict(min=ordered[0], median=median, p90=percentile(ordered, 90),
+                median_absolute_deviation=percentile(deviations, 50), max=ordered[-1])
+
+
+def paired_sample_differences(baseline_samples, candidate_samples, label):
+    """Pair chronological samples by index; no sorting or median substitution."""
+    require(type(baseline_samples) is list and type(candidate_samples) is list
+            and len(baseline_samples) == len(candidate_samples)
+            and all(type(sample) is int and sample >= 0 for sample in baseline_samples)
+            and all(type(sample) is int and sample >= 0 for sample in candidate_samples),
+            f'{label}: unpaired chronological samples')
+    return [candidate - baseline
+            for baseline, candidate in zip(baseline_samples, candidate_samples)]
 
 
 def pinned_corpus_fixtures():
@@ -406,10 +466,20 @@ def paired_records(baseline, candidate, label):
         b, c = first['timing']['median'], second['timing']['median']
         require(type(b) is int and type(c) is int and b >= 0 and c >= 0,
                 f'{label}: {operation} invalid median')
+        baseline_samples = first['timing'].get('samples_ns')
+        candidate_samples = second['timing'].get('samples_ns')
+        require(type(baseline_samples) is list and type(candidate_samples) is list
+                and len(baseline_samples) == first['timing']['sample_count']
+                and len(candidate_samples) == second['timing']['sample_count'],
+                f'{label}: {operation} incomplete chronological samples')
+        differences = paired_sample_differences(baseline_samples, candidate_samples,
+                                                 f'{label}: {operation}')
         pairs.append(dict(operation=operation, input=first['input'],
                           output_dimensions=[first['output'].get('width'), first['output'].get('height')],
                           baseline_median_ns=b, candidate_median_ns=c,
-                          candidate_minus_baseline_ns=c - b))
+                          candidate_minus_baseline_ns=c - b,
+                          positive_differences=sum(difference > 0 for difference in differences),
+                          paired_differences_ns=differences))
     return pairs
 
 
@@ -558,12 +628,63 @@ def smoke(checkout, example, argument, env, label):
                          else {J2K_OPERATION}, label)
 
 
+def measure_round(number, order, checkouts, shas, libraries, corpus, fixture,
+                  warmups, samples_per_block):
+    """Run the full corpus and J2K smokes for both sides in this round's order."""
+    collected = {}
+    for side in order:
+        label = f'round {number} {side}'
+        env = cargo_env(shas[side], warmups, samples_per_block, libraries[side])
+        collected[side] = dict(
+            corpus=smoke(checkouts[side], CORPUS_HARNESS, corpus, env,
+                         f'{label} corpus smoke'),
+            j2k=smoke(checkouts[side], HARNESS, fixture, env, f'{label} J2K smoke'),
+        )
+    return collected
+
+
+def pool_round_sections(rounds, side, name, operations, label):
+    """Pool one side's chronological samples from all rounds into one section."""
+    require(type(rounds) is list and len(rounds) == ROUNDS
+            and all(type(item) is dict and side in item for item in rounds),
+            f'{label}: missing {side} measurement rounds')
+    first = rounds[0][side][name]
+    for index, item in enumerate(rounds[1:], 2):
+        # Every round repeats the same identity, input and output validation;
+        # a divergent round fails closed instead of being silently dropped.
+        paired_records(first, item[side][name], f'{label} round {index}')
+    section = copy.deepcopy(first)
+    pooled = {record['operation']: record['timing'] for record in section['timings']}
+    require(set(pooled) == set(operations), f'{label}: timing operation set mismatch')
+    for timing in pooled.values():
+        timing['samples_ns'] = []
+    for item in rounds:
+        observed = {record['operation']: record['timing']
+                    for record in item[side][name]['timings']}
+        require(set(observed) == set(pooled), f'{label}: round operation set mismatch')
+        for operation, timing in observed.items():
+            samples = timing.get('samples_ns')
+            require(type(samples) is list and len(samples) == BLOCK_SAMPLES,
+                    f'{label}: {operation} round sample budget mismatch')
+            pooled[operation]['samples_ns'].extend(samples)
+    for operation, timing in pooled.items():
+        samples = timing['samples_ns']
+        require(len(samples) == SAMPLES_PER_SIDE,
+                f'{label}: {operation} pooled sample count mismatch')
+        timing['sample_count'] = SAMPLES_PER_SIDE
+        timing['rounds'] = ROUNDS
+        timing.update(timing_statistics(samples, f'{label}: {operation}'))
+    return section
+
+
 def compare(args):
     repo, corpus, output = args.repo.resolve(), args.corpus.resolve(), args.output.resolve()
     require(repo.is_dir() and corpus.is_dir(), 'repo and corpus directories are required')
     require(SHA_PATTERN.fullmatch(args.baseline) and SHA_PATTERN.fullmatch(args.candidate),
             'baseline and candidate must be full SHA values')
-    require(args.warmups >= 0 and args.samples > 0, 'invalid iteration budget')
+    require(args.warmups == WARMUPS_PER_BLOCK and args.samples == SAMPLES_PER_SIDE
+            and ROUNDS * BLOCK_SAMPLES == SAMPLES_PER_SIDE,
+            'iteration budget must be 3 rounds of 7 samples with 2 warmups per block')
     with tempfile.TemporaryDirectory(prefix='iris-parity-source-') as scratch, ExitStack() as stack:
         scratch = Path(scratch)
         baseline = stack.enter_context(worktree(repo, args.baseline, scratch, 'baseline'))
@@ -582,18 +703,28 @@ def compare(args):
         require(digest(fixture) == FIXTURE_SHA256 and fixture.stat().st_size == FIXTURE_SIZE,
                 'generated J2K fixture does not match its pin')
 
-        reports = {}
-        for name, checkout, sha in (('baseline', baseline, args.baseline),
-                                    ('candidate', candidate, args.candidate)):
-            library = (stage_pdfium_library(args.pdfium_library, checkout,
-                                            f'{name} PDFium staging')
-                       if args.pdfium_library is not None else None)
-            env = cargo_env(sha, args.warmups, args.samples, library)
-            reports[name] = dict(
+        checkouts = dict(baseline=baseline, candidate=candidate)
+        shas = dict(baseline=args.baseline, candidate=args.candidate)
+        libraries = {
+            name: (stage_pdfium_library(args.pdfium_library, checkout, f'{name} PDFium staging')
+                   if args.pdfium_library is not None else None)
+            for name, checkout in checkouts.items()
+        }
+        rounds = [
+            measure_round(number, order, checkouts, shas, libraries, corpus, fixture,
+                          args.warmups, BLOCK_SAMPLES)
+            for number, order in enumerate(ROUND_ORDER, 1)
+        ]
+        reports = {
+            name: dict(
                 worktree=str(checkout.resolve()),
-                corpus=smoke(checkout, CORPUS_HARNESS, corpus, env, f'{name} corpus smoke'),
-                j2k=smoke(checkout, HARNESS, fixture, env, f'{name} J2K smoke'),
+                corpus=pool_round_sections(rounds, name, 'corpus', PREVIEW_OPERATIONS,
+                                           f'{name} corpus'),
+                j2k=pool_round_sections(rounds, name, 'j2k', {J2K_OPERATION},
+                                        f'{name} J2K'),
             )
+            for name, checkout in checkouts.items()
+        }
         paired_corpus, paired_j2k, unpaired = pairing_plan(reports['baseline'],
                                                             reports['candidate'])
         report = dict(
@@ -606,9 +737,11 @@ def compare(args):
             fixture_pin=dict(filename=FIXTURE, sha256=FIXTURE_SHA256, size_bytes=FIXTURE_SIZE),
             baseline=reports['baseline'], candidate=reports['candidate'],
             paired_latency=paired_corpus, paired_j2k=paired_j2k, unpaired=unpaired,
+            measurement_rounds=measurement_rounds(),
             cargo_net_offline=os.environ.get('CARGO_NET_OFFLINE'),
-            limits='Same-runner, sequential, crate-level source diagnostic; no UI latency, '
-                   'release-gate, platform or feature-parity claim.',
+            limits='Same-runner, alternating B/C, C/B, B/C crate-level source diagnostic; '
+                   '7 samples per block pooled to 21 per side; no UI latency, release-gate, '
+                   'platform or feature-parity claim.',
         )
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(report_bytes(report), encoding='utf-8')
@@ -622,8 +755,10 @@ def main():
     parser.add_argument('--candidate', required=True)
     parser.add_argument('--corpus', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--warmups', type=int, default=2)
-    parser.add_argument('--samples', type=int, default=21)
+    parser.add_argument('--warmups', type=int, default=WARMUPS_PER_BLOCK,
+                        help='warmups per block; fixed at 2 by the paired budget')
+    parser.add_argument('--samples', type=int, default=SAMPLES_PER_SIDE,
+                        help='total samples per side; fixed at 21 by the paired budget')
     parser.add_argument('--pdfium-library', type=Path, default=None,
                         help='verified PDFium library staged into both worktrees')
     args = parser.parse_args()

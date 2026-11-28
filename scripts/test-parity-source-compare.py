@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -61,22 +62,24 @@ def output(width=128, height=128, pixels=PIXELS):
                 source="FullDecode", decoded_rgb_sha256=pixels)
 
 
-def timing(operation, median=100, filename="paired-j2k.jp2"):
+def timing(operation, median=100, filename="paired-j2k.jp2", samples_ns=None):
+    samples_ns = [median] * m.SAMPLES_PER_SIDE if samples_ns is None else list(samples_ns)
     return dict(record="iris.preview_latency.v1", operation=operation, uses_ffmpeg=False,
                 input=dict(filename=filename, sha256=m.FIXTURE_SHA256, size_bytes=m.FIXTURE_SIZE),
                 output=output(), identity=identity(),
-                timing=dict(unit="nanoseconds", warmup_iterations=1, sample_count=3,
-                            min=90, median=median, p90=120, median_absolute_deviation=5, max=130))
+                timing=dict(unit="nanoseconds", warmup_iterations=1,
+                            sample_count=len(samples_ns), samples_ns=samples_ns,
+                            **m.timing_statistics(samples_ns, 'test')))
 
 
 def section(median=100, ident=None, pixels=PIXELS, filename="paired-j2k.jp2",
-            pdfium_runtime=None):
+            pdfium_runtime=None, samples_ns=None):
     result = dict(
         correctness=dict(record="iris.preview_correctness.v1", passed=True,
                          fixtures=[dict(filename=filename, sha256=m.FIXTURE_SHA256,
                                         size_bytes=m.FIXTURE_SIZE, output=output(pixels=pixels))],
                          identity=ident or identity()),
-        timings=[timing(m.J2K_OPERATION, median, filename)],
+        timings=[timing(m.J2K_OPERATION, median, filename, samples_ns)],
     )
     if pdfium_runtime is not None:
         result['pdfium_runtime'] = pdfium_runtime
@@ -154,6 +157,8 @@ class ParitySourceCompareTests(unittest.TestCase):
         self.assertEqual(pairs[0]['baseline_median_ns'], 100)
         self.assertEqual(pairs[0]['candidate_median_ns'], 130)
         self.assertEqual(pairs[0]['candidate_minus_baseline_ns'], 30)
+        self.assertEqual(pairs[0]['paired_differences_ns'], [30] * m.SAMPLES_PER_SIDE)
+        self.assertEqual(pairs[0]['positive_differences'], m.SAMPLES_PER_SIDE)
         self.assertEqual(pairs[0]['output_dimensions'], [128, 128])
 
         for mutate in (
@@ -180,6 +185,91 @@ class ParitySourceCompareTests(unittest.TestCase):
         right['timings'][0]['output']['decoded_rgb_sha256'] = PIXELS
         with self.assertRaises(ValueError):
             m.paired_records(left, right, 'J2K')
+
+    def test_paired_records_counts_only_positive_index_paired_differences(self):
+        baseline = section(100, samples_ns=[100] * m.SAMPLES_PER_SIDE)
+        # Candidate median is higher, but ten of 21 paired samples are faster.
+        candidate_samples = [105 if index % 2 == 0 else 95
+                             for index in range(m.SAMPLES_PER_SIDE)]
+        candidate = section(105, samples_ns=candidate_samples)
+        pair = m.paired_records(baseline, candidate, 'J2K')[0]
+        self.assertEqual(pair['candidate_minus_baseline_ns'], 5)
+        self.assertEqual(pair['paired_differences_ns'],
+                         [candidate - 100 for candidate in candidate_samples])
+        self.assertEqual(pair['positive_differences'], 11)
+        with self.assertRaises(ValueError):
+            m.paired_records(baseline, section(105, samples_ns=candidate_samples[:-1]), 'J2K')
+
+    def test_parse_records_rejects_missing_or_short_sample_arrays(self):
+        good = text(section())
+        without = copy.deepcopy(section())
+        without['timings'][0]['timing'].pop('samples_ns')
+        short = copy.deepcopy(section())
+        short['timings'][0]['timing']['samples_ns'] = short['timings'][0]['timing'][
+            'samples_ns'][:-1]
+        for stream in (text(without), text(short)):
+            with self.subTest(stream=stream), self.assertRaises(ValueError):
+                m.parse_records(stream, {m.J2K_OPERATION}, 'synthetic')
+        self.assertEqual(m.parse_records(good, {m.J2K_OPERATION}, 'synthetic')
+                         ['timings'][0]['timing']['sample_count'], m.SAMPLES_PER_SIDE)
+
+    def test_round_plan_alternates_sides_with_seven_samples_per_block(self):
+        self.assertEqual(m.ROUND_ORDER,
+                         (('baseline', 'candidate'), ('candidate', 'baseline'),
+                          ('baseline', 'candidate')))
+        self.assertEqual(m.WARMUPS_PER_BLOCK, 2)
+        self.assertEqual(m.BLOCK_SAMPLES * len(m.ROUND_ORDER), m.SAMPLES_PER_SIDE)
+        self.assertEqual(m.measurement_rounds(), [
+            dict(round=1, order=['baseline', 'candidate']),
+            dict(round=2, order=['candidate', 'baseline']),
+            dict(round=3, order=['baseline', 'candidate']),
+        ])
+
+    def test_measure_round_runs_full_smokes_in_declared_order(self):
+        checkouts = dict(baseline=Path('/baseline'), candidate=Path('/candidate'))
+        shas = dict(baseline='a' * 40, candidate='b' * 40)
+        libraries = dict(baseline=None, candidate=None)
+        with mock.patch.object(m, 'smoke',
+                               side_effect=lambda checkout, example, argument, env, label:
+                               dict(checkout=str(checkout), example=example,
+                                    argument=str(argument), env=env, label=label)) as smoke:
+            collected = m.measure_round(2, m.ROUND_ORDER[1], checkouts, shas, libraries,
+                                        Path('/corpus'), Path('/fixture'), 2, 7)
+        self.assertEqual(list(collected), ['candidate', 'baseline'])
+        labels = [call.args[4] for call in smoke.call_args_list]
+        self.assertEqual(labels, [
+            'round 2 candidate corpus smoke', 'round 2 candidate J2K smoke',
+            'round 2 baseline corpus smoke', 'round 2 baseline J2K smoke',
+        ])
+        for call in smoke.call_args_list:
+            self.assertEqual(call.args[3]['IRIS_PREVIEW_LATENCY_SAMPLES'], '7')
+            self.assertEqual(call.args[3]['IRIS_PREVIEW_LATENCY_WARMUPS'], '2')
+            side = 'candidate' if 'candidate' in call.args[4] else 'baseline'
+            self.assertEqual(call.args[3]['GITHUB_SHA'], shas[side])
+            expected_argument = Path('/corpus' if 'corpus' in call.args[4] else '/fixture')
+            self.assertEqual(call.args[2], expected_argument)
+        self.assertEqual(collected['candidate']['corpus']['example'], m.CORPUS_HARNESS)
+        self.assertEqual(collected['baseline']['j2k']['example'], m.HARNESS)
+
+    def test_pool_round_sections_keeps_chronology_and_recomputes_statistics(self):
+        blocks = [list(range(1, 8)), list(range(21, 28)), list(range(41, 48))]
+        rounds = [dict(baseline=dict(corpus=section(samples_ns=block)))
+                  for block in blocks]
+        pooled = m.pool_round_sections(rounds, 'baseline', 'corpus',
+                                       {m.J2K_OPERATION}, 'test')
+        samples = [sample for block in blocks for sample in block]
+        timing = pooled['timings'][0]['timing']
+        self.assertEqual(timing['samples_ns'], samples)
+        self.assertEqual(timing['sample_count'], m.SAMPLES_PER_SIDE)
+        self.assertEqual(timing['rounds'], m.ROUNDS)
+        for key, value in m.timing_statistics(samples, 'test').items():
+            self.assertEqual(timing[key], value)
+        self.assertEqual(pooled['correctness'], rounds[0]['baseline']['corpus']['correctness'])
+
+        changed = copy.deepcopy(rounds)
+        changed[1]['baseline']['corpus']['timings'][0]['timing']['samples_ns'] = blocks[1][:-1]
+        with self.assertRaises(ValueError):
+            m.pool_round_sections(changed, 'baseline', 'corpus', {m.J2K_OPERATION}, 'test')
 
     def test_identity_pair_ignores_source_but_checks_runner_cpu_and_rustc(self):
         baseline = identity()

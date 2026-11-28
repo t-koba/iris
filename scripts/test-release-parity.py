@@ -2,6 +2,7 @@
 """Offline unit tests for the release parity acceptance gate (no cargo/network)."""
 
 import copy
+from fractions import Fraction
 import hashlib
 import importlib.util
 import json
@@ -107,16 +108,19 @@ def j2k_fixture():
 
 
 def timing(operation, platform, revision, median, run_id=RUN_ID, warmups=2, samples=21,
-           input_pin=None):
+           input_pin=None, deltas=None):
     input_pin = input_pin or fixture_pin(m.FIXTURE, m.FIXTURE_SHA256, m.FIXTURE_SIZE)
+    deltas = [0] * samples if deltas is None else list(deltas)
+    assert len(deltas) == samples
+    samples_ns = [median + delta for delta in deltas]
     return dict(
         record="iris.preview_latency.v1", operation=operation,
         uses_ffmpeg=operation.startswith("video::"),
         input=copy.deepcopy(input_pin),
         output=output(), identity=identity(platform, revision, run_id),
-        timing=dict(unit="nanoseconds", warmup_iterations=warmups,
-                    sample_count=samples, min=70, median=median,
-                    p90=120, median_absolute_deviation=5, max=130),
+        timing=dict(unit="nanoseconds", warmup_iterations=warmups, sample_count=samples,
+                    rounds=m.ROUNDS, samples_ns=samples_ns,
+                    **m.timing_statistics(samples_ns, 'test')),
     )
 
 
@@ -125,7 +129,7 @@ def pdfium_filename(platform):
 
 
 def section(platform, revision, operations, median, run_id=RUN_ID, warmups=2, samples=21,
-            worktree=None):
+            worktree=None, deltas=None):
     corpus = set(operations) == set(m.PREVIEW_OPERATIONS)
     fixtures = corpus_fixtures() if corpus else [j2k_fixture()]
     first_pin = next(entry for entry in CORPUS_MANIFEST['files']
@@ -137,7 +141,7 @@ def section(platform, revision, operations, median, run_id=RUN_ID, warmups=2, sa
                          fixtures=fixtures,
                          identity=identity(platform, revision, run_id)),
         timings=[timing(op, platform, revision, median, run_id, warmups, samples,
-                        timing_pin) for op in operations],
+                        timing_pin, deltas) for op in operations],
     )
     # macOS renders PDFs through CoreGraphics; the smoke emits no PDFium line.
     if platform != "macos":
@@ -158,7 +162,8 @@ def resummarize(report):
 
 
 def make_report(platform, candidate=CANDIDATE, baseline=m.BASELINE_SHA, run_id=RUN_ID,
-                baseline_median=100, candidate_median=90):
+                baseline_median=100, candidate_median=90,
+                baseline_deltas=None, candidate_deltas=None):
     operations = sorted(m.PREVIEW_OPERATIONS)
     report = dict(
         schema="iris.parity_source_compare.v1",
@@ -169,16 +174,21 @@ def make_report(platform, candidate=CANDIDATE, baseline=m.BASELINE_SHA, run_id=R
         fixture_pin=dict(filename=m.FIXTURE, sha256=m.FIXTURE_SHA256,
                          size_bytes=m.FIXTURE_SIZE),
         baseline=section(platform, baseline, operations, baseline_median, run_id,
-                         worktree=report_worktree(platform, "baseline")),
+                         worktree=report_worktree(platform, "baseline"),
+                         deltas=baseline_deltas),
         candidate=section(platform, candidate, operations, candidate_median, run_id,
-                          worktree=report_worktree(platform, "candidate")),
+                          worktree=report_worktree(platform, "candidate"),
+                          deltas=candidate_deltas),
+        measurement_rounds=m.measurement_rounds(),
     )
     report["baseline_j2k"] = section(platform, baseline, [m.J2K_OPERATION],
                                     baseline_median, run_id,
-                                    worktree=report_worktree(platform, "baseline"))
+                                    worktree=report_worktree(platform, "baseline"),
+                                    deltas=baseline_deltas)
     report["candidate_j2k"] = section(platform, candidate, [m.J2K_OPERATION],
                                      candidate_median, run_id,
-                                     worktree=report_worktree(platform, "candidate"))
+                                     worktree=report_worktree(platform, "candidate"),
+                                     deltas=candidate_deltas)
     # pairing_plan() expects corpus and J2K under each source revision.
     report["baseline"] = dict(worktree=report_worktree(platform, "baseline"),
                               corpus=report["baseline"], j2k=report.pop("baseline_j2k"))
@@ -492,13 +502,22 @@ class ReleaseParityTests(unittest.TestCase):
         self.save("linux", resummarize(legacy))
         self.assert_rejected()
 
-    def test_rejects_positive_delta(self):
-        report = copy.deepcopy(self.reports["linux"])
-        report["candidate"]["corpus"]["timings"][1]["timing"]["median"] = 140
-        report["candidate"]["j2k"]["timings"][0]["timing"]["median"] = 140
-        self.save("linux", resummarize(report))
+    def test_rejects_consistently_positive_paired_differences(self):
+        noisy = [5 if index % 2 == 0 else -5 for index in range(m.SAMPLES_PER_SIDE)]
+        self.save("linux", make_report("linux", candidate_median=140,
+                                       candidate_deltas=[40] * m.SAMPLES_PER_SIDE))
         result = self.assert_rejected()
-        self.assertIn("candidate slowdown", result.stderr)
+        self.assertIn("paired candidate slowdown", result.stderr)
+        self.assertIn("21/21 positive", result.stderr)
+
+        self.save("linux", make_report("linux", candidate_median=100,
+                                       candidate_deltas=noisy))
+        report = self.reports["linux"]
+        self.assertEqual(report["paired_latency"][0]["candidate_minus_baseline_ns"], 5)
+        self.assertEqual(report["paired_latency"][0]["positive_differences"], 11)
+        result = self.gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
     def test_rejects_false_correctness_on_both_sides(self):
         """Agreed failure on both sides cannot pass the consumer boundary."""
@@ -634,6 +653,56 @@ class ReleaseParityTests(unittest.TestCase):
         result = self.assert_rejected()
         self.assertIn("identity mismatch", result.stderr)
 
+    def test_sign_test_critical_value_matches_binomial_tail(self):
+        self.assertEqual(m.sign_test_critical(21, 0.05, 18), 18)
+        self.assertLess(m.sign_test_tail(21, 18), Fraction(1, 20) / 18)
+        self.assertGreater(m.sign_test_tail(21, 17), Fraction(1, 20) / 18)
+        self.assertAlmostEqual(float(m.sign_test_tail(21, 18)), 0.000745, places=6)
+
+    def test_rejects_wrong_round_count_missing_samples_and_tampered_statistics(self):
+        original = copy.deepcopy(self.reports["linux"])
+        for field, value in (("rounds", 2), ("samples_ns", None)):
+            with self.subTest(field=field):
+                report = copy.deepcopy(original)
+                for side in ("baseline", "candidate"):
+                    for name in ("corpus", "j2k"):
+                        for item in report[side][name]["timings"]:
+                            if value is None:
+                                item["timing"].pop(field)
+                            else:
+                                item["timing"][field] = value
+                self.save("linux", report)
+                self.assert_rejected()
+        report = copy.deepcopy(original)
+        for side in ("baseline", "candidate"):
+            for name in ("corpus", "j2k"):
+                for item in report[side][name]["timings"]:
+                    item["timing"]["samples_ns"] = item["timing"]["samples_ns"][:-1]
+        self.save("linux", report)
+        self.assert_rejected()
+
+        report = copy.deepcopy(original)
+        for side in ("baseline", "candidate"):
+            for name in ("corpus", "j2k"):
+                for item in report[side][name]["timings"]:
+                    item["timing"]["p90"] += 1
+        self.save("linux", report)
+        result = self.assert_rejected()
+        self.assertIn("recomputed p90 mismatch", result.stderr)
+
+    def test_rejects_tampered_paired_differences_and_round_alternation(self):
+        report = copy.deepcopy(self.reports["linux"])
+        report["paired_latency"][0]["positive_differences"] = 18
+        self.save("linux", report)
+        result = self.assert_rejected()
+        self.assertIn("paired_latency was tampered with", result.stderr)
+
+        report = copy.deepcopy(self.reports["linux"])
+        report["measurement_rounds"][1]["order"] = ["baseline", "candidate"]
+        self.save("linux", report)
+        result = self.assert_rejected()
+        self.assertIn("measurement round alternation mismatch", result.stderr)
+
     def test_rejects_wrong_warmup_and_sample_count(self):
         for field, value in (("warmup_iterations", 1), ("sample_count", 20)):
             with self.subTest(field=field):
@@ -642,12 +711,15 @@ class ReleaseParityTests(unittest.TestCase):
                     for name in ("corpus", "j2k"):
                         for item in report[side][name]["timings"]:
                             item["timing"][field] = value
-                self.save("linux", resummarize(report))
+                self.save("linux", report)
                 self.assert_rejected()
 
     def test_rejects_invalid_policy(self):
         raw = json.loads(POLICY.read_text(encoding="utf-8"))
-        for field, value in (("max_candidate_minus_baseline_ns", 1),
+        for field, value in (("rounds", 2), ("sign_test_alpha", 0.1),
+                             ("sign_test_family_size", 14),
+                             ("paired_sign_test_min_positive", 17),
+                             ("policy_rationale", ""),
                              ("baseline_sha", OTHER_SHA), ("samples", 20)):
             with self.subTest(field=field):
                 changed = copy.deepcopy(raw)
