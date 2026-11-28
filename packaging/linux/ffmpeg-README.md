@@ -8,9 +8,11 @@ license declaration for Iris. PDFium has its own adjacent notices/provenance.
 pure-Rust JPEG 2000 decoder compiled into Iris; its bytes are pinned by
 `manifest.json`. `noto-sans-cjk-jp-OFL.txt` is the verbatim SIL OFL 1.1 notice
 for the Noto Sans CJK JP subset compiled into Iris.
-`material-symbols-apache-2.0.txt` is the verbatim Apache-2.0 notice for the
-48-glyph Material Symbols Outlined subset compiled into Iris. Both notices are
-pinned by `manifest.json`.
+`material-symbols-apache-2.0.txt` is the exact `LICENSE` bytes from
+`material-foundation/material-symbols-and-variable-fonts` for the 48-glyph
+Material Symbols Outlined subset compiled into Iris, pinned at SHA-256
+`58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd`.
+Both notices are pinned by `manifest.json`.
 
 `manifest.json` records the exact upstream source URL and SHA-256, required
 signing-key fingerprint, successful detached-signature status, actual library

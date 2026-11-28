@@ -9,8 +9,10 @@ BSD-2-Clause notice for the pure-Rust JPEG 2000 decoder compiled into Iris,
 hash-bound by `manifest.json`. The same directory retains
 `noto-sans-cjk-jp-OFL.txt`, the verbatim SIL OFL 1.1 notice for the Noto Sans
 CJK JP subset compiled into Iris, and `material-symbols-apache-2.0.txt`, the
-verbatim Apache-2.0 notice for the 48-glyph Material Symbols Outlined subset
-compiled into Iris; both are hash-bound by `manifest.json`.
+exact `LICENSE` bytes from `material-foundation/material-symbols-and-variable-fonts`
+for the 48-glyph Material Symbols Outlined subset compiled into Iris, pinned at
+SHA-256 `58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd`;
+both are hash-bound by `manifest.json`.
 
 `Contents/Resources/ffmpeg/manifest.json` identifies the exact FFmpeg source pin,
 verified signing identity, configure policy, generated decoder inventory, build

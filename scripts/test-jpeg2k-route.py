@@ -169,7 +169,7 @@ class ReleaseNoticeSet(unittest.TestCase):
          "1c05c68c34f9708415aada51f17e1b0092d2cea709bf4a94cd38114f9e73d7d9"),
         ("material-symbols-apache-2.0.txt",
          "packaging/third-party-notices/material-symbols-apache-2.0.txt",
-         "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"),
+         "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd"),
     )
 
     def module(self, relative):
@@ -197,8 +197,9 @@ class ReleaseNoticeSet(unittest.TestCase):
             self.assertIn(marker, noto, "full OFL 1.1 text changed")
         apache = (root / self.notices[2][1]).read_bytes()
         self.assertEqual(hashlib.sha256(apache).hexdigest(), self.notices[2][2])
-        for marker in (b"Apache License\n", b"Version 2.0, January 2004\n",
-                       b"APPENDIX: How to apply the Apache License to your work.\n"):
+        for marker in (b"                                 Apache License\n",
+                       b"                           Version 2.0, January 2004\n",
+                       b"   APPENDIX: How to apply the Apache License to your work.\n"):
             self.assertIn(marker, apache, "full Apache-2.0 text changed")
 
     def test_posix_runtime_notice_sets_stage_and_verify_exact_bytes(self):

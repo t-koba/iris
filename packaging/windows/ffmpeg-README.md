@@ -56,8 +56,9 @@ the installer source file and the reviewed native evidence.
   notice for the pure-Rust JPEG 2000 decoder compiled into Iris,
   `noto-sans-cjk-jp-OFL.txt`, the verbatim SIL OFL 1.1 notice for the Noto Sans
   CJK JP subset compiled into Iris, and `material-symbols-apache-2.0.txt`, the
-  verbatim Apache-2.0 notice for the 48-glyph Material Symbols Outlined subset
-  compiled into Iris.
+  exact `LICENSE` bytes from `material-foundation/material-symbols-and-variable-fonts`
+  for the 48-glyph Material Symbols Outlined subset compiled into Iris, pinned at
+  SHA-256 `58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd`.
 - `ffmpeg-build-materials.tar.gz`: the derived vcpkg portfile and its evidence,
   retained baseline-port patches, manifest, registry configuration, triplet,
   source-acquisition record, detached signature, signing key and GPG status.

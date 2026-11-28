@@ -25,7 +25,7 @@ RUST_NOTICES = (
      "1c05c68c34f9708415aada51f17e1b0092d2cea709bf4a94cd38114f9e73d7d9"),
     ("material-symbols-apache-2.0.txt",
      "packaging/third-party-notices/material-symbols-apache-2.0.txt",
-     "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"),
+     "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd"),
 )
 
 

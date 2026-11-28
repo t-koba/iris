@@ -146,7 +146,10 @@ bytes で同梱します。全実行ファイルに埋め込まれる Noto Sans 
 SIL OFL 1.1 と Apache-2.0 の通知 bytes を
 `packaging/third-party-notices/noto-sans-cjk-jp-OFL.txt` と
 `packaging/third-party-notices/material-symbols-apache-2.0.txt` に保管し、
-同じ 3 つの通知 set に同じ bytes で同梱します。
+同じ 3 つの通知 set に同じ bytes で同梱します。Material Symbols の Apache-2.0
+通知は `https://raw.githubusercontent.com/material-foundation/material-symbols-and-variable-fonts/main/LICENSE`
+の bytes をそのまま使い、SHA-256
+`58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd` で固定します。
 
 #### PDFium（chromium/8138）
 
