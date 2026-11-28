@@ -250,19 +250,28 @@ class JxrVendorHardening(unittest.TestCase):
         )
         for commit, cve in mappings:
             self.assertIn(f"`{commit}` is {cve}", provenance, f"missing mapping {commit}")
-        # Only the six first-batch identifiers may appear anywhere, and no
-        # second-batch commit may share a line with a CVE identifier.
+        # Only the six first-batch identifiers may appear anywhere, and every
+        # occurrence must sit on the line pairing it with its own first-batch
+        # commit. This rejects a CVE claimed anywhere in the second imported
+        # batch, independent of headings or of whether a second-batch commit
+        # hash shares the line.
         expected = {cve for _, cve in mappings}
         found = set(re.findall(r"CVE-\d{4}-\d+", provenance))
         self.assertEqual(
             found, expected, f"unexpected CVE identifiers: {sorted(found - expected)}"
         )
-        for commit in SECOND_BATCH_COMMITS:
-            for line in provenance.splitlines():
-                if commit in line:
-                    self.assertNotRegex(
-                        line, r"CVE-\d{4}-\d+", f"CVE attributed to {commit}"
-                    )
+        for line in provenance.splitlines():
+            line_cves = re.findall(r"CVE-\d{4}-\d+", line)
+            if not line_cves:
+                continue
+            for cve in line_cves:
+                owners = [commit for commit, mapped in mappings if mapped == cve]
+                self.assertTrue(
+                    any(commit in line for commit in owners),
+                    f"{cve} is not paired with its first-batch commit: {line}",
+                )
+            for commit in SECOND_BATCH_COMMITS:
+                self.assertNotIn(commit, line, f"CVE attributed to {commit}: {line}")
 
     def test_provenance_and_ci_guard(self):
         provenance = read("IRIS-VENDOR.md")
