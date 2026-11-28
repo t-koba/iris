@@ -423,7 +423,7 @@ synthetic positive regression は到達可能な PASS を確認するだけで�
 
 ### Paired preview parity 計測（release readiness の主張ではない）
 
-`scripts/parity_source_compare.py` は baseline/candidate を B/C, C/B, B/C の順に 3 round 交互に測定し、各 round で corpus と J2K の入力・出力検証をやり直します。片側 7 サンプル × 3 round = 21 サンプルを時刻順に残し、`scripts/release-parity.py` は同じ index の baseline/candidate を対応づけます。pooled median の差は記録しますが、それだけで失敗させません。runner の負荷変動は交互実行で両側にかかり、対応する差の正負はおおむね半々になります。実在の遅延劣化は正の差に片寄るため、21 件中 18 件以上が positive のときだけ失敗します（片側 binomial 確率 0.000745 < Bonferroni 0.05/18）。この判定は same-source の preview diagnostic の比較であり、release readiness や絶対性能を保証しません。
+`scripts/parity_source_compare.py` は baseline/candidate を (B/C, C/B)×4 の順に 8 round 交互に測定し、各 round で corpus と J2K の入力・出力検証をやり直します。片側 3 サンプル × 8 round = 24 サンプルを時刻順に残し、各 timing に 8 個の block median（round_medians_ns）を添えます。paired record は round ごとの candidate−baseline 差（round_deltas_ns）と、隣り合う逆順ペアの和 4 件（balanced_delta_sums_ns = [d0+d1, d2+d3, d4+d5, d6+d7]）を持ち、pooled median 差は記録のみで失敗させません。`scripts/release-parity.py` は各 block median を対応する 3 サンプル片から再計算して round_deltas_ns と balanced 和を検証し、4 個の drift-free 推定（和/2）の平均 effect_ns と不偏標準偏差（n−1=3）から t = effect/(sd/2) を求め、effect > 0 かつ t >= t_critical_df3（df=3 の片側生存率 P[T3 >= t] <= 0.05/18、約 7.184868893978111）のときだけ失敗します。大きさが効くため 10% 程度の中央値劣化は数 round のばらつきがあっても検出し、単調な runner drift は逆順ペア和で相殺されるため変化のない path を noise で失敗させません。この判定は same-source の preview diagnostic の比較であり、release readiness や絶対性能を保証しません。
 
 ## CI
 

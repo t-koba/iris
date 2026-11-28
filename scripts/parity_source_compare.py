@@ -2,16 +2,21 @@
 """Report-only paired-source preview diagnostic; no parity claim or release-gate change.
 
 Builds detached worktrees for two exact source revisions and runs the pinned
-corpus smoke and the shared JPEG 2000 smoke alternately in three rounds
-(B/C, C/B, B/C). Each side contributes seven chronological samples per block,
-pooled into 21 samples per operation. Interleaving exposes both sources to the
-same runner drift; the verifier pairs samples by position and uses a sign test,
-so a consistently slower candidate is detectable while unchanged paths are not
-failed by noise that moves both sides together. Every round repeats full
-correctness/output validation. This script writes a bounded JSON report, never
-uploads bytes, changes release policy or asserts parity. Baseline dependencies
-may need network; run with CARGO_NET_OFFLINE=1 only when both dependency sets
-are already cached.
+corpus smoke and the shared JPEG 2000 smoke alternately in eight rounds
+((B/C, C/B) repeated four times). Each side contributes three chronological
+samples per block, pooled into 24 samples per operation. Every adjacent round
+pair uses opposite order, so a constant within-pair drift cancels in the paired
+round sums. Each timing record keeps its 24 chronological samples for audit and
+pooled median reporting plus eight block medians (round_medians_ns), one per
+round; paired records carry round-by-round candidate-minus-baseline deltas
+(round_deltas_ns) and four drift-free balanced sums (balanced_delta_sums_ns
+= [d0+d1, d2+d3, d4+d5, d6+d7]). The verifier averages the four drift-free
+estimates and applies a magnitude-aware t test, so a consistent slowdown is
+detectable while unchanged paths are not failed by monotone runner drift.
+Every round repeats full correctness/output validation. This script writes a
+bounded JSON report, never uploads bytes, changes release policy or asserts
+parity. Baseline dependencies may need network; run with CARGO_NET_OFFLINE=1
+only when both dependency sets are already cached.
 """
 
 import argparse
@@ -92,15 +97,20 @@ def require(ok, message):
         raise ValueError(message)
 
 
-# 3 interleaved rounds x 7 samples = the same 21 samples per side as before.
+# 8 interleaved rounds x 3 samples = 24 samples per side; every adjacent pair has opposite order.
 WARMUPS_PER_BLOCK = 2
-ROUNDS = 3
-BLOCK_SAMPLES = 7
-SAMPLES_PER_SIDE = 21
+ROUNDS = 8
+BLOCK_SAMPLES = 3
+SAMPLES_PER_SIDE = 24
 ROUND_ORDER = (
     ("baseline", "candidate"),
     ("candidate", "baseline"),
     ("baseline", "candidate"),
+    ("candidate", "baseline"),
+    ("baseline", "candidate"),
+    ("candidate", "baseline"),
+    ("baseline", "candidate"),
+    ("candidate", "baseline"),
 )
 
 
@@ -265,15 +275,20 @@ def timing_statistics(samples, label):
                 median_absolute_deviation=percentile(deviations, 50), max=ordered[-1])
 
 
-def paired_sample_differences(baseline_samples, candidate_samples, label):
-    """Pair chronological samples by index; no sorting or median substitution."""
-    require(type(baseline_samples) is list and type(candidate_samples) is list
-            and len(baseline_samples) == len(candidate_samples)
-            and all(type(sample) is int and sample >= 0 for sample in baseline_samples)
-            and all(type(sample) is int and sample >= 0 for sample in candidate_samples),
-            f'{label}: unpaired chronological samples')
-    return [candidate - baseline
-            for baseline, candidate in zip(baseline_samples, candidate_samples)]
+def round_block_medians(samples, label):
+    """Return the eight block medians for 24 pooled chronological samples."""
+    require(type(samples) is list and len(samples) == SAMPLES_PER_SIDE
+            and all(type(sample) is int and sample >= 0 for sample in samples),
+            f'{label}: invalid chronological samples for block medians')
+    require(ROUNDS * BLOCK_SAMPLES == SAMPLES_PER_SIDE,
+            f'{label}: invalid paired sample budget')
+    medians = []
+    for index in range(ROUNDS):
+        chunk = samples[index * BLOCK_SAMPLES:(index + 1) * BLOCK_SAMPLES]
+        require(len(chunk) == BLOCK_SAMPLES,
+                f'{label}: invalid round block size')
+        medians.append(percentile(sorted(chunk), 50))
+    return medians
 
 
 def pinned_corpus_fixtures():
@@ -463,6 +478,9 @@ def paired_records(baseline, candidate, label):
         for key in ('unit', 'warmup_iterations', 'sample_count'):
             require(first['timing'][key] == second['timing'][key],
                     f'{label}: {operation} timing budget mismatch')
+        if 'rounds' in first['timing'] or 'rounds' in second['timing']:
+            require(first['timing'].get('rounds') == second['timing'].get('rounds') == ROUNDS,
+                    f'{label}: {operation} round budget mismatch')
         b, c = first['timing']['median'], second['timing']['median']
         require(type(b) is int and type(c) is int and b >= 0 and c >= 0,
                 f'{label}: {operation} invalid median')
@@ -472,14 +490,43 @@ def paired_records(baseline, candidate, label):
                 and len(baseline_samples) == first['timing']['sample_count']
                 and len(candidate_samples) == second['timing']['sample_count'],
                 f'{label}: {operation} incomplete chronological samples')
-        differences = paired_sample_differences(baseline_samples, candidate_samples,
-                                                 f'{label}: {operation}')
+        baseline_medians = first['timing'].get('round_medians_ns')
+        candidate_medians = second['timing'].get('round_medians_ns')
+        if baseline_medians is None and candidate_medians is None:
+            # Raw per-round consistency check: a single 3-sample block has no
+            # pooled round medians yet; the return value is discarded.
+            pairs.append(dict(operation=operation, input=first['input'],
+                              output_dimensions=[first['output'].get('width'),
+                                                 first['output'].get('height')],
+                              baseline_median_ns=b, candidate_median_ns=c,
+                              candidate_minus_baseline_ns=c - b,
+                              round_deltas_ns=[], balanced_delta_sums_ns=[]))
+            continue
+        require(type(baseline_medians) is list and len(baseline_medians) == ROUNDS
+                and all(type(value) is int and value >= 0 for value in baseline_medians),
+                f'{label}: {operation} invalid baseline round medians')
+        require(type(candidate_medians) is list and len(candidate_medians) == ROUNDS
+                and all(type(value) is int and value >= 0 for value in candidate_medians),
+                f'{label}: {operation} invalid candidate round medians')
+        for index in range(ROUNDS):
+            for samples, medians, side in (
+                    (baseline_samples, baseline_medians, 'baseline'),
+                    (candidate_samples, candidate_medians, 'candidate')):
+                chunk = samples[index * BLOCK_SAMPLES:(index + 1) * BLOCK_SAMPLES]
+                require(len(chunk) == BLOCK_SAMPLES,
+                        f'{label}: {operation} invalid round block size')
+                require(medians[index] == percentile(sorted(chunk), 50),
+                        f'{label}: {operation} {side} round median mismatch')
+        round_deltas = [candidate - baseline
+                        for baseline, candidate in zip(baseline_medians, candidate_medians)]
+        balanced = [round_deltas[index] + round_deltas[index + 1]
+                    for index in (0, 2, 4, 6)]
         pairs.append(dict(operation=operation, input=first['input'],
                           output_dimensions=[first['output'].get('width'), first['output'].get('height')],
                           baseline_median_ns=b, candidate_median_ns=c,
                           candidate_minus_baseline_ns=c - b,
-                          positive_differences=sum(difference > 0 for difference in differences),
-                          paired_differences_ns=differences))
+                          round_deltas_ns=round_deltas,
+                          balanced_delta_sums_ns=balanced))
     return pairs
 
 
@@ -658,6 +705,7 @@ def pool_round_sections(rounds, side, name, operations, label):
     require(set(pooled) == set(operations), f'{label}: timing operation set mismatch')
     for timing in pooled.values():
         timing['samples_ns'] = []
+        timing['round_medians_ns'] = []
     for item in rounds:
         observed = {record['operation']: record['timing']
                     for record in item[side][name]['timings']}
@@ -667,10 +715,17 @@ def pool_round_sections(rounds, side, name, operations, label):
             require(type(samples) is list and len(samples) == BLOCK_SAMPLES,
                     f'{label}: {operation} round sample budget mismatch')
             pooled[operation]['samples_ns'].extend(samples)
+            pooled[operation]['round_medians_ns'].append(
+                percentile(sorted(samples), 50))
     for operation, timing in pooled.items():
         samples = timing['samples_ns']
         require(len(samples) == SAMPLES_PER_SIDE,
                 f'{label}: {operation} pooled sample count mismatch')
+        require(len(timing['round_medians_ns']) == ROUNDS,
+                f'{label}: {operation} pooled round median count mismatch')
+        require(timing['round_medians_ns'] == round_block_medians(
+            samples, f'{label}: {operation}'),
+            f'{label}: {operation} pooled round median mismatch')
         timing['sample_count'] = SAMPLES_PER_SIDE
         timing['rounds'] = ROUNDS
         timing.update(timing_statistics(samples, f'{label}: {operation}'))
@@ -684,7 +739,7 @@ def compare(args):
             'baseline and candidate must be full SHA values')
     require(args.warmups == WARMUPS_PER_BLOCK and args.samples == SAMPLES_PER_SIDE
             and ROUNDS * BLOCK_SAMPLES == SAMPLES_PER_SIDE,
-            'iteration budget must be 3 rounds of 7 samples with 2 warmups per block')
+            'iteration budget must be 8 rounds of 3 samples with 2 warmups per block')
     with tempfile.TemporaryDirectory(prefix='iris-parity-source-') as scratch, ExitStack() as stack:
         scratch = Path(scratch)
         baseline = stack.enter_context(worktree(repo, args.baseline, scratch, 'baseline'))
@@ -739,9 +794,9 @@ def compare(args):
             paired_latency=paired_corpus, paired_j2k=paired_j2k, unpaired=unpaired,
             measurement_rounds=measurement_rounds(),
             cargo_net_offline=os.environ.get('CARGO_NET_OFFLINE'),
-            limits='Same-runner, alternating B/C, C/B, B/C crate-level source diagnostic; '
-                   '7 samples per block pooled to 21 per side; no UI latency, release-gate, '
-                   'platform or feature-parity claim.',
+            limits='Same-runner, alternating (B/C, C/B) x4 crate-level source diagnostic; '
+                   '3 samples per block pooled to 24 per side with 8 block medians; '
+                   'no UI latency, release-gate, platform or feature-parity claim.',
         )
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(report_bytes(report), encoding='utf-8')

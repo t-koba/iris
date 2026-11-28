@@ -1,11 +1,24 @@
 {
   "schema": 1,
   "baseline_sha": "8e55c491f27b3cb9ca7c7245610812d3e7dcb5cc",
-  "required_platforms": ["linux", "macos", "windows"],
+  "required_platforms": [
+    "linux",
+    "macos",
+    "windows"
+  ],
   "platform_identity": {
-    "linux": {"target_os": "linux", "runner_os": "Linux"},
-    "macos": {"target_os": "macos", "runner_os": "macOS"},
-    "windows": {"target_os": "windows", "runner_os": "Windows"}
+    "linux": {
+      "target_os": "linux",
+      "runner_os": "Linux"
+    },
+    "macos": {
+      "target_os": "macos",
+      "runner_os": "macOS"
+    },
+    "windows": {
+      "target_os": "windows",
+      "runner_os": "Windows"
+    }
   },
   "required_operations": [
     "image_generic::extract_image_thumbnail",
@@ -15,11 +28,11 @@
     "pdf::extract_pdf_thumbnail"
   ],
   "warmups": 2,
-  "samples": 21,
-  "rounds": 3,
-  "sign_test_alpha": 0.05,
-  "sign_test_family_size": 18,
-  "paired_sign_test_min_positive": 18,
-  "policy_rationale": "Fail a paired operation only when at least 18 of 21 index-paired candidate-minus-baseline samples are positive: P[Binomial(21, 0.5) >= 18] = 0.000745, below the Bonferroni alpha 0.05/18 = 0.002778. Runner noise shifts both interleaved sides and gives roughly half positive differences; 18 consistently positive pairs is evidence of a real slowdown. The pooled median delta is reported for audit, not gated.",
+  "samples": 24,
+  "rounds": 8,
+  "alpha": 0.05,
+  "significance_family_size": 18,
+  "t_critical_df3": 7.184868893978111,
+  "policy_rationale": "The gate averages four drift-free paired round estimates (each balanced sum/2 from opposite-order round pairs d0+d1, d2+d3, d4+d5, d6+d7) into effect_ns and forms t = effect/(sd/2) with n-1=3; it fails only when effect > 0 and t >= t_critical_df3 where P[T3 >= t] <= 0.05/18. Magnitude matters (a small consistent shift gives a small t) and monotone runner drift cancels in each opposite-order sum, so unchanged paths are not failed by noise that moves both sides together. The pooled median delta is reported for audit, not gated.",
   "max_report_bytes": 266240
 }

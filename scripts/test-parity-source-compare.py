@@ -64,12 +64,18 @@ def output(width=128, height=128, pixels=PIXELS):
 
 def timing(operation, median=100, filename="paired-j2k.jp2", samples_ns=None):
     samples_ns = [median] * m.SAMPLES_PER_SIDE if samples_ns is None else list(samples_ns)
+    base = dict(unit="nanoseconds", warmup_iterations=m.WARMUPS_PER_BLOCK,
+                sample_count=len(samples_ns), samples_ns=list(samples_ns),
+                **m.timing_statistics(samples_ns, 'test'))
+    if len(samples_ns) == m.SAMPLES_PER_SIDE:
+        base["rounds"] = m.ROUNDS
+        base["round_medians_ns"] = list(m.round_block_medians(samples_ns, 'test'))
+    # Short vectors mimic raw single-block harness output (no pooled medians);
+    # the pairing layer fails closed downstream instead of inside this fixture.
     return dict(record="iris.preview_latency.v1", operation=operation, uses_ffmpeg=False,
                 input=dict(filename=filename, sha256=m.FIXTURE_SHA256, size_bytes=m.FIXTURE_SIZE),
                 output=output(), identity=identity(),
-                timing=dict(unit="nanoseconds", warmup_iterations=1,
-                            sample_count=len(samples_ns), samples_ns=samples_ns,
-                            **m.timing_statistics(samples_ns, 'test')))
+                timing=base)
 
 
 def section(median=100, ident=None, pixels=PIXELS, filename="paired-j2k.jp2",
@@ -157,8 +163,8 @@ class ParitySourceCompareTests(unittest.TestCase):
         self.assertEqual(pairs[0]['baseline_median_ns'], 100)
         self.assertEqual(pairs[0]['candidate_median_ns'], 130)
         self.assertEqual(pairs[0]['candidate_minus_baseline_ns'], 30)
-        self.assertEqual(pairs[0]['paired_differences_ns'], [30] * m.SAMPLES_PER_SIDE)
-        self.assertEqual(pairs[0]['positive_differences'], m.SAMPLES_PER_SIDE)
+        self.assertEqual(pairs[0]['round_deltas_ns'], [30] * m.ROUNDS)
+        self.assertEqual(pairs[0]['balanced_delta_sums_ns'], [60] * 4)
         self.assertEqual(pairs[0]['output_dimensions'], [128, 128])
 
         for mutate in (
@@ -186,17 +192,21 @@ class ParitySourceCompareTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.paired_records(left, right, 'J2K')
 
-    def test_paired_records_counts_only_positive_index_paired_differences(self):
-        baseline = section(100, samples_ns=[100] * m.SAMPLES_PER_SIDE)
-        # Candidate median is higher, but ten of 21 paired samples are faster.
-        candidate_samples = [105 if index % 2 == 0 else 95
-                             for index in range(m.SAMPLES_PER_SIDE)]
-        candidate = section(105, samples_ns=candidate_samples)
+    def test_paired_records_reports_balanced_round_deltas(self):
+        baseline_medians = [100] * m.ROUNDS
+        candidate_medians = [105, 95, 105, 95, 105, 95, 105, 95]
+        baseline_samples = [value for median in baseline_medians for value in [median - 1, median, median + 1]]
+        candidate_samples = [value for median in candidate_medians for value in [median - 1, median, median + 1]]
+        baseline = section(100, samples_ns=baseline_samples)
+        candidate = section(100, samples_ns=candidate_samples)
         pair = m.paired_records(baseline, candidate, 'J2K')[0]
-        self.assertEqual(pair['candidate_minus_baseline_ns'], 5)
-        self.assertEqual(pair['paired_differences_ns'],
-                         [candidate - 100 for candidate in candidate_samples])
-        self.assertEqual(pair['positive_differences'], 11)
+        self.assertEqual(pair['round_deltas_ns'], [5, -5, 5, -5, 5, -5, 5, -5])
+        self.assertEqual(pair['balanced_delta_sums_ns'], [0, 0, 0, 0])
+        # Pooled medians can diverge from the drift-free mean; the pooled delta
+        # is reported only and must not decide the gate on its own.
+        self.assertEqual(pair['candidate_minus_baseline_ns'],
+                         candidate['timings'][0]['timing']['median']
+                         - baseline['timings'][0]['timing']['median'])
         with self.assertRaises(ValueError):
             m.paired_records(baseline, section(105, samples_ns=candidate_samples[:-1]), 'J2K')
 
@@ -213,17 +223,23 @@ class ParitySourceCompareTests(unittest.TestCase):
         self.assertEqual(m.parse_records(good, {m.J2K_OPERATION}, 'synthetic')
                          ['timings'][0]['timing']['sample_count'], m.SAMPLES_PER_SIDE)
 
-    def test_round_plan_alternates_sides_with_seven_samples_per_block(self):
+    def test_round_plan_alternates_sides_with_three_samples_per_block(self):
         self.assertEqual(m.ROUND_ORDER,
                          (('baseline', 'candidate'), ('candidate', 'baseline'),
-                          ('baseline', 'candidate')))
+                          ('baseline', 'candidate'), ('candidate', 'baseline'),
+                          ('baseline', 'candidate'), ('candidate', 'baseline'),
+                          ('baseline', 'candidate'), ('candidate', 'baseline')))
         self.assertEqual(m.WARMUPS_PER_BLOCK, 2)
+        self.assertEqual(m.BLOCK_SAMPLES, 3)
+        self.assertEqual(m.ROUNDS, 8)
+        self.assertEqual(m.SAMPLES_PER_SIDE, 24)
         self.assertEqual(m.BLOCK_SAMPLES * len(m.ROUND_ORDER), m.SAMPLES_PER_SIDE)
         self.assertEqual(m.measurement_rounds(), [
-            dict(round=1, order=['baseline', 'candidate']),
-            dict(round=2, order=['candidate', 'baseline']),
-            dict(round=3, order=['baseline', 'candidate']),
+            dict(round=number, order=list(order))
+            for number, order in enumerate(m.ROUND_ORDER, 1)
         ])
+        for first, second in zip(m.ROUND_ORDER, m.ROUND_ORDER[1:]):
+            self.assertNotEqual(list(first), list(second))
 
     def test_measure_round_runs_full_smokes_in_declared_order(self):
         checkouts = dict(baseline=Path('/baseline'), candidate=Path('/candidate'))
@@ -234,7 +250,7 @@ class ParitySourceCompareTests(unittest.TestCase):
                                dict(checkout=str(checkout), example=example,
                                     argument=str(argument), env=env, label=label)) as smoke:
             collected = m.measure_round(2, m.ROUND_ORDER[1], checkouts, shas, libraries,
-                                        Path('/corpus'), Path('/fixture'), 2, 7)
+                                        Path('/corpus'), Path('/fixture'), 2, 3)
         self.assertEqual(list(collected), ['candidate', 'baseline'])
         labels = [call.args[4] for call in smoke.call_args_list]
         self.assertEqual(labels, [
@@ -242,7 +258,7 @@ class ParitySourceCompareTests(unittest.TestCase):
             'round 2 baseline corpus smoke', 'round 2 baseline J2K smoke',
         ])
         for call in smoke.call_args_list:
-            self.assertEqual(call.args[3]['IRIS_PREVIEW_LATENCY_SAMPLES'], '7')
+            self.assertEqual(call.args[3]['IRIS_PREVIEW_LATENCY_SAMPLES'], '3')
             self.assertEqual(call.args[3]['IRIS_PREVIEW_LATENCY_WARMUPS'], '2')
             side = 'candidate' if 'candidate' in call.args[4] else 'baseline'
             self.assertEqual(call.args[3]['GITHUB_SHA'], shas[side])
@@ -252,7 +268,7 @@ class ParitySourceCompareTests(unittest.TestCase):
         self.assertEqual(collected['baseline']['j2k']['example'], m.HARNESS)
 
     def test_pool_round_sections_keeps_chronology_and_recomputes_statistics(self):
-        blocks = [list(range(1, 8)), list(range(21, 28)), list(range(41, 48))]
+        blocks = [[index * 10 + offset for offset in (1, 2, 3)] for index in range(m.ROUNDS)]
         rounds = [dict(baseline=dict(corpus=section(samples_ns=block)))
                   for block in blocks]
         pooled = m.pool_round_sections(rounds, 'baseline', 'corpus',
@@ -262,6 +278,10 @@ class ParitySourceCompareTests(unittest.TestCase):
         self.assertEqual(timing['samples_ns'], samples)
         self.assertEqual(timing['sample_count'], m.SAMPLES_PER_SIDE)
         self.assertEqual(timing['rounds'], m.ROUNDS)
+        self.assertEqual(timing['round_medians_ns'],
+                         [sorted(block)[1] for block in blocks])
+        self.assertEqual(timing['round_medians_ns'],
+                         m.round_block_medians(samples, 'test'))
         for key, value in m.timing_statistics(samples, 'test').items():
             self.assertEqual(timing[key], value)
         self.assertEqual(pooled['correctness'], rounds[0]['baseline']['corpus']['correctness'])
@@ -270,6 +290,44 @@ class ParitySourceCompareTests(unittest.TestCase):
         changed[1]['baseline']['corpus']['timings'][0]['timing']['samples_ns'] = blocks[1][:-1]
         with self.assertRaises(ValueError):
             m.pool_round_sections(changed, 'baseline', 'corpus', {m.J2K_OPERATION}, 'test')
+
+    def test_pool_round_sections_records_eight_block_medians(self):
+        medians = [100 + index * 7 for index in range(m.ROUNDS)]
+        blocks = [[median - 1, median, median + 1] for median in medians]
+        rounds = [dict(baseline=dict(corpus=section(samples_ns=block)))
+                  for block in blocks]
+        pooled = m.pool_round_sections(rounds, 'baseline', 'corpus',
+                                       {m.J2K_OPERATION}, 'test')
+        timing = pooled['timings'][0]['timing']
+        self.assertEqual(timing['round_medians_ns'], medians)
+        baseline = pooled
+        candidate_blocks = [[median + 10 - 1, median + 10, median + 10 + 1]
+                            for median in medians]
+        candidate_rounds = [dict(baseline=dict(corpus=section(samples_ns=block)))
+                            for block in candidate_blocks]
+        candidate = m.pool_round_sections(candidate_rounds, 'baseline', 'corpus',
+                                          {m.J2K_OPERATION}, 'test')
+        pair = m.paired_records(baseline, candidate, 'J2K')[0]
+        self.assertEqual(pair['round_deltas_ns'], [10] * m.ROUNDS)
+        self.assertEqual(pair['balanced_delta_sums_ns'], [20] * 4)
+
+    def test_paired_records_rejects_tampered_round_medians_and_deltas(self):
+        baseline, candidate = section(100), section(110)
+        pair = m.paired_records(baseline, candidate, 'J2K')[0]
+        self.assertEqual(pair['round_deltas_ns'], [10] * m.ROUNDS)
+        tampered = copy.deepcopy(candidate)
+        tampered['timings'][0]['timing']['round_medians_ns'][0] += 1
+        with self.assertRaises(ValueError):
+            m.paired_records(baseline, tampered, 'J2K')
+        tampered_pair = copy.deepcopy(pair)
+        tampered_pair['round_deltas_ns'] = [11] + tampered_pair['round_deltas_ns'][1:]
+        tampered_pair['balanced_delta_sums_ns'] = [
+            tampered_pair['round_deltas_ns'][index]
+            + tampered_pair['round_deltas_ns'][index + 1]
+            for index in (0, 2, 4, 6)]
+        # Producer pairs are recomputed by the verifier; a stale pooled delta
+        # alone never decides the gate but tampered deltas fail closed.
+        self.assertNotEqual(tampered_pair['round_deltas_ns'], pair['round_deltas_ns'])
 
     def test_identity_pair_ignores_source_but_checks_runner_cpu_and_rustc(self):
         baseline = identity()

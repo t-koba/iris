@@ -2,7 +2,6 @@
 """Offline unit tests for the release parity acceptance gate (no cargo/network)."""
 
 import copy
-from fractions import Fraction
 import hashlib
 import importlib.util
 import json
@@ -107,12 +106,18 @@ def j2k_fixture():
                 output=output())
 
 
-def timing(operation, platform, revision, median, run_id=RUN_ID, warmups=2, samples=21,
+def timing(operation, platform, revision, median, run_id=RUN_ID, warmups=2, samples=None,
            input_pin=None, deltas=None):
+    samples = m.SAMPLES_PER_SIDE if samples is None else samples
     input_pin = input_pin or fixture_pin(m.FIXTURE, m.FIXTURE_SHA256, m.FIXTURE_SIZE)
     deltas = [0] * samples if deltas is None else list(deltas)
     assert len(deltas) == samples
     samples_ns = [median + delta for delta in deltas]
+    if len(samples_ns) == m.SAMPLES_PER_SIDE:
+        round_medians = [m.percentile(sorted(samples_ns[index * m.BLOCK_SAMPLES:(index + 1) * m.BLOCK_SAMPLES]), 50)
+                         for index in range(m.ROUNDS)]
+    else:
+        round_medians = [median] * m.ROUNDS
     return dict(
         record="iris.preview_latency.v1", operation=operation,
         uses_ffmpeg=operation.startswith("video::"),
@@ -120,15 +125,23 @@ def timing(operation, platform, revision, median, run_id=RUN_ID, warmups=2, samp
         output=output(), identity=identity(platform, revision, run_id),
         timing=dict(unit="nanoseconds", warmup_iterations=warmups, sample_count=samples,
                     rounds=m.ROUNDS, samples_ns=samples_ns,
+                    round_medians_ns=list(round_medians),
                     **m.timing_statistics(samples_ns, 'test')),
     )
+
+
+def deltas_for_round_medians(medians, base):
+    """Convert absolute round medians into per-sample deltas around base."""
+    samples = [value for median in medians for value in [median, median, median]]
+    assert len(samples) == m.SAMPLES_PER_SIDE
+    return [value - base for value in samples]
 
 
 def pdfium_filename(platform):
     return "libpdfium.so" if platform == "linux" else "pdfium.dll"
 
 
-def section(platform, revision, operations, median, run_id=RUN_ID, warmups=2, samples=21,
+def section(platform, revision, operations, median, run_id=RUN_ID, warmups=2, samples=None,
             worktree=None, deltas=None):
     corpus = set(operations) == set(m.PREVIEW_OPERATIONS)
     fixtures = corpus_fixtures() if corpus else [j2k_fixture()]
@@ -502,19 +515,53 @@ class ReleaseParityTests(unittest.TestCase):
         self.save("linux", resummarize(legacy))
         self.assert_rejected()
 
-    def test_rejects_consistently_positive_paired_differences(self):
-        noisy = [5 if index % 2 == 0 else -5 for index in range(m.SAMPLES_PER_SIDE)]
-        self.save("linux", make_report("linux", candidate_median=140,
-                                       candidate_deltas=[40] * m.SAMPLES_PER_SIDE))
+    def test_accepts_zero_slowdown_under_monotone_drift(self):
+        """Monotone runner drift cancels in opposite-order balanced sums."""
+        baseline_medians = [100, 115, 120, 135, 140, 155, 160, 175]
+        candidate_medians = [105, 110, 125, 130, 145, 150, 165, 170]
+        baseline_deltas = deltas_for_round_medians(baseline_medians, 100)
+        candidate_deltas = deltas_for_round_medians(candidate_medians, 100)
+        report = make_report("linux", baseline_median=100, candidate_median=100,
+                             baseline_deltas=baseline_deltas,
+                             candidate_deltas=candidate_deltas)
+        pair = report["paired_latency"][0]
+        self.assertEqual(pair["round_deltas_ns"], [5, -5, 5, -5, 5, -5, 5, -5])
+        self.assertEqual(pair["balanced_delta_sums_ns"], [0, 0, 0, 0])
+        self.save("linux", report)
+        result = self.gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejects_consistent_ten_percent_regression_with_noisy_rounds(self):
+        """A consistent ~10% slowdown fails even with a noisy round or two."""
+        candidate_medians = [110, 110, 110, 110, 110, 110, 108, 108]
+        candidate_samples = [value for median in candidate_medians
+                             for value in [median, median, median]]
+        candidate_deltas = [value - 110 for value in candidate_samples]
+        report = make_report("linux", baseline_median=100, candidate_median=110,
+                             baseline_deltas=[0] * m.SAMPLES_PER_SIDE,
+                             candidate_deltas=candidate_deltas)
+        pair = report["paired_latency"][0]
+        self.assertEqual(pair["round_deltas_ns"], [10, 10, 10, 10, 10, 10, 8, 8])
+        self.assertEqual(pair["balanced_delta_sums_ns"], [20, 20, 20, 16])
+        self.save("linux", report)
         result = self.assert_rejected()
         self.assertIn("paired candidate slowdown", result.stderr)
-        self.assertIn("21/21 positive", result.stderr)
 
-        self.save("linux", make_report("linux", candidate_median=100,
-                                       candidate_deltas=noisy))
-        report = self.reports["linux"]
-        self.assertEqual(report["paired_latency"][0]["candidate_minus_baseline_ns"], 5)
-        self.assertEqual(report["paired_latency"][0]["positive_differences"], 11)
+    def test_pooled_median_alone_does_not_gate(self):
+        """A large pooled median delta with small drift-free effect passes."""
+        baseline_medians = [100] * m.ROUNDS
+        candidate_medians = [130, 70, 130, 70, 130, 70, 130, 130]
+        baseline_deltas = [0] * m.SAMPLES_PER_SIDE
+        candidate_samples = [value for median in candidate_medians
+                             for value in [median, median, median]]
+        candidate_deltas = [value - 100 for value in candidate_samples]
+        report = make_report("linux", baseline_median=100, candidate_median=100,
+                             baseline_deltas=baseline_deltas,
+                             candidate_deltas=candidate_deltas)
+        pair = report["paired_latency"][0]
+        self.assertEqual(pair["candidate_minus_baseline_ns"], 30)
+        self.assertEqual(pair["balanced_delta_sums_ns"], [0, 0, 0, 60])
+        self.save("linux", report)
         result = self.gate()
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -653,15 +700,24 @@ class ReleaseParityTests(unittest.TestCase):
         result = self.assert_rejected()
         self.assertIn("identity mismatch", result.stderr)
 
-    def test_sign_test_critical_value_matches_binomial_tail(self):
-        self.assertEqual(m.sign_test_critical(21, 0.05, 18), 18)
-        self.assertLess(m.sign_test_tail(21, 18), Fraction(1, 20) / 18)
-        self.assertGreater(m.sign_test_tail(21, 17), Fraction(1, 20) / 18)
-        self.assertAlmostEqual(float(m.sign_test_tail(21, 18)), 0.000745, places=6)
+    def test_t_critical_value_matches_exact_df3_tail(self):
+        critical = m.t_critical_df3(0.05, 18)
+        self.assertAlmostEqual(critical, 7.184868893978111, places=9)
+        self.assertLessEqual(m.student_t_survival_df3(critical), 0.05 / 18)
+        self.assertGreater(m.student_t_survival_df3(critical - 1e-6), 0.05 / 18)
+        # Closed form: S(t) = 1/2 - (atan(t/sqrt(3)) + t*sqrt(3)/(t*t+3))/pi.
+        import math
+        expected = 0.5 - (math.atan(critical / math.sqrt(3.0))
+                          + critical * math.sqrt(3.0) / (critical * critical + 3.0)) / math.pi
+        self.assertAlmostEqual(m.student_t_survival_df3(critical), expected, places=12)
+        with self.assertRaises(ValueError):
+            m.student_t_survival_df3(-1.0)
+        with self.assertRaises(ValueError):
+            m.t_critical_df3(0.05, 0)
 
     def test_rejects_wrong_round_count_missing_samples_and_tampered_statistics(self):
         original = copy.deepcopy(self.reports["linux"])
-        for field, value in (("rounds", 2), ("samples_ns", None)):
+        for field, value in (("rounds", 2), ("samples_ns", None), ("round_medians_ns", None)):
             with self.subTest(field=field):
                 report = copy.deepcopy(original)
                 for side in ("baseline", "candidate"):
@@ -690,9 +746,24 @@ class ReleaseParityTests(unittest.TestCase):
         result = self.assert_rejected()
         self.assertIn("recomputed p90 mismatch", result.stderr)
 
-    def test_rejects_tampered_paired_differences_and_round_alternation(self):
+        report = copy.deepcopy(original)
+        for side in ("baseline", "candidate"):
+            for name in ("corpus", "j2k"):
+                for item in report[side][name]["timings"]:
+                    item["timing"]["round_medians_ns"][0] += 1
+        self.save("linux", report)
+        result = self.assert_rejected()
+        self.assertIn("round median mismatch", result.stderr)
+
+    def test_rejects_tampered_round_deltas_and_round_alternation(self):
         report = copy.deepcopy(self.reports["linux"])
-        report["paired_latency"][0]["positive_differences"] = 18
+        report["paired_latency"][0]["round_deltas_ns"][0] += 1
+        self.save("linux", report)
+        result = self.assert_rejected()
+        self.assertIn("paired_latency was tampered with", result.stderr)
+
+        report = copy.deepcopy(self.reports["linux"])
+        report["paired_latency"][0]["balanced_delta_sums_ns"][0] += 1
         self.save("linux", report)
         result = self.assert_rejected()
         self.assertIn("paired_latency was tampered with", result.stderr)
@@ -703,8 +774,29 @@ class ReleaseParityTests(unittest.TestCase):
         result = self.assert_rejected()
         self.assertIn("measurement round alternation mismatch", result.stderr)
 
+    def test_rejects_stale_sign_test_fields(self):
+        report = copy.deepcopy(self.reports["linux"])
+        report["paired_latency"][0]["paired_differences_ns"] = [0] * m.SAMPLES_PER_SIDE
+        report["paired_latency"][0]["positive_differences"] = 0
+        self.save("linux", report)
+        result = self.assert_rejected()
+        # Stale sign-test fields no longer exist in recomputed pairs,
+        # so they fail as tampering before the gate is even reached.
+        self.assertIn("tampered", result.stderr)
+        # The gate itself also rejects stale fields when called directly.
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        clean = self.reports["linux"]
+        maps = {"corpus": {
+            "baseline": m.timing_map(clean["baseline"]["corpus"], "test baseline"),
+            "candidate": m.timing_map(clean["candidate"]["corpus"], "test candidate")}}
+        stale = copy.deepcopy(clean["paired_latency"][0])
+        stale["paired_differences_ns"] = [0] * m.SAMPLES_PER_SIDE
+        with self.assertRaises(ValueError) as ctx:
+            m.check_pairs([stale], maps, "corpus", policy, "test")
+        self.assertIn("stale sign-test fields", str(ctx.exception))
+
     def test_rejects_wrong_warmup_and_sample_count(self):
-        for field, value in (("warmup_iterations", 1), ("sample_count", 20)):
+        for field, value in (("warmup_iterations", 1), ("sample_count", 23)):
             with self.subTest(field=field):
                 report = copy.deepcopy(self.reports["linux"])
                 for side in ("baseline", "candidate"):
@@ -716,11 +808,11 @@ class ReleaseParityTests(unittest.TestCase):
 
     def test_rejects_invalid_policy(self):
         raw = json.loads(POLICY.read_text(encoding="utf-8"))
-        for field, value in (("rounds", 2), ("sign_test_alpha", 0.1),
-                             ("sign_test_family_size", 14),
-                             ("paired_sign_test_min_positive", 17),
+        for field, value in (("rounds", 2), ("alpha", 0.1),
+                             ("significance_family_size", 14),
+                             ("t_critical_df3", 5.0),
                              ("policy_rationale", ""),
-                             ("baseline_sha", OTHER_SHA), ("samples", 20)):
+                             ("baseline_sha", OTHER_SHA), ("samples", 23)):
             with self.subTest(field=field):
                 changed = copy.deepcopy(raw)
                 changed[field] = value
